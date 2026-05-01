@@ -127,13 +127,6 @@ func (a *Adapter) buildRequestBody(req provider.Request) ([]byte, error) {
 		body["tools"] = toolDefs
 	}
 
-	// Moonshot kimi-k2.6 requires explicit thinking config for multi-turn tool use.
-	// "enabled" with "keep": "all" preserves reasoning_content across turns.
-	body["thinking"] = map[string]any{
-		"type": "enabled",
-		"keep": "all",
-	}
-
 	return json.Marshal(body)
 }
 

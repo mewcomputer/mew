@@ -215,12 +215,21 @@ func buildProvider(cfg *config.Config, providerID, modelOverride string) (provid
 		}
 	}
 
-	switch pc.Shape {
+	// Opencode-go hosts both OpenAI-shape and Anthropic-shape models.
+	// Auto-route minimax models to the anthropic endpoint.
+	shape := pc.Shape
+	baseURL := pc.BaseURL
+	if providerID == "opencode-go" && strings.HasPrefix(model, "minimax-") {
+		shape = "anthropic"
+		baseURL = "https://opencode.ai/zen/go/v1"
+	}
+
+	switch shape {
 	case "openai":
-		return openai.New(providerID, pc.BaseURL, model, creds), nil
+		return openai.New(providerID, baseURL, model, creds), nil
 	case "anthropic":
-		return anthropic.New(providerID, pc.BaseURL, model, creds), nil
+		return anthropic.New(providerID, baseURL, model, creds), nil
 	default:
-		return nil, fmt.Errorf("unsupported shape %q for provider %q", pc.Shape, providerID)
+		return nil, fmt.Errorf("unsupported shape %q for provider %q", shape, providerID)
 	}
 }
