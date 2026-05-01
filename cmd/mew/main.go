@@ -16,6 +16,7 @@ import (
 	"mew/internal/hooks"
 	"mew/internal/message"
 	"mew/internal/provider"
+	"mew/internal/provider/anthropic"
 	"mew/internal/provider/openai"
 	"mew/internal/session"
 	"mew/internal/tools"
@@ -167,7 +168,7 @@ func isKnownProvider(cfg *config.Config, providerID string) bool {
 		return true
 	}
 	switch providerID {
-	case "opencode-zen", "opencode-go":
+	case "opencode-zen", "opencode-go", "z-ai":
 		return true
 	}
 	return false
@@ -190,6 +191,12 @@ func buildProvider(cfg *config.Config, providerID, modelOverride string) (provid
 				BaseURL:       "https://opencode.ai/zen/go/v1",
 				CredentialRef: "opencode-zen",
 			}
+		case "z-ai":
+			pc = config.ProviderConfig{
+				Shape:         "anthropic",
+				BaseURL:       "https://api.z.ai/api/anthropic",
+				CredentialRef: "z-ai",
+			}
 		default:
 			return nil, fmt.Errorf("unknown provider %q", providerID)
 		}
@@ -211,6 +218,8 @@ func buildProvider(cfg *config.Config, providerID, modelOverride string) (provid
 	switch pc.Shape {
 	case "openai":
 		return openai.New(providerID, pc.BaseURL, model, creds), nil
+	case "anthropic":
+		return anthropic.New(providerID, pc.BaseURL, model, creds), nil
 	default:
 		return nil, fmt.Errorf("unsupported shape %q for provider %q", pc.Shape, providerID)
 	}
