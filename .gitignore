@@ -1,0 +1,21 @@
+# Binaries
+bin/
+*.exe
+
+# Environment / secrets
+.env
+*.pem
+*.key
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
