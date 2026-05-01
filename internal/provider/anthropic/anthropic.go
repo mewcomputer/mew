@@ -73,7 +73,7 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 func (a *Adapter) buildRequestBody(req provider.Request) ([]byte, error) {
 	var messages []map[string]any
 	for _, m := range req.Messages {
-		msg := a.buildWireMessage(m)
+		msg := a.buildWireMessage(req.Messages, m)
 		if msg != nil {
 			messages = append(messages, msg)
 		}
@@ -105,7 +105,7 @@ func (a *Adapter) buildRequestBody(req provider.Request) ([]byte, error) {
 	return json.Marshal(body)
 }
 
-func (a *Adapter) buildWireMessage(m message.Message) map[string]any {
+func (a *Adapter) buildWireMessage(all []message.Message, m message.Message) map[string]any {
 	var content []map[string]any
 
 	switch m.Role {
@@ -118,7 +118,7 @@ func (a *Adapter) buildWireMessage(m message.Message) map[string]any {
 					"text": pt.Text,
 				})
 			case *message.ToolResultPart:
-				output := a.findToolOutput(m, pt.CallID)
+				output := a.findToolOutput(all, pt.CallID)
 				content = append(content, map[string]any{
 					"type":      "tool_result",
 					"tool_use_id": pt.CallID,
@@ -182,10 +182,12 @@ func (a *Adapter) buildWireMessage(m message.Message) map[string]any {
 	return nil
 }
 
-func (a *Adapter) findToolOutput(m message.Message, callID string) string {
-	for _, p := range m.Parts {
-		if tc, ok := p.(*message.ToolCallPart); ok && tc.CallID == callID {
-			return tc.State.Output
+func (a *Adapter) findToolOutput(all []message.Message, callID string) string {
+	for _, m := range all {
+		for _, p := range m.Parts {
+			if tc, ok := p.(*message.ToolCallPart); ok && tc.CallID == callID {
+				return tc.State.Output
+			}
 		}
 	}
 	return ""
