@@ -126,16 +126,24 @@ func runCmd(args []string) error {
 			case *message.ReasoningPart:
 				partTypes[p.PartID()] = "reasoning"
 				fmt.Fprint(os.Stderr, "\n[thinking]\n")
+			case *message.ToolCallPart:
+				partTypes[p.PartID()] = "tool"
 			}
 		case agent.EventPartDelta:
-			if partTypes[e.PartID] == "reasoning" {
+			switch partTypes[e.PartID] {
+			case "reasoning":
 				fmt.Fprint(os.Stderr, e.Delta)
-			} else {
+			case "text":
 				fmt.Print(e.Delta)
+			case "tool":
+				// Tool argument deltas are internal JSON; suppress from stdout.
 			}
 		case agent.EventPartEnd:
-			if partTypes[e.PartID] == "reasoning" {
+			switch partTypes[e.PartID] {
+			case "reasoning":
 				fmt.Fprint(os.Stderr, "\n[/thinking]\n")
+			case "tool":
+				fmt.Fprintf(os.Stderr, "\n")
 			}
 			delete(partTypes, e.PartID)
 		case agent.EventMessageEnd:
