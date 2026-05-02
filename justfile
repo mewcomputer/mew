@@ -15,6 +15,9 @@ test:
 test-v:
     cargo test --all -- --nocapture
 
+mew *args: build
+    cargo run -p mew -- "$@"
+
 # Build and run mew. All args after "run" are forwarded to the binary.
 # Usage: just run --model deepseek-v4-flash "hello world"
 run *args: build
