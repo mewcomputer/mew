@@ -114,4 +114,83 @@ mod tests {
         // cleanup
         let _ = tokio::fs::remove_file(&path).await;
     }
+
+    #[tokio::test]
+    async fn test_multiple_messages() {
+        let session_id = format!("test-{}", Ulid::new());
+        let mut w = Writer::open(&session_id).await.expect("open");
+
+        let msgs = vec![
+            Message {
+                id: Ulid::new(),
+                session_id: Ulid::from_string(&session_id).unwrap_or_else(|_| Ulid::new()),
+                role: Role::User,
+                parts: vec![],
+                time: Time { created: 0, completed: None },
+                assistant: None,
+            },
+            Message {
+                id: Ulid::new(),
+                session_id: Ulid::from_string(&session_id).unwrap_or_else(|_| Ulid::new()),
+                role: Role::Assistant,
+                parts: vec![],
+                time: Time { created: 1, completed: Some(2) },
+                assistant: None,
+            },
+        ];
+
+        for msg in &msgs {
+            w.write_message(msg).await.expect("write");
+        }
+
+        let path = w.path().clone();
+        w.close().await.expect("close");
+
+        let data = tokio::fs::read_to_string(&path).await.expect("read");
+        let lines: Vec<&str> = data.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        let got0: Message = serde_json::from_str(lines[0]).expect("parse");
+        let got1: Message = serde_json::from_str(lines[1]).expect("parse");
+        assert_eq!(got0.role, Role::User);
+        assert_eq!(got1.role, Role::Assistant);
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_writes() {
+        let session_id = format!("test-{}", Ulid::new());
+        let mut writer = Writer::open(&session_id).await.expect("open");
+        let path = writer.path().clone();
+
+        let mut handles = Vec::new();
+        for i in 0..10 {
+            let msg = Message {
+                id: Ulid::new(),
+                session_id: Ulid::from_string(&session_id).unwrap_or_else(|_| Ulid::new()),
+                role: Role::User,
+                parts: vec![],
+                time: Time { created: i, completed: None },
+                assistant: None,
+            };
+            let sid = session_id.clone();
+            handles.push(tokio::spawn(async move {
+                let mut w = Writer::open(&sid).await.expect("open");
+                w.write_message(&msg).await.expect("write");
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        writer.close().await.expect("close");
+
+        let data = tokio::fs::read_to_string(&path).await.expect("read");
+        let lines: Vec<&str> = data.lines().collect();
+        assert_eq!(lines.len(), 10);
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
 }

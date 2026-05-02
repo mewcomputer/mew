@@ -285,4 +285,30 @@ mod tests {
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::Deny);
     }
+
+    #[tokio::test]
+    async fn test_session_allow_persists_across_checks() {
+        let engine = PermissionEngine::new(vec![]);
+
+        // First check without session allow should prompt
+        let d1 = engine
+            .check("bash", &make_bash_input("ls"), mew_tools::Sensitivity::Dangerous)
+            .await;
+        assert_eq!(d1, mew_hooks::PermissionDecision::Prompt);
+
+        // Add session allow
+        engine.add_session_allow("bash").await;
+
+        // Second check should allow
+        let d2 = engine
+            .check("bash", &make_bash_input("ls"), mew_tools::Sensitivity::Dangerous)
+            .await;
+        assert_eq!(d2, mew_hooks::PermissionDecision::AllowOnce);
+
+        // Other tools should still prompt
+        let d3 = engine
+            .check("write", &make_input("foo.rs"), mew_tools::Sensitivity::Mutating)
+            .await;
+        assert_eq!(d3, mew_hooks::PermissionDecision::Prompt);
+    }
 }

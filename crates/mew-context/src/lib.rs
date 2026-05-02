@@ -186,4 +186,108 @@ mod tests {
         assert_eq!(escape_xml("<foo>"), "&lt;foo&gt;");
         assert_eq!(escape_xml("\"bar\""), "&quot;bar&quot;");
     }
+
+    #[test]
+    fn test_paths_between_leaf_not_under_root() {
+        let root = PathBuf::from("/a/b");
+        let leaf = PathBuf::from("/x/y");
+        let paths = paths_between(&root, &leaf);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], leaf);
+    }
+
+    #[test]
+    fn test_paths_between_same() {
+        let root = PathBuf::from("/home/user/project");
+        let leaf = PathBuf::from("/home/user/project");
+        let paths = paths_between(&root, &leaf);
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], root);
+    }
+
+    #[test]
+    fn test_loader_finds_agents_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("AGENTS.md");
+        std::fs::write(&agents, "global context").unwrap();
+
+        let loader = Loader::new(dir.path());
+        let files = loader.load().unwrap();
+
+        // Should find the AGENTS.md in the directory
+        assert!(
+            files.iter().any(|f| f.path.ends_with("AGENTS.md") && f.content == "global context"),
+            "expected to find AGENTS.md with 'global context', got: {:?}",
+            files
+        );
+    }
+
+    #[test]
+    fn test_loader_finds_claude_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = dir.path().join("CLAUDE.md");
+        std::fs::write(&claude, "claude context").unwrap();
+
+        let loader = Loader::new(dir.path());
+        let files = loader.load().unwrap();
+
+        assert!(
+            files.iter().any(|f| f.path.ends_with("CLAUDE.md") && f.content == "claude context")
+        );
+    }
+
+    #[test]
+    fn test_loader_finds_dot_mew_agents_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let dot_mew = dir.path().join(".mew");
+        std::fs::create_dir(&dot_mew).unwrap();
+        std::fs::write(dot_mew.join("AGENTS.md"), "dot mew context").unwrap();
+
+        let loader = Loader::new(dir.path());
+        let files = loader.load().unwrap();
+
+        assert!(
+            files.iter().any(|f| f.path.ends_with(".mew/AGENTS.md") && f.content == "dot mew context")
+        );
+    }
+
+    #[test]
+    fn test_loader_order_most_general_first() {
+        let root = tempfile::tempdir().unwrap();
+        let subdir = root.path().join("src");
+        std::fs::create_dir(&subdir).unwrap();
+
+        // Create a .git directory so find_git_root returns root
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+
+        std::fs::write(root.path().join("AGENTS.md"), "root").unwrap();
+        std::fs::write(subdir.join("AGENTS.md"), "src").unwrap();
+
+        let loader = Loader::new(&subdir);
+        let files = loader.load().unwrap();
+
+        let agents_files: Vec<_> = files
+            .iter()
+            .filter(|f| f.path.ends_with("AGENTS.md"))
+            .collect();
+        assert_eq!(agents_files.len(), 2);
+        assert_eq!(agents_files[0].content, "root");
+        assert_eq!(agents_files[1].content, "src");
+    }
+
+    #[test]
+    fn test_loader_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let loader = Loader::new(dir.path());
+        let files = loader.load().unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_loader_skips_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let loader = Loader::new(dir.path());
+        let files = loader.load().unwrap();
+        assert!(files.is_empty());
+    }
 }

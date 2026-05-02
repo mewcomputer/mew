@@ -1275,4 +1275,213 @@ mod tests {
         assert!(!msgs.is_empty());
         assert_eq!(msgs[0].role, Role::User);
     }
+
+    #[tokio::test]
+    async fn test_permission_engine_allow_rule() {
+        let script1 = FakeProvider::tool_call("echo", "c1", serde_json::json!({"input": "hi"}));
+        let script2 = FakeProvider::text_response("done");
+        let provider = Arc::new(StatefulFakeProvider::new(vec![script1, script2]));
+
+        let rules = vec![mew_config::permissions::PermissionRule {
+            tool: "echo".to_string(),
+            decision: mew_config::permissions::RuleDecision::Allow,
+            r#match: mew_config::permissions::MatchConditions::default(),
+        }];
+        let engine = Arc::new(mew_config::permissions::PermissionEngine::new(rules));
+
+        let mut agent = Agent::new(
+            provider,
+            Arc::new(NopDispatcher),
+            None,
+            vec![Arc::new(EchoTool::mutating())],
+            None,
+        );
+        agent.set_permission_engine(Arc::new(mew_config::permissions::PermissionEngine::new(vec![])));
+
+        let mut rx = agent.run("call two echos".into());
+        let mut permissions_prompted = 0;
+
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                AgentEvent::PermissionRequest { tx, .. } => {
+                    permissions_prompted += 1;
+                    let decision = if permissions_prompted == 1 {
+                        PermissionDecision::AllowSession
+                    } else {
+                        PermissionDecision::AllowOnce
+                    };
+                    let _ = tx.send(decision);
+                }
+                AgentEvent::ToolEnd { .. } => {}
+                AgentEvent::Provider(ProviderEvent::MessageEnd {
+                    finish: Finish::Stop,
+                    ..
+                }) => break,
+                _ => {}
+            }
+        }
+
+        assert_eq!(permissions_prompted, 1, "AllowSession should skip second prompt within same turn");
+    }
+
+    #[tokio::test]
+    async fn test_multi_tool_call_turn() {
+        // Provider returns two tool calls in one turn
+        let script1 = vec![
+            mew_provider::ProviderEvent::PartStart {
+                part: Part::ToolCall(ToolCallPart {
+                    base: PartBase {
+                        id: Ulid::new(),
+                        message_id: Ulid::new(),
+                        session_id: Ulid::new(),
+                    },
+                    tool_name: "echo".into(),
+                    call_id: "c1".into(),
+                    state: ToolState::Pending(ToolStatePending {
+                        input: serde_json::json!({"input": "first"}),
+                        time: ToolTime { start: 0, end: None },
+                    }),
+                    raw_input: String::new(),
+                }),
+            },
+            mew_provider::ProviderEvent::PartEnd { part_id: Ulid::new() },
+            mew_provider::ProviderEvent::PartStart {
+                part: Part::ToolCall(ToolCallPart {
+                    base: PartBase {
+                        id: Ulid::new(),
+                        message_id: Ulid::new(),
+                        session_id: Ulid::new(),
+                    },
+                    tool_name: "echo".into(),
+                    call_id: "c2".into(),
+                    state: ToolState::Pending(ToolStatePending {
+                        input: serde_json::json!({"input": "second"}),
+                        time: ToolTime { start: 0, end: None },
+                    }),
+                    raw_input: String::new(),
+                }),
+            },
+            mew_provider::ProviderEvent::PartEnd { part_id: Ulid::new() },
+            mew_provider::ProviderEvent::MessageEnd {
+                finish: Finish::ToolUse,
+                usage: Tokens::default(),
+                cost: 0.0,
+            },
+        ];
+        let script2 = FakeProvider::text_response("done");
+        let provider = Arc::new(StatefulFakeProvider::new(vec![script1, script2]));
+
+        let mut agent = Agent::new(
+            provider,
+            Arc::new(NopDispatcher),
+            None,
+            vec![Arc::new(EchoTool::mutating())],
+            None,
+        );
+
+        let mut rx = agent.run("call two echos".into());
+        let mut tool_ends = 0;
+
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                AgentEvent::PermissionRequest { tx, .. } => {
+                    let _ = tx.send(PermissionDecision::AllowOnce);
+                }
+                AgentEvent::ToolEnd { .. } => {
+                    tool_ends += 1;
+                }
+                AgentEvent::Provider(ProviderEvent::MessageEnd {
+                    finish: Finish::Stop,
+                    ..
+                }) => break,
+                _ => {}
+            }
+        }
+
+        assert_eq!(tool_ends, 2, "should execute both tools");
+
+        let msgs = agent.messages.lock().await;
+        assert_eq!(msgs.len(), 4); // user, assistant (2 tools), user (2 results), assistant
+    }
+
+    #[tokio::test]
+    async fn test_permission_engine_session_allow() {
+        let script = vec![
+            mew_provider::ProviderEvent::PartStart {
+                part: Part::ToolCall(ToolCallPart {
+                    base: PartBase {
+                        id: Ulid::new(),
+                        message_id: Ulid::new(),
+                        session_id: Ulid::new(),
+                    },
+                    tool_name: "echo".into(),
+                    call_id: "c1".into(),
+                    state: ToolState::Pending(ToolStatePending {
+                        input: serde_json::json!({"input": "first"}),
+                        time: ToolTime { start: 0, end: None },
+                    }),
+                    raw_input: String::new(),
+                }),
+            },
+            mew_provider::ProviderEvent::PartEnd { part_id: Ulid::new() },
+            mew_provider::ProviderEvent::PartStart {
+                part: Part::ToolCall(ToolCallPart {
+                    base: PartBase {
+                        id: Ulid::new(),
+                        message_id: Ulid::new(),
+                        session_id: Ulid::new(),
+                    },
+                    tool_name: "echo".into(),
+                    call_id: "c2".into(),
+                    state: ToolState::Pending(ToolStatePending {
+                        input: serde_json::json!({"input": "second"}),
+                        time: ToolTime { start: 0, end: None },
+                    }),
+                    raw_input: String::new(),
+                }),
+            },
+            mew_provider::ProviderEvent::PartEnd { part_id: Ulid::new() },
+            mew_provider::ProviderEvent::MessageEnd {
+                finish: Finish::ToolUse,
+                usage: Tokens::default(),
+                cost: 0.0,
+            },
+        ];
+        let script2 = FakeProvider::text_response("done");
+        let provider = Arc::new(StatefulFakeProvider::new(vec![script, script2]));
+
+        let mut agent = Agent::new(
+            provider,
+            Arc::new(NopDispatcher),
+            None,
+            vec![Arc::new(EchoTool::mutating())],
+            None,
+        );
+        agent.set_permission_engine(Arc::new(mew_config::permissions::PermissionEngine::new(vec![])));
+
+        let mut rx = agent.run("call two echos".into());
+        let mut permissions_prompted = 0;
+
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                AgentEvent::PermissionRequest { tx, .. } => {
+                    permissions_prompted += 1;
+                    let decision = if permissions_prompted == 1 {
+                        PermissionDecision::AllowSession
+                    } else {
+                        PermissionDecision::AllowOnce
+                    };
+                    let _ = tx.send(decision);
+                }
+                AgentEvent::ToolEnd { .. } => {}
+                AgentEvent::Provider(ProviderEvent::MessageEnd {
+                    finish: Finish::Stop,
+                    ..
+                }) => break,
+                _ => {}
+            }
+        }
+
+        assert_eq!(permissions_prompted, 1, "AllowSession should skip second prompt within same turn");
+    }
 }

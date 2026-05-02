@@ -198,6 +198,7 @@ fn parse(data: &[u8]) -> Result<Catalog, CatalogError> {
     // Try object format first: {"models": [...]}
     #[derive(Deserialize)]
     struct Payload {
+        #[serde(default)]
         models: Vec<Model>,
     }
 
@@ -288,5 +289,61 @@ mod tests {
         assert_eq!(cat.models.len(), 1);
         let m = cat.lookup("array-model").unwrap();
         assert_eq!(m.shape, "anthropic");
+    }
+
+    #[test]
+    fn test_parse_invalid_json() {
+        let result = parse(b"not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_empty_object() {
+        let cat = parse(b"{}").unwrap();
+        assert!(cat.models.is_empty());
+    }
+
+    #[test]
+    fn test_parse_empty_array() {
+        let cat = parse(b"[]").unwrap();
+        assert!(cat.models.is_empty());
+    }
+
+    #[test]
+    fn test_parse_missing_optional_fields() {
+        // Model without reasoning, vision, tool_call, shape, pricing
+        let json = br#"{"models":[{"id":"minimal","provider":"test","context_window":1000,"max_output":100}]}"#;
+        let cat = parse(json).unwrap();
+        assert_eq!(cat.models.len(), 1);
+        let m = cat.lookup("minimal").unwrap();
+        assert_eq!(m.context_window, 1000);
+        assert!(!m.tool_call);
+        assert!(!m.vision);
+        assert!(!m.reasoning);
+        assert_eq!(m.shape, ""); // serde default for String
+        assert_eq!(cat.shape_for("minimal"), "openai"); // fallback in lookup
+    }
+
+    #[test]
+    fn test_parse_pricing_defaults() {
+        let json = br#"{"models":[{"id":"no-price","provider":"test","context_window":1000,"max_output":100,"tool_call":false,"reasoning":false,"vision":false}]}"#;
+        let cat = parse(json).unwrap();
+        let m = cat.lookup("no-price").unwrap();
+        assert_eq!(m.pricing.input, 0.0);
+        assert_eq!(m.pricing.output, 0.0);
+    }
+
+    #[test]
+    fn test_context_window_unknown() {
+        let cat = parse(&sample_json()).unwrap();
+        assert_eq!(cat.context_window("unknown-model"), 128_000);
+    }
+
+    #[test]
+    fn test_supports_methods_unknown() {
+        let cat = parse(&sample_json()).unwrap();
+        assert!(!cat.supports_vision("unknown"));
+        assert!(!cat.supports_tool_call("unknown"));
+        assert!(!cat.supports_reasoning("unknown"));
     }
 }
