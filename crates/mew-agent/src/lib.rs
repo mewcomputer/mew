@@ -467,7 +467,7 @@ impl Agent {
                 };
 
                 tracing::info!(tool = %tc.tool_name, call_id = %call_id, input = %input, "executing tool");
-                let exec_result = tool.execute(ctx, input).await;
+                let exec_result = tool.execute(ctx, input.clone()).await;
                 let tool_output = match exec_result {
                     Ok(out) => {
                         tracing::info!(tool = %tc.tool_name, call_id = %call_id, output = %out.output, error = %out.error, "tool executed successfully");
@@ -482,6 +482,13 @@ impl Agent {
                     }
                 };
 
+                // Update hook_call with parsed input so hooks and final state are correct.
+                let hook_call = HookToolCall {
+                    tool_name: hook_call.tool_name,
+                    call_id: hook_call.call_id,
+                    input: input.clone(),
+                };
+
                 let output = self
                     .dispatcher
                     .on_tool_execute_after(&hook_call, tool_output)
@@ -492,7 +499,7 @@ impl Agent {
                     (
                         false,
                         ToolState::Error(ToolStateError {
-                            input: hook_call.input.clone(),
+                            input: input.clone(),
                             error: output.error.clone(),
                             time: ToolTime {
                                 start: Utc::now().timestamp_millis(),
@@ -504,7 +511,7 @@ impl Agent {
                     (
                         true,
                         ToolState::Completed(ToolStateCompleted {
-                            input: hook_call.input.clone(),
+                            input: input.clone(),
                             output: output.output.clone(),
                             metadata: None,
                             time: ToolTime {
@@ -545,6 +552,19 @@ impl Agent {
                     },
                     call_id: tc.call_id.clone(),
                 }));
+            }
+
+            // Sync updated assistant message (with tool state transitions)
+            // back into self.messages so the next request has the correct state.
+            if let Some(ref msg) = assistant_msg {
+                tracing::debug!(msg_id = %msg.id, "syncing assistant message to store");
+                let mut messages = self.messages.lock().await;
+                for m in messages.iter_mut() {
+                    if m.id == msg.id {
+                        *m = msg.clone();
+                        break;
+                    }
+                }
             }
 
             let result_msg = Message {
