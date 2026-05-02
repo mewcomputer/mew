@@ -14,3 +14,6 @@ directories = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 keyring = "3"
+globset = { workspace = true }
+mew-hooks = { workspace = true }
+mew-tools = { workspace = true }

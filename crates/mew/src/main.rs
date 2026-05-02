@@ -1,26 +1,33 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::io::Write;
+use std::io::Write as _;
 use std::sync::Arc;
+use tokio::io::AsyncBufReadExt;
 use tracing::warn;
 
 use mew_agent::Agent;
 use mew_catalog::Catalog;
 use mew_config::{Config, ProviderConfig};
-use mew_hooks::NopDispatcher;
+use mew_hooks::{NopDispatcher, PermissionDecision};
 use mew_message::{Finish, Part, PartId};
 use mew_provider::Provider;
 use mew_provider_anthropic::Adapter as AnthropicAdapter;
 use mew_provider_openai::Adapter as OpenAIAdapter;
 use mew_session::Writer as SessionWriter;
+use mew_tools::tools::bash::Bash;
 use mew_tools::tools::echo::Echo;
+use mew_tools::tools::edit::Edit;
+use mew_tools::tools::glob::Glob;
+use mew_tools::tools::grep::Grep;
+use mew_tools::tools::read::Read;
+use mew_tools::tools::write::Write;
 
 #[derive(Parser)]
 #[command(name = "mew")]
 #[command(about = "A terminal agent harness")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -42,6 +49,20 @@ enum Commands {
         /// The prompt to send
         prompt: Vec<String>,
     },
+    /// Start an interactive session
+    Chat {
+        /// Provider ID
+        #[arg(long, default_value = "opencode-zen")]
+        provider: String,
+
+        /// Model ID (overrides provider default)
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Dump raw request/response to stderr
+        #[arg(long)]
+        raw: bool,
+    },
 }
 
 #[tokio::main]
@@ -51,13 +72,37 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run {
+        Some(Commands::Run {
             provider,
             model,
             raw,
             prompt,
-        } => run_cmd(provider, model, raw, prompt).await,
+        }) => run_cmd(provider, model, raw, prompt).await,
+        Some(Commands::Chat {
+            provider,
+            model,
+            raw,
+        }) => chat_cmd(provider, model, raw).await,
+        None => chat_cmd("opencode-zen".to_string(), None, false).await,
     }
+}
+
+fn build_tools() -> Vec<Arc<dyn mew_tools::Tool>> {
+    vec![
+        Arc::new(Read),
+        Arc::new(Write),
+        Arc::new(Edit),
+        Arc::new(Bash),
+        Arc::new(Glob),
+        Arc::new(Grep),
+        Arc::new(Echo),
+    ]
+}
+
+fn build_permission_engine(cfg: &Config) -> Arc<mew_config::permissions::PermissionEngine> {
+    Arc::new(mew_config::permissions::PermissionEngine::new(
+        cfg.permissions.rules.clone(),
+    ))
 }
 
 async fn run_cmd(
@@ -77,14 +122,214 @@ async fn run_cmd(
         Ok(c) => c,
         Err(e) => {
             warn!("catalog load failed, using fallback routing: {}", e);
-            // Create empty catalog - we can't construct it directly since
-            // the field is private, so we'll just handle missing catalog
-            // in the provider build logic
             return build_and_run(&cfg, None, &provider_flag, model_flag, raw, prompt).await;
         }
     };
 
     build_and_run(&cfg, Some(&cat), &provider_flag, model_flag, raw, prompt).await
+}
+
+async fn chat_cmd(
+    provider_flag: String,
+    model_flag: Option<String>,
+    raw: bool,
+) -> Result<()> {
+    let cfg = mew_config::load().context("load config")?;
+
+    let cat = match mew_catalog::load().await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("catalog load failed, using fallback routing: {}", e);
+            return build_and_chat(&cfg, None, &provider_flag, model_flag, raw).await;
+        }
+    };
+
+    build_and_chat(&cfg, Some(&cat), &provider_flag, model_flag, raw).await
+}
+
+async fn build_and_chat(
+    cfg: &Config,
+    cat: Option<&Catalog>,
+    provider_flag: &str,
+    model_flag: Option<String>,
+    raw: bool,
+) -> Result<()> {
+    let (provider_id, model_id) = resolve_model(cfg, cat, provider_flag, model_flag);
+
+    let provider = build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
+
+    let session_id = ulid::Ulid::new().to_string();
+    let session_writer = SessionWriter::open(&session_id)
+        .await
+        .context("open session")?;
+
+    let dispatcher = Arc::new(NopDispatcher);
+    let tools = build_tools();
+    let permission_engine = build_permission_engine(cfg);
+
+    let mut agent = Agent::new(provider, dispatcher, Some(session_writer), tools, None);
+    agent.set_permission_engine(permission_engine);
+
+    // Load project context files and prepend to system prompt
+    let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());
+    let ctx_files = ctx_loader.load().unwrap_or_default();
+    if !ctx_files.is_empty() {
+        agent.set_system(mew_context::build_system_prompt(&ctx_files));
+    }
+
+    println!("mew interactive mode (model: {})", model_id);
+    println!("Type /quit to exit, /help for commands\n");
+
+    let stdin = tokio::io::stdin();
+    let mut stdin_lines = tokio::io::BufReader::new(stdin).lines();
+
+    loop {
+        print!("> ");
+        let _ = std::io::stdout().flush();
+
+        let line = match stdin_lines.next_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(e) => {
+                eprintln!("stdin error: {}", e);
+                break;
+            }
+        };
+
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Slash commands
+        if line.starts_with('/') {
+            match handle_slash(line, &mut agent).await {
+                SlashResult::Continue => continue,
+                SlashResult::Quit => break,
+            }
+        }
+
+        // Send message to agent
+        let mut rx = agent.run(line.to_string());
+
+        let mut part_types: std::collections::HashMap<PartId, &'static str> =
+            std::collections::HashMap::new();
+
+        loop {
+            match rx.recv().await {
+                Some(event) => match event {
+                    mew_agent::AgentEvent::Provider(ev) => match ev {
+                        mew_provider::ProviderEvent::PartStart { part } => {
+                            let id = part.id();
+                            match &part {
+                                Part::Text(_) => {
+                                    part_types.insert(id, "text");
+                                }
+                                Part::Reasoning(_) => {
+                                    part_types.insert(id, "reasoning");
+                                    eprintln!("\n[thinking]");
+                                }
+                                Part::ToolCall(_) => {
+                                    part_types.insert(id, "tool");
+                                }
+                                _ => {}
+                            }
+                        }
+                        mew_provider::ProviderEvent::PartDelta {
+                            part_id,
+                            field: _,
+                            delta,
+                        } => match part_types.get(&part_id) {
+                            Some(&"reasoning") => {
+                                eprint!("{}", delta);
+                                let _ = std::io::stderr().flush();
+                            }
+                            Some(&"text") => {
+                                print!("{}", delta);
+                                let _ = std::io::stdout().flush();
+                            }
+                            Some(&"tool") => {}
+                            _ => {}
+                        },
+                        mew_provider::ProviderEvent::PartEnd { part_id } => {
+                            match part_types.get(&part_id) {
+                                Some(&"reasoning") => eprintln!("\n[/thinking]"),
+                                Some(&"tool") => eprintln!(),
+                                _ => {}
+                            }
+                            part_types.remove(&part_id);
+                        }
+                        mew_provider::ProviderEvent::MessageEnd { finish, .. } => {
+                            if finish == Finish::Stop {
+                                println!();
+                            }
+                        }
+                        _ => {}
+                    },
+                    mew_agent::AgentEvent::PermissionRequest { call, tx } => {
+                        print!("\nPermission request: {} {:?}\n[a]llow once / [s]ession / [d]eny: ",
+                            call.tool_name, call.input);
+                        let _ = std::io::stdout().flush();
+
+                        let resp = match stdin_lines.next_line().await {
+                            Ok(Some(line)) => line.trim().to_lowercase(),
+                            _ => "d".to_string(),
+                        };
+
+                        let decision = match resp.as_str() {
+                            "a" | "allow" => PermissionDecision::AllowOnce,
+                            "s" | "session" => PermissionDecision::AllowSession,
+                            _ => PermissionDecision::Deny,
+                        };
+
+                        let _ = tx.send(decision);
+                    }
+                    mew_agent::AgentEvent::ToolStart { call_id } => {
+                        eprintln!("\n[tool start: {}]", call_id);
+                    }
+                    mew_agent::AgentEvent::ToolEnd { call_id, success } => {
+                        eprintln!("[tool end: {}] success={}", call_id, success);
+                    }
+                    mew_agent::AgentEvent::PartUpdated { .. } => {}
+                    mew_agent::AgentEvent::Error(msg) => {
+                        eprintln!("agent error: {}", msg);
+                        break;
+                    }
+                },
+                None => break,
+            }
+        }
+    }
+
+    Ok(())
+}
+
+enum SlashResult {
+    Continue,
+    Quit,
+}
+
+async fn handle_slash(line: &str, _agent: &mut Agent) -> SlashResult {
+    let parts: Vec<&str> = line.splitn(2, ' ').collect();
+    match parts[0] {
+        "/quit" | "/q" => SlashResult::Quit,
+        "/help" => {
+            println!("Commands:");
+            println!("  /quit, /q     Exit");
+            println!("  /help         Show this help");
+            println!("  /clear        Clear the screen");
+            SlashResult::Continue
+        }
+        "/clear" => {
+            print!("\x1B[2J\x1B[H");
+            let _ = std::io::stdout().flush();
+            SlashResult::Continue
+        }
+        _ => {
+            println!("Unknown command: {}. Type /help for available commands.", parts[0]);
+            SlashResult::Continue
+        }
+    }
 }
 
 async fn build_and_run(
@@ -105,9 +350,11 @@ async fn build_and_run(
         .context("open session")?;
 
     let dispatcher = Arc::new(NopDispatcher);
-    let tools: Vec<Arc<dyn mew_tools::Tool>> = vec![Arc::new(Echo)];
+    let tools = build_tools();
+    let permission_engine = build_permission_engine(cfg);
 
     let mut agent = Agent::new(provider, dispatcher, Some(session_writer), tools, None);
+    agent.set_permission_engine(permission_engine);
 
     // Load project context files and prepend to system prompt
     let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());

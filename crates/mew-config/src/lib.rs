@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use thiserror::Error;
 use tracing::{debug, warn};
 
+pub mod permissions;
+
 /// Top-level user configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -12,6 +14,15 @@ pub struct Config {
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(rename = "default_model", default)]
     pub default_model: String,
+    #[serde(default)]
+    pub permissions: PermissionsConfig,
+}
+
+/// Permission configuration section.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PermissionsConfig {
+    #[serde(default)]
+    pub rules: Vec<permissions::PermissionRule>,
 }
 
 impl Default for Config {
@@ -19,6 +30,7 @@ impl Default for Config {
         Self {
             providers: HashMap::new(),
             default_model: String::new(),
+            permissions: PermissionsConfig::default(),
         }
     }
 }

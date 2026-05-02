@@ -722,25 +722,7 @@ done when: `MEW_CRED_OPENCODE_ZEN=... mew run "list three primes then call the e
 
 done when: same `mew run` works against `z-ai/glm-4.6` and against opencode zen, switched only by `--model`. captured anthropic fixture replays correctly including a tool-call turn with reasoning. image input works end-to-end on both shapes against a vision-capable model. a synthetic 429 in fixture replay triggers correct backoff.
 
-### m2: ratatui tui
-
-- `mew-tui` library + `mew` interactive mode (`mew` with no subcommand).
-- ratatui-based rendering, crossterm input. event loop reads `crossterm::event::EventStream`, agent events, and tick events through `tokio::select!`.
-- streaming token rendering, tool-call display reflecting state machine (spinner on running, output collapsed by default on completed, red on error).
-- approval prompts: modal overlay, three options (allow once, allow session, deny). keyboard-driven. driven by the `oneshot::Sender` pattern from `AgentEvent::PermissionRequest`.
-- input editor with multiline support, history (up/down). use `tui-textarea` or hand-roll. default to readline-style keys. one chosen, stick with it.
-- status line: model, session token usage, session cost.
-- keychain creds via `mew auth set` cli plus json fallback.
-- **slash commands.** built-in command registry, dispatched when input starts with `/`. v1 set: `/help`, `/clear` (start new session), `/compact` (force compaction), `/cost` (full breakdown), `/model <id>` (switch mid-session), `/sessions` (list resumable), `/resume <id>`, `/quit`. registry is a `HashMap<String, Box<dyn Command>>` so plugins (m7) can add commands later. unknown `/foo` falls through to the model as literal text — don't error.
-- **@-mentions for files.** typing `@` opens a fuzzy file picker rooted at the project (or git root). selecting inserts `@path/to/file` into the prompt; on submit, agent core reads the file and attaches as `FilePart` (text mime → text content, image mime → image content per image-input rules). respects `.gitignore` via the `ignore` crate. files over 1mb prompt for confirmation.
-- **interrupt / cancellation.** ctrl-c during a streaming turn cancels via the cancellation token, marks the in-progress assistant message `Aborted`, preserves what was streamed, returns input focus. ctrl-c with no active turn clears non-empty input, otherwise prompts "exit? (y/n)". double ctrl-c within 1s exits unconditionally. ctrl-d on empty input exits.
-- **bash output streaming.** bash tool streams stdout/stderr to the tui via `progress_tx` as bytes arrive. tui renders a live-updating tool block. `ToolStateRunning.output` appended-to; `Event::PartUpdated` emitted on a 50ms debounce to avoid flooding. truncation cap (30k chars default) applies to the final captured output written to session, not the live stream.
-- **diff display for edits.** when `edit` runs (and `write` to existing file), tui renders unified diff: additions green, removals red, context dim. `similar` crate. raw before/after still in `ToolState.output` for session record; diff is purely render.
-- **cost surfacing.** session cost = sum of per-message costs (input × input_price + output × output_price + cache adjustments, prices from catalog). status line shows running total. `/cost` shows full breakdown: per-model totals if session crossed models, per-turn list, cache hit ratio. costs persisted on each `Message` so resume reconstructs accurately. if catalog pricing missing for a model, mark cost as `None` and note "cost unavailable" — never silently zero.
-
-done when: a user can `mew auth set z-ai`, then `mew`, hold a multi-turn conversation with tool calls and approvals, see streaming output and tool execution states update live, attach files via `@`, run a long bash command and watch its output stream, ctrl-c a long-running turn cleanly, run `/cost` and see a sane breakdown, and resume the session next launch via `mew --session <id>` or `mew --resume`.
-
-### m3: built-in tools, permission model, skills
+### m2: built-in tools, permission model, skills
 
 - read, write, edit, bash, glob, grep, all implementing `Tool`.
 - permission rules in config, evaluated in documented order.
@@ -775,6 +757,24 @@ done when: a user can `mew auth set z-ai`, then `mew`, hold a multi-turn convers
   evaluated top-to-bottom, first match wins. `ask` uses the same approval ui as tool permissions.
 
 done when: a user can ask "find all rust files importing reqwest and add a comment to each", mew uses glob+grep+edit, prompts for each edit (or batches under session-allow rule), and the session file accurately reflects the tool state machine throughout. a `git-release` skill at `.mew/skills/git-release/SKILL.md` shows up in the `skill` tool's listing, can be loaded by the model, and a `deny` rule for `internal-*` hides matching skills from the listing entirely.
+
+### m3: ratatui tui
+
+- `mew-tui` library + `mew` interactive mode (`mew` with no subcommand).
+- ratatui-based rendering, crossterm input. event loop reads `crossterm::event::EventStream`, agent events, and tick events through `tokio::select!`.
+- streaming token rendering, tool-call display reflecting state machine (spinner on running, output collapsed by default on completed, red on error).
+- approval prompts: modal overlay, three options (allow once, allow session, deny). keyboard-driven. driven by the `oneshot::Sender` pattern from `AgentEvent::PermissionRequest`.
+- input editor with multiline support, history (up/down). use `tui-textarea` or hand-roll. default to readline-style keys. one chosen, stick with it.
+- status line: model, session token usage, session cost.
+- keychain creds via `mew auth set` cli plus json fallback.
+- **slash commands.** built-in command registry, dispatched when input starts with `/`. v1 set: `/help`, `/clear` (start new session), `/compact` (force compaction), `/cost` (full breakdown), `/model <id>` (switch mid-session), `/sessions` (list resumable), `/resume <id>`, `/quit`. registry is a `HashMap<String, Box<dyn Command>>` so plugins (m7) can add commands later. unknown `/foo` falls through to the model as literal text — don't error.
+- **@-mentions for files.** typing `@` opens a fuzzy file picker rooted at the project (or git root). selecting inserts `@path/to/file` into the prompt; on submit, agent core reads the file and attaches as `FilePart` (text mime → text content, image mime → image content per image-input rules). respects `.gitignore` via the `ignore` crate. files over 1mb prompt for confirmation.
+- **interrupt / cancellation.** ctrl-c during a streaming turn cancels via the cancellation token, marks the in-progress assistant message `Aborted`, preserves what was streamed, returns input focus. ctrl-c with no active turn clears non-empty input, otherwise prompts "exit? (y/n)". double ctrl-c within 1s exits unconditionally. ctrl-d on empty input exits.
+- **bash output streaming.** bash tool streams stdout/stderr to the tui via `progress_tx` as bytes arrive. tui renders a live-updating tool block. `ToolStateRunning.output` appended-to; `Event::PartUpdated` emitted on a 50ms debounce to avoid flooding. truncation cap (30k chars default) applies to the final captured output written to session, not the live stream.
+- **diff display for edits.** when `edit` runs (and `write` to existing file), tui renders unified diff: additions green, removals red, context dim. `similar` crate. raw before/after still in `ToolState.output` for session record; diff is purely render.
+- **cost surfacing.** session cost = sum of per-message costs (input × input_price + output × output_price + cache adjustments, prices from catalog). status line shows running total. `/cost` shows full breakdown: per-model totals if session crossed models, per-turn list, cache hit ratio. costs persisted on each `Message` so resume reconstructs accurately. if catalog pricing missing for a model, mark cost as `None` and note "cost unavailable" — never silently zero.
+
+done when: a user can `mew auth set z-ai`, then `mew`, hold a multi-turn conversation with tool calls and approvals, see streaming output and tool execution states update live, attach files via `@`, run a long bash command and watch its output stream, ctrl-c a long-running turn cleanly, run `/cost` and see a sane breakdown, and resume the session next launch via `mew --session <id>` or `mew --resume`.
 
 ### m4: mcp client
 
@@ -1174,4 +1174,4 @@ if any of this drifts during implementation, fix this appendix or the implementa
 
 ## first thing to build
 
-`mew-message`, with types and round-trip tests (table-driven + proptest fuzz). a passing test suite there is the foundation everything else assumes works. then `mew-provider-openai` against captured fixtures. then wire to opencode zen for real. don't write tui code until m1 is green.
+`mew-message`, with types and round-trip tests (table-driven + proptest fuzz). a passing test suite there is the foundation everything else assumes works. then `mew-provider-openai` against captured fixtures. then wire to opencode zen for real. don't write tui code until m2 (built-in tools) is green.

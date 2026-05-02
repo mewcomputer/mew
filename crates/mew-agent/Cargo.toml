@@ -11,6 +11,7 @@ mew-provider = { workspace = true }
 mew-hooks = { workspace = true }
 mew-tools = { workspace = true }
 mew-session = { workspace = true }
+mew-config = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

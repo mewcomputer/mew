@@ -78,6 +78,7 @@ pub struct Agent {
     pub session_id: SessionId,
     pub system: String,
     pub cancel_token: CancellationToken,
+    pub permission_engine: Option<Arc<mew_config::permissions::PermissionEngine>>,
 }
 
 impl Agent {
@@ -103,7 +104,13 @@ impl Agent {
             session_id: session_id.unwrap_or_else(Ulid::new),
             system: String::new(),
             cancel_token: CancellationToken::new(),
+            permission_engine: None,
         }
+    }
+
+    /// Attach a permission engine for rule-based permission checks.
+    pub fn set_permission_engine(&mut self, engine: Arc<mew_config::permissions::PermissionEngine>) {
+        self.permission_engine = Some(engine);
     }
 
     /// Sets the system prompt prepended to every provider request.
@@ -330,11 +337,21 @@ impl Agent {
                 };
 
                 // Permission check.
-                let default_decision =
-                    match self.tools.get(&tc.tool_name).map(|t| t.sensitivity()) {
-                        Some(Sensitivity::ReadOnly) => PermissionDecision::AllowOnce,
+                let sensitivity = self
+                    .tools
+                    .get(&tc.tool_name)
+                    .map(|t| t.sensitivity())
+                    .unwrap_or(Sensitivity::Dangerous);
+                let default_decision = if let Some(ref engine) = self.permission_engine {
+                    engine
+                        .check(&tc.tool_name, &hook_call.input, sensitivity)
+                        .await
+                } else {
+                    match sensitivity {
+                        Sensitivity::ReadOnly => PermissionDecision::AllowOnce,
                         _ => PermissionDecision::Prompt,
-                    };
+                    }
+                };
                 let decision = self
                     .dispatcher
                     .on_permission_ask(&hook_call, default_decision)
@@ -355,6 +372,12 @@ impl Agent {
                 } else {
                     decision
                 };
+
+                if decision == PermissionDecision::AllowSession {
+                    if let Some(ref engine) = self.permission_engine {
+                        engine.add_session_allow(&tc.tool_name).await;
+                    }
+                }
 
                 if decision == PermissionDecision::Deny {
                     let error_state = ToolState::Error(ToolStateError {

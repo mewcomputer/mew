@@ -70,6 +70,13 @@ eventsource-stream = "0.2"
 reqwest-retry = "0.7"
 reqwest-middleware = "0.4"
 
+# filesystem / pattern matching
+globset = "0.4"
+ignore = "0.4"
+
+# diff display
+similar = "2"
+
 # internal crates (no version yet, path-based)
 mew-message = { path = "crates/mew-message" }
 mew-provider = { path = "crates/mew-provider" }
