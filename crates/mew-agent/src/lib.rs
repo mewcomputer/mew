@@ -723,8 +723,11 @@ impl Agent {
                     }
                 }
                 Part::ToolCall(ref mut p) => {
-                    if field == "arguments" {
-                        p.raw_input.push_str(delta);
+                    match field {
+                        "arguments" => p.raw_input.push_str(delta),
+                        "call_id" => p.call_id.push_str(delta),
+                        "tool_name" => p.tool_name.push_str(delta),
+                        _ => {}
                     }
                 }
                 _ => {}

@@ -400,6 +400,13 @@ impl Adapter {
                     let acc = current_tool_calls.get_mut(&idx).unwrap();
                     if let Some(id) = &tc_delta.id {
                         acc.id.clone_from(id);
+                        let _ = tx
+                            .send(ProviderEvent::PartDelta {
+                                part_id: acc.part.base.id,
+                                field: "call_id",
+                                delta: id.clone(),
+                            })
+                            .await;
                     }
                     if let Some(typ) = &tc_delta.typ {
                         acc.typ.clone_from(typ);
@@ -407,6 +414,13 @@ impl Adapter {
                     if let Some(function) = &tc_delta.function {
                         if let Some(name) = &function.name {
                             acc.name.clone_from(name);
+                            let _ = tx
+                                .send(ProviderEvent::PartDelta {
+                                    part_id: acc.part.base.id,
+                                    field: "tool_name",
+                                    delta: name.clone(),
+                                })
+                                .await;
                         }
                         if let Some(arguments) = &function.arguments {
                             acc.arguments.push_str(arguments);
