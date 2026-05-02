@@ -69,6 +69,8 @@ pub struct PickerState {
     pub filter: String,
     pub selected: usize,
     pub cursor: usize,
+    /// First visible item index in the filtered list.
+    pub scroll: usize,
 }
 
 impl PickerState {
@@ -86,6 +88,15 @@ impl PickerState {
     pub fn selected_item(&self) -> Option<&PickerItem> {
         let filtered = self.filtered();
         filtered.get(self.selected).copied()
+    }
+
+    /// Ensure scroll keeps selected item in view for the given visible count.
+    pub fn adjust_scroll(&mut self, visible_count: usize) {
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + visible_count {
+            self.scroll = self.selected.saturating_sub(visible_count - 1);
+        }
     }
 }
 
@@ -186,6 +197,7 @@ impl App {
             filter: String::new(),
             selected: 0,
             cursor: 0,
+            scroll: 0,
         });
     }
 
@@ -207,6 +219,7 @@ impl App {
             filter: String::new(),
             selected: 0,
             cursor: 0,
+            scroll: 0,
         });
     }
 
@@ -247,6 +260,7 @@ impl App {
             let count = p.filtered().len();
             if count > 0 {
                 p.selected = (p.selected + 1).min(count - 1);
+                p.adjust_scroll(6);
             }
         }
     }
@@ -255,6 +269,7 @@ impl App {
     pub fn picker_up(&mut self) {
         if let Some(ref mut p) = self.picker {
             p.selected = p.selected.saturating_sub(1);
+            p.adjust_scroll(6);
         }
     }
 

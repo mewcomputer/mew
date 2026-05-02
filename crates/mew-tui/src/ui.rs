@@ -1,8 +1,8 @@
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Clear, Paragraph, Wrap},
+    widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
 
@@ -444,14 +444,15 @@ fn draw_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
     let list_area = Rect::new(
         inner.x,
         inner.y + 2,
-        inner.width,
+        inner.width.saturating_sub(1),
         inner.height.saturating_sub(2),
     );
 
     let filtered = picker.filtered();
     let mut list_text = Text::default();
 
-    for (i, item) in filtered.iter().enumerate().take(list_area.height as usize) {
+    let start = picker.scroll;
+    for (i, item) in filtered.iter().enumerate().skip(start).take(list_area.height as usize) {
         let is_selected = i == picker.selected;
         let label_style = if is_selected {
             Style::default()
@@ -486,4 +487,24 @@ fn draw_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
 
     let list_para = Paragraph::new(list_text).wrap(Wrap { trim: true });
     f.render_widget(list_para, list_area);
+
+    // Scrollbar.
+    if filtered.len() > list_area.height as usize {
+        let scrollbar_area = list_area.inner(Margin {
+            horizontal: 0,
+            vertical: 0,
+        });
+        let mut scrollbar_state = ScrollbarState::new(filtered.len())
+            .position(picker.scroll);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+        f.render_stateful_widget(
+            scrollbar,
+            scrollbar_area,
+            &mut scrollbar_state,
+        );
+    }
 }
