@@ -377,18 +377,27 @@ async fn discover_models(
     let mut seen = HashSet::new();
     let mut models = Vec::new();
 
-    // Query each configured provider.
-    for (pid, pc) in &cfg.providers {
+    // Collect all provider IDs to query: configured + built-in.
+    let mut provider_ids: Vec<&str> = cfg.providers.keys().map(|s| s.as_str()).collect();
+    for pid in &["opencode-zen", "opencode-go", "z-ai"] {
+        if !provider_ids.contains(pid) {
+            provider_ids.push(pid);
+        }
+    }
+
+    // Query each provider.
+    for pid in provider_ids {
         let provider = match build_provider(cfg, cat, pid, "", raw) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!("failed to build provider {} for discovery: {}", pid, e);
+                tracing::warn!("discovery: failed to build provider {}: {}", pid, e);
                 continue;
             }
         };
 
         match provider.list_models().await {
             Ok(list) => {
+                tracing::info!("discovery: provider {} returned {} models", pid, list.len());
                 for m in list {
                     let full_id = if m.id.contains('/') {
                         m.id.clone()
@@ -399,20 +408,22 @@ async fn discover_models(
                         let desc = if let Some(c) = cat.and_then(|c| c.lookup(&m.id)) {
                             format!("{} · {} · {} ctx", pid, c.shape, c.context_window)
                         } else {
-                            format!("{} · {}", pid, pc.shape)
+                            let shape = provider_name_to_shape(pid);
+                            format!("{} · {}", pid, shape)
                         };
                         models.push((full_id, desc));
                     }
                 }
             }
             Err(e) => {
-                tracing::warn!("provider {} list_models failed: {}", pid, e);
+                tracing::warn!("discovery: provider {} list_models failed: {}", pid, e);
             }
         }
     }
 
     // Add hardcoded fallbacks if nothing discovered.
     if models.is_empty() {
+        tracing::warn!("discovery: no models from any provider, using fallbacks");
         let fallbacks: Vec<(String, String)> = vec![
             ("opencode-zen/deepseek-v4-flash".into(), "opencode-zen · openai".into()),
             ("z-ai/glm-5.1".into(), "z-ai · anthropic".into()),
@@ -427,6 +438,14 @@ async fn discover_models(
 
     models.sort_by(|a, b| a.0.cmp(&b.0));
     models
+}
+
+fn provider_name_to_shape(pid: &str) -> &'static str {
+    match pid {
+        "opencode-zen" | "opencode-go" => "openai",
+        "z-ai" => "anthropic",
+        _ => "openai",
+    }
 }
 
 async fn build_and_run(
