@@ -85,6 +85,7 @@ pub fn handle_key_event(
 ) -> Option<Action> {
     match app.mode {
         crate::app::Mode::PermissionPrompt => handle_permission_key(app, key),
+        crate::app::Mode::CommandPalette => handle_picker_key(app, key),
         crate::app::Mode::Normal | crate::app::Mode::SlashCommand => handle_normal_key(app, key),
     }
 }
@@ -144,6 +145,10 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) && app.input.is_empty() => {
             app.should_quit = true;
             return Some(Action::Quit);
+        }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.open_command_palette();
+            return None;
         }
         _ => {}
     }
@@ -213,6 +218,71 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
     }
 }
 
+fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Esc => {
+            app.close_picker();
+            None
+        }
+        KeyCode::Enter => {
+            if let Some(ref p) = app.picker {
+                if let Some(item) = p.selected_item() {
+                    let id = item.id.clone();
+                    let kind = p.kind.clone();
+                    app.close_picker();
+                    if kind == "command" {
+                        match id.as_str() {
+                            "switch-model" => {
+                                app.open_model_picker();
+                                None
+                            }
+                            "clear" => Some(Action::Clear),
+                            "quit" => {
+                                app.should_quit = true;
+                                Some(Action::Quit)
+                            }
+                            _ => None,
+                        }
+                    } else if kind == "model" {
+                        Some(Action::SwitchModel(id))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        KeyCode::Up => {
+            app.picker_up();
+            None
+        }
+        KeyCode::Down => {
+            app.picker_down();
+            None
+        }
+        KeyCode::Char(c) => {
+            app.picker_insert(c);
+            None
+        }
+        KeyCode::Backspace => {
+            app.picker_backspace();
+            None
+        }
+        KeyCode::Left => {
+            app.picker_cursor_left();
+            None
+        }
+        KeyCode::Right => {
+            app.picker_cursor_right();
+            None
+        }
+        _ => None,
+    }
+}
+
 /// High-level actions produced by input handling.
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -224,4 +294,8 @@ pub enum Action {
     Cancel,
     /// Quit the application.
     Quit,
+    /// Clear the chat.
+    Clear,
+    /// Switch to a different model.
+    SwitchModel(String),
 }

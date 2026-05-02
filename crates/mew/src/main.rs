@@ -188,6 +188,16 @@ async fn run_tui(
     app.context_files = context_files;
     app.tools = tool_names;
 
+    // Populate model list for the palette.
+    if let Some(c) = cat {
+        app.models = c
+            .models
+            .values()
+            .map(|m| (m.id.clone(), format!("{} · {}", m.provider, m.shape)))
+            .collect();
+        app.models.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -252,6 +262,57 @@ async fn run_tui(
                                     SlashResult::Quit => break Ok(()),
                                     SlashResult::Clear => {
                                         app.messages.clear();
+                                    }
+                                }
+                            }
+                            mew_tui::events::Action::Clear => {
+                                app.messages.clear();
+                            }
+                            mew_tui::events::Action::SwitchModel(new_model) => {
+                                match build_provider(cfg, cat, &provider_id, &new_model, raw) {
+                                    Ok(new_provider) => {
+                                        agent.provider = new_provider;
+                                        app.status.model = new_model.clone();
+                                        app.messages.push(mew_message::Message {
+                                            id: ulid::Ulid::new(),
+                                            session_id: ulid::Ulid::new(),
+                                            role: Role::Assistant,
+                                            parts: vec![Part::Text(mew_message::TextPart {
+                                                base: mew_message::PartBase {
+                                                    id: ulid::Ulid::new(),
+                                                    message_id: ulid::Ulid::new(),
+                                                    session_id: ulid::Ulid::new(),
+                                                },
+                                                text: format!("Switched to model: {}", new_model),
+                                                synthetic: true,
+                                            })],
+                                            time: mew_message::Time {
+                                                created: chrono::Utc::now().timestamp_millis(),
+                                                completed: Some(chrono::Utc::now().timestamp_millis()),
+                                            },
+                                            assistant: None,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        app.messages.push(mew_message::Message {
+                                            id: ulid::Ulid::new(),
+                                            session_id: ulid::Ulid::new(),
+                                            role: Role::Assistant,
+                                            parts: vec![Part::Text(mew_message::TextPart {
+                                                base: mew_message::PartBase {
+                                                    id: ulid::Ulid::new(),
+                                                    message_id: ulid::Ulid::new(),
+                                                    session_id: ulid::Ulid::new(),
+                                                },
+                                                text: format!("Failed to switch model: {}", e),
+                                                synthetic: true,
+                                            })],
+                                            time: mew_message::Time {
+                                                created: chrono::Utc::now().timestamp_millis(),
+                                                completed: Some(chrono::Utc::now().timestamp_millis()),
+                                            },
+                                            assistant: None,
+                                        });
                                     }
                                 }
                             }

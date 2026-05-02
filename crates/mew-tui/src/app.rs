@@ -38,6 +38,10 @@ pub struct App {
     pub context_files: Vec<String>,
     /// Available tool names.
     pub tools: Vec<String>,
+    /// Available models (id -> description) for the palette.
+    pub models: Vec<(String, String)>,
+    /// Active picker, if any.
+    pub picker: Option<PickerState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +49,44 @@ pub enum Mode {
     Normal,
     PermissionPrompt,
     SlashCommand,
+    CommandPalette,
+}
+
+/// A single item in the command palette.
+#[derive(Debug, Clone)]
+pub struct PickerItem {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+}
+
+/// State for the cmdk-style command palette.
+#[derive(Debug)]
+pub struct PickerState {
+    /// What the picker is selecting (e.g. "command", "model").
+    pub kind: String,
+    pub items: Vec<PickerItem>,
+    pub filter: String,
+    pub selected: usize,
+    pub cursor: usize,
+}
+
+impl PickerState {
+    pub fn filtered(&self) -> Vec<&PickerItem> {
+        let f = self.filter.to_lowercase();
+        self.items
+            .iter()
+            .filter(|i| {
+                i.label.to_lowercase().contains(&f)
+                    || i.description.to_lowercase().contains(&f)
+            })
+            .collect()
+    }
+
+    pub fn selected_item(&self) -> Option<&PickerItem> {
+        let filtered = self.filtered();
+        filtered.get(self.selected).copied()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +155,128 @@ impl App {
             should_quit: false,
             context_files: Vec::new(),
             tools: Vec::new(),
+            models: Vec::new(),
+            picker: None,
+        }
+    }
+
+    /// Open the command palette with a list of commands.
+    pub fn open_command_palette(&mut self) {
+        let items = vec![
+            PickerItem {
+                id: "switch-model".into(),
+                label: "Switch Model".into(),
+                description: "Change the active LLM".into(),
+            },
+            PickerItem {
+                id: "clear".into(),
+                label: "Clear Chat".into(),
+                description: "Remove all messages from the current session".into(),
+            },
+            PickerItem {
+                id: "quit".into(),
+                label: "Quit".into(),
+                description: "Exit mew".into(),
+            },
+        ];
+        self.mode = Mode::CommandPalette;
+        self.picker = Some(PickerState {
+            kind: "command".into(),
+            items,
+            filter: String::new(),
+            selected: 0,
+            cursor: 0,
+        });
+    }
+
+    /// Open a model picker.
+    pub fn open_model_picker(&mut self) {
+        let items: Vec<PickerItem> = self
+            .models
+            .iter()
+            .map(|(id, desc)| PickerItem {
+                id: id.clone(),
+                label: id.clone(),
+                description: desc.clone(),
+            })
+            .collect();
+        self.mode = Mode::CommandPalette;
+        self.picker = Some(PickerState {
+            kind: "model".into(),
+            items,
+            filter: String::new(),
+            selected: 0,
+            cursor: 0,
+        });
+    }
+
+    /// Close the picker and return to normal mode.
+    pub fn close_picker(&mut self) {
+        self.picker = None;
+        self.mode = Mode::Normal;
+    }
+
+    /// Insert a character into the picker filter.
+    pub fn picker_insert(&mut self, c: char) {
+        if let Some(ref mut p) = self.picker {
+            p.filter.insert(p.cursor, c);
+            p.cursor += c.len_utf8();
+            p.selected = 0;
+        }
+    }
+
+    /// Backspace in the picker filter.
+    pub fn picker_backspace(&mut self) {
+        if let Some(ref mut p) = self.picker {
+            if p.cursor > 0 {
+                let prev = p.filter[..p.cursor]
+                    .char_indices()
+                    .last()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                p.filter.remove(prev);
+                p.cursor = prev;
+                p.selected = p.selected.min(p.filtered().len().saturating_sub(1));
+            }
+        }
+    }
+
+    /// Move picker selection down.
+    pub fn picker_down(&mut self) {
+        if let Some(ref mut p) = self.picker {
+            let count = p.filtered().len();
+            if count > 0 {
+                p.selected = (p.selected + 1).min(count - 1);
+            }
+        }
+    }
+
+    /// Move picker selection up.
+    pub fn picker_up(&mut self) {
+        if let Some(ref mut p) = self.picker {
+            p.selected = p.selected.saturating_sub(1);
+        }
+    }
+
+    /// Move picker cursor left.
+    pub fn picker_cursor_left(&mut self) {
+        if let Some(ref mut p) = self.picker {
+            p.cursor = p.filter[..p.cursor]
+                .char_indices()
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0);
+        }
+    }
+
+    /// Move picker cursor right.
+    pub fn picker_cursor_right(&mut self) {
+        if let Some(ref mut p) = self.picker {
+            p.cursor = p.filter[p.cursor..]
+                .chars()
+                .next()
+                .map(|c| p.cursor + c.len_utf8())
+                .unwrap_or(p.filter.len());
         }
     }
 

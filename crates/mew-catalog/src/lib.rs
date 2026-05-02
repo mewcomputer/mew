@@ -60,7 +60,7 @@ pub struct Model {
 /// The loaded model registry.
 #[derive(Debug, Clone)]
 pub struct Catalog {
-    models: HashMap<String, Model>,
+    pub models: HashMap<String, Model>,
 }
 
 impl Catalog {

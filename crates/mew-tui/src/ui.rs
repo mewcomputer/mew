@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Mode, PermissionState, ToolDisplayState, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH};
+use crate::app::{App, Mode, PermissionState, PickerState, ToolDisplayState, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH};
 use mew_message::{Part, Role, ToolState};
 
 /// Background color for the input surface.
@@ -63,6 +63,12 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.mode == Mode::PermissionPrompt {
         if let Some(ref perm) = app.permission {
             draw_permission_modal(f, perm, main_area);
+        }
+    }
+
+    if app.mode == Mode::CommandPalette {
+        if let Some(ref picker) = app.picker {
+            draw_picker(f, picker, main_area);
         }
     }
 }
@@ -399,4 +405,90 @@ fn draw_permission_modal(f: &mut Frame, perm: &PermissionState, area: Rect) {
         1,
     );
     f.render_widget(Paragraph::new(Line::from(option_lines)), option_area);
+}
+
+fn draw_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let max_items = 8u16;
+    let height = (4 + max_items).min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(DIVIDER))
+        .style(Style::default().bg(INPUT_BG))
+        .title(format!(" {} ", picker.kind));
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    // Filter input at top.
+    let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let prefix = Span::styled("> ", Style::default().fg(Color::Cyan).bg(INPUT_BG));
+    let filter_text = Span::styled(&picker.filter, Style::default().fg(Color::White).bg(INPUT_BG));
+    let filter_para = Paragraph::new(Line::from(vec![prefix, filter_text]));
+    f.render_widget(filter_para, filter_area);
+
+    // Cursor in filter.
+    let cursor_x = filter_area.x + 2 + (picker.cursor.min(filter_area.width as usize - 2) as u16);
+    f.set_cursor_position((cursor_x, filter_area.y));
+
+    // Divider under filter.
+    let div_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+    let div_line = Line::from(Span::styled(
+        "─".repeat(inner.width as usize),
+        Style::default().fg(DIVIDER),
+    ));
+    f.render_widget(Paragraph::new(div_line), div_area);
+
+    // Item list.
+    let list_area = Rect::new(
+        inner.x,
+        inner.y + 2,
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+
+    let filtered = picker.filtered();
+    let mut list_text = Text::default();
+
+    for (i, item) in filtered.iter().enumerate().take(list_area.height as usize) {
+        let is_selected = i == picker.selected;
+        let label_style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White).bg(INPUT_BG)
+        };
+        let desc_style = if is_selected {
+            Style::default().fg(Color::Black).bg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray).bg(INPUT_BG)
+        };
+
+        list_text.push_line(Line::from(vec![
+            Span::styled(&item.label, label_style),
+        ]));
+        if !item.description.is_empty() {
+            list_text.push_line(Line::from(vec![
+                Span::styled(&item.description, desc_style),
+            ]));
+        }
+    }
+
+    if filtered.is_empty() {
+        list_text.push_line(Line::from(Span::styled(
+            "no results",
+            Style::default().fg(Color::DarkGray).bg(INPUT_BG),
+        )));
+    }
+
+    let list_para = Paragraph::new(list_text).wrap(Wrap { trim: true });
+    f.render_widget(list_para, list_area);
 }
