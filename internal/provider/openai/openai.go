@@ -16,6 +16,7 @@ import (
 
 	"mew/internal/message"
 	"mew/internal/provider"
+	"mew/internal/provider/imageutil"
 )
 
 // Adapter implements provider.Provider for the OpenAI chat completions API.
@@ -67,15 +68,32 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	hreq.Header.Set("Authorization", "Bearer "+a.apiKey)
 	hreq.Header.Set("Accept", "text/event-stream")
 
-	resp, err := a.client.Do(hreq)
-	if err != nil {
-		return nil, fmt.Errorf("http request: %w", err)
-	}
+	policy := provider.DefaultRetryPolicy()
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		resp, err = a.client.Do(hreq.Clone(ctx))
+		if err != nil {
+			return nil, fmt.Errorf("http request: %w", err)
+		}
 
-	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
 		data, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, string(data))
+
+		backoff, retry := policy.ShouldRetry(resp.StatusCode, attempt)
+		if !retry {
+			kind, msg := provider.ClassifyError(resp.StatusCode, string(data))
+			return nil, fmt.Errorf("%s: %s", kind, msg)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
 	}
 
 	evCh := make(chan provider.Event)
@@ -135,12 +153,27 @@ func (a *Adapter) buildWireMessage(all []message.Message, m message.Message) []m
 
 	switch m.Role {
 	case message.RoleUser:
-		var content strings.Builder
+		var textContent strings.Builder
+		var imageBlocks []map[string]any
 		var toolResults []map[string]any
 		for _, p := range m.Parts {
 			switch pt := p.(type) {
 			case *message.TextPart:
-				content.WriteString(pt.Text)
+				textContent.WriteString(pt.Text)
+			case *message.FilePart:
+				if strings.HasPrefix(pt.Mime, "image/") {
+					mime, b64, err := imageutil.Resolve(pt.URL)
+					if err == nil {
+						imageBlocks = append(imageBlocks, map[string]any{
+							"type": "image_url",
+							"image_url": map[string]any{
+								"url": fmt.Sprintf("data:%s;base64,%s", mime, b64),
+							},
+						})
+					}
+				} else {
+					textContent.WriteString(fmt.Sprintf("\n[File: %s]", pt.Filename))
+				}
 			case *message.ToolResultPart:
 				output := a.findToolOutput(all, pt.CallID)
 				toolResults = append(toolResults, map[string]any{
@@ -150,8 +183,19 @@ func (a *Adapter) buildWireMessage(all []message.Message, m message.Message) []m
 				})
 			}
 		}
-		if content.Len() > 0 {
-			out = append(out, map[string]any{"role": "user", "content": content.String()})
+		if len(imageBlocks) > 0 {
+			// Array format required when images are present.
+			var content []map[string]any
+			if textContent.Len() > 0 {
+				content = append(content, map[string]any{
+					"type": "text",
+					"text": textContent.String(),
+				})
+			}
+			content = append(content, imageBlocks...)
+			out = append(out, map[string]any{"role": "user", "content": content})
+		} else if textContent.Len() > 0 {
+			out = append(out, map[string]any{"role": "user", "content": textContent.String()})
 		}
 		out = append(out, toolResults...)
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 	"mew/internal/message"
 	"mew/internal/provider"
+	"mew/internal/provider/imageutil"
 )
 
 // Adapter implements provider.Provider for the Anthropic Messages API.
@@ -24,6 +26,7 @@ type Adapter struct {
 	model   string
 	apiKey  string
 	client  *http.Client
+	dump    bool
 }
 
 // New creates a new Anthropic-shape adapter.
@@ -39,10 +42,22 @@ func New(name, baseURL, model, apiKey string) *Adapter {
 
 func (a *Adapter) Name() string { return a.name }
 
+// SetDump enables raw request/response dumping to stderr.
+func (a *Adapter) SetDump(v bool) { a.dump = v }
+
 func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
 	body, err := a.buildRequestBody(req)
 	if err != nil {
 		return nil, err
+	}
+
+	if a.dump {
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, body, "", "  "); err == nil {
+			fmt.Fprintf(os.Stderr, "\n[RAW REQUEST BODY]\n%s\n\n", pretty.String())
+		} else {
+			fmt.Fprintf(os.Stderr, "\n[RAW REQUEST BODY]\n%s\n\n", string(body))
+		}
 	}
 
 	hreq, err := http.NewRequestWithContext(ctx, "POST", a.baseURL+"/messages", bytes.NewReader(body))
@@ -54,15 +69,32 @@ func (a *Adapter) Stream(ctx context.Context, req provider.Request) (<-chan prov
 	hreq.Header.Set("Anthropic-Version", "2023-06-01")
 	hreq.Header.Set("Accept", "text/event-stream")
 
-	resp, err := a.client.Do(hreq)
-	if err != nil {
-		return nil, fmt.Errorf("http request: %w", err)
-	}
+	policy := provider.DefaultRetryPolicy()
+	var resp *http.Response
+	for attempt := 0; ; attempt++ {
+		resp, err = a.client.Do(hreq.Clone(ctx))
+		if err != nil {
+			return nil, fmt.Errorf("http request: %w", err)
+		}
 
-	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+
 		data, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, string(data))
+
+		backoff, retry := policy.ShouldRetry(resp.StatusCode, attempt)
+		if !retry {
+			kind, msg := provider.ClassifyError(resp.StatusCode, string(data))
+			return nil, fmt.Errorf("%s: %s", kind, msg)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
 	}
 
 	evCh := make(chan provider.Event)
@@ -194,8 +226,11 @@ func (a *Adapter) findToolOutput(all []message.Message, callID string) string {
 }
 
 func (a *Adapter) readImageData(url string) string {
-	// TODO: implement image reading for M1
-	return ""
+	_, b64, err := imageutil.Resolve(url)
+	if err != nil {
+		return ""
+	}
+	return b64
 }
 
 func (a *Adapter) readStream(body io.ReadCloser, evCh chan<- provider.Event) {
@@ -212,6 +247,10 @@ func (a *Adapter) readStream(body io.ReadCloser, evCh chan<- provider.Event) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		if a.dump {
+			fmt.Fprintf(os.Stderr, "[RAW SSE] %s\n", line)
+		}
+
 		if strings.HasPrefix(line, "event: ") {
 			currentEvent = strings.TrimPrefix(line, "event: ")
 			continue

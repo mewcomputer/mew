@@ -11,6 +11,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"mew/internal/agent"
+	"mew/internal/catalog"
 	"mew/internal/config"
 	mewcontext "mew/internal/context"
 	"mew/internal/hooks"
@@ -61,13 +62,23 @@ func runCmd(args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	cat, err := catalog.Load()
+	if err != nil {
+		// Non-fatal: catalog is a convenience, not a hard dependency.
+		slog.Warn("catalog load failed, using fallback routing", "err", err)
+		cat = &catalog.Catalog{}
+	}
+
 	// Model IDs like "opencode-go/kimi-k2.6" auto-route to that provider
 	// only if the prefix matches a known provider. Otherwise pass the full
 	// string through (e.g. "z.ai/glm-4.6" stays intact).
 	modelID := *modelFlag
 	providerID := *providerFlag
 	if modelID != "" {
-		if idx := strings.Index(modelID, "/"); idx > 0 {
+		// Check catalog first for automatic provider/shape selection.
+		if m, ok := cat.Lookup(modelID); ok {
+			providerID = m.Provider
+		} else if idx := strings.Index(modelID, "/"); idx > 0 {
 			candidate := modelID[:idx]
 			if isKnownProvider(cfg, candidate) {
 				if providerID == "opencode-zen" {
@@ -78,7 +89,7 @@ func runCmd(args []string) error {
 		}
 	}
 
-	p, err := buildProvider(cfg, providerID, modelID)
+	p, err := buildProvider(cfg, cat, providerID, modelID)
 	if err != nil {
 		return fmt.Errorf("build provider: %w", err)
 	}
@@ -182,7 +193,7 @@ func isKnownProvider(cfg *config.Config, providerID string) bool {
 	return false
 }
 
-func buildProvider(cfg *config.Config, providerID, modelOverride string) (provider.Provider, error) {
+func buildProvider(cfg *config.Config, cat *catalog.Catalog, providerID, modelOverride string) (provider.Provider, error) {
 	pc, ok := cfg.Providers[providerID]
 	if !ok {
 		// Fall back to built-in defaults for known providers.
@@ -202,7 +213,7 @@ func buildProvider(cfg *config.Config, providerID, modelOverride string) (provid
 		case "z-ai":
 			pc = config.ProviderConfig{
 				Shape:         "anthropic",
-				BaseURL:       "https://api.z.ai/api/anthropic",
+				BaseURL:       "https://api.z.ai/api/anthropic/v1",
 				CredentialRef: "z-ai",
 			}
 		default:
@@ -223,9 +234,11 @@ func buildProvider(cfg *config.Config, providerID, modelOverride string) (provid
 		}
 	}
 
-	// Opencode-go hosts both OpenAI-shape and Anthropic-shape models.
-	// Auto-route minimax models to the anthropic endpoint.
+	// Determine adapter shape. Catalog overrides provider config.
 	shape := pc.Shape
+	if s := cat.ShapeFor(model); s != "" {
+		shape = s
+	}
 	baseURL := pc.BaseURL
 	if providerID == "opencode-go" && strings.HasPrefix(model, "minimax-") {
 		shape = "anthropic"
