@@ -97,6 +97,45 @@ impl Provider for Adapter {
 
         Ok(Box::pin(rx))
     }
+
+    async fn list_models(&self) -> Result<Vec<mew_provider::ModelInfo>, ProviderError> {
+        let url = format!("{}/models", self.base_url);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            let (kind, msg) = mew_provider::classify_error(status, &body);
+            return Err(ProviderError::Classified { kind, message: msg });
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ModelsResponse {
+            data: Vec<ModelEntry>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ModelEntry {
+            id: String,
+            #[serde(default)]
+            owned_by: String,
+        }
+
+        let payload: ModelsResponse = resp.json().await?;
+        Ok(payload
+            .data
+            .into_iter()
+            .map(|m| mew_provider::ModelInfo {
+                id: m.id,
+                owned_by: m.owned_by,
+            })
+            .collect())
+    }
 }
 
 impl Adapter {

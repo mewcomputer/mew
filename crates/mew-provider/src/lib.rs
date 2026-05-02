@@ -7,10 +7,22 @@ use mew_message::{ErrorKind, Finish, Message, Part, PartId, Tokens};
 
 pub type EventStream = Pin<Box<dyn Stream<Item = ProviderEvent> + Send>>;
 
+/// Basic info about a model returned by a provider.
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    pub id: String,
+    pub owned_by: String,
+}
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
     async fn stream(&self, req: Request) -> Result<EventStream, ProviderError>;
+    /// List available models from the provider API.
+    /// Default implementation returns an empty list.
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(Vec::new())
+    }
 }
 
 #[derive(Debug, Clone)]

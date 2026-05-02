@@ -188,27 +188,8 @@ async fn run_tui(
     app.context_files = context_files;
     app.tools = tool_names;
 
-    // Populate model list for the palette.
-    app.models = if let Some(c) = cat {
-        let mut models: Vec<(String, String)> = c
-            .models
-            .values()
-            .map(|m| (m.id.clone(), format!("{} · {}", m.provider, m.shape)))
-            .collect();
-        models.sort_by(|a, b| a.0.cmp(&b.0));
-        models
-    } else {
-        Vec::new()
-    };
-
-    // Fallback: if catalog is empty, seed with known models.
-    if app.models.is_empty() {
-        app.models = vec![
-            ("deepseek-v4-flash".into(), "opencode-zen · openai".into()),
-            ("glm-5.1".into(), "z-ai · anthropic".into()),
-            ("minimax-text-01".into(), "opencode-go · anthropic".into()),
-        ];
-    }
+    // Populate model list by querying providers and merging with catalog.
+    app.models = discover_models(cfg, cat, raw).await;
 
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
@@ -281,10 +262,16 @@ async fn run_tui(
                                 app.messages.clear();
                             }
                             mew_tui::events::Action::SwitchModel(new_model) => {
-                                match build_provider(cfg, cat, &provider_id, &new_model, raw) {
+                                let (new_provider_id, new_model_id) = if let Some(idx) = new_model.find('/') {
+                                    (&new_model[..idx], &new_model[idx + 1..])
+                                } else {
+                                    (provider_id.as_str(), new_model.as_str())
+                                };
+                                match build_provider(cfg, cat, new_provider_id, new_model_id, raw) {
                                     Ok(new_provider) => {
                                         agent.provider = new_provider;
-                                        app.status.model = new_model.clone();
+                                        app.status.model = new_model_id.to_string();
+                                        app.status.provider = new_provider_id.to_string();
                                         app.messages.push(mew_message::Message {
                                             id: ulid::Ulid::new(),
                                             session_id: ulid::Ulid::new(),
@@ -378,6 +365,68 @@ async fn handle_slash_tui(line: &str) -> SlashResult {
         "/clear" => SlashResult::Clear,
         _ => SlashResult::Continue,
     }
+}
+
+async fn discover_models(
+    cfg: &Config,
+    cat: Option<&Catalog>,
+    raw: bool,
+) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    let mut models = Vec::new();
+
+    // Query each configured provider.
+    for (pid, pc) in &cfg.providers {
+        let provider = match build_provider(cfg, cat, pid, "", raw) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("failed to build provider {} for discovery: {}", pid, e);
+                continue;
+            }
+        };
+
+        match provider.list_models().await {
+            Ok(list) => {
+                for m in list {
+                    let full_id = if m.id.contains('/') {
+                        m.id.clone()
+                    } else {
+                        format!("{}/{}", pid, m.id)
+                    };
+                    if seen.insert(full_id.clone()) {
+                        let desc = if let Some(c) = cat.and_then(|c| c.lookup(&m.id)) {
+                            format!("{} · {} · {} ctx", pid, c.shape, c.context_window)
+                        } else {
+                            format!("{} · {}", pid, pc.shape)
+                        };
+                        models.push((full_id, desc));
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("provider {} list_models failed: {}", pid, e);
+            }
+        }
+    }
+
+    // Add hardcoded fallbacks if nothing discovered.
+    if models.is_empty() {
+        let fallbacks: Vec<(String, String)> = vec![
+            ("opencode-zen/deepseek-v4-flash".into(), "opencode-zen · openai".into()),
+            ("z-ai/glm-5.1".into(), "z-ai · anthropic".into()),
+            ("opencode-go/minimax-text-01".into(), "opencode-go · anthropic".into()),
+        ];
+        for (id, desc) in fallbacks {
+            if seen.insert(id.clone()) {
+                models.push((id, desc));
+            }
+        }
+    }
+
+    models.sort_by(|a, b| a.0.cmp(&b.0));
+    models
 }
 
 async fn build_and_run(
