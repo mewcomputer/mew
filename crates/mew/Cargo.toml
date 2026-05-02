@@ -23,6 +23,9 @@ mew-catalog = { workspace = true }
 mew-context = { workspace = true }
 mew-hooks = { workspace = true }
 mew-tui = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+chrono = { workspace = true }
 
 tokio = { workspace = true }
 ulid = { workspace = true }

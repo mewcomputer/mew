@@ -2,14 +2,13 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::io::Write as _;
 use std::sync::Arc;
-use tokio::io::AsyncBufReadExt;
 use tracing::warn;
 
 use mew_agent::Agent;
 use mew_catalog::Catalog;
 use mew_config::{Config, ProviderConfig};
-use mew_hooks::{NopDispatcher, PermissionDecision};
-use mew_message::{Finish, Part, PartId};
+use mew_hooks::NopDispatcher;
+use mew_message::{Finish, Part, PartId, Role};
 use mew_provider::Provider;
 use mew_provider_anthropic::Adapter as AnthropicAdapter;
 use mew_provider_openai::Adapter as OpenAIAdapter;
@@ -140,14 +139,14 @@ async fn chat_cmd(
         Ok(c) => c,
         Err(e) => {
             warn!("catalog load failed, using fallback routing: {}", e);
-            return build_and_chat(&cfg, None, &provider_flag, model_flag, raw).await;
+            return run_tui(&cfg, None, &provider_flag, model_flag, raw).await;
         }
     };
 
-    build_and_chat(&cfg, Some(&cat), &provider_flag, model_flag, raw).await
+    run_tui(&cfg, Some(&cat), &provider_flag, model_flag, raw).await
 }
 
-async fn build_and_chat(
+async fn run_tui(
     cfg: &Config,
     cat: Option<&Catalog>,
     provider_flag: &str,
@@ -177,158 +176,129 @@ async fn build_and_chat(
         agent.set_system(mew_context::build_system_prompt(&ctx_files));
     }
 
-    println!("mew interactive mode (model: {})", model_id);
-    println!("Type /quit to exit, /help for commands\n");
+    // Setup terminal.
+    crossterm::terminal::enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    crossterm::execute!(
+        stdout,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
 
-    let stdin = tokio::io::stdin();
-    let mut stdin_lines = tokio::io::BufReader::new(stdin).lines();
+    let backend = ratatui::backend::CrosstermBackend::new(stdout);
+    let mut terminal = ratatui::Terminal::new(backend)?;
 
-    loop {
-        print!("> ");
-        let _ = std::io::stdout().flush();
+    // Create app state.
+    let mut app = mew_tui::App::new();
+    app.status.model = model_id.clone();
+    app.status.provider = provider_id.clone();
+    app.status.session_id = session_id.clone();
 
-        let line = match stdin_lines.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
-            Err(e) => {
-                eprintln!("stdin error: {}", e);
-                break;
-            }
+    // Create event loop.
+    let (event_loop, mut event_rx) = mew_tui::EventLoop::new();
+    event_loop.spawn();
+
+    // Main loop.
+    let result = loop {
+        // Render.
+        if let Err(e) = terminal.draw(|f| mew_tui::ui::draw(f, &app)) {
+            break Err(anyhow::anyhow!("draw error: {}", e));
+        }
+
+        // Wait for events.
+        let event = match event_rx.recv().await {
+            Some(e) => e,
+            None => break Ok(()),
         };
 
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        // Slash commands
-        if line.starts_with('/') {
-            match handle_slash(line, &mut agent).await {
-                SlashResult::Continue => continue,
-                SlashResult::Quit => break,
+        match event {
+            mew_tui::Event::Input(crossterm_event) => {
+                if let crossterm::event::Event::Key(key) = crossterm_event {
+                    if let Some(action) = mew_tui::events::handle_key_event(&mut app, key) {
+                        match action {
+                            mew_tui::events::Action::Submit(text) => {
+                                // Add user message to chat.
+                                app.messages.push(mew_message::Message {
+                                    id: ulid::Ulid::new(),
+                                    session_id: ulid::Ulid::new(),
+                                    role: Role::User,
+                                    parts: vec![Part::Text(mew_message::TextPart {
+                                        base: mew_message::PartBase {
+                                            id: ulid::Ulid::new(),
+                                            message_id: ulid::Ulid::new(),
+                                            session_id: ulid::Ulid::new(),
+                                        },
+                                        text: text.clone(),
+                                        synthetic: false,
+                                    })],
+                                    time: mew_message::Time {
+                                        created: chrono::Utc::now().timestamp_millis(),
+                                        completed: None,
+                                    },
+                                    assistant: None,
+                                });
+                                app.streaming = true;
+                                let agent_rx = agent.run(text);
+                                event_loop.forward_agent_events(agent_rx);
+                            }
+                            mew_tui::events::Action::SlashCommand(text) => {
+                                match handle_slash_tui(&text).await {
+                                    SlashResult::Continue => {}
+                                    SlashResult::Quit => break Ok(()),
+                                    SlashResult::Clear => {
+                                        app.messages.clear();
+                                    }
+                                }
+                            }
+                            mew_tui::events::Action::Cancel => {
+                                agent.cancel_token.cancel();
+                                app.streaming = false;
+                            }
+                            mew_tui::events::Action::Quit => break Ok(()),
+                        }
+                    }
+                }
             }
-        }
-
-        // Send message to agent
-        let mut rx = agent.run(line.to_string());
-
-        let mut part_types: std::collections::HashMap<PartId, &'static str> =
-            std::collections::HashMap::new();
-
-        loop {
-            match rx.recv().await {
-                Some(event) => match event {
-                    mew_agent::AgentEvent::Provider(ev) => match ev {
-                        mew_provider::ProviderEvent::PartStart { part } => {
-                            let id = part.id();
-                            match &part {
-                                Part::Text(_) => {
-                                    part_types.insert(id, "text");
-                                }
-                                Part::Reasoning(_) => {
-                                    part_types.insert(id, "reasoning");
-                                    eprintln!("\n[thinking]");
-                                }
-                                Part::ToolCall(_) => {
-                                    part_types.insert(id, "tool");
-                                }
-                                _ => {}
-                            }
-                        }
-                        mew_provider::ProviderEvent::PartDelta {
-                            part_id,
-                            field: _,
-                            delta,
-                        } => match part_types.get(&part_id) {
-                            Some(&"reasoning") => {
-                                eprint!("{}", delta);
-                                let _ = std::io::stderr().flush();
-                            }
-                            Some(&"text") => {
-                                print!("{}", delta);
-                                let _ = std::io::stdout().flush();
-                            }
-                            Some(&"tool") => {}
-                            _ => {}
-                        },
-                        mew_provider::ProviderEvent::PartEnd { part_id } => {
-                            match part_types.get(&part_id) {
-                                Some(&"reasoning") => eprintln!("\n[/thinking]"),
-                                Some(&"tool") => eprintln!(),
-                                _ => {}
-                            }
-                            part_types.remove(&part_id);
-                        }
-                        mew_provider::ProviderEvent::MessageEnd { finish, .. } => {
-                            if finish == Finish::Stop {
-                                println!();
-                            }
-                        }
-                        _ => {}
-                    },
-                    mew_agent::AgentEvent::PermissionRequest { call, tx } => {
-                        print!("\nPermission request: {} {:?}\n[a]llow once / [s]ession / [d]eny: ",
-                            call.tool_name, call.input);
-                        let _ = std::io::stdout().flush();
-
-                        let resp = match stdin_lines.next_line().await {
-                            Ok(Some(line)) => line.trim().to_lowercase(),
-                            _ => "d".to_string(),
-                        };
-
-                        let decision = match resp.as_str() {
-                            "a" | "allow" => PermissionDecision::AllowOnce,
-                            "s" | "session" => PermissionDecision::AllowSession,
-                            _ => PermissionDecision::Deny,
-                        };
-
-                        let _ = tx.send(decision);
-                    }
-                    mew_agent::AgentEvent::ToolStart { call_id } => {
-                        eprintln!("\n[tool start: {}]", call_id);
-                    }
-                    mew_agent::AgentEvent::ToolEnd { call_id, success } => {
-                        eprintln!("[tool end: {}] success={}", call_id, success);
-                    }
-                    mew_agent::AgentEvent::PartUpdated { .. } => {}
-                    mew_agent::AgentEvent::Error(msg) => {
-                        eprintln!("agent error: {}", msg);
-                        break;
-                    }
-                },
-                None => break,
+            mew_tui::Event::Agent(event) => {
+                app.handle_agent_event(event);
             }
+            mew_tui::Event::Tick => {}
+            mew_tui::Event::Quit => break Ok(()),
         }
-    }
 
-    Ok(())
+        if app.should_quit {
+            break Ok(());
+        }
+    };
+
+    // Restore terminal.
+    crossterm::terminal::disable_raw_mode()?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+
+    result
 }
 
 enum SlashResult {
     Continue,
     Quit,
+    Clear,
 }
 
-async fn handle_slash(line: &str, _agent: &mut Agent) -> SlashResult {
+async fn handle_slash_tui(line: &str) -> SlashResult {
     let parts: Vec<&str> = line.splitn(2, ' ').collect();
     match parts[0] {
         "/quit" | "/q" => SlashResult::Quit,
         "/help" => {
-            println!("Commands:");
-            println!("  /quit, /q     Exit");
-            println!("  /help         Show this help");
-            println!("  /clear        Clear the screen");
+            // Help is shown inline as a system message.
             SlashResult::Continue
         }
-        "/clear" => {
-            print!("\x1B[2J\x1B[H");
-            let _ = std::io::stdout().flush();
-            SlashResult::Continue
-        }
-        _ => {
-            println!("Unknown command: {}. Type /help for available commands.", parts[0]);
-            SlashResult::Continue
-        }
+        "/clear" => SlashResult::Clear,
+        _ => SlashResult::Continue,
     }
 }
 
