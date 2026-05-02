@@ -606,3 +606,103 @@ fn new_tool_call_part() -> ToolCallPart {
         raw_input: String::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mew_message::AssistantMeta;
+
+    #[tokio::test]
+    async fn test_build_wire_message_user() {
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![Part::Text(TextPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                text: "Hello".to_string(),
+                synthetic: false,
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let wire = adapter.build_wire_message(&[], &msg).await;
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["role"], "user");
+        assert_eq!(wire[0]["content"], "Hello");
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_assistant_with_tool() {
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![
+                Part::Text(TextPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: "Calling tool".to_string(),
+                    synthetic: false,
+                }),
+                Part::ToolCall(ToolCallPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    tool_name: "echo".to_string(),
+                    call_id: "call_123".to_string(),
+                    state: ToolState::Pending(ToolStatePending {
+                        input: serde_json::json!({"input": "hi"}),
+                        time: ToolTime {
+                            start: 0,
+                            end: None,
+                        },
+                    }),
+                    raw_input: String::new(),
+                }),
+            ],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: Some(AssistantMeta {
+                provider_id: String::new(),
+                model_id: String::new(),
+                cost: 0.0,
+                tokens: Tokens::default(),
+                finish: None,
+                error: None,
+            }),
+        };
+        let wire = adapter.build_wire_message(&[], &msg).await;
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["role"], "assistant");
+        assert!(wire[0]["tool_calls"].is_array());
+        assert_eq!(wire[0]["tool_calls"][0]["id"], "call_123");
+        assert_eq!(wire[0]["tool_calls"][0]["function"]["name"], "echo");
+    }
+}

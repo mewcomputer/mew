@@ -651,3 +651,196 @@ fn new_reasoning_part() -> ReasoningPart {
         signature: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mew_message::{AssistantMeta, TextPart, ToolResultPart};
+
+    #[tokio::test]
+    async fn test_build_wire_message_user() {
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![Part::Text(TextPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                text: "Hello".to_string(),
+                synthetic: false,
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let wire = adapter.build_wire_message(&[], &msg).await;
+        assert!(wire.is_some());
+        let wire = wire.unwrap();
+        assert_eq!(wire["role"], "user");
+        assert!(wire["content"].is_array());
+        assert_eq!(wire["content"][0]["type"], "text");
+        assert_eq!(wire["content"][0]["text"], "Hello");
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_assistant_with_reasoning_and_tool() {
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![
+                Part::Reasoning(ReasoningPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: "Thinking...".to_string(),
+                    signature: Some("sig123".to_string()),
+                }),
+                Part::Text(TextPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: "Here you go".to_string(),
+                    synthetic: false,
+                }),
+                Part::ToolCall(ToolCallPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    tool_name: "echo".to_string(),
+                    call_id: "call_456".to_string(),
+                    state: ToolState::Pending(ToolStatePending {
+                        input: serde_json::json!({"input": "hi"}),
+                        time: ToolTime {
+                            start: 0,
+                            end: None,
+                        },
+                    }),
+                    raw_input: String::new(),
+                }),
+            ],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: Some(AssistantMeta {
+                provider_id: String::new(),
+                model_id: String::new(),
+                cost: 0.0,
+                tokens: Tokens::default(),
+                finish: None,
+                error: None,
+            }),
+        };
+        let wire = adapter.build_wire_message(&[], &msg).await;
+        assert!(wire.is_some());
+        let wire = wire.unwrap();
+        assert_eq!(wire["role"], "assistant");
+        let content = wire["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["thinking"], "Thinking...");
+        assert_eq!(content[0]["signature"], "sig123");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[2]["type"], "tool_use");
+        assert_eq!(content[2]["id"], "call_456");
+        assert_eq!(content[2]["name"], "echo");
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_tool_result() {
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        // First create an assistant message with the tool call so find_tool_output works
+        let assistant_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                tool_name: "echo".to_string(),
+                call_id: "call_789".to_string(),
+                state: ToolState::Completed(mew_message::ToolStateCompleted {
+                    input: serde_json::json!({"input": "hello"}),
+                    output: "echo: hello".to_string(),
+                    metadata: None,
+                    time: ToolTime {
+                        start: 0,
+                        end: Some(1),
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: Some(AssistantMeta {
+                provider_id: String::new(),
+                model_id: String::new(),
+                cost: 0.0,
+                tokens: Tokens::default(),
+                finish: None,
+                error: None,
+            }),
+        };
+        let user_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![Part::ToolResult(ToolResultPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                call_id: "call_789".to_string(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let all = vec![assistant_msg.clone(), user_msg.clone()];
+        let wire = adapter.build_wire_message(&all, &user_msg).await;
+        assert!(wire.is_some());
+        let wire = wire.unwrap();
+        let content = wire["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["tool_use_id"], "call_789");
+        assert_eq!(content[0]["content"], "echo: hello");
+    }
+}

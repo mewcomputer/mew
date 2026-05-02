@@ -1,0 +1,9 @@
+data: {"id":"chatcmpl-tool","object":"chat.completion.chunk","created":1714600001,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","content":"Here are some primes: 2, 3, 5, 7, 11.\n\nNow calling echo:"},"finish_reason":null,"logprobs":null}]}
+
+data: {"id":"chatcmpl-tool","object":"chat.completion.chunk","created":1714600001,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"echo","arguments":""}}]},"finish_reason":null,"logprobs":null}]}
+
+data: {"id":"chatcmpl-tool","object":"chat.completion.chunk","created":1714600001,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"input\":\"Hello from echo"}}]}},"finish_reason":null,"logprobs":null}]}
+
+data: {"id":"chatcmpl-tool","object":"chat.completion.chunk","created":1714600001,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"!\"}"}}]}},"finish_reason":"tool_calls","logprobs":null}]}
+
+data: [DONE]

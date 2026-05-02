@@ -22,31 +22,38 @@ pub enum CatalogError {
 }
 
 /// Per-token cost info.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Pricing {
+    #[serde(default)]
     pub input: f64,
+    #[serde(default)]
     pub output: f64,
-    #[serde(rename = "cache_read")]
+    #[serde(rename = "cache_read", default)]
     pub cache_read: f64,
-    #[serde(rename = "cache_write")]
+    #[serde(rename = "cache_write", default)]
     pub cache_write: f64,
+    #[serde(default)]
     pub reasoning: f64,
 }
 
 /// A single model entry from the models.dev catalog.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Model {
     pub id: String,
     pub provider: String,
-    #[serde(rename = "context_window")]
+    #[serde(rename = "context_window", default)]
     pub context_window: i64,
-    #[serde(rename = "max_output")]
+    #[serde(rename = "max_output", default)]
     pub max_output: i64,
-    #[serde(rename = "tool_call")]
+    #[serde(rename = "tool_call", default)]
     pub tool_call: bool,
+    #[serde(default)]
     pub reasoning: bool,
+    #[serde(default)]
     pub vision: bool,
+    #[serde(default)]
     pub shape: String,
+    #[serde(default)]
     pub pricing: Pricing,
 }
 
@@ -57,6 +64,13 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    /// Creates an empty catalog (for fallback when loading fails).
+    pub fn empty() -> Self {
+        Self {
+            models: HashMap::new(),
+        }
+    }
+
     /// Returns a model by ID, if known.
     pub fn lookup(&self, id: &str) -> Option<&Model> {
         self.models.get(id)
@@ -181,17 +195,28 @@ async fn load_with_client(client: reqwest::Client) -> Result<Catalog, CatalogErr
 }
 
 fn parse(data: &[u8]) -> Result<Catalog, CatalogError> {
+    // Try object format first: {"models": [...]}
     #[derive(Deserialize)]
     struct Payload {
         models: Vec<Model>,
     }
 
-    let payload: Payload = serde_json::from_slice(data)?;
-    let mut models = HashMap::with_capacity(payload.models.len());
-    for m in payload.models {
+    if let Ok(payload) = serde_json::from_slice::<Payload>(data) {
+        let mut models = HashMap::with_capacity(payload.models.len());
+        for m in payload.models {
+            models.insert(m.id.clone(), m);
+        }
+        debug!(count = models.len(), "parsed catalog (object format)");
+        return Ok(Catalog { models });
+    }
+
+    // Fall back to array format: [...]
+    let models_vec: Vec<Model> = serde_json::from_slice(data)?;
+    let mut models = HashMap::with_capacity(models_vec.len());
+    for m in models_vec {
         models.insert(m.id.clone(), m);
     }
-    debug!(count = models.len(), "parsed catalog");
+    debug!(count = models.len(), "parsed catalog (array format)");
     Ok(Catalog { models })
 }
 
@@ -254,5 +279,14 @@ mod tests {
         assert!(!cat.supports_tool_call("unknown"));
         assert!(!cat.supports_reasoning("test-model"));
         assert!(!cat.supports_reasoning("unknown"));
+    }
+
+    #[test]
+    fn test_parse_array_format() {
+        let json = br#"[{"id":"array-model","provider":"test","context_window":100000,"max_output":4096,"tool_call":true,"reasoning":false,"vision":false,"shape":"anthropic","pricing":{"input":0.001,"output":0.002,"cache_read":0.0005,"cache_write":0.001,"reasoning":0.0}}]"#;
+        let cat = parse(json).unwrap();
+        assert_eq!(cat.models.len(), 1);
+        let m = cat.lookup("array-model").unwrap();
+        assert_eq!(m.shape, "anthropic");
     }
 }
