@@ -47,6 +47,7 @@ impl Writer {
         let line = serde_json::to_vec(msg)?;
         self.file.write_all(&line).await?;
         self.file.write_all(b"\n").await?;
+        self.file.flush().await?;
         Ok(())
     }
 

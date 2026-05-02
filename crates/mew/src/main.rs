@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::io::Write;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -144,8 +145,14 @@ async fn build_and_run(
                     field: _,
                     delta,
                 } => match part_types.get(&part_id) {
-                    Some(&"reasoning") => eprint!("{}", delta),
-                    Some(&"text") => print!("{}", delta),
+                    Some(&"reasoning") => {
+                        eprint!("{}", delta);
+                        let _ = std::io::stderr().flush();
+                    }
+                    Some(&"text") => {
+                        print!("{}", delta);
+                        let _ = std::io::stdout().flush();
+                    }
                     Some(&"tool") => {}
                     _ => {}
                 },
