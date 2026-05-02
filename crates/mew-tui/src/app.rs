@@ -3,6 +3,11 @@ use mew_message::{Message, Part, PartId, Role, ToolState};
 use mew_provider::ProviderEvent;
 use std::collections::HashMap;
 
+/// Minimum terminal width to show the sidebar.
+pub const SIDEBAR_MIN_WIDTH: u16 = 120;
+/// Width of the sidebar in columns.
+pub const SIDEBAR_WIDTH: u16 = 32;
+
 /// The application's main state.
 pub struct App {
     /// Conversation messages.
@@ -29,6 +34,10 @@ pub struct App {
     pub streaming: bool,
     /// Whether to exit the application.
     pub should_quit: bool,
+    /// Context files loaded for this session.
+    pub context_files: Vec<String>,
+    /// Available tool names.
+    pub tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +111,8 @@ impl App {
             history_index: None,
             streaming: false,
             should_quit: false,
+            context_files: Vec::new(),
+            tools: Vec::new(),
         }
     }
 

@@ -6,36 +6,63 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Mode, PermissionState, ToolDisplayState};
+use crate::app::{App, Mode, PermissionState, ToolDisplayState, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH};
 use mew_message::{Part, Role, ToolState};
 
-/// Background color for the input surface (slightly different from default terminal bg).
+/// Background color for the input surface.
 const INPUT_BG: Color = Color::Rgb(35, 35, 38);
 /// Background color for the status line surface.
 const STATUS_BG: Color = Color::Rgb(30, 30, 33);
+/// Background color for the sidebar surface.
+const SIDEBAR_BG: Color = Color::Rgb(28, 28, 31);
 /// Subtle divider color.
 const DIVIDER: Color = Color::Rgb(50, 50, 55);
 
 /// Render the full UI.
 pub fn draw(f: &mut Frame, app: &App) {
-    let main = Layout::default()
+    let area = f.area();
+
+    // Decide if sidebar fits.
+    let show_sidebar = area.width >= SIDEBAR_MIN_WIDTH + SIDEBAR_WIDTH;
+
+    let main_chunks: Vec<Rect> = if show_sidebar {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(SIDEBAR_MIN_WIDTH),
+                Constraint::Length(SIDEBAR_WIDTH),
+            ])
+            .split(area);
+        // Fill sidebar background.
+        let sidebar_bg = Block::default().style(Style::default().bg(SIDEBAR_BG));
+        f.render_widget(sidebar_bg, chunks[1]);
+        draw_sidebar(f, app, chunks[1]);
+        chunks.to_vec()
+    } else {
+        vec![area]
+    };
+
+    let main_area = main_chunks[0];
+
+    // Vertical layout inside main area.
+    let vert = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),     // chat area
+            Constraint::Min(1),     // chat
             Constraint::Length(1),  // divider
-            Constraint::Length(1),  // input area
-            Constraint::Length(1),  // status line
+            Constraint::Length(3),  // input (1 padding + 1 content + 1 padding)
+            Constraint::Length(1),  // status
         ])
-        .split(f.area());
+        .split(main_area);
 
-    draw_chat(f, app, main[0]);
-    draw_divider(f, main[1]);
-    draw_input(f, app, main[2]);
-    draw_status(f, app, main[3]);
+    draw_chat(f, app, vert[0]);
+    draw_divider(f, vert[1]);
+    draw_input(f, app, vert[2]);
+    draw_status(f, app, vert[3]);
 
     if app.mode == Mode::PermissionPrompt {
         if let Some(ref perm) = app.permission {
-            draw_permission_modal(f, perm, f.area());
+            draw_permission_modal(f, perm, main_area);
         }
     }
 }
@@ -90,7 +117,6 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                     {
                         if !out.is_empty() {
                             for line in out.lines().take(20) {
-                                // cap displayed lines
                                 text.push_line(Line::from(vec![
                                     Span::raw("    "),
                                     Span::raw(line),
@@ -119,14 +145,11 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                         }
                     }
                 }
-                Part::ToolResult(_) => {
-                    // Tool results are markers; don't render separately.
-                }
+                Part::ToolResult(_) => {}
                 _ => {}
             }
         }
 
-        // Add spacing between messages.
         text.push_line(Line::from(""));
     }
 
@@ -169,8 +192,15 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let bg_block = Block::default().style(Style::default().bg(INPUT_BG));
     f.render_widget(bg_block, area);
 
-    // Truncate input to fit the width and show cursor.
-    let width = area.width.saturating_sub(2) as usize;
+    // Content is the middle row with horizontal padding.
+    let content_area = Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        1,
+    );
+
+    let width = content_area.width as usize;
     let visible = if app.input.len() <= width {
         &app.input
     } else {
@@ -179,7 +209,6 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         &app.input[start..end]
     };
 
-    // Add a prefix indicator.
     let prefix = if app.streaming {
         Span::styled("… ", Style::default().fg(Color::Yellow).bg(INPUT_BG))
     } else {
@@ -188,20 +217,17 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 
     let text = Text::from(Line::from(vec![prefix, Span::styled(visible, style)]));
     let paragraph = Paragraph::new(text);
+    f.render_widget(paragraph, content_area);
 
-    let inner = Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1);
-    f.render_widget(paragraph, inner);
-
-    // Position cursor.
-    let cursor_x = inner.x + (app.cursor.min(width) as u16);
-    let cursor_y = inner.y;
+    // Position cursor inside the padded content area.
+    let cursor_x = content_area.x + (app.cursor.min(width) as u16);
+    let cursor_y = content_area.y;
     f.set_cursor_position((cursor_x, cursor_y));
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let status = &app.status;
 
-    // Background fill.
     let bg = Block::default().style(Style::default().bg(STATUS_BG));
     f.render_widget(bg, area);
 
@@ -225,6 +251,93 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(right_para, right_area);
 }
 
+fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
+    let mut text = Text::default();
+
+    // Header
+    text.push_line(Line::from(vec![
+        Span::styled("Context", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+    ]));
+    text.push_line(Line::from(""));
+
+    // Context files
+    if app.context_files.is_empty() {
+        text.push_line(Line::from(Span::styled(
+            "No context files loaded",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for path in &app.context_files {
+            let name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path);
+            text.push_line(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(name, Style::default().fg(Color::Gray)),
+            ]));
+        }
+    }
+
+    text.push_line(Line::from(""));
+    text.push_line(Line::from(Span::styled(
+        "─".repeat(area.width.saturating_sub(2) as usize),
+        Style::default().fg(DIVIDER),
+    )));
+    text.push_line(Line::from(""));
+
+    // Tools
+    text.push_line(Line::from(vec![
+        Span::styled("Tools", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+    ]));
+    text.push_line(Line::from(""));
+
+    if app.tools.is_empty() {
+        text.push_line(Line::from(Span::styled(
+            "No tools available",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for tool in &app.tools {
+            text.push_line(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(tool, Style::default().fg(Color::Gray)),
+            ]));
+        }
+    }
+
+    text.push_line(Line::from(""));
+    text.push_line(Line::from(Span::styled(
+        "─".repeat(area.width.saturating_sub(2) as usize),
+        Style::default().fg(DIVIDER),
+    )));
+    text.push_line(Line::from(""));
+
+    // Session
+    text.push_line(Line::from(vec![
+        Span::styled("Session", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+    ]));
+    text.push_line(Line::from(""));
+    text.push_line(Line::from(vec![
+        Span::styled("  id  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            &app.status.session_id[..8.min(app.status.session_id.len())],
+            Style::default().fg(Color::Gray),
+        ),
+    ]));
+    text.push_line(Line::from(vec![
+        Span::styled("  msg ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{}", app.messages.len()),
+            Style::default().fg(Color::Gray),
+        ),
+    ]));
+
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
+    let inner = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2));
+    f.render_widget(paragraph, inner);
+}
+
 fn draw_permission_modal(f: &mut Frame, perm: &PermissionState, area: Rect) {
     let width = 60u16.min(area.width.saturating_sub(4));
     let height = 14u16.min(area.height.saturating_sub(4));
@@ -232,7 +345,6 @@ fn draw_permission_modal(f: &mut Frame, perm: &PermissionState, area: Rect) {
     let y = (area.height.saturating_sub(height)) / 2;
     let popup = Rect::new(x, y, width, height);
 
-    // Dim the background.
     f.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -265,7 +377,6 @@ fn draw_permission_modal(f: &mut Frame, perm: &PermissionState, area: Rect) {
     let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
     f.render_widget(paragraph, inner);
 
-    // Draw options.
     let options = [("allow once", 'a'), ("session", 's'), ("deny", 'd')];
     let mut option_lines = Vec::new();
     for (i, (label, key)) in options.iter().enumerate() {

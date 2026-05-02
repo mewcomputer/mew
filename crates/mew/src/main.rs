@@ -166,15 +166,27 @@ async fn run_tui(
     let tools = build_tools();
     let permission_engine = build_permission_engine(cfg);
 
+    // Load project context files.
+    let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());
+    let ctx_files = ctx_loader.load().unwrap_or_default();
+
+    // Populate sidebar data before moving tools.
+    let context_files: Vec<String> = ctx_files.iter().map(|f| f.path.to_string_lossy().to_string()).collect();
+    let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+
     let mut agent = Agent::new(provider, dispatcher, Some(session_writer), tools, None);
     agent.set_permission_engine(permission_engine);
 
-    // Load project context files and prepend to system prompt
-    let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());
-    let ctx_files = ctx_loader.load().unwrap_or_default();
     if !ctx_files.is_empty() {
         agent.set_system(mew_context::build_system_prompt(&ctx_files));
     }
+
+    let mut app = mew_tui::App::new();
+    app.status.model = model_id.clone();
+    app.status.provider = provider_id.clone();
+    app.status.session_id = session_id.clone();
+    app.context_files = context_files;
+    app.tools = tool_names;
 
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
@@ -184,15 +196,8 @@ async fn run_tui(
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableMouseCapture
     )?;
-
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
-
-    // Create app state.
-    let mut app = mew_tui::App::new();
-    app.status.model = model_id.clone();
-    app.status.provider = provider_id.clone();
-    app.status.session_id = session_id.clone();
 
     // Create event loop.
     let (event_loop, mut event_rx) = mew_tui::EventLoop::new();
