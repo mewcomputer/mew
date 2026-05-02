@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
 async fn run_cmd(
     provider_flag: String,
     model_flag: Option<String>,
-    _raw: bool,
+    raw: bool,
     prompt_parts: Vec<String>,
 ) -> Result<()> {
     let prompt = prompt_parts.join(" ");
@@ -79,11 +79,11 @@ async fn run_cmd(
             // Create empty catalog - we can't construct it directly since
             // the field is private, so we'll just handle missing catalog
             // in the provider build logic
-            return build_and_run(&cfg, None, &provider_flag, model_flag, prompt).await;
+            return build_and_run(&cfg, None, &provider_flag, model_flag, raw, prompt).await;
         }
     };
 
-    build_and_run(&cfg, Some(&cat), &provider_flag, model_flag, prompt).await
+    build_and_run(&cfg, Some(&cat), &provider_flag, model_flag, raw, prompt).await
 }
 
 async fn build_and_run(
@@ -91,12 +91,12 @@ async fn build_and_run(
     cat: Option<&Catalog>,
     provider_flag: &str,
     model_flag: Option<String>,
+    raw: bool,
     prompt: String,
 ) -> Result<()> {
     let (provider_id, model_id) = resolve_model(cfg, cat, provider_flag, model_flag);
 
-    let provider = build_provider(cfg, cat, &provider_id, &model_id)
-        .context("build provider")?;
+    let provider = build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
 
     let session_id = ulid::Ulid::new().to_string();
     let session_writer = SessionWriter::open(&session_id)
@@ -106,13 +106,7 @@ async fn build_and_run(
     let dispatcher = Arc::new(NopDispatcher);
     let tools: Vec<Arc<dyn mew_tools::Tool>> = vec![Arc::new(Echo)];
 
-    let mut agent = Agent::new(
-        provider,
-        dispatcher,
-        Some(session_writer),
-        tools,
-        None,
-    );
+    let mut agent = Agent::new(provider, dispatcher, Some(session_writer), tools, None);
 
     // Load project context files and prepend to system prompt
     let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());
@@ -149,14 +143,12 @@ async fn build_and_run(
                     part_id,
                     field: _,
                     delta,
-                } => {
-                    match part_types.get(&part_id) {
-                        Some(&"reasoning") => eprint!("{}", delta),
-                        Some(&"text") => print!("{}", delta),
-                        Some(&"tool") => {}
-                        _ => {}
-                    }
-                }
+                } => match part_types.get(&part_id) {
+                    Some(&"reasoning") => eprint!("{}", delta),
+                    Some(&"text") => print!("{}", delta),
+                    Some(&"tool") => {}
+                    _ => {}
+                },
                 mew_provider::ProviderEvent::PartEnd { part_id } => {
                     match part_types.get(&part_id) {
                         Some(&"reasoning") => eprintln!("\n[/thinking]"),
@@ -239,6 +231,7 @@ fn build_provider(
     cat: Option<&Catalog>,
     provider_id: &str,
     model_override: &str,
+    raw: bool,
 ) -> Result<Arc<dyn Provider>> {
     let pc = cfg
         .providers
@@ -264,8 +257,7 @@ fn build_provider(
         })
         .with_context(|| format!("unknown provider {}", provider_id))?;
 
-    let creds = mew_config::get_credential(&pc.credential_ref)
-        .context("get credential")?;
+    let creds = mew_config::get_credential(&pc.credential_ref).context("get credential")?;
 
     let model = if model_override.is_empty() {
         if cfg.default_model.is_empty() {
@@ -292,12 +284,30 @@ fn build_provider(
     }
 
     match shape.as_str() {
-        "openai" => Ok(Arc::new(OpenAIAdapter::new(
-            provider_id.to_string(), base_url, model, creds,
-        ))),
-        "anthropic" => Ok(Arc::new(AnthropicAdapter::new(
-            provider_id.to_string(), base_url, model, creds,
-        ))),
+        "openai" => {
+            let mut adapter = OpenAIAdapter::new(
+                provider_id.to_string(),
+                base_url,
+                model,
+                creds,
+            );
+            if raw {
+                adapter.set_dump(true);
+            }
+            Ok(Arc::new(adapter))
+        }
+        "anthropic" => {
+            let mut adapter = AnthropicAdapter::new(
+                provider_id.to_string(),
+                base_url,
+                model,
+                creds,
+            );
+            if raw {
+                adapter.set_dump(true);
+            }
+            Ok(Arc::new(adapter))
+        }
         _ => anyhow::bail!("unsupported shape {} for provider {}", shape, provider_id),
     }
 }

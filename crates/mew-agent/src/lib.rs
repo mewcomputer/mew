@@ -458,13 +458,20 @@ impl Agent {
                         .unwrap_or_else(|_| std::path::PathBuf::from(".")),
                 };
 
+                tracing::info!(tool = %tc.tool_name, call_id = %call_id, input = %input, "executing tool");
                 let exec_result = tool.execute(ctx, input).await;
                 let tool_output = match exec_result {
-                    Ok(out) => out,
-                    Err(e) => ToolOutput {
-                        output: String::new(),
-                        error: e.to_string(),
-                    },
+                    Ok(out) => {
+                        tracing::info!(tool = %tc.tool_name, call_id = %call_id, output = %out.output, error = %out.error, "tool executed successfully");
+                        out
+                    }
+                    Err(e) => {
+                        tracing::warn!(tool = %tc.tool_name, call_id = %call_id, error = %e, "tool execution failed");
+                        ToolOutput {
+                            output: String::new(),
+                            error: e.to_string(),
+                        }
+                    }
                 };
 
                 let output = self
@@ -472,6 +479,7 @@ impl Agent {
                     .on_tool_execute_after(&hook_call, tool_output)
                     .await;
 
+                tracing::info!(tool = %tc.tool_name, call_id = %call_id, success = %output.error.is_empty(), "tool finished");
                 let (success, final_state) = if !output.error.is_empty() {
                     (
                         false,

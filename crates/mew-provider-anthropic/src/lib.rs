@@ -166,10 +166,11 @@ impl Adapter {
                         }
                         Part::ToolResult(pt) => {
                             let output = Self::find_tool_output(all, &pt.call_id);
+                            // z.ai's proxy expects content as an array of text blocks.
                             content.push(json!({
                                 "type": "tool_result",
                                 "tool_use_id": pt.call_id,
-                                "content": output,
+                                "content": [{"type": "text", "text": output}],
                             }));
                         }
                         Part::File(pt) => {
