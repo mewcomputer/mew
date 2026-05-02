@@ -189,13 +189,25 @@ async fn run_tui(
     app.tools = tool_names;
 
     // Populate model list for the palette.
-    if let Some(c) = cat {
-        app.models = c
+    app.models = if let Some(c) = cat {
+        let mut models: Vec<(String, String)> = c
             .models
             .values()
             .map(|m| (m.id.clone(), format!("{} · {}", m.provider, m.shape)))
             .collect();
-        app.models.sort_by(|a, b| a.0.cmp(&b.0));
+        models.sort_by(|a, b| a.0.cmp(&b.0));
+        models
+    } else {
+        Vec::new()
+    };
+
+    // Fallback: if catalog is empty, seed with known models.
+    if app.models.is_empty() {
+        app.models = vec![
+            ("deepseek-v4-flash".into(), "opencode-zen · openai".into()),
+            ("glm-5.1".into(), "z-ai · anthropic".into()),
+            ("minimax-text-01".into(), "opencode-go · anthropic".into()),
+        ];
     }
 
     // Setup terminal.

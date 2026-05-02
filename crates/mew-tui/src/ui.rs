@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -351,16 +351,14 @@ fn draw_permission_modal(f: &mut Frame, perm: &PermissionState, area: Rect) {
     let y = (area.height.saturating_sub(height)) / 2;
     let popup = Rect::new(x, y, width, height);
 
+    // Dim the background.
     f.render_widget(Clear, popup);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(DIVIDER))
-        .style(Style::default().bg(INPUT_BG))
-        .title(" Permission ");
+    // Solid background block, no border.
+    let bg = Block::default().style(Style::default().bg(INPUT_BG));
+    f.render_widget(bg, popup);
 
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = Rect::new(popup.x + 2, popup.y + 1, popup.width.saturating_sub(4), popup.height.saturating_sub(2));
 
     let tool_input = serde_json::to_string_pretty(&perm.input).unwrap_or_default();
     let text = Text::from(vec![
@@ -417,14 +415,11 @@ fn draw_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
 
     f.render_widget(Clear, popup);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(DIVIDER))
-        .style(Style::default().bg(INPUT_BG))
-        .title(format!(" {} ", picker.kind));
+    // Solid background, no border.
+    let bg = Block::default().style(Style::default().bg(INPUT_BG));
+    f.render_widget(bg, popup);
 
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+    let inner = Rect::new(popup.x + 2, popup.y + 1, popup.width.saturating_sub(4), popup.height.saturating_sub(2));
 
     // Filter input at top.
     let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
