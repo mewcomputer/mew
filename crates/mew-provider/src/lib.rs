@@ -182,3 +182,107 @@ pub mod imageutil {
         .to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_retry_policy_429_backoff() {
+        let policy = RetryPolicy::default();
+
+        // 429: exponential backoff starting at 1s
+        let (backoff, retry) = policy.should_retry(429, 0);
+        assert!(retry);
+        assert_eq!(backoff, Duration::from_secs(1));
+
+        let (backoff, retry) = policy.should_retry(429, 1);
+        assert!(retry);
+        assert_eq!(backoff, Duration::from_secs(2));
+
+        let (backoff, retry) = policy.should_retry(429, 2);
+        assert!(retry);
+        assert_eq!(backoff, Duration::from_secs(4));
+
+        let (backoff, retry) = policy.should_retry(429, 3);
+        assert!(retry);
+        assert_eq!(backoff, Duration::from_secs(8));
+
+        // 4th retry (attempt 4) exceeds max_retries=4
+        let (backoff, retry) = policy.should_retry(429, 4);
+        assert!(!retry);
+        assert_eq!(backoff, Duration::ZERO);
+    }
+
+    #[test]
+    fn test_retry_policy_429_capped() {
+        let policy = RetryPolicy {
+            initial_backoff: Duration::from_secs(10),
+            max_backoff: Duration::from_secs(30),
+            max_retries: 10,
+            retry_5xx: true,
+        };
+
+        // 10s * 2^2 = 40s, but capped at 30s
+        let (backoff, retry) = policy.should_retry(429, 2);
+        assert!(retry);
+        assert_eq!(backoff, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_retry_policy_5xx_single_retry() {
+        let policy = RetryPolicy::default();
+
+        // First 5xx gets one retry
+        let (backoff, retry) = policy.should_retry(500, 0);
+        assert!(retry);
+        assert_eq!(backoff, Duration::from_secs(1));
+
+        // Second 5xx attempt fails
+        let (backoff, retry) = policy.should_retry(500, 1);
+        assert!(!retry);
+        assert_eq!(backoff, Duration::ZERO);
+    }
+
+    #[test]
+    fn test_retry_policy_5xx_disabled() {
+        let policy = RetryPolicy {
+            retry_5xx: false,
+            ..Default::default()
+        };
+
+        let (_, retry) = policy.should_retry(500, 0);
+        assert!(!retry);
+    }
+
+    #[test]
+    fn test_retry_policy_4xx_no_retry() {
+        let policy = RetryPolicy::default();
+
+        let (_, retry) = policy.should_retry(400, 0);
+        assert!(!retry);
+
+        let (_, retry) = policy.should_retry(404, 0);
+        assert!(!retry);
+    }
+
+    #[test]
+    fn test_classify_error() {
+        assert_eq!(
+            classify_error(401, "unauthorized"),
+            (ErrorKind::ProviderAuth, "authentication failed: unauthorized".to_string())
+        );
+        assert_eq!(
+            classify_error(429, "too many requests"),
+            (ErrorKind::ProviderRateLimit, "rate limited: too many requests".to_string())
+        );
+        assert_eq!(
+            classify_error(500, "internal error"),
+            (ErrorKind::ProviderOverload, "server error (500): internal error".to_string())
+        );
+        assert_eq!(
+            classify_error(400, "bad request"),
+            (ErrorKind::ProviderApi, "client error (400): bad request".to_string())
+        );
+    }
+}

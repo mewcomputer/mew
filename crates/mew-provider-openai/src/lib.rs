@@ -705,4 +705,55 @@ mod tests {
         assert_eq!(wire[0]["tool_calls"][0]["id"], "call_123");
         assert_eq!(wire[0]["tool_calls"][0]["function"]["name"], "echo");
     }
+
+    #[tokio::test]
+    async fn test_build_wire_message_user_with_image() {
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![
+                Part::Text(TextPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: "Describe this image".to_string(),
+                    synthetic: false,
+                }),
+                Part::File(mew_message::FilePart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    mime: "image/png".to_string(),
+                    filename: Some("test.png".to_string()),
+                    url: "file:///tmp/test.png".to_string(),
+                }),
+            ],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let wire = adapter.build_wire_message(&[], &msg).await;
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["role"], "user");
+        // When images are present, content should be an array
+        let content = wire[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Describe this image");
+        assert_eq!(content[1]["type"], "image_url");
+        assert!(content[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
+    }
 }
