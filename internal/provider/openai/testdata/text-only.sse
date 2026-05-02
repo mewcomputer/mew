@@ -1,7 +1,0 @@
-data: {"id":"chatcmpl-text","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-text","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-text","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
-
-data: [DONE]

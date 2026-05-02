@@ -1,0 +1,16 @@
+[package]
+name = "mew-tui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mew-message = { workspace = true }
+mew-agent = { workspace = true }
+mew-provider = { workspace = true }
+tokio = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }

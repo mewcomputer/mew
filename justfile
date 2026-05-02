@@ -5,52 +5,52 @@ set positional-arguments := true
 
 # Default recipe: build the binary
 build:
-    go build -o bin/mew ./cmd/mew
+    cargo build --release -p mew
 
 # Run all tests
 test:
-    go test ./...
+    cargo test --all
 
 # Run tests with verbose output
 test-v:
-    go test -v ./...
+    cargo test --all -- --nocapture
 
 # Build and run mew. All args after "run" are forwarded to the binary.
 # Usage: just run --model deepseek-v4-flash "hello world"
 run *args: build
-    ./bin/mew run "$@"
+    cargo run -p mew -- run "$@"
 
-# Install to $GOPATH/bin (or ~/go/bin)
+# Install to ~/.cargo/bin
 install:
-    go install ./cmd/mew
+    cargo install --path crates/mew
 
 # Install to /usr/local/bin (requires sudo)
 install-system: build
-    sudo cp bin/mew /usr/local/bin/mew
+    sudo cp target/release/mew /usr/local/bin/mew
 
 # Clean build artifacts
 clean:
-    rm -rf bin/
+    cargo clean
 
-# Format all Go code
+# Format all Rust code
 fmt:
-    gofmt -w .
+    cargo fmt
 
-# Run go vet
-vet:
-    go vet ./...
+# Run clippy
+clippy:
+    cargo clippy --all -- -D warnings
 
-# CI-ready check: format, vet, test
-ci: fmt vet test
+# CI-ready check: format, clippy, test
+ci: fmt clippy test
 
 # Record a new provider fixture (set MEW_RECORD=1 and provider creds)
 record:
-    MEW_RECORD=1 go test ./internal/provider/openai/...
+    MEW_RECORD=1 cargo test -p mew-provider-openai
 
 # Show module dependencies
 deps:
-    go mod graph
+    cargo tree
 
-# Tidy module
+# Update dependencies
 tidy:
-    go mod tidy
+    cargo update

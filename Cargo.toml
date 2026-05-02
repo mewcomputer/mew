@@ -1,0 +1,86 @@
+[workspace]
+members = [
+    "crates/mew",
+    "crates/mew-message",
+    "crates/mew-provider",
+    "crates/mew-provider-openai",
+    "crates/mew-provider-anthropic",
+    "crates/mew-provider-fake",
+    "crates/mew-agent",
+    "crates/mew-tools",
+    "crates/mew-config",
+    "crates/mew-session",
+    "crates/mew-catalog",
+    "crates/mew-context",
+    "crates/mew-hooks",
+    "crates/mew-tui",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["mew contributors"]
+license = "MIT"
+
+[workspace.dependencies]
+# async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7" }
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# http
+reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json"] }
+
+# error handling
+thiserror = "1"
+anyhow = "1"
+
+# id generation
+ulid = { version = "1", features = ["serde"] }
+
+# tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# async traits
+async-trait = "0.1"
+
+# futures
+futures = "0.3"
+
+# tui
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# config
+toml = "0.8"
+directories = "5"
+
+# time
+chrono = { version = "0.4", features = ["serde"] }
+
+# sse parsing for openai adapter
+eventsource-stream = "0.2"
+
+# http retry
+reqwest-retry = "0.7"
+reqwest-middleware = "0.4"
+
+# internal crates (no version yet, path-based)
+mew-message = { path = "crates/mew-message" }
+mew-provider = { path = "crates/mew-provider" }
+mew-hooks = { path = "crates/mew-hooks" }
+mew-tools = { path = "crates/mew-tools" }
+mew-config = { path = "crates/mew-config" }
+mew-session = { path = "crates/mew-session" }
+mew-catalog = { path = "crates/mew-catalog" }
+mew-context = { path = "crates/mew-context" }
+mew-agent = { path = "crates/mew-agent" }
+mew-tui = { path = "crates/mew-tui" }
+mew-provider-openai = { path = "crates/mew-provider-openai" }
+mew-provider-anthropic = { path = "crates/mew-provider-anthropic" }
+mew-provider-fake = { path = "crates/mew-provider-fake" }

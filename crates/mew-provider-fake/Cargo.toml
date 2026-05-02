@@ -1,0 +1,14 @@
+[package]
+name = "mew-provider-fake"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mew-message = { workspace = true }
+mew-provider = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }

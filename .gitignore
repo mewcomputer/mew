@@ -7,8 +7,9 @@ bin/
 *.pem
 *.key
 
-# Go
-vendor/
+# Rust
+target/
+Cargo.lock
 
 # IDE
 .idea/
