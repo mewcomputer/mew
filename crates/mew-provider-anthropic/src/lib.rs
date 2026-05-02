@@ -414,6 +414,7 @@ impl Adapter {
                             end: None,
                         },
                     }),
+                    raw_input: String::new(),
                 };
                 let acc = ToolCallAccumulator {
                     part: part.clone(),

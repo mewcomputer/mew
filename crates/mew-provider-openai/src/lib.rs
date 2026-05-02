@@ -589,5 +589,6 @@ fn new_tool_call_part() -> ToolCallPart {
                 end: None,
             },
         }),
+        raw_input: String::new(),
     }
 }

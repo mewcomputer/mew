@@ -148,6 +148,8 @@ pub struct ToolCallPart {
     pub tool_name: String,
     pub call_id: String,
     pub state: ToolState,
+    #[serde(skip)]
+    pub raw_input: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

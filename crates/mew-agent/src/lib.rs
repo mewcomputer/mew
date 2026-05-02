@@ -313,6 +313,7 @@ impl Agent {
                             tool_name: tc.tool_name.clone(),
                             call_id: tc.call_id.clone(),
                             state: running_state,
+                            raw_input: tc.raw_input.clone(),
                         }),
                     })
                     .await;
@@ -375,6 +376,7 @@ impl Agent {
                                 tool_name: tc.tool_name.clone(),
                                 call_id: tc.call_id.clone(),
                                 state: error_state,
+                                raw_input: tc.raw_input.clone(),
                             }),
                         })
                         .await;
@@ -417,6 +419,7 @@ impl Agent {
                                     tool_name: tc.tool_name.clone(),
                                     call_id: tc.call_id.clone(),
                                     state: error_state,
+                                    raw_input: tc.raw_input.clone(),
                                 }),
                             })
                             .await;
@@ -438,9 +441,14 @@ impl Agent {
                     }
                 };
 
+                let input = if hook_call.input.is_null() && !tc.raw_input.is_empty() {
+                    serde_json::from_str(&tc.raw_input).unwrap_or_else(|_| hook_call.input.clone())
+                } else {
+                    hook_call.input.clone()
+                };
                 let input = self
                     .dispatcher
-                    .on_tool_execute_before(&hook_call, hook_call.input.clone())
+                    .on_tool_execute_before(&hook_call, input)
                     .await;
 
                 let (progress_tx, mut progress_rx) = mpsc::channel::<ToolProgress>(16);
@@ -513,12 +521,13 @@ impl Agent {
                 let _ = ev_tx
                     .send(AgentEvent::PartUpdated {
                         part_id,
-                        part: Part::ToolCall(ToolCallPart {
-                            base: tc.base.clone(),
-                            tool_name: tc.tool_name.clone(),
-                            call_id: tc.call_id.clone(),
-                            state: final_state,
-                        }),
+                            part: Part::ToolCall(ToolCallPart {
+                                base: tc.base.clone(),
+                                tool_name: tc.tool_name.clone(),
+                                call_id: tc.call_id.clone(),
+                                state: final_state,
+                                raw_input: tc.raw_input.clone(),
+                            }),
                     })
                     .await;
                 let _ = ev_tx
@@ -691,6 +700,11 @@ impl Agent {
                 Part::Reasoning(ref mut p) => {
                     if field == "text" || field.is_empty() {
                         p.text.push_str(delta);
+                    }
+                }
+                Part::ToolCall(ref mut p) => {
+                    if field == "arguments" {
+                        p.raw_input.push_str(delta);
                     }
                 }
                 _ => {}
@@ -952,6 +966,7 @@ mod tests {
                 input: serde_json::Value::Null,
                 time: ToolTime { start: now, end: None },
             }),
+            raw_input: String::new(),
         };
         let completed_part = ToolCallPart {
             base: PartBase {
@@ -970,6 +985,7 @@ mod tests {
                     end: Some(now),
                 },
             }),
+            raw_input: String::new(),
         };
 
         let msg = Message {
@@ -1022,6 +1038,7 @@ mod tests {
                     input: serde_json::Value::Null,
                     time: ToolTime { start: now, end: None },
                 }),
+                raw_input: String::new(),
             })],
             time: Time {
                 created: now,

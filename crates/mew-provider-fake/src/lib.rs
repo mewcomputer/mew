@@ -80,6 +80,7 @@ impl FakeProvider {
                         end: None,
                     },
                 }),
+                raw_input: String::new(),
             }),
         });
         events.push(ProviderEvent::PartEnd { part_id });
