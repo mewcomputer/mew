@@ -7,6 +7,7 @@ members = [
     "crates/mew-provider-anthropic",
     "crates/mew-provider-router",
     "crates/mew-provider-fake",
+    "crates/mew-acp",
     "crates/mew-agent",
     "crates/mew-tools",
     "crates/mew-mcp",
@@ -112,4 +113,5 @@ mew-provider-openai = { path = "crates/mew-provider-openai" }
 mew-provider-anthropic = { path = "crates/mew-provider-anthropic" }
 mew-provider-router = { path = "crates/mew-provider-router" }
 mew-provider-fake = { path = "crates/mew-provider-fake" }
+mew-acp = { path = "crates/mew-acp" }
 ratatui-mdstream = { path = "crates/ratatui-mdstream" }

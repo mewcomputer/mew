@@ -63,6 +63,24 @@ enum Commands {
         /// Dump raw request/response to stderr
         #[arg(long)]
         raw: bool,
+
+        /// Connect to an external ACP agent
+        #[arg(long)]
+        acp_agent: Option<String>,
+    },
+    /// Run as an ACP server (exposes agent core over stdio ACP)
+    Acp {
+        /// Provider ID
+        #[arg(long, default_value = "opencode-zen")]
+        provider: String,
+
+        /// Model ID
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Dump raw request/response
+        #[arg(long)]
+        raw: bool,
     },
 }
 
@@ -104,24 +122,32 @@ async fn main() -> Result<()> {
             provider,
             model,
             raw,
+            acp_agent,
         }) => {
-            let provider = if provider.is_empty() {
-                if state.last_provider.is_empty() {
-                    "opencode-zen".to_string()
-                } else {
-                    state.last_provider
-                }
+            if let Some(agent_cmd) = acp_agent {
+                chat_with_acp(&agent_cmd).await
             } else {
-                provider
-            };
-            let model = model.or_else(|| {
-                if state.last_model.is_empty() {
-                    None
+                let provider = if provider.is_empty() {
+                    if state.last_provider.is_empty() {
+                        "opencode-zen".to_string()
+                    } else {
+                        state.last_provider
+                    }
                 } else {
-                    Some(state.last_model)
-                }
-            });
-            chat_cmd(provider, model, raw).await
+                    provider
+                };
+                let model = model.or_else(|| {
+                    if state.last_model.is_empty() {
+                        None
+                    } else {
+                        Some(state.last_model)
+                    }
+                });
+                chat_cmd(provider, model, raw).await
+            }
+        }
+        Some(Commands::Acp { provider, model, raw }) => {
+            run_acp_server(&provider, model, raw).await
         }
         None => {
             let provider = if state.last_provider.is_empty() {
@@ -207,6 +233,30 @@ fn load_mcp_configs() -> Vec<mew_mcp::McpServerConfig> {
             Vec::new()
         }
     }
+}
+
+async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
+    // Split command into command + args (shell-style).
+    let parts: Vec<&str> = agent_cmd.split_whitespace().collect();
+    if parts.is_empty() {
+        anyhow::bail!("empty acp agent command");
+    }
+    let command = parts[0];
+    let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd_str = cwd.to_string_lossy().to_string();
+
+    let acp_client = mew_acp::AcpClient::connect(command, &args, &cwd_str).await?;
+
+    // For now, just print session info and exit.
+    println!("connected to acp agent, session {}", acp_client.session_id());
+    println!("full TUI integration pending — use mew chat for local sessions");
+
+    Ok(())
+}
+
+async fn run_acp_server(_provider: &str, _model: Option<String>, _raw: bool) -> Result<()> {
+    anyhow::bail!("acp server mode not yet implemented");
 }
 
 fn build_skills_xml(skills: &[mew_skills::Skill]) -> String {

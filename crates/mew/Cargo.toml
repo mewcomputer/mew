@@ -26,6 +26,7 @@ mew-skills = { workspace = true }
 mew-hooks = { workspace = true }
 mew-tui = { workspace = true }
 mew-mcp = { workspace = true }
+mew-acp = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 chrono = { workspace = true }
