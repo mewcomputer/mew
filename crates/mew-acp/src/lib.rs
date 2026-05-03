@@ -5,6 +5,7 @@
 //!   server — exposes mew's agent core as an ACP service over stdio
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -50,8 +51,8 @@ struct RawMessage {
 /// Connects to an external ACP agent over stdio.
 pub struct AcpClient {
     _child: Child,
-    reader: BufReader<tokio::process::ChildStdout>,
-    writer: tokio::process::ChildStdin,
+    reader: Arc<tokio::sync::Mutex<BufReader<tokio::process::ChildStdout>>>,
+    writer: Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>,
     next_id: AtomicU64,
     session_id: String,
 }
@@ -71,12 +72,13 @@ impl AcpClient {
 
         let stdout = child.stdout.take().context("stdout")?;
         let stdin = child.stdin.take().context("stdin")?;
-        let reader = BufReader::new(stdout);
+        let reader = Arc::new(tokio::sync::Mutex::new(BufReader::new(stdout)));
+        let writer = Arc::new(tokio::sync::Mutex::new(stdin));
 
         let mut client = Self {
             _child: child,
             reader,
-            writer: stdin,
+            writer,
             next_id: AtomicU64::new(1),
             session_id: String::new(),
         };
@@ -119,14 +121,14 @@ impl AcpClient {
         Ok(client)
     }
 
-    /// Run a single prompt turn. Sends a prompt, collects all notifications
-    /// until the session/prompt response arrives, and translates them to
-    /// agent events sent through `ev_tx`.
+    /// Run a single prompt turn. Returns a receiver of agent events that the
+    /// TUI can drain, matching the `Agent::run_with_parts` interface.
     pub async fn run_turn(
         &mut self,
         text: &str,
-        ev_tx: mpsc::Sender<mew_agent::AgentEvent>,
-    ) -> Result<String> {
+    ) -> Result<mpsc::Receiver<mew_agent::AgentEvent>> {
+        let (ev_tx, ev_rx) = mpsc::channel(256);
+
         let params = serde_json::json!({
             "sessionId": self.session_id,
             "prompt": [
@@ -134,13 +136,75 @@ impl AcpClient {
             ]
         });
 
-        let stop_reason = self
-            .call_rpc("session/prompt", Some(params), |msg| {
-                let _ = translate_notification(msg, &ev_tx);
-            })
-            .await?;
+        let reader = self.reader.clone();
+        let mut writer = self.writer.lock().await;
+        let next_id = &self.next_id;
 
-        Ok(stop_reason.unwrap_or_else(|| "end_turn".to_string()))
+        let id = next_id.fetch_add(1, Ordering::SeqCst);
+        let req = Request {
+            jsonrpc: "2.0",
+            id,
+            method: "session/prompt".to_string(),
+            params: Some(params),
+        };
+        let line = serde_json::to_string(&req)?;
+        debug!("acp → {}", &line[..line.len().min(200)]);
+        writer.write_all(line.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await?;
+        drop(writer);
+
+        tokio::spawn(async move {
+            let mut r = reader.lock().await;
+            loop {
+                let mut line_buf = String::new();
+                if r.read_line(&mut line_buf).await.is_err() {
+                    break;
+                }
+                let line = line_buf.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                debug!("acp ← {}", &line[..line.len().min(200)]);
+                let msg: RawMessage = match serde_json::from_str(&line) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+
+                if msg.id == Some(id) || (msg.id.is_none() && msg.result.is_some()) {
+                    let stop_reason = msg
+                        .result
+                        .and_then(|v| {
+                            v.get("stopReason")
+                                .and_then(|s| s.as_str().map(String::from))
+                        })
+                        .unwrap_or_else(|| "end_turn".to_string());
+                    let finish = match stop_reason.as_str() {
+                        "cancelled" => mew_message::Finish::Error,
+                        "max_tokens" => mew_message::Finish::Length,
+                        _ => mew_message::Finish::Stop,
+                    };
+                    let _ = ev_tx
+                        .send(mew_agent::AgentEvent::Provider(
+                            mew_provider::ProviderEvent::MessageEnd {
+                                finish,
+                                usage: mew_message::Tokens::default(),
+                                cost: 0.0,
+                            },
+                        ))
+                        .await;
+                    break;
+                }
+
+                translate_notification(&msg, &ev_tx);
+            }
+        });
+
+        Ok(ev_rx)
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
     }
 
     /// Send a JSON-RPC request and read lines until the response arrives.
@@ -165,15 +229,18 @@ impl AcpClient {
         };
         let line = serde_json::to_string(&req)?;
         debug!("acp → {}", &line[..line.len().min(200)]);
-        self.writer.write_all(line.as_bytes()).await?;
-        self.writer.write_all(b"\n").await?;
-        self.writer.flush().await?;
+        {
+            let mut w = self.writer.lock().await;
+            w.write_all(line.as_bytes()).await?;
+            w.write_all(b"\n").await?;
+            w.flush().await?;
+        }
 
-        // Read lines until we get a response with our id.
+        let mut r = self.reader.lock().await;
         loop {
-            let mut line = String::new();
-            self.reader.read_line(&mut line).await?;
-            let line = line.trim().to_string();
+            let mut line_buf = String::new();
+            r.read_line(&mut line_buf).await?;
+            let line = line_buf.trim().to_string();
             if line.is_empty() {
                 continue;
             }
@@ -187,25 +254,18 @@ impl AcpClient {
                 }
             };
 
-            // Check if it's the response to our request.
             if msg.id == Some(id) || (msg.id.is_none() && msg.result.is_some()) {
                 if let Some(ref err) = msg.error {
                     anyhow::bail!("rpc error: {:?}", err);
                 }
-                // Extract stopReason or return the result.
                 return Ok(msg.result.and_then(|v| {
                     v.get("stopReason")
                         .and_then(|s| s.as_str().map(String::from))
                 }));
             }
 
-            // It's a notification or an unrelated message.
             on_notification(&msg);
         }
-    }
-
-    pub fn session_id(&self) -> &str {
-        &self.session_id
     }
 }
 

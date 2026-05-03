@@ -236,7 +236,8 @@ fn load_mcp_configs() -> Vec<mew_mcp::McpServerConfig> {
 }
 
 async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
-    // Split command into command + args (shell-style).
+    use std::sync::Arc;
+
     let parts: Vec<&str> = agent_cmd.split_whitespace().collect();
     if parts.is_empty() {
         anyhow::bail!("empty acp agent command");
@@ -247,12 +248,124 @@ async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
     let cwd_str = cwd.to_string_lossy().to_string();
 
     let acp_client = mew_acp::AcpClient::connect(command, &args, &cwd_str).await?;
+    let acp_client = Arc::new(tokio::sync::Mutex::new(acp_client));
 
-    // For now, just print session info and exit.
-    println!("connected to acp agent, session {}", acp_client.session_id());
-    println!("full TUI integration pending — use mew chat for local sessions");
+    let session_id = {
+        let client = acp_client.lock().await;
+        client.session_id().to_string()
+    };
 
-    Ok(())
+    // Setup terminal and run the TUI.
+    let mut app = mew_tui::App::new();
+    app.status.model = "acp-agent".to_string();
+    app.status.provider = "acp".to_string();
+    app.status.session_id = session_id;
+
+    crossterm::terminal::enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    crossterm::execute!(
+        stdout,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture,
+        crossterm::event::EnableBracketedPaste,
+    )?;
+    let backend = ratatui::backend::CrosstermBackend::new(stdout);
+    let mut terminal = ratatui::Terminal::new(backend)?;
+
+    let (event_loop, mut event_rx) = mew_tui::EventLoop::new();
+    event_loop.spawn();
+    let event_loop = Arc::new(event_loop);
+
+    let result = loop {
+        if let Err(e) = terminal.draw(|f| mew_tui::ui::draw(f, &mut app)) {
+            break Err(anyhow::anyhow!("draw error: {}", e));
+        }
+
+        let event = match event_rx.recv().await {
+            Some(e) => e,
+            None => break Ok(()),
+        };
+
+        let mut should_break = false;
+        match event {
+            mew_tui::Event::Input(crossterm_event) => {
+                if let Some(action) =
+                    mew_tui::events::handle_input_event(&mut app, crossterm_event)
+                {
+                    match action {
+                        mew_tui::events::Action::Submit(text) => {
+                            let cwd = std::env::current_dir().unwrap_or_default();
+                            let (enriched, attachments) =
+                                process_mentions(&text, &cwd, &mut app.context_files).await;
+                            app.messages
+                                .push(user_message(enriched.clone(), attachments.clone()));
+                            app.streaming = true;
+                            let client = acp_client.clone();
+                            let ev_loop = event_loop.clone();
+                            tokio::spawn(async move {
+                                match client.lock().await.run_turn(&enriched).await {
+                                    Ok(rx) => ev_loop.forward_agent_events(rx),
+                                    Err(e) => tracing::error!("acp turn failed: {e}"),
+                                }
+                            });
+                        }
+                        mew_tui::events::Action::Quit => should_break = true,
+                        mew_tui::events::Action::Cancel => {
+                            app.streaming = false;
+                        }
+                        mew_tui::events::Action::Clear => {
+                            app.clear_messages();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            mew_tui::Event::Agent(event) => {
+                app.handle_agent_event(event);
+            }
+            mew_tui::Event::Tick => {
+                app.tick();
+            }
+            mew_tui::Event::Quit => should_break = true,
+        }
+
+        // Drain remaining events.
+        loop {
+            let ok = match event_rx.try_recv() {
+                Ok(mew_tui::Event::Agent(event)) => {
+                    app.handle_agent_event(event);
+                    true
+                }
+                Ok(mew_tui::Event::Tick) => {
+                    app.tick();
+                    true
+                }
+                Ok(mew_tui::Event::Quit) => {
+                    should_break = true;
+                    false
+                }
+                _ => false,
+            };
+            if !ok {
+                break;
+            }
+        }
+
+        if should_break || app.should_quit {
+            break Ok(());
+        }
+    };
+
+    crossterm::terminal::disable_raw_mode()?;
+    crossterm::execute!(
+        terminal.backend_mut(),
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste,
+    )?;
+    terminal.show_cursor()?;
+
+    result
 }
 
 async fn run_acp_server(_provider: &str, _model: Option<String>, _raw: bool) -> Result<()> {
@@ -489,6 +602,7 @@ async fn run_tui(
     // Create event loop.
     let (event_loop, mut event_rx) = mew_tui::EventLoop::new();
     event_loop.spawn();
+    let event_loop = Arc::new(event_loop);
 
     // Main loop.
     let result = loop {
