@@ -100,16 +100,13 @@ fn make_unified_diff(old: &str, new: &str, path: &std::path::Path) -> String {
     use similar::TextDiff;
 
     let diff = TextDiff::from_lines(old, new);
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
 
     let mut out = String::new();
     for hunk in diff
         .unified_diff()
         .context_radius(3)
-        .header(&file_name, &file_name)
+        .header(file_name, file_name)
         .iter_hunks()
     {
         out.push_str(&hunk.to_string());
@@ -158,8 +155,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tool = Write;
         let ctx = dummy_ctx(dir.path().to_path_buf());
-        let input =
-            serde_json::json!({"path": "subdir/nested/test.txt", "content": "nested"});
+        let input = serde_json::json!({"path": "subdir/nested/test.txt", "content": "nested"});
         let result = tool.execute(ctx, input).await.unwrap();
         assert!(result.output.contains("wrote 6 bytes"));
 

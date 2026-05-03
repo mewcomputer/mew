@@ -4,10 +4,7 @@ use ratatui::{
 };
 
 use crate::{
-    highlight::Highlighter,
-    inline::parse_inline,
-    pending::PendingPolicy,
-    theme::Theme,
+    highlight::Highlighter, inline::parse_inline, pending::PendingPolicy, theme::Theme,
     wrap::wrap_styled,
 };
 
@@ -43,7 +40,13 @@ pub fn render_pending(
     highlighter: &mut dyn Highlighter,
     policy: &dyn PendingPolicy,
 ) -> Vec<Line<'static>> {
-    policy.render(block.kind, block.display_or_raw(), width, theme, highlighter)
+    policy.render(
+        block.kind,
+        block.display_or_raw(),
+        width,
+        theme,
+        highlighter,
+    )
 }
 
 fn render_heading(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
@@ -64,12 +67,7 @@ fn render_heading(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
 
     wrapped
         .into_iter()
-        .map(|spans| {
-            Line::from(spans).style(
-                theme.heading[level]
-                    .add_modifier(Modifier::BOLD),
-            )
-        })
+        .map(|spans| Line::from(spans).style(theme.heading[level].add_modifier(Modifier::BOLD)))
         .collect()
 }
 
@@ -88,7 +86,10 @@ fn render_list(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     for line in text.lines() {
         let trimmed = line.trim_start();
         let _indent = line.len() - trimmed.len();
-        let content = if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("+ ") {
+        let content = if trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with("+ ")
+        {
             &trimmed[2..]
         } else if let Some(n) = trimmed.find(". ") {
             if trimmed[..n].parse::<u32>().is_ok() {
@@ -220,11 +221,10 @@ fn render_raw(text: &str, width: u16, _theme: &Theme, prefix: &str) -> Vec<Line<
 /// Extract language from a code fence opening line.
 pub fn extract_fence_lang(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
-    if trimmed.starts_with("```") {
-        let rest = &trimmed[3..].trim();
-        rest.split_whitespace().next()
-    } else if trimmed.starts_with("~~~") {
-        let rest = &trimmed[3..].trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("```")
+        .or_else(|| trimmed.strip_prefix("~~~"))
+    {
         rest.split_whitespace().next()
     } else {
         None

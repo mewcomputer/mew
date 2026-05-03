@@ -1,11 +1,14 @@
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use std::time::Instant;
+use crossterm::event::{
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use futures::StreamExt;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 /// Events that drive the TUI.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// A crossterm input event.
     Input(CrosstermEvent),
@@ -39,10 +42,14 @@ impl EventLoop {
             loop {
                 match reader.next().await {
                     Some(Ok(event)) => {
-                        if matches!(event, CrosstermEvent::Key(_) | CrosstermEvent::Mouse(_) | CrosstermEvent::Paste(_)) {
-                            if tx.send(Event::Input(event)).await.is_err() {
-                                break;
-                            }
+                        if matches!(
+                            event,
+                            CrosstermEvent::Key(_)
+                                | CrosstermEvent::Mouse(_)
+                                | CrosstermEvent::Paste(_)
+                        ) && tx.send(Event::Input(event)).await.is_err()
+                        {
+                            break;
                         }
                     }
                     Some(Err(e)) => {
@@ -80,10 +87,7 @@ impl EventLoop {
 }
 
 /// Process any crossterm input event and return an action.
-pub fn handle_input_event(
-    app: &mut crate::app::App,
-    event: CrosstermEvent,
-) -> Option<Action> {
+pub fn handle_input_event(app: &mut crate::app::App, event: CrosstermEvent) -> Option<Action> {
     match event {
         CrosstermEvent::Key(key) => handle_key_event(app, key),
         CrosstermEvent::Mouse(mouse) => handle_mouse_event(app, mouse),
@@ -93,10 +97,7 @@ pub fn handle_input_event(
 }
 
 /// Process a crossterm key event and return an action.
-pub fn handle_key_event(
-    app: &mut crate::app::App,
-    key: KeyEvent,
-) -> Option<Action> {
+pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     match app.mode {
         crate::app::Mode::PermissionPrompt => handle_permission_key(app, key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
@@ -110,7 +111,12 @@ fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action>
     let is_image = std::path::Path::new(candidate)
         .extension()
         .and_then(|e| e.to_str())
-        .map(|e| matches!(e.to_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp"))
+        .map(|e| {
+            matches!(
+                e.to_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp"
+            )
+        })
         .unwrap_or(false);
     let content = if is_image {
         format!("@{}", candidate)
@@ -128,7 +134,10 @@ fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action>
 
 fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
     // Only scroll chat in normal/slash modes.
-    if !matches!(app.mode, crate::app::Mode::Normal | crate::app::Mode::SlashCommand) {
+    if !matches!(
+        app.mode,
+        crate::app::Mode::Normal | crate::app::Mode::SlashCommand
+    ) {
         return None;
     }
     match mouse.kind {
@@ -220,7 +229,9 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 return Some(Action::Quit);
             }
         }
-        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) && app.input.is_empty() => {
+        KeyCode::Char('d')
+            if key.modifiers.contains(KeyModifiers::CONTROL) && app.input.is_empty() =>
+        {
             app.should_quit = true;
             return Some(Action::Quit);
         }
@@ -384,7 +395,9 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             None
         }
         KeyCode::Up => {
-            if app.mode == crate::app::Mode::SlashCommand && !app.filtered_slash_commands().is_empty() {
+            if app.mode == crate::app::Mode::SlashCommand
+                && !app.filtered_slash_commands().is_empty()
+            {
                 app.slash_prev();
             } else if app.input.is_empty() {
                 app.scroll_up(1);
@@ -394,7 +407,9 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             None
         }
         KeyCode::Down => {
-            if app.mode == crate::app::Mode::SlashCommand && !app.filtered_slash_commands().is_empty() {
+            if app.mode == crate::app::Mode::SlashCommand
+                && !app.filtered_slash_commands().is_empty()
+            {
                 app.slash_next();
             } else if app.input.is_empty() {
                 app.scroll_down(1);

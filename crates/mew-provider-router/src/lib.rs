@@ -30,11 +30,10 @@ impl Router {
     /// Decide which provider to use based on conversation complexity.
     fn select(&self, req: &Request) -> &Arc<dyn Provider> {
         // If there are tool results in any assistant message, use big.
-        let has_tool_results = req.messages.iter().any(|m| {
-            m.parts
-                .iter()
-                .any(|p| matches!(p, Part::ToolResult(_)))
-        });
+        let has_tool_results = req
+            .messages
+            .iter()
+            .any(|m| m.parts.iter().any(|p| matches!(p, Part::ToolResult(_))));
 
         let is_long = req.messages.len() > self.turn_threshold;
 
@@ -72,10 +71,10 @@ impl Provider for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mew_message::{Message, Part, Role, TextPart, Time, ToolResultPart, PartBase};
-    use mew_provider::ProviderError;
     use futures::channel::mpsc;
     use futures::SinkExt;
+    use mew_message::{Message, Part, PartBase, Role, TextPart, Time, ToolResultPart};
+    use mew_provider::ProviderError;
 
     struct TaggedProvider {
         tag: &'static str,
@@ -83,7 +82,9 @@ mod tests {
 
     #[async_trait]
     impl Provider for TaggedProvider {
-        fn name(&self) -> &str { self.tag }
+        fn name(&self) -> &str {
+            self.tag
+        }
         async fn stream(&self, _req: Request) -> Result<EventStream, ProviderError> {
             let (mut tx, rx) = mpsc::channel(1);
             let tag = self.tag;
@@ -101,14 +102,19 @@ mod tests {
                         text: format!("from {}", tag),
                         synthetic: false,
                     })],
-                    time: Time { created: 0, completed: None },
+                    time: Time {
+                        created: 0,
+                        completed: None,
+                    },
                     assistant: None,
                 };
-                let _ = tx.send(mew_provider::ProviderEvent::MessageEnd {
-                    finish: mew_message::Finish::Stop,
-                    usage: mew_message::Tokens::default(),
-                    cost: 0.0,
-                }).await;
+                let _ = tx
+                    .send(mew_provider::ProviderEvent::MessageEnd {
+                        finish: mew_message::Finish::Stop,
+                        usage: mew_message::Tokens::default(),
+                        cost: 0.0,
+                    })
+                    .await;
             });
             Ok(Box::pin(rx))
         }
@@ -142,17 +148,18 @@ mod tests {
             id: ulid::Ulid::new(),
             session_id: ulid::Ulid::new(),
             role: Role::User,
-            parts: vec![
-                Part::ToolResult(ToolResultPart {
-                    base: PartBase {
-                        id: ulid::Ulid::new(),
-                        message_id: ulid::Ulid::new(),
-                        session_id: ulid::Ulid::new(),
-                    },
-                    call_id: "c1".into(),
-                }),
-            ],
-            time: Time { created: 0, completed: None },
+            parts: vec![Part::ToolResult(ToolResultPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                call_id: "c1".into(),
+            })],
+            time: Time {
+                created: 0,
+                completed: None,
+            },
             assistant: None,
         };
 
@@ -180,7 +187,10 @@ mod tests {
                 session_id: ulid::Ulid::new(),
                 role: Role::User,
                 parts: vec![],
-                time: Time { created: 0, completed: None },
+                time: Time {
+                    created: 0,
+                    completed: None,
+                },
                 assistant: None,
             });
         }

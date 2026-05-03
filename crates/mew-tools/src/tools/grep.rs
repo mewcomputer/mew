@@ -47,10 +47,7 @@ impl Tool for Grep {
             .get("pattern")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing pattern".into()))?;
-        let path = input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         let glob = input.get("glob").and_then(|v| v.as_str());
         let base = ctx.cwd.join(path);
 
@@ -131,9 +128,15 @@ mod tests {
     #[tokio::test]
     async fn test_grep() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("a.rs"), "fn main() {}\nfn foo() {}").await.unwrap();
-        tokio::fs::write(dir.path().join("b.rs"), "fn bar() {}").await.unwrap();
-        tokio::fs::write(dir.path().join("c.txt"), "fn baz() {}").await.unwrap();
+        tokio::fs::write(dir.path().join("a.rs"), "fn main() {}\nfn foo() {}")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("b.rs"), "fn bar() {}")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("c.txt"), "fn baz() {}")
+            .await
+            .unwrap();
 
         let tool = Grep;
         let ctx = dummy_ctx(dir.path().to_path_buf());
@@ -146,8 +149,12 @@ mod tests {
     #[tokio::test]
     async fn test_grep_glob_filter() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("a.rs"), "fn main() {}").await.unwrap();
-        tokio::fs::write(dir.path().join("b.txt"), "fn main() {}").await.unwrap();
+        tokio::fs::write(dir.path().join("a.rs"), "fn main() {}")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("b.txt"), "fn main() {}")
+            .await
+            .unwrap();
 
         let tool = Grep;
         let ctx = dummy_ctx(dir.path().to_path_buf());

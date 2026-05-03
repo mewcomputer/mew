@@ -109,7 +109,7 @@ async fn main() -> Result<()> {
             } else {
                 provider
             };
-            let model = model.or_else(|| {
+            let model = model.or({
                 if state.last_model.is_empty() {
                     None
                 } else {
@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
                 } else {
                     provider
                 };
-                let model = model.or_else(|| {
+                let model = model.or({
                     if state.last_model.is_empty() {
                         None
                     } else {
@@ -146,9 +146,11 @@ async fn main() -> Result<()> {
                 chat_cmd(provider, model, raw).await
             }
         }
-        Some(Commands::Acp { provider, model, raw }) => {
-            run_acp_server(&provider, model, raw).await
-        }
+        Some(Commands::Acp {
+            provider,
+            model,
+            raw,
+        }) => run_acp_server(&provider, model, raw).await,
         None => {
             let provider = if state.last_provider.is_empty() {
                 "opencode-zen".to_string()
@@ -289,8 +291,7 @@ async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
         let mut should_break = false;
         match event {
             mew_tui::Event::Input(crossterm_event) => {
-                if let Some(action) =
-                    mew_tui::events::handle_input_event(&mut app, crossterm_event)
+                if let Some(action) = mew_tui::events::handle_input_event(&mut app, crossterm_event)
                 {
                     match action {
                         mew_tui::events::Action::Submit(text) => {
@@ -312,6 +313,12 @@ async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
                         mew_tui::events::Action::Quit => should_break = true,
                         mew_tui::events::Action::Cancel => {
                             app.streaming = false;
+                            let client = acp_client.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = client.lock().await.cancel().await {
+                                    tracing::error!("acp cancel failed: {e}");
+                                }
+                            });
                         }
                         mew_tui::events::Action::Clear => {
                             app.clear_messages();
@@ -381,12 +388,24 @@ async fn run_acp_server(provider_flag: &str, model_flag: Option<String>, raw: bo
     let dispatcher = Arc::new(NopDispatcher);
     let skills_loader = mew_skills::Loader::new(std::env::current_dir().unwrap_or_default());
     let skills = Arc::new(skills_loader.load().unwrap_or_default());
-    let tools = build_tools(skills);
+    let tools = build_tools(skills.clone());
 
     let permission_engine = build_permission_engine(&cfg);
 
     let mut agent = Agent::new(provider, dispatcher, None, tools, None);
     agent.set_permission_engine(permission_engine);
+
+    // Load project context and skills for system prompt.
+    let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());
+    let ctx_files = ctx_loader.load().unwrap_or_default();
+    if !ctx_files.is_empty() {
+        agent.set_system(mew_context::build_system_prompt(&ctx_files));
+    }
+    if !skills.is_empty() {
+        let mut system = agent.system.clone();
+        system.push_str(&build_skills_xml(&skills));
+        agent.set_system(system);
+    }
 
     if let Some(c) = cat_ref {
         agent.supports_vision = c.supports_vision(&model_id);
@@ -526,18 +545,17 @@ async fn run_tui(
         build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
 
     // For router providers, use the big model for display.
-    let (display_provider, display_model) =
-        if let Some(pc) = cfg.providers.get(&provider_id) {
-            if pc.kind == "router" && !pc.big.is_empty() {
-                let (_, big_mid) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
-                let (big_pid, _) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
-                (big_pid, big_mid)
-            } else {
-                (provider_id.clone(), model_id.clone())
-            }
+    let (display_provider, display_model) = if let Some(pc) = cfg.providers.get(&provider_id) {
+        if pc.kind == "router" && !pc.big.is_empty() {
+            let (_, big_mid) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
+            let (big_pid, _) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
+            (big_pid, big_mid)
         } else {
             (provider_id.clone(), model_id.clone())
-        };
+        }
+    } else {
+        (provider_id.clone(), model_id.clone())
+    };
 
     let session_id = ulid::Ulid::new().to_string();
     let session_writer = SessionWriter::open(&session_id)
@@ -683,18 +701,26 @@ async fn run_tui(
                                     ));
                                 }
                                 mew_tui::SlashResult::SwitchModel(new_model) => {
-                                    let (new_provider_id, new_model_id) = if let Some(idx) = new_model.find('/') {
-                                        (&new_model[..idx], &new_model[idx + 1..])
-                                    } else {
-                                        (provider_id.as_str(), new_model.as_str())
-                                    };
-                                    match build_provider(cfg, cat, new_provider_id, new_model_id, raw) {
+                                    let (new_provider_id, new_model_id) =
+                                        if let Some(idx) = new_model.find('/') {
+                                            (&new_model[..idx], &new_model[idx + 1..])
+                                        } else {
+                                            (provider_id.as_str(), new_model.as_str())
+                                        };
+                                    match build_provider(
+                                        cfg,
+                                        cat,
+                                        new_provider_id,
+                                        new_model_id,
+                                        raw,
+                                    ) {
                                         Ok(new_provider) => {
                                             agent.provider = new_provider;
                                             app.status.model = new_model_id.to_string();
                                             app.status.provider = new_provider_id.to_string();
                                             if let Some(c) = cat {
-                                                app.status.context_window = c.context_window(new_model_id) as u32;
+                                                app.status.context_window =
+                                                    c.context_window(new_model_id) as u32;
                                                 if let Some(m) = c.lookup(new_model_id) {
                                                     agent.input_price = m.pricing.input;
                                                     agent.output_price = m.pricing.output;
@@ -710,10 +736,16 @@ async fn run_tui(
                                             if let Err(e) = mew_config::save_state(&state) {
                                                 tracing::warn!("failed to save state: {}", e);
                                             }
-                                            app.messages.push(synthetic_message(format!("switched to {}", new_model)));
+                                            app.messages.push(synthetic_message(format!(
+                                                "switched to {}",
+                                                new_model
+                                            )));
                                         }
                                         Err(e) => {
-                                            app.messages.push(synthetic_message(format!("failed to switch: {}", e)));
+                                            app.messages.push(synthetic_message(format!(
+                                                "failed to switch: {}",
+                                                e
+                                            )));
                                         }
                                     }
                                 }
@@ -728,14 +760,16 @@ async fn run_tui(
                                             app.status.session_id = id.clone();
                                             app.auto_scroll = true;
                                             app.scroll = app.max_scroll;
-                                            app.messages.push(synthetic_message(
-                                                format!("resumed session {}", id),
-                                            ));
+                                            app.messages.push(synthetic_message(format!(
+                                                "resumed session {}",
+                                                id
+                                            )));
                                         }
                                         Err(e) => {
-                                            app.messages.push(synthetic_message(
-                                                format!("failed to load session {}: {}", id, e),
-                                            ));
+                                            app.messages.push(synthetic_message(format!(
+                                                "failed to load session {}: {}",
+                                                id, e
+                                            )));
                                         }
                                     }
                                 }
@@ -760,7 +794,8 @@ async fn run_tui(
                                     app.status.model = new_model_id.to_string();
                                     app.status.provider = new_provider_id.to_string();
                                     if let Some(c) = cat {
-                                        app.status.context_window = c.context_window(new_model_id) as u32;
+                                        app.status.context_window =
+                                            c.context_window(new_model_id) as u32;
                                         if let Some(m) = c.lookup(new_model_id) {
                                             agent.input_price = m.pricing.input;
                                             agent.output_price = m.pricing.output;
@@ -776,10 +811,16 @@ async fn run_tui(
                                     if let Err(e) = mew_config::save_state(&state) {
                                         tracing::warn!("failed to save state: {}", e);
                                     }
-                                    app.messages.push(synthetic_message(format!("switched to {}", new_model)));
+                                    app.messages.push(synthetic_message(format!(
+                                        "switched to {}",
+                                        new_model
+                                    )));
                                 }
                                 Err(e) => {
-                                    app.messages.push(synthetic_message(format!("failed to switch model: {}", e)));
+                                    app.messages.push(synthetic_message(format!(
+                                        "failed to switch model: {}",
+                                        e
+                                    )));
                                 }
                             }
                         }
@@ -1165,18 +1206,17 @@ async fn build_and_run(
         build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
 
     // For router providers, use the big model for display.
-    let (display_provider, display_model) =
-        if let Some(pc) = cfg.providers.get(&provider_id) {
-            if pc.kind == "router" && !pc.big.is_empty() {
-                let (_, big_mid) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
-                let (big_pid, _) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
-                (big_pid, big_mid)
-            } else {
-                (provider_id.clone(), model_id.clone())
-            }
+    let (display_provider, display_model) = if let Some(pc) = cfg.providers.get(&provider_id) {
+        if pc.kind == "router" && !pc.big.is_empty() {
+            let (_, big_mid) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
+            let (big_pid, _) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
+            (big_pid, big_mid)
         } else {
             (provider_id.clone(), model_id.clone())
-        };
+        }
+    } else {
+        (provider_id.clone(), model_id.clone())
+    };
 
     let session_id = ulid::Ulid::new().to_string();
     let session_writer = SessionWriter::open(&session_id)
@@ -1372,22 +1412,34 @@ fn build_provider(
             "opencode-zen" => Some(ProviderConfig {
                 shape: "openai".to_string(),
                 base_url: "https://opencode.ai/zen/v1".to_string(),
-                credential_ref: "opencode-zen".to_string(), kind: "direct".into(), small: String::new(), big: String::new(),
+                credential_ref: "opencode-zen".to_string(),
+                kind: "direct".into(),
+                small: String::new(),
+                big: String::new(),
             }),
             "opencode-go" => Some(ProviderConfig {
                 shape: "openai".to_string(),
                 base_url: "https://opencode.ai/zen/go/v1".to_string(),
-                credential_ref: "opencode-zen".to_string(), kind: "direct".into(), small: String::new(), big: String::new(),
+                credential_ref: "opencode-zen".to_string(),
+                kind: "direct".into(),
+                small: String::new(),
+                big: String::new(),
             }),
             "z-ai" => Some(ProviderConfig {
                 shape: "anthropic".to_string(),
                 base_url: "https://api.z.ai/api/anthropic/v1".to_string(),
-                credential_ref: "z-ai".to_string(), kind: "direct".into(), small: String::new(), big: String::new(),
+                credential_ref: "z-ai".to_string(),
+                kind: "direct".into(),
+                small: String::new(),
+                big: String::new(),
             }),
             "deepseek" => Some(ProviderConfig {
                 shape: "deepseek".to_string(),
                 base_url: "https://api.deepseek.ai/v1".to_string(),
-                credential_ref: "deepseek".to_string(), kind: "direct".into(), small: String::new(), big: String::new(),
+                credential_ref: "deepseek".to_string(),
+                kind: "direct".into(),
+                small: String::new(),
+                big: String::new(),
             }),
             _ => None,
         })
@@ -1422,9 +1474,7 @@ fn build_provider(
         router.set_turn_threshold(3);
 
         return Ok(Arc::new(mew_provider_router::Routed::new(
-            router,
-            big_pid,
-            model,
+            router, big_pid, model,
         )));
     }
 

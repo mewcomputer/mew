@@ -136,8 +136,7 @@ impl PickerState {
         self.items
             .iter()
             .filter(|i| {
-                i.label.to_lowercase().contains(&f)
-                    || i.description.to_lowercase().contains(&f)
+                i.label.to_lowercase().contains(&f) || i.description.to_lowercase().contains(&f)
             })
             .collect()
     }
@@ -196,7 +195,10 @@ pub struct PermissionState {
 #[derive(Debug, Clone)]
 pub enum ToolDisplayState {
     Running,
-    Completed { output: String, diff: Option<String> },
+    Completed {
+        output: String,
+        diff: Option<String>,
+    },
     Error(String),
 }
 
@@ -380,7 +382,11 @@ impl App {
                     continue;
                 }
             }
-            let rel = path.strip_prefix(&cwd).unwrap_or(path).to_string_lossy().to_string();
+            let rel = path
+                .strip_prefix(&cwd)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
             if !rel.to_lowercase().contains(&prefix.to_lowercase()) {
                 continue;
             }
@@ -478,7 +484,7 @@ impl App {
     /// Move cursor to end of current line.
     pub fn cursor_end(&mut self) {
         if let Some(ln_pos) = self.input[self.cursor..].find('\n') {
-            self.cursor = self.cursor + ln_pos;
+            self.cursor += ln_pos;
         } else {
             self.cursor = self.input.len();
         }
@@ -535,9 +541,7 @@ impl App {
         if self.cursor >= self.input.len() {
             return;
         }
-        let after: Vec<(usize, char)> = self.input[self.cursor..]
-            .char_indices()
-            .collect();
+        let after: Vec<(usize, char)> = self.input[self.cursor..].char_indices().collect();
         if after.is_empty() {
             return;
         }
@@ -684,14 +688,38 @@ impl App {
     /// Available slash commands (single source of truth for autocomplete and handling).
     pub fn slash_commands() -> Vec<SlashCommand> {
         vec![
-            SlashCommand { name: "/clear".into(),    description: "clear chat".into() },
-            SlashCommand { name: "/compact".into(),  description: "force context compaction".into() },
-            SlashCommand { name: "/cost".into(),     description: "show cost breakdown".into() },
-            SlashCommand { name: "/help".into(),     description: "show available commands".into() },
-            SlashCommand { name: "/model".into(),    description: "switch model (e.g. /model deepseek-v4-flash)".into() },
-            SlashCommand { name: "/quit".into(),     description: "exit mew".into() },
-            SlashCommand { name: "/sessions".into(), description: "list previous sessions".into() },
-            SlashCommand { name: "/resume".into(),   description: "resume a session (e.g. /resume <id>)".into() },
+            SlashCommand {
+                name: "/clear".into(),
+                description: "clear chat".into(),
+            },
+            SlashCommand {
+                name: "/compact".into(),
+                description: "force context compaction".into(),
+            },
+            SlashCommand {
+                name: "/cost".into(),
+                description: "show cost breakdown".into(),
+            },
+            SlashCommand {
+                name: "/help".into(),
+                description: "show available commands".into(),
+            },
+            SlashCommand {
+                name: "/model".into(),
+                description: "switch model (e.g. /model deepseek-v4-flash)".into(),
+            },
+            SlashCommand {
+                name: "/quit".into(),
+                description: "exit mew".into(),
+            },
+            SlashCommand {
+                name: "/sessions".into(),
+                description: "list previous sessions".into(),
+            },
+            SlashCommand {
+                name: "/resume".into(),
+                description: "resume a session (e.g. /resume <id>)".into(),
+            },
         ]
     }
 
@@ -703,10 +731,10 @@ impl App {
         };
         match cmd {
             "/quit" | "/q" => SlashResult::Quit,
-            "/clear"       => SlashResult::Clear,
-            "/compact"     => SlashResult::Compact,
-            "/cost"        => SlashResult::Message(self.build_cost_report()),
-            "/help"        => SlashResult::Message(self.build_help()),
+            "/clear" => SlashResult::Clear,
+            "/compact" => SlashResult::Compact,
+            "/cost" => SlashResult::Message(self.build_cost_report()),
+            "/help" => SlashResult::Message(self.build_help()),
             "/model" => {
                 if let Some(id) = arg {
                     SlashResult::SwitchModel(id.to_string())
@@ -714,7 +742,7 @@ impl App {
                     SlashResult::OpenModelPicker
                 }
             }
-            "/sessions"    => SlashResult::Message(self.build_sessions_list()),
+            "/sessions" => SlashResult::Message(self.build_sessions_list()),
             "/resume" => {
                 if let Some(id) = arg {
                     SlashResult::ResumeSession(id.to_string())
@@ -722,7 +750,7 @@ impl App {
                     SlashResult::Message("usage: /resume <session-id>".into())
                 }
             }
-            _              => SlashResult::Continue,
+            _ => SlashResult::Continue,
         }
     }
 
@@ -781,11 +809,7 @@ impl App {
                     let name = entry.file_name().to_string_lossy().to_string();
                     let id = name.strip_suffix(".jsonl").unwrap_or(&name);
                     let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                    out.push_str(&format!(
-                        "  {}  ({} bytes)\n",
-                        id,
-                        size
-                    ));
+                    out.push_str(&format!("  {}  ({} bytes)\n", id, size));
                 }
                 if files.is_empty() {
                     out.push_str("  (no sessions found)\n");
@@ -850,7 +874,8 @@ impl App {
                         // multi-turn loop), reset the streaming state so incremental
                         // deltas are rendered for this part, not silently dropped.
                         if matches!(part, Part::Text(_)) {
-                            self.md_stream = Some(mdstream::MdStream::new(mdstream::Options::default()));
+                            self.md_stream =
+                                Some(mdstream::MdStream::new(mdstream::Options::default()));
                             self.md_state = mdstream::DocumentState::new();
                         }
                         msg.parts.push(part);
@@ -891,7 +916,11 @@ impl App {
                 }
             }
             AgentEvent::Provider(ProviderEvent::PartEnd { .. }) => {}
-            AgentEvent::Provider(ProviderEvent::MessageEnd { finish, usage, cost }) => {
+            AgentEvent::Provider(ProviderEvent::MessageEnd {
+                finish,
+                usage,
+                cost,
+            }) => {
                 // Finalize the incremental markdown stream.
                 if let Some(mut stream) = self.md_stream.take() {
                     let update: mdstream::Update = stream.finalize();
@@ -951,10 +980,8 @@ impl App {
                     for part in &mut msg.parts {
                         if let Part::ToolCall(tc) = part {
                             if tc.call_id == call_id {
-                                self.tool_states.insert(
-                                    tc.base.id,
-                                    ToolDisplayState::Running,
-                                );
+                                self.tool_states
+                                    .insert(tc.base.id, ToolDisplayState::Running);
                                 break;
                             }
                         }
@@ -986,7 +1013,9 @@ impl App {
                             if tc.call_id == call_id {
                                 // Only set a default state if PartUpdated hasn't
                                 // already populated it (which carries the diff).
-                                if !self.tool_states.contains_key(&tc.base.id) {
+                                if let std::collections::hash_map::Entry::Vacant(e) =
+                                    self.tool_states.entry(tc.base.id)
+                                {
                                     let state = if success {
                                         ToolDisplayState::Completed {
                                             output: String::new(),
@@ -995,7 +1024,7 @@ impl App {
                                     } else {
                                         ToolDisplayState::Error(String::new())
                                     };
-                                    self.tool_states.insert(tc.base.id, state);
+                                    e.insert(state);
                                 }
                                 break;
                             }
@@ -1055,7 +1084,11 @@ impl App {
     /// Select previous permission option.
     pub fn permission_prev(&mut self) {
         if let Some(ref mut perm) = self.permission {
-            perm.selected = if perm.selected == 0 { 2 } else { perm.selected - 1 };
+            perm.selected = if perm.selected == 0 {
+                2
+            } else {
+                perm.selected - 1
+            };
         }
     }
 }

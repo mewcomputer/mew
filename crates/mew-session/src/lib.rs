@@ -1,5 +1,4 @@
 use mew_message::Message;
-use serde_json;
 use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -75,8 +74,18 @@ pub fn session_dir() -> PathBuf {
         .map(|d| d.config_dir().join("sessions"))
         .unwrap_or_else(|| {
             std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".config").join("mew").join("sessions"))
-                .unwrap_or_else(|| PathBuf::from(".").join(".config").join("mew").join("sessions"))
+                .map(|h| {
+                    PathBuf::from(h)
+                        .join(".config")
+                        .join("mew")
+                        .join("sessions")
+                })
+                .unwrap_or_else(|| {
+                    PathBuf::from(".")
+                        .join(".config")
+                        .join("mew")
+                        .join("sessions")
+                })
         })
 }
 
@@ -144,7 +153,10 @@ mod tests {
                 session_id: Ulid::from_string(&session_id).unwrap_or_else(|_| Ulid::new()),
                 role: Role::User,
                 parts: vec![],
-                time: Time { created: 0, completed: None },
+                time: Time {
+                    created: 0,
+                    completed: None,
+                },
                 assistant: None,
             },
             Message {
@@ -152,7 +164,10 @@ mod tests {
                 session_id: Ulid::from_string(&session_id).unwrap_or_else(|_| Ulid::new()),
                 role: Role::Assistant,
                 parts: vec![],
-                time: Time { created: 1, completed: Some(2) },
+                time: Time {
+                    created: 1,
+                    completed: Some(2),
+                },
                 assistant: None,
             },
         ];
@@ -189,7 +204,10 @@ mod tests {
                 session_id: Ulid::from_string(&session_id).unwrap_or_else(|_| Ulid::new()),
                 role: Role::User,
                 parts: vec![],
-                time: Time { created: i, completed: None },
+                time: Time {
+                    created: i,
+                    completed: None,
+                },
                 assistant: None,
             };
             let sid = session_id.clone();

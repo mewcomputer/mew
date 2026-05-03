@@ -2,7 +2,9 @@ use std::sync::OnceLock;
 
 use ratatui::style::{Color, Modifier, Style};
 use syntect::{
-    highlighting::{HighlightIterator, HighlightState, Highlighter as SyntectHighlighterInner, ThemeSet},
+    highlighting::{
+        HighlightIterator, HighlightState, Highlighter as SyntectHighlighterInner, ThemeSet,
+    },
     parsing::{ParseState, ScopeStack, SyntaxSet},
 };
 
@@ -12,11 +14,11 @@ static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
 fn syntax_set() -> &'static SyntaxSet {
-    SYNTAX_SET.get_or_init(|| two_face::syntax::extra_newlines())
+    SYNTAX_SET.get_or_init(two_face::syntax::extra_newlines)
 }
 
 fn theme_set() -> &'static ThemeSet {
-    THEME_SET.get_or_init(|| ThemeSet::load_defaults())
+    THEME_SET.get_or_init(ThemeSet::load_defaults)
 }
 
 /// Syntax highlighter backed by syntect.
@@ -112,23 +114,33 @@ mod tests {
     fn test_wgsl_syntax_available() {
         let ss = syntax_set();
         let syntax = ss.find_syntax_by_token("wgsl");
-        assert!(syntax.is_some(), "wgsl syntax should be available from two-face");
+        assert!(
+            syntax.is_some(),
+            "wgsl syntax should be available from two-face"
+        );
     }
 
     #[test]
     fn test_gdscript_syntax_available() {
         let ss = syntax_set();
-        let syntax = ss.find_syntax_by_token("gdscript")
+        let syntax = ss
+            .find_syntax_by_token("gdscript")
             .or_else(|| ss.find_syntax_by_token("gd"))
             .or_else(|| ss.find_syntax_by_extension("gd"));
-        assert!(syntax.is_some(), "gdscript syntax should be available from two-face (tried: gdscript, gd, .gd)");
+        assert!(
+            syntax.is_some(),
+            "gdscript syntax should be available from two-face (tried: gdscript, gd, .gd)"
+        );
     }
 
     #[test]
     fn test_zig_syntax_available() {
         let ss = syntax_set();
         let syntax = ss.find_syntax_by_token("zig");
-        assert!(syntax.is_some(), "zig syntax should be available from two-face");
+        assert!(
+            syntax.is_some(),
+            "zig syntax should be available from two-face"
+        );
     }
 
     #[test]

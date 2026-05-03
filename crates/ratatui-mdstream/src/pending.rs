@@ -77,9 +77,11 @@ impl PendingPolicy for ElideHeadAndTail {
             kept.push(first.clone());
         }
         let hint = Line::from(Span::styled(
-            format!("… generating more … (showing last {} of {} lines)",
+            format!(
+                "… generating more … (showing last {} of {} lines)",
                 self.max_lines.saturating_sub(2),
-                total.saturating_sub(1)),
+                total.saturating_sub(1)
+            ),
             theme.pending_indicator,
         ));
         kept.push(hint);

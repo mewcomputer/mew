@@ -6,10 +6,7 @@ use ratatui::{
 };
 
 use crate::{
-    cache::RenderCache,
-    highlight::NoHighlight,
-    pending::ElideHeadAndTail,
-    render::render_pending,
+    cache::RenderCache, highlight::NoHighlight, pending::ElideHeadAndTail, render::render_pending,
     theme::Theme,
 };
 

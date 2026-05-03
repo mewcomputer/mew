@@ -3,7 +3,7 @@ use mew_message::{
     Finish, MessageId, Part, PartBase, PartId, SessionId, TextPart, Tokens, ToolCallPart,
     ToolState, ToolStatePending, ToolTime,
 };
-use mew_provider::{EventStream, Provider, ProviderEvent, ProviderError, Request};
+use mew_provider::{EventStream, Provider, ProviderError, ProviderEvent, Request};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 

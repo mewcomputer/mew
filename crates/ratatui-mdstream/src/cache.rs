@@ -56,7 +56,11 @@ impl RenderCache {
 
     /// Total number of lines in the cache.
     pub fn total_lines(&self) -> usize {
-        self.committed.iter().map(|b| b.lines.len() + 1).sum::<usize>().saturating_sub(1)
+        self.committed
+            .iter()
+            .map(|b| b.lines.len() + 1)
+            .sum::<usize>()
+            .saturating_sub(1)
     }
 
     /// Collect all cached lines into a flat Vec.

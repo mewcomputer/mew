@@ -205,14 +205,10 @@ impl Adapter {
             body["tools"] = json!(tools);
         }
 
-        Ok(serde_json::to_vec(&body).map_err(ProviderError::Json)?)
+        serde_json::to_vec(&body).map_err(ProviderError::Json)
     }
 
-    async fn build_wire_message(
-        &self,
-        all: &[Message],
-        m: &Message,
-    ) -> Option<serde_json::Value> {
+    async fn build_wire_message(&self, all: &[Message], m: &Message) -> Option<serde_json::Value> {
         let mut content: Vec<serde_json::Value> = Vec::new();
 
         match m.role {
@@ -298,14 +294,10 @@ impl Adapter {
         }
     }
 
-    async fn read_stream(
-        dump: bool,
-        resp: reqwest::Response,
-        mut tx: mpsc::Sender<ProviderEvent>,
-    ) {
-        let stream = resp.bytes_stream().map(|res| {
-            res.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-        });
+    async fn read_stream(dump: bool, resp: reqwest::Response, mut tx: mpsc::Sender<ProviderEvent>) {
+        let stream = resp
+            .bytes_stream()
+            .map(|res| res.map_err(std::io::Error::other));
         let reader = tokio::io::BufReader::new(tokio_util::io::StreamReader::new(stream));
         let mut lines = reader.lines();
 
@@ -580,10 +572,18 @@ impl Adapter {
         current_tool_call: &mut Option<ToolCallAccumulator>,
     ) {
         if let Some(tp) = current_text_part.take() {
-            let _ = tx.send(ProviderEvent::PartEnd { part_id: tp.base.id }).await;
+            let _ = tx
+                .send(ProviderEvent::PartEnd {
+                    part_id: tp.base.id,
+                })
+                .await;
         }
         if let Some(rp) = current_reasoning_part.take() {
-            let _ = tx.send(ProviderEvent::PartEnd { part_id: rp.base.id }).await;
+            let _ = tx
+                .send(ProviderEvent::PartEnd {
+                    part_id: rp.base.id,
+                })
+                .await;
         }
         if let Some(mut acc) = current_tool_call.take() {
             acc.finalize();
@@ -626,10 +626,18 @@ impl Adapter {
         current_tool_call: &mut Option<ToolCallAccumulator>,
     ) {
         if let Some(tp) = current_text_part.take() {
-            let _ = tx.send(ProviderEvent::PartEnd { part_id: tp.base.id }).await;
+            let _ = tx
+                .send(ProviderEvent::PartEnd {
+                    part_id: tp.base.id,
+                })
+                .await;
         }
         if let Some(rp) = current_reasoning_part.take() {
-            let _ = tx.send(ProviderEvent::PartEnd { part_id: rp.base.id }).await;
+            let _ = tx
+                .send(ProviderEvent::PartEnd {
+                    part_id: rp.base.id,
+                })
+                .await;
         }
         if let Some(mut acc) = current_tool_call.take() {
             acc.finalize();
@@ -964,15 +972,12 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
-        let fixture = std::fs::read_to_string("src/testdata/text-only.sse")
-            .expect("read text-only fixture");
+        let fixture =
+            std::fs::read_to_string("src/testdata/text-only.sse").expect("read text-only fixture");
 
         Mock::given(method("POST"))
             .and(path("/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_raw(fixture, "text/event-stream"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(fixture, "text/event-stream"))
             .mount(&mock_server)
             .await;
 
@@ -999,10 +1004,18 @@ mod tests {
         println!("events: {events:?}");
 
         // Should have PartStart(Text), PartDelta(text), PartEnd, MessageEnd
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartStart { .. })));
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartDelta { field: "text", .. })));
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartEnd { .. })));
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::PartStart { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::PartDelta { field: "text", .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::PartEnd { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
     }
 
     #[tokio::test]
@@ -1016,10 +1029,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_raw(fixture, "text/event-stream"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(fixture, "text/event-stream"))
             .mount(&mock_server)
             .await;
 
@@ -1063,6 +1073,8 @@ mod tests {
         });
         assert!(has_tool_use, "expected tool call part start");
 
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
     }
 }

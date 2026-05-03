@@ -98,8 +98,7 @@ impl Agent {
             };
             let estimated = self.estimated_tokens(&messages);
             let threshold = (self.context_window as f64 * self.compaction_threshold) as u32;
-            let should_compact = force
-                || (self.context_window > 0 && estimated > threshold);
+            let should_compact = force || (self.context_window > 0 && estimated > threshold);
             if should_compact {
                 tracing::info!(
                     estimated,
@@ -137,8 +136,7 @@ impl Agent {
                 let _ = ev_tx
                     .send(AgentEvent::Error(format!(
                         "context compacted: {} turns removed ({} estimated tokens)",
-                        len_before,
-                        estimated
+                        len_before, estimated
                     )))
                     .await;
             }
@@ -222,9 +220,7 @@ impl Agent {
             // Stream ended naturally.
             if assistant_msg.is_none() {
                 let _ = ev_tx
-                    .send(AgentEvent::Error(
-                        "no assistant message received".into(),
-                    ))
+                    .send(AgentEvent::Error("no assistant message received".into()))
                     .await;
                 return Ok(());
             }

@@ -27,18 +27,32 @@ impl Theme {
         Self {
             paragraph: Style::default().fg(Color::White),
             heading: [
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ],
             emphasis: Style::default().add_modifier(Modifier::ITALIC),
             strong: Style::default().add_modifier(Modifier::BOLD),
             strikethrough: Style::default().add_modifier(Modifier::CROSSED_OUT),
             inline_code: Style::default().bg(Color::Rgb(40, 40, 45)),
-            link_text: Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED),
+            link_text: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::UNDERLINED),
             link_url: Style::default().fg(Color::DarkGray),
             list_bullet: Style::default().fg(Color::White),
             block_quote: Style::default().fg(Color::Gray),

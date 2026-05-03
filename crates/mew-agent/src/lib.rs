@@ -39,9 +39,10 @@ impl std::fmt::Debug for AgentEvent {
                 .debug_struct("PermissionRequest")
                 .field("call", call)
                 .finish(),
-            AgentEvent::ToolStart { call_id } => {
-                f.debug_struct("ToolStart").field("call_id", call_id).finish()
-            }
+            AgentEvent::ToolStart { call_id } => f
+                .debug_struct("ToolStart")
+                .field("call_id", call_id)
+                .finish(),
             AgentEvent::ToolEnd { call_id, success } => f
                 .debug_struct("ToolEnd")
                 .field("call_id", call_id)
@@ -63,9 +64,9 @@ impl std::fmt::Debug for AgentEvent {
 }
 
 mod agent;
-mod turn;
 mod events;
 mod tools;
+mod turn;
 
 pub use agent::Agent;
 

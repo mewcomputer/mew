@@ -134,19 +134,19 @@ pub fn parse_inline(text: &str, theme: &Theme) -> Vec<StyledRun> {
                     runs.push((format!(" ({u})"), theme.link_url));
                 }
                 i = bracket_end + 1;
-continue;
-                }
-            }
-
-            // Use grapheme iteration for the fallback case to handle
-            // multi-byte characters (emoji, CJK, etc.) correctly.
-            if let Some(grapheme) = text[i..].graphemes(true).next() {
-                current.push_str(grapheme);
-                i += grapheme.len(); // Move past the grapheme
-            } else {
-                break;
+                continue;
             }
         }
+
+        // Use grapheme iteration for the fallback case to handle
+        // multi-byte characters (emoji, CJK, etc.) correctly.
+        if let Some(grapheme) = text[i..].graphemes(true).next() {
+            current.push_str(grapheme);
+            i += grapheme.len(); // Move past the grapheme
+        } else {
+            break;
+        }
+    }
 
     if !current.is_empty() {
         runs.push((current, current_style));

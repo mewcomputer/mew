@@ -47,7 +47,7 @@ impl Loader {
         // Determine root: git worktree root or home.
         let root = find_git_root(&self.cwd).unwrap_or_else(|_| {
             std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h))
+                .map(PathBuf::from)
                 .unwrap_or_else(|| self.cwd.clone())
         });
 
@@ -74,12 +74,10 @@ impl Loader {
 }
 
 fn try_read(path: &Path) -> Option<File> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|content| File {
-            path: path.to_path_buf(),
-            content,
-        })
+    std::fs::read_to_string(path).ok().map(|content| File {
+        path: path.to_path_buf(),
+        content,
+    })
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -94,10 +92,12 @@ fn find_git_root(dir: &Path) -> Result<PathBuf, ContextError> {
         }
         match current.parent() {
             Some(parent) => current = parent.to_path_buf(),
-            None => return Err(ContextError::Io(io::Error::new(
-                io::ErrorKind::NotFound,
-                "git root not found",
-            ))),
+            None => {
+                return Err(ContextError::Io(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "git root not found",
+                )))
+            }
         }
     }
 }
@@ -118,7 +118,7 @@ fn paths_between(root: &Path, leaf: &Path) -> Vec<PathBuf> {
     let suffix = suffix.strip_prefix('/').unwrap_or(suffix);
     let suffix = suffix.strip_prefix('\\').unwrap_or(suffix);
 
-    for component in suffix.split(|c| c == '/' || c == '\\') {
+    for component in suffix.split(['/', '\\']) {
         if component.is_empty() {
             continue;
         }
@@ -216,7 +216,9 @@ mod tests {
 
         // Should find the AGENTS.md in the directory
         assert!(
-            files.iter().any(|f| f.path.ends_with("AGENTS.md") && f.content == "global context"),
+            files
+                .iter()
+                .any(|f| f.path.ends_with("AGENTS.md") && f.content == "global context"),
             "expected to find AGENTS.md with 'global context', got: {:?}",
             files
         );
@@ -231,9 +233,9 @@ mod tests {
         let loader = Loader::new(dir.path());
         let files = loader.load().unwrap();
 
-        assert!(
-            files.iter().any(|f| f.path.ends_with("CLAUDE.md") && f.content == "claude context")
-        );
+        assert!(files
+            .iter()
+            .any(|f| f.path.ends_with("CLAUDE.md") && f.content == "claude context"));
     }
 
     #[test]
@@ -246,9 +248,9 @@ mod tests {
         let loader = Loader::new(dir.path());
         let files = loader.load().unwrap();
 
-        assert!(
-            files.iter().any(|f| f.path.ends_with(".mew/AGENTS.md") && f.content == "dot mew context")
-        );
+        assert!(files
+            .iter()
+            .any(|f| f.path.ends_with(".mew/AGENTS.md") && f.content == "dot mew context"));
     }
 
     #[test]

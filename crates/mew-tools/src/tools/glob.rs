@@ -43,10 +43,7 @@ impl Tool for Glob {
             .get("pattern")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing pattern".into()))?;
-        let path = input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         let base = ctx.cwd.join(path);
 
         let glob = globset::Glob::new(pattern)
@@ -54,9 +51,7 @@ impl Tool for Glob {
         let matcher = glob.compile_matcher();
 
         let mut files = Vec::new();
-        let walker = ignore::WalkBuilder::new(&base)
-            .hidden(false)
-            .build();
+        let walker = ignore::WalkBuilder::new(&base).hidden(false).build();
 
         for result in walker {
             let entry = result.map_err(|e| ToolError::Execution(format!("walk error: {}", e)))?;
@@ -99,9 +94,15 @@ mod tests {
     #[tokio::test]
     async fn test_glob() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("foo.rs"), "").await.unwrap();
-        tokio::fs::write(dir.path().join("bar.rs"), "").await.unwrap();
-        tokio::fs::write(dir.path().join("baz.txt"), "").await.unwrap();
+        tokio::fs::write(dir.path().join("foo.rs"), "")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("bar.rs"), "")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("baz.txt"), "")
+            .await
+            .unwrap();
 
         let tool = Glob;
         let ctx = dummy_ctx(dir.path().to_path_buf());
@@ -117,8 +118,12 @@ mod tests {
     async fn test_glob_recursive() {
         let dir = tempfile::tempdir().unwrap();
         tokio::fs::create_dir(dir.path().join("src")).await.unwrap();
-        tokio::fs::write(dir.path().join("src/lib.rs"), "").await.unwrap();
-        tokio::fs::write(dir.path().join("main.rs"), "").await.unwrap();
+        tokio::fs::write(dir.path().join("src/lib.rs"), "")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("main.rs"), "")
+            .await
+            .unwrap();
 
         let tool = Glob;
         let ctx = dummy_ctx(dir.path().to_path_buf());

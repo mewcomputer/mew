@@ -30,16 +30,18 @@ struct Frontmatter {
     name: String,
     description: String,
     #[serde(default)]
+    #[allow(dead_code)]
     license: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     compatibility: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     metadata: Option<serde_yaml::Value>,
 }
 
-static NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[a-z0-9]+(-[a-z0-9]+)*$").expect("valid name regex")
-});
+static NAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z0-9]+(-[a-z0-9]+)*$").expect("valid name regex"));
 
 /// Discovers and loads skills from the filesystem.
 pub struct Loader {
@@ -251,7 +253,7 @@ fn paths_between(root: &Path, leaf: &Path) -> Vec<PathBuf> {
     let suffix = leaf_str.strip_prefix(&*root_str).unwrap_or("");
     let suffix = suffix.strip_prefix('/').unwrap_or(suffix);
     let suffix = suffix.strip_prefix('\\').unwrap_or(suffix);
-    for component in suffix.split(|c| c == '/' || c == '\\') {
+    for component in suffix.split(['/', '\\']) {
         if component.is_empty() {
             continue;
         }
@@ -285,9 +287,7 @@ mod tests {
     fn write_skill(dir: &Path, name: &str, description: &str, body: &str) {
         let skill_dir = dir.join(".mew").join("skills").join(name);
         std::fs::create_dir_all(&skill_dir).unwrap();
-        let content = format!(
-            "---\nname: {name}\ndescription: {description}\n---\n{body}"
-        );
+        let content = format!("---\nname: {name}\ndescription: {description}\n---\n{body}");
         std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
     }
 
@@ -295,7 +295,12 @@ mod tests {
     fn test_load_single_skill() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
-        write_skill(cwd, "git-release", "Creates a git release", "# Git Release\nDo things.");
+        write_skill(
+            cwd,
+            "git-release",
+            "Creates a git release",
+            "# Git Release\nDo things.",
+        );
 
         let loader = Loader::new(cwd);
         let skills = loader.load().unwrap();

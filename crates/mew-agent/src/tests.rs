@@ -2,13 +2,13 @@ use async_trait::async_trait;
 use std::sync::Mutex as StdMutex;
 
 use mew_hooks::NopDispatcher;
+use mew_hooks::ToolOutput;
 use mew_message::{
-    Finish, Message, Part, PartBase, Role, TextPart, Time, Tokens,
-    ToolCallPart, ToolState, ToolStatePending, ToolTime,
+    Finish, Message, Part, PartBase, Role, TextPart, Time, Tokens, ToolCallPart, ToolState,
+    ToolStatePending, ToolTime,
 };
 use mew_provider::{EventStream, Provider, ProviderError, ProviderEvent, Request};
 use mew_provider_fake::FakeProvider;
-use mew_hooks::ToolOutput;
 use mew_tools::{Sensitivity, Tool, ToolCtx};
 
 use crate::Agent;
@@ -213,7 +213,10 @@ fn test_pending_tool_calls() {
         call_id: "c1".into(),
         state: ToolState::Pending(ToolStatePending {
             input: serde_json::Value::Null,
-            time: ToolTime { start: now, end: None },
+            time: ToolTime {
+                start: now,
+                end: None,
+            },
         }),
         raw_input: String::new(),
     };
@@ -288,7 +291,10 @@ fn test_update_tool_call() {
             call_id: "c1".into(),
             state: ToolState::Pending(ToolStatePending {
                 input: serde_json::Value::Null,
-                time: ToolTime { start: now, end: None },
+                time: ToolTime {
+                    start: now,
+                    end: None,
+                },
             }),
             raw_input: String::new(),
         })],
@@ -302,7 +308,10 @@ fn test_update_tool_call() {
     let new_state = ToolState::Running(ToolStateRunning {
         input: serde_json::Value::Null,
         output: String::new(),
-        time: ToolTime { start: now, end: None },
+        time: ToolTime {
+            start: now,
+            end: None,
+        },
     });
     agent.update_tool_call(&mut msg, part_id, new_state.clone());
 
@@ -319,7 +328,13 @@ fn test_update_tool_call() {
 async fn test_text_turn() {
     let script = FakeProvider::text_response("hello world");
     let provider = std::sync::Arc::new(FakeProvider::new(script));
-    let agent = Agent::new(provider, std::sync::Arc::new(NopDispatcher), None, vec![], None);
+    let agent = Agent::new(
+        provider,
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
 
     let mut rx = agent.run("hi".into());
     let mut events = Vec::new();
@@ -328,18 +343,18 @@ async fn test_text_turn() {
     }
 
     // Should see PartStart, some PartDeltas, PartEnd, MessageEnd
-    assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::Provider(ProviderEvent::PartStart { .. })))
-    );
-    assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::Provider(ProviderEvent::PartDelta { .. })))
-    );
-    assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::Provider(ProviderEvent::PartEnd { .. })))
-    );
-    assert!(
-        events.iter().any(|e| matches!(e, AgentEvent::Provider(ProviderEvent::MessageEnd { .. })))
-    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::Provider(ProviderEvent::PartStart { .. }))));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::Provider(ProviderEvent::PartDelta { .. }))));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::Provider(ProviderEvent::PartEnd { .. }))));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::Provider(ProviderEvent::MessageEnd { .. }))));
 
     // Messages should contain user + assistant
     let msgs = agent.messages.lock().await;
@@ -460,7 +475,13 @@ async fn test_tool_turn_denied() {
 async fn test_cancellation_during_stream() {
     let script = FakeProvider::text_response("a very long response that takes time");
     let provider = std::sync::Arc::new(FakeProvider::new(script));
-    let agent = Agent::new(provider, std::sync::Arc::new(NopDispatcher), None, vec![], None);
+    let agent = Agent::new(
+        provider,
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
 
     let mut rx = agent.run("hi".into());
     // Cancel immediately.
@@ -495,7 +516,9 @@ async fn test_permission_engine_allow_rule() {
         vec![std::sync::Arc::new(EchoTool::mutating())],
         None,
     );
-    agent.set_permission_engine(std::sync::Arc::new(mew_config::permissions::PermissionEngine::new(vec![])));
+    agent.set_permission_engine(std::sync::Arc::new(
+        mew_config::permissions::PermissionEngine::new(vec![]),
+    ));
 
     let mut rx = agent.run("call two echos".into());
     let mut permissions_prompted = 0;
@@ -520,7 +543,10 @@ async fn test_permission_engine_allow_rule() {
         }
     }
 
-    assert_eq!(permissions_prompted, 1, "AllowSession should skip second prompt within same turn");
+    assert_eq!(
+        permissions_prompted, 1,
+        "AllowSession should skip second prompt within same turn"
+    );
 }
 
 #[tokio::test]
@@ -538,12 +564,17 @@ async fn test_multi_tool_call_turn() {
                 call_id: "c1".into(),
                 state: ToolState::Pending(ToolStatePending {
                     input: serde_json::json!({"input": "first"}),
-                    time: ToolTime { start: 0, end: None },
+                    time: ToolTime {
+                        start: 0,
+                        end: None,
+                    },
                 }),
                 raw_input: String::new(),
             }),
         },
-        mew_provider::ProviderEvent::PartEnd { part_id: ulid::Ulid::new() },
+        mew_provider::ProviderEvent::PartEnd {
+            part_id: ulid::Ulid::new(),
+        },
         mew_provider::ProviderEvent::PartStart {
             part: Part::ToolCall(ToolCallPart {
                 base: PartBase {
@@ -555,12 +586,17 @@ async fn test_multi_tool_call_turn() {
                 call_id: "c2".into(),
                 state: ToolState::Pending(ToolStatePending {
                     input: serde_json::json!({"input": "second"}),
-                    time: ToolTime { start: 0, end: None },
+                    time: ToolTime {
+                        start: 0,
+                        end: None,
+                    },
                 }),
                 raw_input: String::new(),
             }),
         },
-        mew_provider::ProviderEvent::PartEnd { part_id: ulid::Ulid::new() },
+        mew_provider::ProviderEvent::PartEnd {
+            part_id: ulid::Ulid::new(),
+        },
         mew_provider::ProviderEvent::MessageEnd {
             finish: Finish::ToolUse,
             usage: Tokens::default(),
@@ -617,12 +653,17 @@ async fn test_permission_engine_session_allow() {
                 call_id: "c1".into(),
                 state: ToolState::Pending(ToolStatePending {
                     input: serde_json::json!({"input": "first"}),
-                    time: ToolTime { start: 0, end: None },
+                    time: ToolTime {
+                        start: 0,
+                        end: None,
+                    },
                 }),
                 raw_input: String::new(),
             }),
         },
-        mew_provider::ProviderEvent::PartEnd { part_id: ulid::Ulid::new() },
+        mew_provider::ProviderEvent::PartEnd {
+            part_id: ulid::Ulid::new(),
+        },
         mew_provider::ProviderEvent::PartStart {
             part: Part::ToolCall(ToolCallPart {
                 base: PartBase {
@@ -634,12 +675,17 @@ async fn test_permission_engine_session_allow() {
                 call_id: "c2".into(),
                 state: ToolState::Pending(ToolStatePending {
                     input: serde_json::json!({"input": "second"}),
-                    time: ToolTime { start: 0, end: None },
+                    time: ToolTime {
+                        start: 0,
+                        end: None,
+                    },
                 }),
                 raw_input: String::new(),
             }),
         },
-        mew_provider::ProviderEvent::PartEnd { part_id: ulid::Ulid::new() },
+        mew_provider::ProviderEvent::PartEnd {
+            part_id: ulid::Ulid::new(),
+        },
         mew_provider::ProviderEvent::MessageEnd {
             finish: Finish::ToolUse,
             usage: Tokens::default(),
@@ -656,7 +702,9 @@ async fn test_permission_engine_session_allow() {
         vec![std::sync::Arc::new(EchoTool::mutating())],
         None,
     );
-    agent.set_permission_engine(std::sync::Arc::new(mew_config::permissions::PermissionEngine::new(vec![])));
+    agent.set_permission_engine(std::sync::Arc::new(
+        mew_config::permissions::PermissionEngine::new(vec![]),
+    ));
 
     let mut rx = agent.run("call two echos".into());
     let mut permissions_prompted = 0;
@@ -681,5 +729,8 @@ async fn test_permission_engine_session_allow() {
         }
     }
 
-    assert_eq!(permissions_prompted, 1, "AllowSession should skip second prompt within same turn");
+    assert_eq!(
+        permissions_prompted, 1,
+        "AllowSession should skip second prompt within same turn"
+    );
 }

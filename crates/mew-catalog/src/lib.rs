@@ -81,7 +81,13 @@ impl Catalog {
     pub fn shape_for(&self, id: &str) -> &str {
         self.models
             .get(id)
-            .and_then(|m| if m.shape.is_empty() { None } else { Some(m.shape.as_str()) })
+            .and_then(|m| {
+                if m.shape.is_empty() {
+                    None
+                } else {
+                    Some(m.shape.as_str())
+                }
+            })
             .unwrap_or("openai")
     }
 
@@ -90,7 +96,13 @@ impl Catalog {
     pub fn context_window(&self, id: &str) -> i64 {
         self.models
             .get(id)
-            .and_then(|m| if m.context_window > 0 { Some(m.context_window) } else { None })
+            .and_then(|m| {
+                if m.context_window > 0 {
+                    Some(m.context_window)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(128_000)
     }
 
@@ -172,7 +184,11 @@ async fn load_with_client(client: reqwest::Client) -> Result<Catalog, CatalogErr
     }
 
     // Capture ETag before consuming the body.
-    let etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let etag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     let data = match resp.bytes().await {
         Ok(b) => b.to_vec(),

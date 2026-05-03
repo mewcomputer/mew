@@ -314,10 +314,7 @@ mod tests {
         let rt: T = serde_json::from_str(&s).unwrap_or_else(|e| {
             panic!("{name}: deserialize failed: {e}\njson: {s}");
         });
-        assert_eq!(
-            &rt, val,
-            "{name}: round-trip mismatch\nserialized: {s}"
-        );
+        assert_eq!(&rt, val, "{name}: round-trip mismatch\nserialized: {s}");
     }
 
     // -----------------------------------------------------------------------

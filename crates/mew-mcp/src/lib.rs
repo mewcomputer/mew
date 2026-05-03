@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 // ---------------------------------------------------------------------------
@@ -63,9 +63,11 @@ pub enum McpError {
 trait Transport: Send + Sync {
     async fn call(&self, method: &str, params: Option<Value>) -> Result<Value, McpError>;
     async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), McpError>;
+    #[allow(dead_code)]
     async fn cancel(&self, _request_id: u64) -> Result<(), McpError> {
         Ok(())
     }
+    #[allow(dead_code)]
     fn set_protocol_version(&self, _version: &str) {}
     async fn close(&mut self) -> Result<(), McpError>;
 }
@@ -76,9 +78,10 @@ trait Transport: Send + Sync {
 
 /// Parse an SSE (Server-Sent Events) response from an MCP server.
 async fn parse_sse_response(resp: reqwest::Response) -> Result<Value, McpError> {
-    let body = resp.text().await.map_err(|e| {
-        McpError::Transport(format!("read sse body: {e}"))
-    })?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| McpError::Transport(format!("read sse body: {e}")))?;
 
     // Accumulate multi-line data chunks.
     let mut data_buffer = String::new();
@@ -138,7 +141,7 @@ fn try_parse_sse_data(data: &str) -> Option<Result<Value, McpError>> {
         }));
     }
 
-    response.result.map(|r| Ok(r))
+    response.result.map(Ok)
 }
 
 struct HttpTransport {
@@ -200,6 +203,7 @@ impl HttpTransport {
     }
 
     /// Set the negotiated protocol version (called during initialize).
+    #[allow(dead_code)]
     fn set_protocol_version(&self, version: &str) {
         if let Ok(mut ver) = self.protocol_version.try_lock() {
             *ver = version.to_string();
@@ -243,9 +247,10 @@ impl Transport for HttpTransport {
             return parse_sse_response(resp).await;
         }
 
-        let response: JsonRpcResponse = resp.json().await.map_err(|e| {
-            McpError::Transport(format!("parse response: {e}"))
-        })?;
+        let response: JsonRpcResponse = resp
+            .json()
+            .await
+            .map_err(|e| McpError::Transport(format!("parse response: {e}")))?;
 
         if let Some(err) = response.error {
             return Err(McpError::Rpc {
@@ -254,9 +259,9 @@ impl Transport for HttpTransport {
             });
         }
 
-        response.result.ok_or_else(|| {
-            McpError::Protocol("missing result in response".into())
-        })
+        response
+            .result
+            .ok_or_else(|| McpError::Protocol("missing result in response".into()))
     }
 
     async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), McpError> {
@@ -273,16 +278,22 @@ impl Transport for HttpTransport {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(McpError::Transport(format!("notification failed: HTTP {status}: {body}")));
+            return Err(McpError::Transport(format!(
+                "notification failed: HTTP {status}: {body}"
+            )));
         }
         Ok(())
     }
 
     async fn cancel(&self, request_id: u64) -> Result<(), McpError> {
-        self.notify("notifications/cancelled", Some(serde_json::json!({
-            "requestId": request_id,
-            "reason": "cancelled by client"
-        }))).await
+        self.notify(
+            "notifications/cancelled",
+            Some(serde_json::json!({
+                "requestId": request_id,
+                "reason": "cancelled by client"
+            })),
+        )
+        .await
     }
 
     async fn close(&mut self) -> Result<(), McpError> {
@@ -303,12 +314,14 @@ struct StdioTransport {
 
 impl StdioTransport {
     fn new(mut child: tokio::process::Child) -> Result<Self, McpError> {
-        let stdin = child.stdin.take().ok_or_else(|| {
-            McpError::Transport("child has no stdin".into())
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            McpError::Transport("child has no stdout".into())
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| McpError::Transport("child has no stdin".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| McpError::Transport("child has no stdout".into()))?;
 
         Ok(Self {
             child: Mutex::new(child),
@@ -334,7 +347,8 @@ impl Transport for StdioTransport {
             params,
         };
 
-        let mut body = serde_json::to_string(&request).map_err(|e| McpError::Transport(e.to_string()))?;
+        let mut body =
+            serde_json::to_string(&request).map_err(|e| McpError::Transport(e.to_string()))?;
         body.push('\n');
 
         debug!(%method, id, "mcp stdio request");
@@ -342,21 +356,23 @@ impl Transport for StdioTransport {
         // Write to stdin.
         {
             let mut guard = self.stdin.lock().await;
-            let stdin = guard.as_mut().ok_or_else(|| {
-                McpError::Transport("stdin closed".into())
-            })?;
-            stdin.write_all(body.as_bytes()).await.map_err(|e| {
-                McpError::Transport(format!("write stdin: {e}"))
-            })?;
+            let stdin = guard
+                .as_mut()
+                .ok_or_else(|| McpError::Transport("stdin closed".into()))?;
+            stdin
+                .write_all(body.as_bytes())
+                .await
+                .map_err(|e| McpError::Transport(format!("write stdin: {e}")))?;
         }
 
         // Read response line from stdout.
         let response_line = {
             let mut stdout = self.stdout.lock().await;
             let mut line = String::new();
-            stdout.read_line(&mut line).await.map_err(|e| {
-                McpError::Transport(format!("read stdout: {e}"))
-            })?;
+            stdout
+                .read_line(&mut line)
+                .await
+                .map_err(|e| McpError::Transport(format!("read stdout: {e}")))?;
             if line.is_empty() {
                 return Err(McpError::Transport("server closed stdout".into()));
             }
@@ -374,9 +390,9 @@ impl Transport for StdioTransport {
             });
         }
 
-        response.result.ok_or_else(|| {
-            McpError::Protocol("missing result in stdio response".into())
-        })
+        response
+            .result
+            .ok_or_else(|| McpError::Protocol("missing result in stdio response".into()))
     }
 
     async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), McpError> {
@@ -386,34 +402,37 @@ impl Transport for StdioTransport {
             "params": params,
         });
 
-        let mut body = serde_json::to_string(&request).map_err(|e| McpError::Transport(e.to_string()))?;
+        let mut body =
+            serde_json::to_string(&request).map_err(|e| McpError::Transport(e.to_string()))?;
         body.push('\n');
 
         let mut guard = self.stdin.lock().await;
-        let stdin = guard.as_mut().ok_or_else(|| {
-            McpError::Transport("stdin closed".into())
-        })?;
-        stdin.write_all(body.as_bytes()).await.map_err(|e| {
-            McpError::Transport(format!("write stdin: {e}"))
-        })?;
+        let stdin = guard
+            .as_mut()
+            .ok_or_else(|| McpError::Transport("stdin closed".into()))?;
+        stdin
+            .write_all(body.as_bytes())
+            .await
+            .map_err(|e| McpError::Transport(format!("write stdin: {e}")))?;
         Ok(())
     }
 
     async fn cancel(&self, request_id: u64) -> Result<(), McpError> {
-        self.notify("notifications/cancelled", Some(serde_json::json!({
-            "requestId": request_id,
-            "reason": "cancelled by client"
-        }))).await
+        self.notify(
+            "notifications/cancelled",
+            Some(serde_json::json!({
+                "requestId": request_id,
+                "reason": "cancelled by client"
+            })),
+        )
+        .await
     }
 
     async fn close(&mut self) -> Result<(), McpError> {
         // Graceful: close stdin to signal EOF, then wait for exit.
         self.stdin.lock().await.take();
         let mut child = self.child.lock().await;
-        let wait = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            child.wait(),
-        ).await;
+        let wait = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
         if wait.is_err() {
             let _ = child.start_kill();
             let _ = child.wait().await;
@@ -496,17 +515,20 @@ impl McpClient {
 
         let result = self
             .transport
-            .call("initialize", Some(serde_json::json!({
-                "protocolVersion": "2025-11-25",
-                "capabilities": {
-                    "roots": { "listChanged": true }
-                },
-                "clientInfo": {
-                    "name": "mew",
-                    "title": "mew",
-                    "version": "0.1.0"
-                }
-            })))
+            .call(
+                "initialize",
+                Some(serde_json::json!({
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {
+                        "roots": { "listChanged": true }
+                    },
+                    "clientInfo": {
+                        "name": "mew",
+                        "title": "mew",
+                        "version": "0.1.0"
+                    }
+                })),
+            )
             .await?;
 
         info!(server = %self.name, protocol_version = %result["protocolVersion"], "MCP server initialized");
@@ -523,7 +545,10 @@ impl McpClient {
         self.set_negotiated_version(server_version);
 
         // Send initialized notification (no response expected).
-        let _ = self.transport.notify("notifications/initialized", None).await;
+        let _ = self
+            .transport
+            .notify("notifications/initialized", None)
+            .await;
         Ok(())
     }
 
@@ -533,11 +558,7 @@ impl McpClient {
         let mut cursor: Option<String> = None;
 
         loop {
-            let params = if let Some(ref c) = cursor {
-                Some(serde_json::json!({ "cursor": c }))
-            } else {
-                None
-            };
+            let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
 
             let result = self.transport.call("tools/list", params).await?;
 
@@ -564,7 +585,8 @@ impl McpClient {
             info!(server = %self.name, page_count = page.len(), cursor = ?cursor, "discovered MCP tool page");
             tools.extend(page);
 
-            cursor = result.get("nextCursor")
+            cursor = result
+                .get("nextCursor")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(String::from);
@@ -585,10 +607,13 @@ impl McpClient {
     ) -> Result<ToolCallResult, McpError> {
         let result = self
             .transport
-            .call("tools/call", Some(serde_json::json!({
-                "name": tool_name,
-                "arguments": arguments,
-            })))
+            .call(
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": tool_name,
+                    "arguments": arguments,
+                })),
+            )
             .await?;
 
         let content = result.get("content").and_then(|v| v.as_array());
@@ -602,7 +627,10 @@ impl McpClient {
             })
             .unwrap_or_default();
 
-        let is_error = result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_error = result
+            .get("isError")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         Ok(ToolCallResult { text, is_error })
     }
@@ -699,8 +727,16 @@ impl mew_tools::Tool for McpTool {
     ) -> Result<mew_hooks::ToolOutput, mew_tools::ToolError> {
         match self.client.call_tool(&self.tool_name, input).await {
             Ok(result) => Ok(mew_hooks::ToolOutput {
-                output: if result.is_error { String::new() } else { result.text.clone() },
-                error: if result.is_error { result.text } else { String::new() },
+                output: if result.is_error {
+                    String::new()
+                } else {
+                    result.text.clone()
+                },
+                error: if result.is_error {
+                    result.text
+                } else {
+                    String::new()
+                },
                 diff: None,
             }),
             Err(e) => Ok(mew_hooks::ToolOutput {
@@ -747,7 +783,10 @@ mod tests {
                 serde_json::json!({})
             };
             match client.call_tool(&first.name, args).await {
-                Ok(r) => eprintln!("tool output (first 500): {}", &r.text[..r.text.len().min(500)]),
+                Ok(r) => eprintln!(
+                    "tool output (first 500): {}",
+                    &r.text[..r.text.len().min(500)]
+                ),
                 Err(e) => eprintln!("tool error (may be expected): {}", e),
             }
         }

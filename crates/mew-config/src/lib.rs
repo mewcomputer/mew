@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 pub mod permissions;
 
 /// Top-level user configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
@@ -25,16 +25,6 @@ pub struct PermissionsConfig {
     pub rules: Vec<permissions::PermissionRule>,
     #[serde(default)]
     pub skills: Vec<permissions::SkillPermissionRule>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            providers: HashMap::new(),
-            default_model: String::new(),
-            permissions: PermissionsConfig::default(),
-        }
-    }
 }
 
 /// Describes a single provider entry.
@@ -146,8 +136,8 @@ pub fn save_state(state: &State) -> Result<(), ConfigError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let data = toml::to_string_pretty(state)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let data =
+        toml::to_string_pretty(state).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     std::fs::write(&path, data)?;
     debug!(?path, "state saved");
     Ok(())
@@ -195,11 +185,12 @@ pub fn get_credential(ref_name: &str) -> Result<String, ConfigError> {
     let creds_path = config_dir().join("credentials.json");
     match std::fs::read_to_string(&creds_path) {
         Ok(data) => {
-            let creds: HashMap<String, String> =
-                serde_json::from_str(&data).map_err(|e| ConfigError::Io(io::Error::new(
+            let creds: HashMap<String, String> = serde_json::from_str(&data).map_err(|e| {
+                ConfigError::Io(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("credentials.json: {}", e),
-                )))?;
+                ))
+            })?;
             if let Some(v) = creds.get(ref_name) {
                 debug!(%ref_name, "found credential in credentials.json");
                 return Ok(v.clone());
@@ -259,7 +250,8 @@ mod tests {
     fn test_state_load_missing_returns_default() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nonexistent_state.toml");
-        let state = load_state_from(&path).expect("load_state_from should not fail when file missing");
+        let state =
+            load_state_from(&path).expect("load_state_from should not fail when file missing");
         assert!(state.last_model.is_empty());
         assert!(state.last_provider.is_empty());
     }

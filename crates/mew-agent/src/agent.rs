@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use ulid::Ulid;
 
 use mew_hooks::Dispatcher;
 use mew_message::{Message, Part, SessionId};
@@ -54,7 +53,7 @@ impl Agent {
             session: session.map(|w| Arc::new(tokio::sync::Mutex::new(w))),
             tools: tools_map,
             messages: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            session_id: session_id.unwrap_or_else(Ulid::new),
+            session_id: session_id.unwrap_or_default(),
             system: String::new(),
             cancel_token: CancellationToken::new(),
             permission_engine: None,
@@ -71,7 +70,10 @@ impl Agent {
         }
     }
 
-    pub fn set_permission_engine(&mut self, engine: Arc<mew_config::permissions::PermissionEngine>) {
+    pub fn set_permission_engine(
+        &mut self,
+        engine: Arc<mew_config::permissions::PermissionEngine>,
+    ) {
         self.permission_engine = Some(engine);
     }
 
@@ -109,7 +111,11 @@ impl Agent {
         self.run_with_parts(prompt, vec![])
     }
 
-    pub fn run_with_parts(&self, prompt: String, attachments: Vec<Part>) -> mpsc::Receiver<AgentEvent> {
+    pub fn run_with_parts(
+        &self,
+        prompt: String,
+        attachments: Vec<Part>,
+    ) -> mpsc::Receiver<AgentEvent> {
         let (tx, rx) = mpsc::channel(256);
         let agent = self.clone();
 

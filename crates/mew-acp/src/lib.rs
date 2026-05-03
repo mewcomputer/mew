@@ -30,6 +30,14 @@ struct Request {
     params: Option<Value>,
 }
 
+#[derive(Debug, Serialize)]
+struct Notification {
+    jsonrpc: &'static str,
+    method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<Value>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct RawMessage {
     #[serde(default)]
@@ -123,10 +131,7 @@ impl AcpClient {
 
     /// Run a single prompt turn. Returns a receiver of agent events that the
     /// TUI can drain, matching the `Agent::run_with_parts` interface.
-    pub async fn run_turn(
-        &mut self,
-        text: &str,
-    ) -> Result<mpsc::Receiver<mew_agent::AgentEvent>> {
+    pub async fn run_turn(&mut self, text: &str) -> Result<mpsc::Receiver<mew_agent::AgentEvent>> {
         let (ev_tx, ev_rx) = mpsc::channel(256);
 
         let params = serde_json::json!({
@@ -207,6 +212,24 @@ impl AcpClient {
         &self.session_id
     }
 
+    /// Send a session/cancel notification to the agent.
+    pub async fn cancel(&self) -> Result<()> {
+        let notif = Notification {
+            jsonrpc: "2.0",
+            method: "session/cancel".to_string(),
+            params: Some(serde_json::json!({
+                "sessionId": self.session_id
+            })),
+        };
+        let line = serde_json::to_string(&notif)?;
+        debug!("acp → cancel");
+        let mut w = self.writer.lock().await;
+        w.write_all(line.as_bytes()).await?;
+        w.write_all(b"\n").await?;
+        w.flush().await?;
+        Ok(())
+    }
+
     /// Send a JSON-RPC request and read lines until the response arrives.
     /// Each intermediate notification is passed to `on_notification`.
     /// Returns the `stopReason` extracted from the response result (for
@@ -273,7 +296,7 @@ impl AcpClient {
 // ACP Server — exposes mew's agent as an ACP service over stdio
 // ---------------------------------------------------------------------------
 
-use mew_agent::{Agent, Agent as AgentCore};
+use mew_agent::Agent as AgentCore;
 
 /// Run an ACP server on stdin/stdout, using the provided agent.
 /// Reads JSON-RPC requests, runs the agent, and streams updates back.
@@ -368,8 +391,9 @@ pub async fn run_server(agent: AgentCore) -> Result<()> {
                 while let Some(event) = rx.recv().await {
                     match &event {
                         mew_agent::AgentEvent::Provider(pe) => match pe {
-                            mew_provider::ProviderEvent::PartStart { part } => {
-                                if let Part::Text(tp) = part {
+                            // PartDelta carries the actual streaming text content.
+                            mew_provider::ProviderEvent::PartDelta { field, delta, .. } => {
+                                if *field == "text" || field.is_empty() {
                                     let notif = serde_json::json!({
                                         "jsonrpc": "2.0",
                                         "method": "session/update",
@@ -379,7 +403,7 @@ pub async fn run_server(agent: AgentCore) -> Result<()> {
                                                 "sessionUpdate": "agent_message_chunk",
                                                 "content": {
                                                     "type": "text",
-                                                    "text": tp.text
+                                                    "text": delta
                                                 }
                                             }
                                         }
@@ -424,10 +448,7 @@ pub async fn run_server(agent: AgentCore) -> Result<()> {
                             });
                             send_line(&mut stdout, &notif).await?;
                         }
-                        mew_agent::AgentEvent::ToolEnd {
-                            call_id,
-                            success,
-                        } => {
+                        mew_agent::AgentEvent::ToolEnd { call_id, success } => {
                             let notif = serde_json::json!({
                                 "jsonrpc": "2.0",
                                 "method": "session/update",
@@ -478,10 +499,18 @@ pub async fn run_server(agent: AgentCore) -> Result<()> {
                 send_line(&mut stdout, &resp).await?;
             }
             "session/cancel" => {
-                // Note: cancellation token not exposed for acp server yet.
-                // Agent will complete naturally.
                 if let Some(ref sid) = session_id {
                     info!("acp server: cancel session {sid}");
+                    agent.cancel_token.cancel();
+                }
+                // No response needed for notification, but if it's a request, respond OK.
+                if msg.id.is_some() {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": resp_id,
+                        "result": {}
+                    });
+                    send_line(&mut stdout, &resp).await?;
                 }
             }
             _ => {
@@ -523,64 +552,95 @@ async fn send_error(
 // Notification translation (client side: ACP → AgentEvent)
 // ---------------------------------------------------------------------------
 
-fn translate_notification(
-    msg: &RawMessage,
-    ev_tx: &mpsc::Sender<mew_agent::AgentEvent>,
-) {
-    if msg.method.as_deref() != Some("session/update") {
-        return;
-    }
-    let Some(ref params) = msg.params else { return };
-    let Some(update) = params.get("update") else { return };
-    let update_type = update
-        .get("sessionUpdate")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+/// Track state across one notification stream for a single turn.
+struct TurnState {
+    msg_id: ulid::Ulid,
+    session_id: ulid::Ulid,
+    started: bool,
+}
 
-    match update_type {
-        "agent_message_chunk" => {
-            if let Some(content) = update.get("content") {
-                if let Some(text) = content.get("text").and_then(|v| v.as_str()) {
-                    let _ = ev_tx.try_send(mew_agent::AgentEvent::Provider(
-                        mew_provider::ProviderEvent::PartStart {
-                            part: Part::Text(mew_message::TextPart {
-                                base: mew_message::PartBase {
-                                    id: ulid::Ulid::new(),
-                                    message_id: ulid::Ulid::new(),
-                                    session_id: ulid::Ulid::new(),
+fn translate_notification(msg: &RawMessage, ev_tx: &mpsc::Sender<mew_agent::AgentEvent>) {
+    thread_local! {
+        static TURN_STATE: std::cell::RefCell<Option<TurnState>> = const { std::cell::RefCell::new(None) };
+    }
+
+    TURN_STATE.with(|ts| {
+        let mut ts = ts.borrow_mut();
+        let state = ts.get_or_insert_with(|| TurnState {
+            msg_id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            started: false,
+        });
+
+        if msg.method.as_deref() != Some("session/update") {
+            return;
+        }
+        let Some(ref params) = msg.params else { return };
+        let Some(update) = params.get("update") else {
+            return;
+        };
+        let update_type = update
+            .get("sessionUpdate")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        match update_type {
+            "agent_message_chunk" => {
+                if let Some(content) = update.get("content") {
+                    if let Some(text) = content.get("text").and_then(|v| v.as_str()) {
+                        // Send PartStart on the first chunk, then PartDelta on subsequent.
+                        if !state.started {
+                            let _ = ev_tx.try_send(mew_agent::AgentEvent::Provider(
+                                mew_provider::ProviderEvent::PartStart {
+                                    part: Part::Text(mew_message::TextPart {
+                                        base: mew_message::PartBase {
+                                            id: state.msg_id,
+                                            message_id: state.msg_id,
+                                            session_id: state.session_id,
+                                        },
+                                        text: text.to_string(),
+                                        synthetic: false,
+                                    }),
                                 },
-                                text: text.to_string(),
-                                synthetic: false,
-                            }),
-                        },
-                    ));
+                            ));
+                            state.started = true;
+                        } else {
+                            let _ = ev_tx.try_send(mew_agent::AgentEvent::Provider(
+                                mew_provider::ProviderEvent::PartDelta {
+                                    part_id: state.msg_id,
+                                    field: "text",
+                                    delta: text.to_string(),
+                                },
+                            ));
+                        }
+                    }
                 }
             }
-        }
-        "tool_call" => {
-            let id = update
-                .get("toolCallId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let _ = ev_tx.try_send(mew_agent::AgentEvent::ToolStart {
-                call_id: id.to_string(),
-            });
-        }
-        "tool_call_update" => {
-            let id = update
-                .get("toolCallId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("");
-            if status == "completed" || status == "failed" {
-                let _ = ev_tx.try_send(mew_agent::AgentEvent::ToolEnd {
+            "tool_call" => {
+                let id = update
+                    .get("toolCallId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let _ = ev_tx.try_send(mew_agent::AgentEvent::ToolStart {
                     call_id: id.to_string(),
-                    success: status == "completed",
                 });
             }
+            "tool_call_update" => {
+                let id = update
+                    .get("toolCallId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                if status == "completed" || status == "failed" {
+                    let _ = ev_tx.try_send(mew_agent::AgentEvent::ToolEnd {
+                        call_id: id.to_string(),
+                        success: status == "completed",
+                    });
+                }
+            }
+            _ => {}
         }
-        _ => {}
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -614,8 +674,9 @@ mod tests {
         let msg: RawMessage = serde_json::from_str(line).unwrap();
         assert_eq!(msg.id, Some(1));
         assert_eq!(
-            msg.result
-                .and_then(|v| v.get("stopReason").and_then(|s| s.as_str().map(String::from))),
+            msg.result.and_then(|v| v
+                .get("stopReason")
+                .and_then(|s| s.as_str().map(String::from))),
             Some("end_turn".to_string())
         );
     }

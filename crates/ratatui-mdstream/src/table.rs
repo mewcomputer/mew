@@ -15,29 +15,28 @@ pub(crate) struct ParsedTable {
     pub rows: Vec<Vec<Vec<StyledRun>>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Align {
+    #[default]
     Left,
     Right,
     Center,
 }
 
-impl Default for Align {
-    fn default() -> Self {
-        Align::Left
-    }
-}
-
 pub(crate) fn parse_table(text: &str, theme: &Theme) -> ParsedTable {
     let mut lines: Vec<&str> = text.lines().collect();
-    while lines.first().map_or(false, |l| l.trim().is_empty()) {
+    while lines.first().is_some_and(|l| l.trim().is_empty()) {
         lines.remove(0);
     }
-    while lines.last().map_or(false, |l| l.trim().is_empty()) {
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
     }
     if lines.is_empty() {
-        return ParsedTable { headers: vec![], aligns: vec![], rows: vec![] };
+        return ParsedTable {
+            headers: vec![],
+            aligns: vec![],
+            rows: vec![],
+        };
     }
 
     let header_cells = split_table_row(lines[0]);
@@ -62,9 +61,16 @@ pub(crate) fn parse_table(text: &str, theme: &Theme) -> ParsedTable {
         rows.push(row_cells);
     }
 
-    let headers: Vec<_> = header_cells.iter().map(|c| parse_inline(c, theme)).collect();
+    let headers: Vec<_> = header_cells
+        .iter()
+        .map(|c| parse_inline(c, theme))
+        .collect();
 
-    ParsedTable { headers, aligns, rows }
+    ParsedTable {
+        headers,
+        aligns,
+        rows,
+    }
 }
 
 /// Lay out a parsed table into styled ratatui lines with box-drawing borders.
@@ -89,7 +95,9 @@ pub(crate) fn compose_table(
     let raw_widths: Vec<usize> = (0..num_cols)
         .map(|col| {
             let hw = cell_text_width(&table.headers.get(col));
-            let rw = table.rows.iter()
+            let rw = table
+                .rows
+                .iter()
                 .map(|r| cell_text_width(&r.get(col)))
                 .max()
                 .unwrap_or(0);
@@ -103,25 +111,30 @@ pub(crate) fn compose_table(
     // Pre-wrap each cell's content.
     let header_wrapped: Vec<Vec<Vec<Span<'static>>>> = (0..num_cols)
         .map(|col| {
-            let runs = table.headers.get(col)
-                .cloned()
-                .unwrap_or_default();
+            let runs = table.headers.get(col).cloned().unwrap_or_default();
             wrap_styled(&runs, col_widths[col] as u16)
         })
         .collect();
 
-    let rows_wrapped: Vec<Vec<Vec<Vec<Span<'static>>>>> = table.rows.iter().map(|row| {
-        (0..num_cols).map(|col| {
-            let runs = row.get(col).cloned().unwrap_or_default();
-            wrap_styled(&runs, col_widths[col] as u16)
-        }).collect()
-    }).collect();
+    let rows_wrapped: Vec<Vec<Vec<Vec<Span<'static>>>>> = table
+        .rows
+        .iter()
+        .map(|row| {
+            (0..num_cols)
+                .map(|col| {
+                    let runs = row.get(col).cloned().unwrap_or_default();
+                    wrap_styled(&runs, col_widths[col] as u16)
+                })
+                .collect()
+        })
+        .collect();
 
     // Find the height of each row (max lines across columns).
     let header_height = header_wrapped.iter().map(|c| c.len()).max().unwrap_or(1);
-    let row_heights: Vec<usize> = rows_wrapped.iter().map(|row| {
-        row.iter().map(|c| c.len()).max().unwrap_or(1)
-    }).collect();
+    let row_heights: Vec<usize> = rows_wrapped
+        .iter()
+        .map(|row| row.iter().map(|c| c.len()).max().unwrap_or(1))
+        .collect();
 
     let border_style = theme.table_border;
     let header_style = theme.table_header;
@@ -179,10 +192,18 @@ fn fit_widths(raw: &[usize], available: usize) -> Vec<usize> {
         return raw.to_vec();
     }
     let ratio = available as f64 / total as f64;
-    raw.iter().map(|w| (*w as f64 * ratio).ceil() as usize).collect()
+    raw.iter()
+        .map(|w| (*w as f64 * ratio).ceil() as usize)
+        .collect()
 }
 
-fn border_line(widths: &[usize], left: &str, mid: &str, right: &str, style: Style) -> Line<'static> {
+fn border_line(
+    widths: &[usize],
+    left: &str,
+    mid: &str,
+    right: &str,
+    style: Style,
+) -> Line<'static> {
     let mut spans = vec![Span::styled(left.to_string(), style)];
     for (i, w) in widths.iter().enumerate() {
         if i > 0 {
@@ -245,7 +266,9 @@ fn render_narrow(table: &ParsedTable, max_width: u16, theme: &Theme) -> Vec<Line
             lines.push(Line::from(""));
         }
         for (col, cell) in row.iter().enumerate() {
-            let header = table.headers.get(col)
+            let header = table
+                .headers
+                .get(col)
                 .and_then(|h| h.first())
                 .map(|(t, _)| format!("{t}: "))
                 .unwrap_or_default();
@@ -277,44 +300,58 @@ fn split_table_row(line: &str) -> Vec<String> {
     }
     cells.push(current.trim().to_string());
     if let Some(first) = cells.first() {
-        if first.is_empty() && cells.len() > 1 { cells.remove(0); }
+        if first.is_empty() && cells.len() > 1 {
+            cells.remove(0);
+        }
     }
     if let Some(last) = cells.last() {
-        if last.is_empty() && cells.len() > 1 { cells.pop(); }
+        if last.is_empty() && cells.len() > 1 {
+            cells.pop();
+        }
     }
     cells
 }
 
 fn is_separator_row(line: &str) -> bool {
     let trimmed = line.trim();
-    trimmed.contains('|') && trimmed.contains('-')
-        && !trimmed.chars().any(|c| c != '|' && c != '-' && c != ':' && c != ' ')
+    trimmed.contains('|')
+        && trimmed.contains('-')
+        && !trimmed
+            .chars()
+            .any(|c| c != '|' && c != '-' && c != ':' && c != ' ')
 }
 
 fn parse_alignment_row(line: &str, _num_cols: usize) -> Vec<Align> {
-    split_table_row(line).iter().map(|cell| {
-        let cell = cell.trim();
-        match (cell.starts_with(':'), cell.ends_with(':')) {
-            (true, true) => Align::Center,
-            (false, true) => Align::Right,
-            _ => Align::Left,
-        }
-    }).collect()
+    split_table_row(line)
+        .iter()
+        .map(|cell| {
+            let cell = cell.trim();
+            match (cell.starts_with(':'), cell.ends_with(':')) {
+                (true, true) => Align::Center,
+                (false, true) => Align::Right,
+                _ => Align::Left,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn theme() -> Theme { Theme::dark() }
+    fn theme() -> Theme {
+        Theme::dark()
+    }
 
     #[test]
     fn test_parse_simple_table() {
         let text = "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |";
         let table = parse_table(text, &theme());
-        let all_headers: Vec<Vec<String>> = table.headers.iter().map(|cells| {
-            cells.iter().map(|(t, _)| t.clone()).collect()
-        }).collect();
+        let all_headers: Vec<Vec<String>> = table
+            .headers
+            .iter()
+            .map(|cells| cells.iter().map(|(t, _)| t.clone()).collect())
+            .collect();
         assert_eq!(all_headers, vec![vec!["A"], vec!["B"]]);
         assert_eq!(table.aligns, vec![Align::Left, Align::Left]);
         assert_eq!(table.rows.len(), 2);
@@ -333,7 +370,11 @@ mod tests {
         let table = parse_table(text, &theme());
         let lines = compose_table(&table, 80, &theme());
         assert!(lines.len() >= 5);
-        let first = lines[0].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        let first = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
         assert!(first.contains('┌'));
         let first_cell = &lines[1].spans;
         assert!(first_cell.iter().any(|s| s.content.contains("A")));

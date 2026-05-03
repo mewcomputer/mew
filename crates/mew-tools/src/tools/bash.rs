@@ -114,7 +114,8 @@ impl Tool for Bash {
                     }
                     else => None,
                 }
-            }).await;
+            })
+            .await;
 
             match line {
                 Ok(Some((l, _is_stderr))) => {
@@ -126,20 +127,24 @@ impl Tool for Bash {
                 }
                 Ok(None) => {}
                 Err(_) => {
-                    let _ = tokio::process::Command::new("kill")
-                        .arg(pid.to_string())
-                        .output()
-                        .await;
+                    std::mem::drop(tokio::spawn(
+                        tokio::process::Command::new("kill")
+                            .arg(pid.to_string())
+                            .output(),
+                    ));
                     return Err(ToolError::Execution("timeout".into()));
                 }
             }
         }
 
-        let status = tokio::time::timeout(timeout, child.wait()).await
+        let status = tokio::time::timeout(timeout, child.wait())
+            .await
             .map_err(|_| {
-                let _ = tokio::process::Command::new("kill")
-                    .arg(pid.to_string())
-                    .output();
+                std::mem::drop(tokio::spawn(
+                    tokio::process::Command::new("kill")
+                        .arg(pid.to_string())
+                        .output(),
+                ));
                 ToolError::Execution("timeout".into())
             })?
             .map_err(|e| ToolError::Execution(format!("wait failed: {}", e)))?;

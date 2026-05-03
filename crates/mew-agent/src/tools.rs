@@ -1,13 +1,10 @@
 use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 
-use mew_hooks::{
-    PermissionDecision, ToolCall as HookToolCall, ToolOutput,
-};
+use mew_hooks::{PermissionDecision, ToolCall as HookToolCall, ToolOutput};
 use mew_message::{
-    Message, Part, PartBase, PartId,
-    ToolCallPart, ToolResultPart, ToolState, ToolStateCompleted, ToolStateError,
-    ToolStateRunning, ToolTime,
+    Message, Part, PartBase, PartId, ToolCallPart, ToolResultPart, ToolState, ToolStateCompleted,
+    ToolStateError, ToolStateRunning, ToolTime,
 };
 use mew_tools::{Sensitivity, ToolCtx, ToolProgress};
 
@@ -234,9 +231,7 @@ impl Agent {
             let call_id2 = call_id.clone();
             tokio::spawn(async move {
                 let mut buf = String::new();
-                let mut tick = tokio::time::interval(
-                    tokio::time::Duration::from_millis(50),
-                );
+                let mut tick = tokio::time::interval(tokio::time::Duration::from_millis(50));
                 // Skip immediate first tick so first chunk isn't delayed.
                 tick.tick().await;
                 loop {
@@ -280,8 +275,7 @@ impl Agent {
                 call_id: tc.call_id.clone(),
                 cancel: self.cancel_token.child_token(),
                 progress_tx,
-                cwd: std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
                 dispatcher: Some(self.dispatcher.clone()),
             };
 

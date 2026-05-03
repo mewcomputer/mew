@@ -42,7 +42,9 @@ pub struct ToolDef {
 
 #[derive(Debug, Clone)]
 pub enum ProviderEvent {
-    PartStart { part: Part },
+    PartStart {
+        part: Part,
+    },
     PartDelta {
         part_id: PartId,
         field: &'static str,
@@ -127,7 +129,10 @@ pub fn classify_error(status_code: u16, body: &str) -> (ErrorKind, String) {
             ErrorKind::ProviderAuth,
             format!("authentication failed: {body}"),
         ),
-        429 => (ErrorKind::ProviderRateLimit, format!("rate limited: {body}")),
+        429 => (
+            ErrorKind::ProviderRateLimit,
+            format!("rate limited: {body}"),
+        ),
         500..=599 => (
             ErrorKind::ProviderOverload,
             format!("server error ({status_code}): {body}"),
@@ -150,8 +155,8 @@ pub fn classify_reason(status_code: u16) -> String {
 }
 
 pub mod imageutil {
-    use std::path::Path;
     use base64::Engine;
+    use std::path::Path;
 
     pub async fn resolve(url: &str) -> anyhow::Result<(String, String)> {
         if let Some(rest) = url.strip_prefix("data:") {
@@ -298,19 +303,31 @@ mod tests {
     fn test_classify_error() {
         assert_eq!(
             classify_error(401, "unauthorized"),
-            (ErrorKind::ProviderAuth, "authentication failed: unauthorized".to_string())
+            (
+                ErrorKind::ProviderAuth,
+                "authentication failed: unauthorized".to_string()
+            )
         );
         assert_eq!(
             classify_error(429, "too many requests"),
-            (ErrorKind::ProviderRateLimit, "rate limited: too many requests".to_string())
+            (
+                ErrorKind::ProviderRateLimit,
+                "rate limited: too many requests".to_string()
+            )
         );
         assert_eq!(
             classify_error(500, "internal error"),
-            (ErrorKind::ProviderOverload, "server error (500): internal error".to_string())
+            (
+                ErrorKind::ProviderOverload,
+                "server error (500): internal error".to_string()
+            )
         );
         assert_eq!(
             classify_error(400, "bad request"),
-            (ErrorKind::ProviderApi, "client error (400): bad request".to_string())
+            (
+                ErrorKind::ProviderApi,
+                "client error (400): bad request".to_string()
+            )
         );
     }
 }

@@ -54,7 +54,10 @@ impl Tool for Read {
             .map_err(|e| ToolError::Execution(format!("read failed: {}", e)))?;
 
         let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-        let limit = input.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+        let limit = input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
 
         let content = if offset > 0 || limit.is_some() {
             let lines: Vec<&str> = content.lines().collect();
@@ -109,7 +112,9 @@ mod tests {
     async fn test_read_offset_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        tokio::fs::write(&path, "line1\nline2\nline3\nline4").await.unwrap();
+        tokio::fs::write(&path, "line1\nline2\nline3\nline4")
+            .await
+            .unwrap();
 
         let tool = Read;
         let ctx = dummy_ctx(dir.path().to_path_buf());

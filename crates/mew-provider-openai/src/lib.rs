@@ -204,14 +204,10 @@ impl Adapter {
             body["tools"] = json!(tools);
         }
 
-        Ok(serde_json::to_vec(&body).map_err(ProviderError::Json)?)
+        serde_json::to_vec(&body).map_err(ProviderError::Json)
     }
 
-    async fn build_wire_message(
-        &self,
-        all: &[Message],
-        m: &Message,
-    ) -> Vec<serde_json::Value> {
+    async fn build_wire_message(&self, all: &[Message], m: &Message) -> Vec<serde_json::Value> {
         let mut out: Vec<serde_json::Value> = Vec::new();
 
         match m.role {
@@ -312,11 +308,7 @@ impl Adapter {
         out
     }
 
-    async fn read_stream(
-        dump: bool,
-        resp: reqwest::Response,
-        mut tx: mpsc::Sender<ProviderEvent>,
-    ) {
+    async fn read_stream(dump: bool, resp: reqwest::Response, mut tx: mpsc::Sender<ProviderEvent>) {
         let mut stream = resp.bytes_stream().eventsource();
 
         let mut current_text_part: Option<TextPart> = None;
@@ -374,7 +366,11 @@ impl Adapter {
 
             if delta.role.as_deref() == Some("assistant")
                 && current_text_part.is_none()
-                && delta.tool_calls.as_ref().map(|v| v.is_empty()).unwrap_or(true)
+                && delta
+                    .tool_calls
+                    .as_ref()
+                    .map(|v| v.is_empty())
+                    .unwrap_or(true)
             {
                 let part = new_text_part();
                 let _ = tx
@@ -389,7 +385,9 @@ impl Adapter {
                 if !content.is_empty() {
                     if let Some(rp) = current_reasoning_part.take() {
                         let _ = tx
-                            .send(ProviderEvent::PartEnd { part_id: rp.base.id })
+                            .send(ProviderEvent::PartEnd {
+                                part_id: rp.base.id,
+                            })
                             .await;
                     }
                     if let Some(tp) = &current_text_part {
@@ -430,13 +428,17 @@ impl Adapter {
             if let Some(tool_calls) = &delta.tool_calls {
                 if let Some(rp) = current_reasoning_part.take() {
                     let _ = tx
-                        .send(ProviderEvent::PartEnd { part_id: rp.base.id })
+                        .send(ProviderEvent::PartEnd {
+                            part_id: rp.base.id,
+                        })
                         .await;
                 }
                 for tc_delta in tool_calls {
                     let idx = tc_delta.index;
 
-                    if !current_tool_calls.contains_key(&idx) {
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        current_tool_calls.entry(idx)
+                    {
                         let part = new_tool_call_part();
                         let acc = ToolCallAccumulator {
                             part: part.clone(),
@@ -450,7 +452,7 @@ impl Adapter {
                                 part: Part::ToolCall(part),
                             })
                             .await;
-                        current_tool_calls.insert(idx, acc);
+                        e.insert(acc);
                     }
 
                     let acc = current_tool_calls.get_mut(&idx).unwrap();
@@ -525,10 +527,18 @@ impl Adapter {
         finish: Finish,
     ) {
         if let Some(tp) = current_text_part.take() {
-            let _ = tx.send(ProviderEvent::PartEnd { part_id: tp.base.id }).await;
+            let _ = tx
+                .send(ProviderEvent::PartEnd {
+                    part_id: tp.base.id,
+                })
+                .await;
         }
         if let Some(rp) = current_reasoning_part.take() {
-            let _ = tx.send(ProviderEvent::PartEnd { part_id: rp.base.id }).await;
+            let _ = tx
+                .send(ProviderEvent::PartEnd {
+                    part_id: rp.base.id,
+                })
+                .await;
         }
         for (_, mut acc) in std::mem::take(current_tool_calls) {
             acc.finalize();
@@ -810,7 +820,10 @@ mod tests {
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "Describe this image");
         assert_eq!(content[1]["type"], "image_url");
-        assert!(content[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
+        assert!(content[1]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
     }
 
     // -----------------------------------------------------------------------
@@ -823,15 +836,12 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
-        let fixture = std::fs::read_to_string("src/testdata/text-only.sse")
-            .expect("read text-only fixture");
+        let fixture =
+            std::fs::read_to_string("src/testdata/text-only.sse").expect("read text-only fixture");
 
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_raw(fixture, "text/event-stream"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(fixture, "text/event-stream"))
             .mount(&mock_server)
             .await;
 
@@ -856,10 +866,22 @@ mod tests {
         }
 
         // Should have PartStart(Text), PartDelta(text) x3, PartEnd, MessageEnd
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartStart { .. })));
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartDelta { field: "text", .. })));
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartEnd { .. })));
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::MessageEnd { finish: Finish::Stop, .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::PartStart { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::PartDelta { field: "text", .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::PartEnd { .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProviderEvent::MessageEnd {
+                finish: Finish::Stop,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
@@ -868,15 +890,12 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock_server = MockServer::start().await;
-        let fixture = std::fs::read_to_string("src/testdata/tool-call.sse")
-            .expect("read tool-call fixture");
+        let fixture =
+            std::fs::read_to_string("src/testdata/tool-call.sse").expect("read tool-call fixture");
 
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_raw(fixture, "text/event-stream"),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(fixture, "text/event-stream"))
             .mount(&mock_server)
             .await;
 
@@ -902,9 +921,25 @@ mod tests {
 
         println!("events: {events:?}");
 
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartStart { .. })));
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartDelta { field: "arguments", .. })));
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartDelta { field: "call_id", .. })));
-        assert!(events.iter().any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::PartStart { .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProviderEvent::PartDelta {
+                field: "arguments",
+                ..
+            }
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProviderEvent::PartDelta {
+                field: "call_id",
+                ..
+            }
+        )));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
     }
 }

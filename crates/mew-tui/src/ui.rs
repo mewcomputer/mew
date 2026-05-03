@@ -69,17 +69,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         0
     };
 
-    let input_height = (app.input_line_count().max(1).min(12) + 2) as u16;
+    let input_height = (app.input_line_count().clamp(1, 12) + 2) as u16;
 
     // Vertical layout inside main area.
     let vert = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),                  // chat
-            Constraint::Length(1),               // divider
-            Constraint::Length(slash_height),     // slash autocomplete
-            Constraint::Length(input_height),     // input
-            Constraint::Length(1),               // status
+            Constraint::Min(1),               // chat
+            Constraint::Length(1),            // divider
+            Constraint::Length(slash_height), // slash autocomplete
+            Constraint::Length(input_height), // input
+            Constraint::Length(1),            // status
         ])
         .split(main_area);
 
@@ -155,7 +155,8 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                         let use_streaming = is_streaming && Some(part_idx) == last_text_part_idx;
                         let md_lines: Vec<ratatui::text::Line<'static>> = if use_streaming {
                             // Use the incremental markdown stream for the active text part.
-                            let mut highlighter = ratatui_mdstream::highlight::SyntectHighlighter::new();
+                            let mut highlighter =
+                                ratatui_mdstream::highlight::SyntectHighlighter::new();
                             fix_em_dashes(ratatui_mdstream::render_streaming(
                                 &app.md_state,
                                 md_width,
@@ -169,21 +170,30 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                 app.pending_md_rerender = None;
                             }
                             let cache = &mut app.rendered_md_cache;
-                            if let Some((cached_width, cached_text, cached_lines)) = cache.get(&msg.id) {
+                            if let Some((cached_width, cached_text, cached_lines)) =
+                                cache.get(&msg.id)
+                            {
                                 if cached_text == &tp.text && *cached_width == md_width {
                                     Rc::unwrap_or_clone(Rc::clone(cached_lines))
                                 } else {
                                     cache.remove(&msg.id);
                                     let lines = fix_em_dashes(ratatui_mdstream::render_markdown(
-                                        &tp.text, md_width, &MdTheme::dark(),
+                                        &tp.text,
+                                        md_width,
+                                        &MdTheme::dark(),
                                     ));
                                     let rc = Rc::new(lines);
-                                    cache.insert(msg.id, (md_width, tp.text.clone(), Rc::clone(&rc)));
+                                    cache.insert(
+                                        msg.id,
+                                        (md_width, tp.text.clone(), Rc::clone(&rc)),
+                                    );
                                     Rc::unwrap_or_clone(rc)
                                 }
                             } else {
                                 let lines = fix_em_dashes(ratatui_mdstream::render_markdown(
-                                    &tp.text, md_width, &MdTheme::dark(),
+                                    &tp.text,
+                                    md_width,
+                                    &MdTheme::dark(),
                                 ));
                                 let rc = Rc::new(lines);
                                 cache.insert(msg.id, (md_width, tp.text.clone(), Rc::clone(&rc)));
@@ -251,7 +261,10 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                             area.width,
                             vec![
                                 Span::styled("      ", tool_bg_style),
-                                Span::styled(args, Style::default().fg(Color::DarkGray).bg(TOOL_BG)),
+                                Span::styled(
+                                    args,
+                                    Style::default().fg(Color::DarkGray).bg(TOOL_BG),
+                                ),
                             ],
                             tool_bg_style,
                         );
@@ -281,7 +294,11 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                             let line_count = lines.len();
 
                             if is_bash {
-                                let limit = if app.bash_expanded { BASH_LINES_EXPANDED } else { BASH_LINES_COLLAPSED };
+                                let limit = if app.bash_expanded {
+                                    BASH_LINES_EXPANDED
+                                } else {
+                                    BASH_LINES_COLLAPSED
+                                };
                                 let skip = line_count.saturating_sub(limit);
                                 if skip > 0 {
                                     push_tool_line(
@@ -311,7 +328,10 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                         vec![
                                             Span::styled("      ", tool_bg_style),
                                             Span::styled(
-                                                format!("... ({} more lines)", line_count - TOOL_LINES_MAX),
+                                                format!(
+                                                    "... ({} more lines)",
+                                                    line_count - TOOL_LINES_MAX
+                                                ),
                                                 Style::default().fg(Color::DarkGray).bg(TOOL_BG),
                                             ),
                                         ],
@@ -347,7 +367,10 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                     vec![
                                         Span::styled("      ", tool_bg_style),
                                         Span::styled(
-                                            format!("... ({} more lines)", diff_lines - DIFF_LINES_MAX),
+                                            format!(
+                                                "... ({} more lines)",
+                                                diff_lines - DIFF_LINES_MAX
+                                            ),
                                             Style::default().fg(Color::DarkGray).bg(TOOL_BG),
                                         ),
                                     ],
@@ -369,7 +392,9 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                     push_tool_edge(&mut text, area.width, false, TOOL_BG);
                 }
                 Part::File(fp) => {
-                    let name = fp.filename.as_deref()
+                    let name = fp
+                        .filename
+                        .as_deref()
                         .or_else(|| fp.url.rsplit('/').next())
                         .unwrap_or("file");
                     text.push_line(Line::from(vec![
@@ -427,12 +452,7 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     }
     if app.scroll < max_scroll {
         let indicator = Span::styled("↓", Style::default().fg(Color::Yellow));
-        let indicator_area = Rect::new(
-            area.x + area.width - 2,
-            area.y + area.height - 1,
-            2,
-            1,
-        );
+        let indicator_area = Rect::new(area.x + area.width - 2, area.y + area.height - 1, 2, 1);
         f.render_widget(Paragraph::new(Line::from(indicator)), indicator_area);
     }
 }
@@ -442,7 +462,8 @@ fn push_tool_line<'a>(text: &mut Text<'a>, width: u16, spans: Vec<Span<'a>>, pad
     let mut line = Line::from(spans);
     let used = line.width() as u16;
     if used < width {
-        line.spans.push(Span::styled(" ".repeat((width - used) as usize), pad_style));
+        line.spans
+            .push(Span::styled(" ".repeat((width - used) as usize), pad_style));
     }
     text.push_line(line);
 }
@@ -450,29 +471,41 @@ fn push_tool_line<'a>(text: &mut Text<'a>, width: u16, spans: Vec<Span<'a>>, pad
 /// Pre-process markdown lines: convert em dashes to double-width,
 /// preserving span styles and line-level backgrounds.
 fn fix_em_dashes(lines: Vec<ratatui::text::Line<'static>>) -> Vec<ratatui::text::Line<'static>> {
-    lines.into_iter().map(|line| {
-        let spans: Vec<Span> = line.spans.into_iter()
-            .map(|s| {
-                let content: String = if s.content.contains('\u{2014}') {
-                    s.content.chars()
-                        .map(|c| if c == '\u{2014}' { "— ".to_string() } else { c.to_string() })
-                        .collect()
-                } else {
-                    s.content.to_string()
-                };
-                Span::styled(content, s.style)
-            })
-            .collect();
-        let mut new_line = Line::from(spans);
-        new_line.style = line.style;
-        new_line
-    }).collect()
+    lines
+        .into_iter()
+        .map(|line| {
+            let spans: Vec<Span> = line
+                .spans
+                .into_iter()
+                .map(|s| {
+                    let content: String = if s.content.contains('\u{2014}') {
+                        s.content
+                            .chars()
+                            .map(|c| {
+                                if c == '\u{2014}' {
+                                    "— ".to_string()
+                                } else {
+                                    c.to_string()
+                                }
+                            })
+                            .collect()
+                    } else {
+                        s.content.to_string()
+                    };
+                    Span::styled(content, s.style)
+                })
+                .collect();
+            let mut new_line = Line::from(spans);
+            new_line.style = line.style;
+            new_line
+        })
+        .collect()
 }
 
 /// Compute display width of a string using Unicode standard widths.
 fn display_width(s: &str) -> usize {
     s.chars()
-        .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as usize)
+        .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0))
         .sum()
 }
 
@@ -491,8 +524,17 @@ fn push_tool_edge(text: &mut Text<'_>, width: u16, is_top: bool, tool_bg: Color)
 }
 
 /// Push a single ANSI-parsed line with indent and tool background padding.
-fn push_ansi_line<'a>(text: &mut Text<'a>, width: u16, mut line: Line<'static>, indent: &str, tool_bg: Color) {
-    let mut spans = vec![Span::styled(indent.to_string(), Style::default().bg(tool_bg))];
+fn push_ansi_line<'a>(
+    text: &mut Text<'a>,
+    width: u16,
+    mut line: Line<'static>,
+    indent: &str,
+    tool_bg: Color,
+) {
+    let mut spans = vec![Span::styled(
+        indent.to_string(),
+        Style::default().bg(tool_bg),
+    )];
     spans.extend(line.spans);
     line.spans = spans;
     line.style = Style::default().bg(tool_bg);
@@ -524,9 +566,10 @@ fn tool_call_label_and_color(app: &App, tc: &mew_message::ToolCallPart) -> (&'st
 fn tool_call_args_summary(tc: &mew_message::ToolCallPart) -> Option<String> {
     let input = tc.state.input();
     match tc.tool_name.as_str() {
-        "read" | "write" | "edit" => {
-            input.get("path").and_then(|v| v.as_str()).map(|s| s.to_string())
-        }
+        "read" | "write" | "edit" => input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         "bash" => input.get("command").and_then(|v| v.as_str()).map(|s| {
             if s.len() > 50 {
                 format!("{}...", &s[..50])
@@ -541,7 +584,10 @@ fn tool_call_args_summary(tc: &mew_message::ToolCallPart) -> Option<String> {
                 format!("'{}'", s)
             }
         }),
-        "glob" => input.get("pattern").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        "glob" => input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         "echo" => input.get("input").and_then(|v| v.as_str()).map(|s| {
             if s.len() > 40 {
                 format!("'{}...'", &s[..40])
@@ -594,7 +640,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         }
 
         let available = content_area.width as usize;
-        let (visible, col) = if display_width(line) <= available {
+        let (visible, _col) = if display_width(line) <= available {
             (*line, cursor_col.min(available))
         } else {
             let cursor_col_in_text = if li == cursor_line { cursor_col } else { 0 };
@@ -616,7 +662,8 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     }
 
     // Position cursor on the active line.
-    let cursor_x = content_area.x + prefix_width as u16 + cursor_col.min(content_area.width as usize) as u16;
+    let cursor_x =
+        content_area.x + prefix_width as u16 + cursor_col.min(content_area.width as usize) as u16;
     let cursor_y = content_area.y + cursor_line.min(content_area.height as usize) as u16;
     f.set_cursor_position((cursor_x, cursor_y));
 }
@@ -625,7 +672,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 fn byte_at_display_offset(s: &str, target_col: usize) -> usize {
     let mut col = 0usize;
     for (i, ch) in s.char_indices() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as usize;
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
         if col + w > target_col {
             return i;
         }
@@ -661,16 +708,31 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let left_spans = if app.esc_cancel_pending.is_some() {
-        vec![Span::styled("esc again to stop agent", Style::default().fg(Color::Yellow).bg(STATUS_BG))]
+        vec![Span::styled(
+            "esc again to stop agent",
+            Style::default().fg(Color::Yellow).bg(STATUS_BG),
+        )]
     } else if app.ctrl_c_quit_pending.is_some() {
-        vec![Span::styled("ctrl-c again to quit", Style::default().fg(Color::Red).bg(STATUS_BG))]
+        vec![Span::styled(
+            "ctrl-c again to quit",
+            Style::default().fg(Color::Red).bg(STATUS_BG),
+        )]
     } else if let Some(ref retry) = app.retry_status {
-        vec![Span::styled(retry.as_str(), Style::default().fg(Color::LightBlue).bg(STATUS_BG))]
+        vec![Span::styled(
+            retry.as_str(),
+            Style::default().fg(Color::LightBlue).bg(STATUS_BG),
+        )]
     } else {
         vec![
-            Span::styled(&status.model, Style::default().fg(Color::White).bg(STATUS_BG)),
+            Span::styled(
+                &status.model,
+                Style::default().fg(Color::White).bg(STATUS_BG),
+            ),
             Span::styled("  ", Style::default().bg(STATUS_BG)),
-            Span::styled(&status.provider, Style::default().fg(Color::DarkGray).bg(STATUS_BG)),
+            Span::styled(
+                &status.provider,
+                Style::default().fg(Color::DarkGray).bg(STATUS_BG),
+            ),
         ]
     };
     let right_width = display_width(&right) as u16;

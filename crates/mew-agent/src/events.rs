@@ -1,9 +1,7 @@
 use chrono::Utc;
 use tokio::sync::mpsc;
 
-use mew_message::{
-    AssistantMeta, Message, Part, PartId, Role, Time, Tokens,
-};
+use mew_message::{AssistantMeta, Message, Part, PartId, Role, Time, Tokens};
 use mew_provider::ProviderEvent;
 
 use crate::agent::Agent;
@@ -108,9 +106,7 @@ impl Agent {
                 let _ = ev_tx
                     .send(AgentEvent::Provider(ProviderEvent::Error(err.clone())))
                     .await;
-                let _ = ev_tx
-                    .send(AgentEvent::Error(err.message.clone()))
-                    .await;
+                let _ = ev_tx.send(AgentEvent::Error(err.message.clone())).await;
             }
         }
     }
@@ -133,14 +129,12 @@ impl Agent {
                         p.signature = Some(delta.to_string());
                     }
                 }
-                Part::ToolCall(ref mut p) => {
-                    match field {
-                        "arguments" => p.raw_input.push_str(delta),
-                        "call_id" => p.call_id.push_str(delta),
-                        "tool_name" => p.tool_name.push_str(delta),
-                        _ => {}
-                    }
-                }
+                Part::ToolCall(ref mut p) => match field {
+                    "arguments" => p.raw_input.push_str(delta),
+                    "call_id" => p.call_id.push_str(delta),
+                    "tool_name" => p.tool_name.push_str(delta),
+                    _ => {}
+                },
                 _ => {}
             }
         }

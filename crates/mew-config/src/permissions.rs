@@ -62,7 +62,10 @@ impl PermissionEngine {
         }
     }
 
-    pub fn new_with_skills(rules: Vec<PermissionRule>, skill_rules: Vec<SkillPermissionRule>) -> Self {
+    pub fn new_with_skills(
+        rules: Vec<PermissionRule>,
+        skill_rules: Vec<SkillPermissionRule>,
+    ) -> Self {
         Self {
             rules,
             skill_rules,
@@ -166,7 +169,10 @@ impl PermissionEngine {
 
     /// Record that a tool is allowed for the remainder of this session.
     pub async fn add_session_allow(&self, tool_name: &str) {
-        self.session_allows.lock().await.insert(tool_name.to_string());
+        self.session_allows
+            .lock()
+            .await
+            .insert(tool_name.to_string());
     }
 
     fn rule_applies(&self, rule: &PermissionRule, tool_name: &str) -> bool {
@@ -217,7 +223,11 @@ mod tests {
     async fn test_default_readonly_allow() {
         let engine = PermissionEngine::new(vec![]);
         let decision = engine
-            .check("read", &make_input("foo.rs"), mew_tools::Sensitivity::ReadOnly)
+            .check(
+                "read",
+                &make_input("foo.rs"),
+                mew_tools::Sensitivity::ReadOnly,
+            )
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce);
     }
@@ -226,7 +236,11 @@ mod tests {
     async fn test_default_mutating_prompt() {
         let engine = PermissionEngine::new(vec![]);
         let decision = engine
-            .check("write", &make_input("foo.rs"), mew_tools::Sensitivity::Mutating)
+            .check(
+                "write",
+                &make_input("foo.rs"),
+                mew_tools::Sensitivity::Mutating,
+            )
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::Prompt);
     }
@@ -235,7 +249,11 @@ mod tests {
     async fn test_dangerous_prompt() {
         let engine = PermissionEngine::new(vec![]);
         let decision = engine
-            .check("bash", &make_bash_input("ls"), mew_tools::Sensitivity::Dangerous)
+            .check(
+                "bash",
+                &make_bash_input("ls"),
+                mew_tools::Sensitivity::Dangerous,
+            )
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::Prompt);
     }
@@ -251,7 +269,11 @@ mod tests {
             },
         }]);
         let decision = engine
-            .check("read", &make_input("src/lib.rs"), mew_tools::Sensitivity::ReadOnly)
+            .check(
+                "read",
+                &make_input("src/lib.rs"),
+                mew_tools::Sensitivity::ReadOnly,
+            )
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce);
     }
@@ -267,7 +289,11 @@ mod tests {
             },
         }]);
         let decision = engine
-            .check("read", &make_input("readme.md"), mew_tools::Sensitivity::ReadOnly)
+            .check(
+                "read",
+                &make_input("readme.md"),
+                mew_tools::Sensitivity::ReadOnly,
+            )
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce); // default for ReadOnly
     }
@@ -283,7 +309,11 @@ mod tests {
             },
         }]);
         let decision = engine
-            .check("write", &make_input("/etc/passwd"), mew_tools::Sensitivity::Mutating)
+            .check(
+                "write",
+                &make_input("/etc/passwd"),
+                mew_tools::Sensitivity::Mutating,
+            )
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::Deny);
     }
@@ -303,7 +333,11 @@ mod tests {
             },
         ]);
         let decision = engine
-            .check("bash", &make_bash_input("ls"), mew_tools::Sensitivity::Dangerous)
+            .check(
+                "bash",
+                &make_bash_input("ls"),
+                mew_tools::Sensitivity::Dangerous,
+            )
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::Deny);
     }
@@ -319,12 +353,20 @@ mod tests {
             },
         }]);
         let decision = engine
-            .check("bash", &make_bash_input("git status"), mew_tools::Sensitivity::Dangerous)
+            .check(
+                "bash",
+                &make_bash_input("git status"),
+                mew_tools::Sensitivity::Dangerous,
+            )
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce);
 
         let decision = engine
-            .check("bash", &make_bash_input("rm -rf /"), mew_tools::Sensitivity::Dangerous)
+            .check(
+                "bash",
+                &make_bash_input("rm -rf /"),
+                mew_tools::Sensitivity::Dangerous,
+            )
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::Prompt);
     }
@@ -334,7 +376,11 @@ mod tests {
         let engine = PermissionEngine::new(vec![]);
         engine.add_session_allow("write").await;
         let decision = engine
-            .check("write", &make_input("foo.rs"), mew_tools::Sensitivity::Mutating)
+            .check(
+                "write",
+                &make_input("foo.rs"),
+                mew_tools::Sensitivity::Mutating,
+            )
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce);
     }
@@ -347,7 +393,11 @@ mod tests {
             r#match: MatchConditions::default(),
         }]);
         let decision = engine
-            .check("read", &make_input("foo.rs"), mew_tools::Sensitivity::ReadOnly)
+            .check(
+                "read",
+                &make_input("foo.rs"),
+                mew_tools::Sensitivity::ReadOnly,
+            )
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::Deny);
     }
@@ -358,7 +408,11 @@ mod tests {
 
         // First check without session allow should prompt
         let d1 = engine
-            .check("bash", &make_bash_input("ls"), mew_tools::Sensitivity::Dangerous)
+            .check(
+                "bash",
+                &make_bash_input("ls"),
+                mew_tools::Sensitivity::Dangerous,
+            )
             .await;
         assert_eq!(d1, mew_hooks::PermissionDecision::Prompt);
 
@@ -367,13 +421,21 @@ mod tests {
 
         // Second check should allow
         let d2 = engine
-            .check("bash", &make_bash_input("ls"), mew_tools::Sensitivity::Dangerous)
+            .check(
+                "bash",
+                &make_bash_input("ls"),
+                mew_tools::Sensitivity::Dangerous,
+            )
             .await;
         assert_eq!(d2, mew_hooks::PermissionDecision::AllowOnce);
 
         // Other tools should still prompt
         let d3 = engine
-            .check("write", &make_input("foo.rs"), mew_tools::Sensitivity::Mutating)
+            .check(
+                "write",
+                &make_input("foo.rs"),
+                mew_tools::Sensitivity::Mutating,
+            )
             .await;
         assert_eq!(d3, mew_hooks::PermissionDecision::Prompt);
     }
