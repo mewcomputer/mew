@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::io::Write as _;
 use std::sync::Arc;
-use tracing::warn;
+use tracing::{info, warn};
 
 use mew_agent::Agent;
 use mew_catalog::Catalog;
@@ -368,8 +368,40 @@ async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
     result
 }
 
-async fn run_acp_server(_provider: &str, _model: Option<String>, _raw: bool) -> Result<()> {
-    anyhow::bail!("acp server mode not yet implemented");
+async fn run_acp_server(provider_flag: &str, model_flag: Option<String>, raw: bool) -> Result<()> {
+    let cfg = mew_config::load().context("load config")?;
+    let cat = mew_catalog::load().await.ok();
+    let cat_ref = cat.as_ref();
+
+    let (provider_id, model_id) = resolve_model(&cfg, cat_ref, provider_flag, model_flag);
+
+    let provider =
+        build_provider(&cfg, cat_ref, &provider_id, &model_id, raw).context("build provider")?;
+
+    let dispatcher = Arc::new(NopDispatcher);
+    let skills_loader = mew_skills::Loader::new(std::env::current_dir().unwrap_or_default());
+    let skills = Arc::new(skills_loader.load().unwrap_or_default());
+    let tools = build_tools(skills);
+
+    let permission_engine = build_permission_engine(&cfg);
+
+    let mut agent = Agent::new(provider, dispatcher, None, tools, None);
+    agent.set_permission_engine(permission_engine);
+
+    if let Some(c) = cat_ref {
+        agent.supports_vision = c.supports_vision(&model_id);
+        agent.context_window = c.context_window(&model_id).max(0) as u32;
+        if let Some(m) = c.lookup(&model_id) {
+            agent.input_price = m.pricing.input;
+            agent.output_price = m.pricing.output;
+            agent.cache_read_price = m.pricing.cache_read;
+            agent.cache_write_price = m.pricing.cache_write;
+            agent.reasoning_price = m.pricing.reasoning;
+        }
+    }
+
+    info!("mew acp server starting, model={model_id}");
+    mew_acp::run_server(agent).await
 }
 
 fn build_skills_xml(skills: &[mew_skills::Skill]) -> String {

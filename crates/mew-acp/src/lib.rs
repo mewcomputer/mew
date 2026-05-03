@@ -270,7 +270,257 @@ impl AcpClient {
 }
 
 // ---------------------------------------------------------------------------
-// Notification translation
+// ACP Server — exposes mew's agent as an ACP service over stdio
+// ---------------------------------------------------------------------------
+
+use mew_agent::{Agent, Agent as AgentCore};
+
+/// Run an ACP server on stdin/stdout, using the provided agent.
+/// Reads JSON-RPC requests, runs the agent, and streams updates back.
+pub async fn run_server(agent: AgentCore) -> Result<()> {
+    let stdin = tokio::io::stdin();
+    let stdout = tokio::io::stdout();
+    let reader = BufReader::new(stdin);
+    let mut lines = reader.lines();
+    let mut stdout = tokio::io::BufWriter::new(stdout);
+
+    let mut session_id: Option<String> = None;
+    let agent = Arc::new(agent);
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        debug!("acp server ← {}", &line[..line.len().min(200)]);
+
+        let msg: RawMessage = match serde_json::from_str(&line) {
+            Ok(m) => m,
+            Err(e) => {
+                debug!("skip unparseable: {e}");
+                continue;
+            }
+        };
+
+        let method = msg.method.as_deref().unwrap_or("");
+        let resp_id = msg.id.unwrap_or(0);
+
+        match method {
+            "initialize" => {
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": resp_id,
+                    "result": {
+                        "protocolVersion": 1,
+                        "agentCapabilities": {
+                            "loadSession": false,
+                            "promptCapabilities": {
+                                "image": true
+                            },
+                            "sessionCapabilities": {}
+                        },
+                        "agentInfo": {
+                            "name": "mew",
+                            "title": "mew",
+                            "version": "0.1.0"
+                        }
+                    }
+                });
+                send_line(&mut stdout, &resp).await?;
+            }
+            "session/new" => {
+                let sid = format!("sess_{}", ulid::Ulid::new());
+                session_id = Some(sid.clone());
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": resp_id,
+                    "result": {
+                        "sessionId": sid
+                    }
+                });
+                send_line(&mut stdout, &resp).await?;
+            }
+            "session/prompt" => {
+                let Some(ref sid) = session_id else {
+                    send_error(&mut stdout, resp_id, -32602, "no session").await?;
+                    continue;
+                };
+
+                // Extract text from prompt params.
+                let text = msg
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("prompt"))
+                    .and_then(|p| p.get(0))
+                    .and_then(|c| c.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                info!("acp server: prompt \"{}\"", &text[..text.len().min(80)]);
+
+                let agent = agent.clone();
+                let sid = sid.clone();
+
+                // Run the agent and stream events back.
+                let rx = agent.run(text.to_string());
+                tokio::pin!(rx);
+
+                let mut stop_reason = "end_turn".to_string();
+                while let Some(event) = rx.recv().await {
+                    match &event {
+                        mew_agent::AgentEvent::Provider(pe) => match pe {
+                            mew_provider::ProviderEvent::PartStart { part } => {
+                                if let Part::Text(tp) = part {
+                                    let notif = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "method": "session/update",
+                                        "params": {
+                                            "sessionId": sid,
+                                            "update": {
+                                                "sessionUpdate": "agent_message_chunk",
+                                                "content": {
+                                                    "type": "text",
+                                                    "text": tp.text
+                                                }
+                                            }
+                                        }
+                                    });
+                                    send_line(&mut stdout, &notif).await?;
+                                }
+                            }
+                            mew_provider::ProviderEvent::MessageEnd { finish, .. } => {
+                                stop_reason = match finish {
+                                    mew_message::Finish::Stop => "end_turn".into(),
+                                    mew_message::Finish::Length => "max_tokens".into(),
+                                    mew_message::Finish::ToolUse => "end_turn".into(),
+                                    mew_message::Finish::Error => "refusal".into(),
+                                };
+                            }
+                            mew_provider::ProviderEvent::RetryWait {
+                                attempt,
+                                max_attempts,
+                                delay_secs,
+                                reason,
+                            } => {
+                                info!(
+                                    "acp server retry {}/{}: {} in {}s",
+                                    attempt, max_attempts, reason, delay_secs
+                                );
+                            }
+                            _ => {}
+                        },
+                        mew_agent::AgentEvent::ToolStart { call_id } => {
+                            let notif = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "method": "session/update",
+                                "params": {
+                                    "sessionId": sid,
+                                    "update": {
+                                        "sessionUpdate": "tool_call",
+                                        "toolCallId": call_id,
+                                        "title": call_id,
+                                        "status": "in_progress"
+                                    }
+                                }
+                            });
+                            send_line(&mut stdout, &notif).await?;
+                        }
+                        mew_agent::AgentEvent::ToolEnd {
+                            call_id,
+                            success,
+                        } => {
+                            let notif = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "method": "session/update",
+                                "params": {
+                                    "sessionId": sid,
+                                    "update": {
+                                        "sessionUpdate": "tool_call_update",
+                                        "toolCallId": call_id,
+                                        "status": if *success {
+                                            "completed"
+                                        } else {
+                                            "failed"
+                                        }
+                                    }
+                                }
+                            });
+                            send_line(&mut stdout, &notif).await?;
+                        }
+                        mew_agent::AgentEvent::Error(msg) => {
+                            let notif = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "method": "session/update",
+                                "params": {
+                                    "sessionId": sid,
+                                    "update": {
+                                        "sessionUpdate": "agent_message_chunk",
+                                        "content": {
+                                            "type": "text",
+                                            "text": format!("[mew] {msg}")
+                                        }
+                                    }
+                                }
+                            });
+                            send_line(&mut stdout, &notif).await?;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Send the final prompt response.
+                let resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": resp_id,
+                    "result": {
+                        "stopReason": stop_reason
+                    }
+                });
+                send_line(&mut stdout, &resp).await?;
+            }
+            "session/cancel" => {
+                // Note: cancellation token not exposed for acp server yet.
+                // Agent will complete naturally.
+                if let Some(ref sid) = session_id {
+                    info!("acp server: cancel session {sid}");
+                }
+            }
+            _ => {
+                debug!("acp server: unknown method {}", method);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn send_line(
+    w: &mut (impl tokio::io::AsyncWrite + Unpin),
+    val: &serde_json::Value,
+) -> Result<()> {
+    let line = serde_json::to_string(val)?;
+    debug!("acp server → {}", &line[..line.len().min(200)]);
+    w.write_all(line.as_bytes()).await?;
+    w.write_all(b"\n").await?;
+    w.flush().await?;
+    Ok(())
+}
+
+async fn send_error(
+    w: &mut (impl tokio::io::AsyncWrite + Unpin),
+    id: u64,
+    code: i64,
+    message: &str,
+) -> Result<()> {
+    let err = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message }
+    });
+    send_line(w, &err).await
+}
+
+// ---------------------------------------------------------------------------
+// Notification translation (client side: ACP → AgentEvent)
 // ---------------------------------------------------------------------------
 
 fn translate_notification(
@@ -330,5 +580,146 @@ fn translate_notification(
             }
         }
         _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mew_agent::AgentEvent;
+    use mew_message::Part;
+    use mew_provider::ProviderEvent;
+
+    #[test]
+    fn test_request_serialization() {
+        let req = Request {
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize".to_string(),
+            params: Some(serde_json::json!({"protocolVersion": 1})),
+        };
+        let line = serde_json::to_string(&req).unwrap();
+        assert!(line.contains("\"id\":1"));
+        assert!(line.contains("\"method\":\"initialize\""));
+        assert!(line.contains("\"protocolVersion\":1"));
+    }
+
+    #[test]
+    fn test_raw_message_parsing() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}"#;
+        let msg: RawMessage = serde_json::from_str(line).unwrap();
+        assert_eq!(msg.id, Some(1));
+        assert_eq!(
+            msg.result
+                .and_then(|v| v.get("stopReason").and_then(|s| s.as_str().map(String::from))),
+            Some("end_turn".to_string())
+        );
+    }
+
+    #[test]
+    fn test_raw_message_notification() {
+        let line = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}"#;
+        let msg: RawMessage = serde_json::from_str(line).unwrap();
+        assert_eq!(msg.method, Some("session/update".to_string()));
+        assert_eq!(msg.id, None);
+    }
+
+    #[test]
+    fn test_translate_text_chunk() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let msg = RawMessage {
+            id: None,
+            method: Some("session/update".to_string()),
+            params: Some(serde_json::json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {
+                        "type": "text",
+                        "text": "hello world"
+                    }
+                }
+            })),
+            result: None,
+            error: None,
+        };
+        translate_notification(&msg, &tx);
+        drop(tx);
+        // Verify there's an event in the channel.
+        let events: Vec<_> = rx.blocking_recv().into_iter().collect();
+        // Note: translate_notification uses try_send which may fail silently.
+        // The channel has capacity 1, so it should succeed.
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn test_translate_tool_call() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let msg = RawMessage {
+            id: None,
+            method: Some("session/update".to_string()),
+            params: Some(serde_json::json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_1",
+                    "title": "reading file",
+                    "kind": "read",
+                    "status": "pending"
+                }
+            })),
+            result: None,
+            error: None,
+        };
+        translate_notification(&msg, &tx);
+        drop(tx);
+        let events: Vec<_> = rx.blocking_recv().into_iter().collect();
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn test_translate_tool_call_update() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let msg = RawMessage {
+            id: None,
+            method: Some("session/update".to_string()),
+            params: Some(serde_json::json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_1",
+                    "status": "completed"
+                }
+            })),
+            result: None,
+            error: None,
+        };
+        translate_notification(&msg, &tx);
+        drop(tx);
+        let events: Vec<_> = rx.blocking_recv().into_iter().collect();
+        assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn test_translate_unknown_ignored() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let msg = RawMessage {
+            id: None,
+            method: Some("session/update".to_string()),
+            params: Some(serde_json::json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "unknown_type"
+                }
+            })),
+            result: None,
+            error: None,
+        };
+        translate_notification(&msg, &tx);
+        // Unknown types should not panic and not send events.
     }
 }
