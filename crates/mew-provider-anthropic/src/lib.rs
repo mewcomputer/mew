@@ -5,7 +5,8 @@ use mew_message::{
     Tokens, ToolCallPart, ToolState, ToolStatePending, ToolTime,
 };
 use mew_provider::{
-    classify_error, EventStream, Provider, ProviderError, ProviderEvent, Request, RetryPolicy,
+    classify_error, classify_reason, EventStream, Provider, ProviderError, ProviderEvent, Request,
+    RetryPolicy,
 };
 use serde_json::json;
 use tokio::io::AsyncBufReadExt;
@@ -67,6 +68,8 @@ impl Provider for Adapter {
             .build()?;
 
         let policy = RetryPolicy::default();
+        let (tx, rx) = mpsc::channel(128);
+        let mut retry_tx = tx.clone();
         let mut resp = None;
 
         for attempt in 0.. {
@@ -83,13 +86,27 @@ impl Provider for Adapter {
             let (backoff, retry) = policy.should_retry(status, attempt);
             if !retry {
                 let (kind, msg) = classify_error(status, &data);
+                let _ = retry_tx
+                    .send(ProviderEvent::Error(mew_message::MessageError {
+                        kind,
+                        message: msg.clone(),
+                    }))
+                    .await;
                 return Err(ProviderError::Classified { kind, message: msg });
             }
+            let _ = retry_tx
+                .send(ProviderEvent::RetryWait {
+                    attempt: attempt as u32 + 1,
+                    max_attempts: 4,
+                    delay_secs: backoff.as_secs(),
+                    reason: classify_reason(status),
+                })
+                .await;
             tokio::time::sleep(backoff).await;
         }
 
+        drop(retry_tx);
         let resp = resp.unwrap();
-        let (tx, rx) = mpsc::channel(128);
         let dump = self.dump;
         tokio::spawn(async move {
             Self::read_stream(dump, resp, tx).await;

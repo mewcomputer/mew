@@ -664,6 +664,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         vec![Span::styled("esc again to stop agent", Style::default().fg(Color::Yellow).bg(STATUS_BG))]
     } else if app.ctrl_c_quit_pending.is_some() {
         vec![Span::styled("ctrl-c again to quit", Style::default().fg(Color::Red).bg(STATUS_BG))]
+    } else if let Some(ref retry) = app.retry_status {
+        vec![Span::styled(retry.as_str(), Style::default().fg(Color::LightBlue).bg(STATUS_BG))]
     } else {
         vec![
             Span::styled(&status.model, Style::default().fg(Color::White).bg(STATUS_BG)),

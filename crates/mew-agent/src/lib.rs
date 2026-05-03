@@ -813,6 +813,22 @@ impl Agent {
                     }))
                     .await;
             }
+            ProviderEvent::RetryWait {
+                attempt,
+                max_attempts,
+                delay_secs,
+                reason,
+            } => {
+                // Forward retry info to TUI.
+                let _ = ev_tx
+                    .send(AgentEvent::Provider(ProviderEvent::RetryWait {
+                        attempt: *attempt,
+                        max_attempts: *max_attempts,
+                        delay_secs: *delay_secs,
+                        reason: reason.clone(),
+                    }))
+                    .await;
+            }
             ProviderEvent::Error(err) => {
                 if let Some(ref mut msg) = assistant_msg {
                     let now = Utc::now().timestamp_millis();

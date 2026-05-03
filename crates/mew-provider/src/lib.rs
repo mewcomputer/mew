@@ -56,6 +56,13 @@ pub enum ProviderEvent {
         usage: Tokens,
         cost: f64,
     },
+    /// The provider is waiting before retrying (rate limit / server error).
+    RetryWait {
+        attempt: u32,
+        max_attempts: u32,
+        delay_secs: u64,
+        reason: String,
+    },
     Error(mew_message::MessageError),
 }
 
@@ -130,6 +137,15 @@ pub fn classify_error(status_code: u16, body: &str) -> (ErrorKind, String) {
             format!("client error ({status_code}): {body}"),
         ),
         _ => (ErrorKind::Unknown, format!("http {status_code}: {body}")),
+    }
+}
+
+/// Map an HTTP status code to a human-readable retry reason.
+pub fn classify_reason(status_code: u16) -> String {
+    match status_code {
+        429 => "rate limited".into(),
+        500..=599 => "server overloaded".into(),
+        _ => format!("http {status_code}"),
     }
 }
 

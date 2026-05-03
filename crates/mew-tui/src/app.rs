@@ -97,6 +97,8 @@ pub struct App {
     pub esc_cancel_pending: Option<Instant>,
     /// Set on the first Ctrl-c press while streaming; second Ctrl-c within 1s exits.
     pub ctrl_c_quit_pending: Option<Instant>,
+    /// Current retry status for display in the status line.
+    pub retry_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,6 +231,7 @@ impl App {
             max_scroll: 0,
             esc_cancel_pending: None,
             ctrl_c_quit_pending: None,
+            retry_status: None,
         }
     }
 
@@ -905,6 +908,7 @@ impl App {
                     self.streaming = false;
                     self.esc_cancel_pending = None;
                     self.ctrl_c_quit_pending = None;
+                    self.retry_status = None;
                 }
                 self.status.input_tokens += usage.input;
                 self.status.output_tokens += usage.output;
@@ -913,10 +917,22 @@ impl App {
                     msg.time.completed = Some(chrono::Utc::now().timestamp_millis());
                 }
             }
+            AgentEvent::Provider(ProviderEvent::RetryWait {
+                attempt,
+                max_attempts,
+                delay_secs,
+                reason,
+            }) => {
+                self.retry_status = Some(format!(
+                    "retrying ({}/{}): {} in {}s",
+                    attempt, max_attempts, reason, delay_secs
+                ));
+            }
             AgentEvent::Provider(ProviderEvent::Error(err)) => {
                 self.streaming = false;
                 self.esc_cancel_pending = None;
                 self.ctrl_c_quit_pending = None;
+                self.retry_status = None;
                 self.push_synthetic_message(format!("Provider error: {}", err.message));
             }
             AgentEvent::PermissionRequest { call, tx } => {
