@@ -16,6 +16,7 @@ tokio-util = { workspace = true }
 thiserror = { workspace = true }
 globset = { workspace = true }
 ignore = { workspace = true }
+similar = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

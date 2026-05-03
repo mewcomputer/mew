@@ -70,6 +70,7 @@ impl Tool for Read {
         Ok(ToolOutput {
             output: content,
             error: String::new(),
+            diff: None,
         })
     }
 }

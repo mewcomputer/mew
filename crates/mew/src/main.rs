@@ -8,6 +8,7 @@ use mew_agent::Agent;
 use mew_catalog::Catalog;
 use mew_config::{Config, ProviderConfig};
 use mew_hooks::NopDispatcher;
+use mew_mcp::McpClient;
 use mew_message::{Finish, Part, PartId, Role};
 use mew_provider::Provider;
 use mew_provider_anthropic::Adapter as AnthropicAdapter;
@@ -70,19 +71,70 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Load runtime state for fallback defaults.
+    let state = mew_config::load_state().unwrap_or_default();
+
     match cli.command {
         Some(Commands::Run {
             provider,
             model,
             raw,
             prompt,
-        }) => run_cmd(provider, model, raw, prompt).await,
+        }) => {
+            let provider = if provider.is_empty() {
+                if state.last_provider.is_empty() {
+                    "opencode-zen".to_string()
+                } else {
+                    state.last_provider
+                }
+            } else {
+                provider
+            };
+            let model = model.or_else(|| {
+                if state.last_model.is_empty() {
+                    None
+                } else {
+                    Some(state.last_model)
+                }
+            });
+            run_cmd(provider, model, raw, prompt).await
+        }
         Some(Commands::Chat {
             provider,
             model,
             raw,
-        }) => chat_cmd(provider, model, raw).await,
-        None => chat_cmd("opencode-zen".to_string(), None, false).await,
+        }) => {
+            let provider = if provider.is_empty() {
+                if state.last_provider.is_empty() {
+                    "opencode-zen".to_string()
+                } else {
+                    state.last_provider
+                }
+            } else {
+                provider
+            };
+            let model = model.or_else(|| {
+                if state.last_model.is_empty() {
+                    None
+                } else {
+                    Some(state.last_model)
+                }
+            });
+            chat_cmd(provider, model, raw).await
+        }
+        None => {
+            let provider = if state.last_provider.is_empty() {
+                "opencode-zen".to_string()
+            } else {
+                state.last_provider
+            };
+            let model = if state.last_model.is_empty() {
+                None
+            } else {
+                Some(state.last_model)
+            };
+            chat_cmd(provider, model, false).await
+        }
     }
 }
 
@@ -102,6 +154,96 @@ fn build_permission_engine(cfg: &Config) -> Arc<mew_config::permissions::Permiss
     Arc::new(mew_config::permissions::PermissionEngine::new(
         cfg.permissions.rules.clone(),
     ))
+}
+
+/// Load MCP server configs from cwd/mcp.json (Claude-Code-compatible format).
+fn load_mcp_configs() -> Vec<mew_mcp::McpServerConfig> {
+    let path = std::env::current_dir()
+        .unwrap_or_default()
+        .join("mcp.json");
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(v) => {
+                    let servers = v.get("mcpServers").and_then(|s| s.as_object());
+                    match servers {
+                        Some(servers) => servers
+                            .iter()
+                            .map(|(name, cfg)| mew_mcp::McpServerConfig {
+                                name: name.clone(),
+                                url: cfg.get("url").and_then(|v| v.as_str()).map(String::from),
+                                command: cfg.get("command").and_then(|v| v.as_str()).map(String::from),
+                            args: cfg
+                                .get("args")
+                                .and_then(|v| v.as_array())
+                                .map(|a| a.iter().filter_map(|v: &serde_json::Value| v.as_str().map(String::from)).collect())
+                                    .unwrap_or_default(),
+                            })
+                            .collect(),
+                        None => Vec::new(),
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("failed to parse mcp.json: {}", e);
+                    Vec::new()
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Vec::new()
+        }
+        Err(e) => {
+            tracing::warn!("failed to read mcp.json: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// Connect to all configured MCP servers and discover their tools.
+async fn connect_mcp_servers(
+    configs: &[mew_mcp::McpServerConfig],
+) -> Vec<Arc<dyn mew_tools::Tool>> {
+    let mut tools: Vec<Arc<dyn mew_tools::Tool>> = Vec::new();
+
+    for cfg in configs {
+        let client = if let Some(ref url) = cfg.url {
+            match McpClient::connect_http(&cfg.name, url).await {
+                Ok(client) => client,
+                Err(e) => {
+                    tracing::warn!(server = %cfg.name, error = %e, "failed to connect to MCP server");
+                    continue;
+                }
+            }
+        } else if let Some(ref command) = cfg.command {
+            match McpClient::connect_stdio(&cfg.name, command, &cfg.args).await {
+                Ok(client) => client,
+                Err(e) => {
+                    tracing::warn!(server = %cfg.name, error = %e, "failed to connect to MCP server");
+                    continue;
+                }
+            }
+        } else {
+            tracing::warn!(server = %cfg.name, "MCP server has no url or command");
+            continue;
+        };
+
+        match client.list_tools().await {
+            Ok(mcp_tools) => {
+                let client = Arc::new(client);
+                for def in &mcp_tools {
+                    let name = def.qualified_name(&cfg.name);
+                    tools.push(Arc::new(mew_mcp::McpTool::new(&cfg.name, def, client.clone())));
+                    tracing::info!(tool = %name, server = %cfg.name, "registered MCP tool");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(server = %cfg.name, error = %e, "failed to list MCP tools");
+            }
+        }
+    }
+
+    tools
 }
 
 async fn run_cmd(
@@ -163,7 +305,15 @@ async fn run_tui(
         .context("open session")?;
 
     let dispatcher = Arc::new(NopDispatcher);
-    let tools = build_tools();
+    let mut tools = build_tools();
+
+    // Load MCP tools.
+    let mcp_configs = load_mcp_configs();
+    if !mcp_configs.is_empty() {
+        let mcp_tools = connect_mcp_servers(&mcp_configs).await;
+        tools.extend(mcp_tools);
+    }
+
     let permission_engine = build_permission_engine(cfg);
 
     // Load project context files.
@@ -185,6 +335,9 @@ async fn run_tui(
     app.status.model = model_id.clone();
     app.status.provider = provider_id.clone();
     app.status.session_id = session_id.clone();
+    if let Some(c) = cat {
+        app.status.context_window = c.context_window(&model_id) as u32;
+    }
     app.context_files = context_files;
     app.tools = tool_names;
 
@@ -197,7 +350,8 @@ async fn run_tui(
     crossterm::execute!(
         stdout,
         crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
+        crossterm::event::EnableMouseCapture,
+        crossterm::event::EnableBracketedPaste,
     )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
@@ -209,57 +363,44 @@ async fn run_tui(
     // Main loop.
     let result = loop {
         // Render.
-        if let Err(e) = terminal.draw(|f| mew_tui::ui::draw(f, &app)) {
+        if let Err(e) = terminal.draw(|f| mew_tui::ui::draw(f, &mut app)) {
             break Err(anyhow::anyhow!("draw error: {}", e));
         }
 
-        // Wait for events.
+        // Wait for at least one event.
         let event = match event_rx.recv().await {
             Some(e) => e,
             None => break Ok(()),
         };
 
+        // Process the first event.
+        let mut should_break = false;
         match event {
             mew_tui::Event::Input(crossterm_event) => {
-                if let crossterm::event::Event::Key(key) = crossterm_event {
-                    if let Some(action) = mew_tui::events::handle_key_event(&mut app, key) {
+                if let Some(action) = mew_tui::events::handle_input_event(&mut app, crossterm_event) {
                         match action {
                             mew_tui::events::Action::Submit(text) => {
-                                // Add user message to chat.
-                                app.messages.push(mew_message::Message {
-                                    id: ulid::Ulid::new(),
-                                    session_id: ulid::Ulid::new(),
-                                    role: Role::User,
-                                    parts: vec![Part::Text(mew_message::TextPart {
-                                        base: mew_message::PartBase {
-                                            id: ulid::Ulid::new(),
-                                            message_id: ulid::Ulid::new(),
-                                            session_id: ulid::Ulid::new(),
-                                        },
-                                        text: text.clone(),
-                                        synthetic: false,
-                                    })],
-                                    time: mew_message::Time {
-                                        created: chrono::Utc::now().timestamp_millis(),
-                                        completed: None,
-                                    },
-                                    assistant: None,
-                                });
+                                let cwd = std::env::current_dir().unwrap_or_default();
+                                let (enriched, attachments) = process_mentions(&text, &cwd, &mut app.context_files).await;
+                                app.messages.push(user_message(enriched.clone(), attachments.clone()));
                                 app.streaming = true;
-                                let agent_rx = agent.run(text);
+                                let agent_rx = agent.run_with_parts(enriched, attachments);
                                 event_loop.forward_agent_events(agent_rx);
                             }
                             mew_tui::events::Action::SlashCommand(text) => {
-                                match handle_slash_tui(&text).await {
-                                    SlashResult::Continue => {}
-                                    SlashResult::Quit => break Ok(()),
-                                    SlashResult::Clear => {
-                                        app.messages.clear();
+                                match app.handle_slash(&text) {
+                                    mew_tui::SlashResult::Continue => {}
+                                    mew_tui::SlashResult::Quit => should_break = true,
+                                    mew_tui::SlashResult::Clear => {
+                                        app.clear_messages();
+                                    }
+                                    mew_tui::SlashResult::Message(msg) => {
+                                        app.messages.push(synthetic_message(msg));
                                     }
                                 }
                             }
                             mew_tui::events::Action::Clear => {
-                                app.messages.clear();
+                                app.clear_messages();
                             }
                             mew_tui::events::Action::SwitchModel(new_model) => {
                                 let (new_provider_id, new_model_id) = if let Some(idx) = new_model.find('/') {
@@ -272,46 +413,20 @@ async fn run_tui(
                                         agent.provider = new_provider;
                                         app.status.model = new_model_id.to_string();
                                         app.status.provider = new_provider_id.to_string();
-                                        app.messages.push(mew_message::Message {
-                                            id: ulid::Ulid::new(),
-                                            session_id: ulid::Ulid::new(),
-                                            role: Role::Assistant,
-                                            parts: vec![Part::Text(mew_message::TextPart {
-                                                base: mew_message::PartBase {
-                                                    id: ulid::Ulid::new(),
-                                                    message_id: ulid::Ulid::new(),
-                                                    session_id: ulid::Ulid::new(),
-                                                },
-                                                text: format!("Switched to model: {}", new_model),
-                                                synthetic: true,
-                                            })],
-                                            time: mew_message::Time {
-                                                created: chrono::Utc::now().timestamp_millis(),
-                                                completed: Some(chrono::Utc::now().timestamp_millis()),
-                                            },
-                                            assistant: None,
-                                        });
+                                        if let Some(c) = cat {
+                                            app.status.context_window = c.context_window(new_model_id) as u32;
+                                        }
+                                        let state = mew_config::State {
+                                            last_model: new_model_id.to_string(),
+                                            last_provider: new_provider_id.to_string(),
+                                        };
+                                        if let Err(e) = mew_config::save_state(&state) {
+                                            tracing::warn!("failed to save state: {}", e);
+                                        }
+                                        app.messages.push(synthetic_message(format!("switched to {}", new_model)));
                                     }
                                     Err(e) => {
-                                        app.messages.push(mew_message::Message {
-                                            id: ulid::Ulid::new(),
-                                            session_id: ulid::Ulid::new(),
-                                            role: Role::Assistant,
-                                            parts: vec![Part::Text(mew_message::TextPart {
-                                                base: mew_message::PartBase {
-                                                    id: ulid::Ulid::new(),
-                                                    message_id: ulid::Ulid::new(),
-                                                    session_id: ulid::Ulid::new(),
-                                                },
-                                                text: format!("Failed to switch model: {}", e),
-                                                synthetic: true,
-                                            })],
-                                            time: mew_message::Time {
-                                                created: chrono::Utc::now().timestamp_millis(),
-                                                completed: Some(chrono::Utc::now().timestamp_millis()),
-                                            },
-                                            assistant: None,
-                                        });
+                                        app.messages.push(synthetic_message(format!("failed to switch model: {}", e)));
                                     }
                                 }
                             }
@@ -319,16 +434,114 @@ async fn run_tui(
                                 agent.cancel_token.cancel();
                                 app.streaming = false;
                             }
-                            mew_tui::events::Action::Quit => break Ok(()),
+                            mew_tui::events::Action::Quit => should_break = true,
                         }
                     }
-                }
             }
             mew_tui::Event::Agent(event) => {
                 app.handle_agent_event(event);
             }
-            mew_tui::Event::Tick => {}
-            mew_tui::Event::Quit => break Ok(()),
+            mew_tui::Event::Tick => { app.tick(); }
+            mew_tui::Event::Quit => should_break = true,
+        }
+
+        if should_break {
+            break Ok(());
+        }
+
+        // Drain remaining events before next render (coalesces rapid input).
+        // When streaming, limit agent events per drain batch so text
+        // appears incrementally instead of all at once after a burst.
+        //
+        // Submit actions from the drain are deferred so @mention file reads
+        // (which are async) can run after the drain finishes.
+        let mut agent_drain_count = 0u32;
+        const STREAMING_DRAIN_LIMIT: u32 = 4;
+        let mut pending_drain_submit: Option<String> = None;
+        'drain: while let Ok(event) = event_rx.try_recv() {
+            match event {
+                mew_tui::Event::Input(crossterm_event) => {
+                    if let crossterm::event::Event::Mouse(ref mouse) = crossterm_event {
+                        match mouse.kind {
+                            crossterm::event::MouseEventKind::ScrollUp => {
+                                app.scroll_up(1);
+                                continue;
+                            }
+                            crossterm::event::MouseEventKind::ScrollDown => {
+                                app.scroll_down(1);
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(action) = mew_tui::events::handle_input_event(&mut app, crossterm_event) {
+                        match action {
+                            mew_tui::events::Action::Quit => {
+                                should_break = true;
+                                break 'drain;
+                            }
+                            mew_tui::events::Action::Submit(text) => {
+                                pending_drain_submit = Some(text);
+                                break 'drain;
+                            }
+                            mew_tui::events::Action::Cancel => {
+                                agent.cancel_token.cancel();
+                                app.streaming = false;
+                            }
+                            mew_tui::events::Action::Clear => {
+                                app.clear_messages();
+                            }
+                            mew_tui::events::Action::SlashCommand(text) => {
+                                match app.handle_slash(&text) {
+                                    mew_tui::SlashResult::Continue => {}
+                                    mew_tui::SlashResult::Quit => {
+                                        should_break = true;
+                                        break 'drain;
+                                    }
+                                    mew_tui::SlashResult::Clear => {
+                                        app.clear_messages();
+                                    }
+                                    mew_tui::SlashResult::Message(msg) => {
+                                        app.messages.push(synthetic_message(msg));
+                                    }
+                                }
+                            }
+                            mew_tui::events::Action::SwitchModel(_) => {
+                                // Model switches happen via the command palette, which
+                                // requires mode=CommandPalette. The palette is never
+                                // open during heavy streaming, so this branch is
+                                // effectively unreachable in the drain path.
+                            }
+                        }
+                    }
+                }
+                mew_tui::Event::Agent(event) => {
+                    app.handle_agent_event(event);
+                    agent_drain_count += 1;
+                    if app.streaming && agent_drain_count >= STREAMING_DRAIN_LIMIT {
+                        break 'drain;
+                    }
+                }
+                mew_tui::Event::Tick => { app.tick(); }
+                mew_tui::Event::Quit => {
+                    should_break = true;
+                    break 'drain;
+                },
+            }
+        }
+
+        // Process a Submit action deferred from the drain (needs async @mention reads).
+        if let Some(text) = pending_drain_submit {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let (enriched, attachments) = process_mentions(&text, &cwd, &mut app.context_files).await;
+            app.messages.push(user_message(enriched.clone(), attachments.clone()));
+            app.streaming = true;
+            let agent_rx = agent.run_with_parts(enriched, attachments);
+            event_loop.forward_agent_events(agent_rx);
+        }
+
+        if should_break {
+            break Ok(());
         }
 
         if app.should_quit {
@@ -341,29 +554,131 @@ async fn run_tui(
     crossterm::execute!(
         terminal.backend_mut(),
         crossterm::terminal::LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture
+        crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste,
     )?;
     terminal.show_cursor()?;
 
     result
 }
 
-enum SlashResult {
-    Continue,
-    Quit,
-    Clear,
+
+fn image_mime(path: &str) -> Option<&'static str> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase());
+    match ext.as_deref() {
+        Some("png")  => Some("image/png"),
+        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+        Some("gif")  => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        _ => None,
+    }
 }
 
-async fn handle_slash_tui(line: &str) -> SlashResult {
-    let parts: Vec<&str> = line.splitn(2, ' ').collect();
-    match parts[0] {
-        "/quit" | "/q" => SlashResult::Quit,
-        "/help" => {
-            // Help is shown inline as a system message.
-            SlashResult::Continue
+/// Resolve @mentions in `text`. Text files are inlined; image files become `Part::File`
+/// attachments. Returns the (possibly extended) text and any image parts.
+async fn process_mentions(
+    text: &str,
+    cwd: &std::path::Path,
+    context_files: &mut Vec<String>,
+) -> (String, Vec<Part>) {
+    let mentions = mew_tui::app::parse_file_mentions(text);
+    let mut enriched = text.to_string();
+    let mut attachments: Vec<Part> = Vec::new();
+
+    for path_str in &mentions {
+        let path = cwd.join(path_str);
+        if let Some(mime) = image_mime(path_str) {
+            let mention = format!("@{}", path_str);
+            enriched = enriched.replace(&mention, "");
+            if path.exists() {
+                let abs = path.canonicalize().unwrap_or(path.clone());
+                let filename = std::path::Path::new(path_str)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path_str)
+                    .to_string();
+                attachments.push(Part::File(mew_message::FilePart {
+                    base: mew_message::PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    mime: mime.to_string(),
+                    url: format!("file://{}", abs.display()),
+                    filename: Some(filename),
+                }));
+                if !context_files.contains(path_str) {
+                    context_files.push(path_str.clone());
+                }
+            } else {
+                enriched.push_str(&format!("\n\n[error reading {}: file not found]", path_str));
+            }
+        } else {
+            match tokio::fs::read_to_string(&path).await {
+                Ok(content) => {
+                    enriched.push_str(&format!("\n\n--- {} ---\n{}", path_str, content));
+                    if !context_files.contains(path_str) {
+                        context_files.push(path_str.clone());
+                    }
+                }
+                Err(e) => {
+                    enriched.push_str(&format!("\n\n[error reading {}: {}]", path_str, e));
+                }
+            }
         }
-        "/clear" => SlashResult::Clear,
-        _ => SlashResult::Continue,
+    }
+
+    (enriched, attachments)
+}
+
+fn user_message(text: String, attachments: Vec<Part>) -> mew_message::Message {
+    let msg_id = ulid::Ulid::new();
+    let mut parts = vec![Part::Text(mew_message::TextPart {
+        base: mew_message::PartBase {
+            id: ulid::Ulid::new(),
+            message_id: msg_id,
+            session_id: ulid::Ulid::new(),
+        },
+        text: text.clone(),
+        synthetic: false,
+    })];
+    parts.extend(attachments);
+    mew_message::Message {
+        id: msg_id,
+        session_id: ulid::Ulid::new(),
+        role: Role::User,
+        parts,
+        time: mew_message::Time {
+            created: chrono::Utc::now().timestamp_millis(),
+            completed: None,
+        },
+        assistant: None,
+    }
+}
+
+fn synthetic_message(text: String) -> mew_message::Message {
+    let msg_id = ulid::Ulid::new();
+    mew_message::Message {
+        id: msg_id,
+        session_id: ulid::Ulid::new(),
+        role: Role::Assistant,
+        parts: vec![Part::Text(mew_message::TextPart {
+            base: mew_message::PartBase {
+                id: ulid::Ulid::new(),
+                message_id: msg_id,
+                session_id: ulid::Ulid::new(),
+            },
+            text,
+            synthetic: true,
+        })],
+        time: mew_message::Time {
+            created: chrono::Utc::now().timestamp_millis(),
+            completed: Some(chrono::Utc::now().timestamp_millis()),
+        },
+        assistant: None,
     }
 }
 
@@ -466,7 +781,15 @@ async fn build_and_run(
         .context("open session")?;
 
     let dispatcher = Arc::new(NopDispatcher);
-    let tools = build_tools();
+    let mut tools = build_tools();
+
+    // Load MCP tools.
+    let mcp_configs = load_mcp_configs();
+    if !mcp_configs.is_empty() {
+        let mcp_tools = connect_mcp_servers(&mcp_configs).await;
+        tools.extend(mcp_tools);
+    }
+
     let permission_engine = build_permission_engine(cfg);
 
     let mut agent = Agent::new(provider, dispatcher, Some(session_writer), tools, None);
@@ -544,7 +867,16 @@ async fn build_and_run(
             mew_agent::AgentEvent::ToolEnd { call_id, success } => {
                 eprintln!("[tool end: {}] success={}", call_id, success);
             }
-            mew_agent::AgentEvent::PartUpdated { .. } => {}
+            mew_agent::AgentEvent::PartUpdated { part_id: _, part } => {
+                if let Part::ToolCall(tc) = &part {
+                    if let mew_message::ToolState::Completed(c) = &tc.state {
+                        if let Some(ref diff) = c.diff {
+                            eprintln!("[diff] {}", diff);
+                        }
+                    }
+                }
+            }
+            mew_agent::AgentEvent::ToolProgress { .. } => {}
             mew_agent::AgentEvent::Error(msg) => {
                 anyhow::bail!("agent error: {}", msg);
             }

@@ -43,6 +43,7 @@ impl Tool for Echo {
         Ok(ToolOutput {
             output: format!("echo: {}", s),
             error: String::new(),
+            diff: None,
         })
     }
 }

@@ -1,3 +1,4 @@
+use ansi_to_tui::IntoText as _;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
@@ -5,21 +6,36 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
+use ratatui_mdstream::Theme as MdTheme;
+use std::rc::Rc;
 
-use crate::app::{App, Mode, PermissionState, PickerState, ToolDisplayState, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH};
+use crate::app::{
+    App, Mode, PermissionState, PickerState, SlashCommand, ToolDisplayState, PICKER_VISIBLE_ITEMS,
+    SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH,
+};
 use mew_message::{Part, Role, ToolState};
 
-/// Background color for the input surface.
-const INPUT_BG: Color = Color::Rgb(35, 35, 38);
-/// Background color for the status line surface.
+/// Background color for the input and status line surface.
 const STATUS_BG: Color = Color::Rgb(30, 30, 33);
 /// Background color for the sidebar surface.
 const SIDEBAR_BG: Color = Color::Rgb(28, 28, 31);
+/// Background color for tool call blocks.
+const TOOL_BG: Color = Color::Rgb(34, 34, 38);
 /// Subtle divider color.
 const DIVIDER: Color = Color::Rgb(50, 50, 55);
+/// Max lines of bash output shown when collapsed.
+const BASH_LINES_COLLAPSED: usize = 10;
+/// Max lines of bash output shown when expanded.
+const BASH_LINES_EXPANDED: usize = 50;
+/// Max lines shown for non-bash tool output.
+const TOOL_LINES_MAX: usize = 20;
+/// Max lines of live streaming output shown while a tool is running.
+const TOOL_LINES_LIVE: usize = 5;
+/// Max lines of diff shown inline.
+const DIFF_LINES_MAX: usize = 30;
 
 /// Render the full UI.
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
     // Decide if sidebar fits.
@@ -44,21 +60,34 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let main_area = main_chunks[0];
 
+    // Check if slash autocomplete should show.
+    let slash_cmds = app.filtered_slash_commands();
+    let show_slash = app.mode == Mode::SlashCommand && !slash_cmds.is_empty();
+    let slash_height = if show_slash {
+        (slash_cmds.len() as u16 + 2).min(5)
+    } else {
+        0
+    };
+
     // Vertical layout inside main area.
     let vert = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),     // chat
-            Constraint::Length(1),  // divider
-            Constraint::Length(3),  // input (1 padding + 1 content + 1 padding)
-            Constraint::Length(1),  // status
+            Constraint::Min(1),              // chat
+            Constraint::Length(1),           // divider
+            Constraint::Length(slash_height), // slash autocomplete
+            Constraint::Length(3),           // input
+            Constraint::Length(1),           // status
         ])
         .split(main_area);
 
     draw_chat(f, app, vert[0]);
     draw_divider(f, vert[1]);
-    draw_input(f, app, vert[2]);
-    draw_status(f, app, vert[3]);
+    if show_slash {
+        draw_slash_autocomplete(f, app, &slash_cmds, vert[2]);
+    }
+    draw_input(f, app, vert[3]);
+    draw_status(f, app, vert[4]);
 
     if app.mode == Mode::PermissionPrompt {
         if let Some(ref perm) = app.permission {
@@ -73,31 +102,113 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
+fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     let mut text = Text::default();
+    let tool_bg_style = Style::default().bg(TOOL_BG);
+    let msg_count = app.messages.len();
+    let md_width = area.width.saturating_sub(2);
 
-    for msg in &app.messages {
+    // Invalidate markdown cache when terminal width changes.
+    if app.last_md_width != md_width {
+        app.rendered_md_cache.clear();
+        app.last_md_width = md_width;
+    }
+
+    for (msg_idx, msg) in app.messages.iter().enumerate() {
+        let is_last = msg_idx + 1 == msg_count;
+        let is_streaming = app.streaming && is_last;
         let (prefix, prefix_color, content_style) = match msg.role {
             Role::User => (">", Color::Cyan, Style::default().fg(Color::White)),
             Role::Assistant => ("", Color::Gray, Style::default().fg(Color::White)),
         };
 
-        for part in &msg.parts {
+        let mut message_had_content = false;
+
+        // Model attribution for assistant messages.
+        if msg.role == Role::Assistant {
+            if let Some(ref meta) = msg.assistant {
+                if !meta.provider_id.is_empty() && !meta.model_id.is_empty() {
+                    text.push_line(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            format!("{} / {}", meta.provider_id, meta.model_id),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                    message_had_content = true;
+                }
+            }
+        }
+
+        // Only the final text part in a streaming message uses live md_state.
+        // Earlier text parts (before tool calls) are already complete and should
+        // render from their accumulated text, not the streaming state.
+        let last_text_part_idx = msg.parts.iter().rposition(|p| matches!(p, Part::Text(_)));
+
+        for (part_idx, part) in msg.parts.iter().enumerate() {
             match part {
                 Part::Text(tp) => {
-                    for line in tp.text.lines() {
-                        let mut spans = Vec::new();
-                        if !prefix.is_empty() {
-                            spans.push(Span::styled(
-                                format!("{} ", prefix),
-                                Style::default().fg(prefix_color),
-                            ));
+                    if prefix.is_empty() {
+                        // Assistant text — render as markdown.
+                        let use_streaming = is_streaming && Some(part_idx) == last_text_part_idx;
+                        let md_lines: Vec<ratatui::text::Line<'static>> = if use_streaming {
+                            // Use the incremental markdown stream for the active text part.
+                            let mut highlighter = ratatui_mdstream::highlight::SyntectHighlighter::new();
+                            fix_em_dashes(ratatui_mdstream::render_streaming(
+                                &app.md_state,
+                                md_width,
+                                &MdTheme::dark(),
+                                &mut highlighter,
+                            ))
                         } else {
-                            spans.push(Span::raw("  "));
+                            // Use cached rendering for completed messages.
+                            if app.pending_md_rerender == Some(msg.id) {
+                                app.rendered_md_cache.remove(&msg.id);
+                                app.pending_md_rerender = None;
+                            }
+                            let cache = &mut app.rendered_md_cache;
+                            if let Some((cached_width, cached_text, cached_lines)) = cache.get(&msg.id) {
+                                if cached_text == &tp.text && *cached_width == md_width {
+                                    Rc::unwrap_or_clone(Rc::clone(cached_lines))
+                                } else {
+                                    cache.remove(&msg.id);
+                                    let lines = fix_em_dashes(ratatui_mdstream::render_markdown(
+                                        &tp.text, md_width, &MdTheme::dark(),
+                                    ));
+                                    let rc = Rc::new(lines);
+                                    cache.insert(msg.id, (md_width, tp.text.clone(), Rc::clone(&rc)));
+                                    Rc::unwrap_or_clone(rc)
+                                }
+                            } else {
+                                let lines = fix_em_dashes(ratatui_mdstream::render_markdown(
+                                    &tp.text, md_width, &MdTheme::dark(),
+                                ));
+                                let rc = Rc::new(lines);
+                                cache.insert(msg.id, (md_width, tp.text.clone(), Rc::clone(&rc)));
+                                Rc::unwrap_or_clone(rc)
+                            }
+                        };
+                        for line in md_lines {
+                            let mut new_line = Line::from(line.spans);
+                            new_line.spans.insert(0, Span::raw("  "));
+                            new_line.style = line.style;
+                            text.push_line(new_line);
                         }
-                        spans.push(Span::styled(line, content_style));
-                        text.push_line(Line::from(spans));
+                    } else {
+                        // User text — keep the > prefix. Em dash → two-em-dash for width.
+                        for line in tp.text.lines() {
+                            let display_line = line.replace('\u{2014}', "— ");
+                            let spans = vec![
+                                Span::styled(
+                                    format!("{} ", prefix),
+                                    Style::default().fg(prefix_color),
+                                ),
+                                Span::styled(display_line, content_style),
+                            ];
+                            text.push_line(Line::from(spans));
+                        }
                     }
+                    message_had_content = true;
                 }
                 Part::Reasoning(rp) => {
                     for line in rp.text.lines() {
@@ -106,70 +217,297 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
                             Span::styled(line, Style::default().fg(Color::DarkGray)),
                         ]));
                     }
+                    message_had_content = true;
                 }
                 Part::ToolCall(tc) => {
                     let (state_label, state_color) = tool_call_label_and_color(app, tc);
 
-                    text.push_line(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(
-                            format!("{} {}", state_label, tc.tool_name),
-                            Style::default().fg(state_color).add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
+                    // Top edge: half default bg, half tool bg.
+                    push_tool_edge(&mut text, area.width, true, TOOL_BG);
 
-                    // Show output if completed or errored.
-                    if let Some(ToolDisplayState::Completed(out)) = app.tool_states.get(&tc.base.id)
-                    {
-                        if !out.is_empty() {
-                            for line in out.lines().take(20) {
-                                text.push_line(Line::from(vec![
-                                    Span::raw("    "),
-                                    Span::raw(line),
-                                ]));
+                    // Tool name line.
+                    push_tool_line(
+                        &mut text,
+                        area.width,
+                        vec![
+                            Span::styled("  ", tool_bg_style),
+                            Span::styled(
+                                format!("{} {}", state_label, tc.tool_name),
+                                Style::default()
+                                    .fg(state_color)
+                                    .bg(TOOL_BG)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ],
+                        tool_bg_style,
+                    );
+
+                    // Args line.
+                    if let Some(args) = tool_call_args_summary(tc) {
+                        push_tool_line(
+                            &mut text,
+                            area.width,
+                            vec![
+                                Span::styled("      ", tool_bg_style),
+                                Span::styled(args, Style::default().fg(Color::DarkGray).bg(TOOL_BG)),
+                            ],
+                            tool_bg_style,
+                        );
+                    }
+                    message_had_content = true;
+
+                    // Partial output while running.
+                    if let ToolState::Running(ref running) = tc.state {
+                        if !running.output.is_empty() {
+                            let parsed = running.output.as_str().into_text().unwrap_or_default();
+                            let lines = parsed.lines;
+                            let skip = lines.len().saturating_sub(TOOL_LINES_LIVE);
+                            for line in lines.into_iter().skip(skip) {
+                                push_ansi_line(&mut text, area.width, line, "      ", TOOL_BG);
                             }
-                            let line_count = out.lines().count();
-                            if line_count > 20 {
-                                text.push_line(Line::from(vec![
-                                    Span::raw("    "),
-                                    Span::styled(
-                                        format!("... ({} more lines)", line_count - 20),
-                                        Style::default().fg(Color::DarkGray),
-                                    ),
-                                ]));
+                        }
+                    }
+
+                    // Completed output.
+                    if let Some(ToolDisplayState::Completed { output, diff }) =
+                        app.tool_states.get(&tc.base.id)
+                    {
+                        if !output.is_empty() {
+                            let parsed = output.as_str().into_text().unwrap_or_default();
+                            let is_bash = tc.tool_name == "bash";
+                            let lines = parsed.lines;
+                            let line_count = lines.len();
+
+                            if is_bash {
+                                let limit = if app.bash_expanded { BASH_LINES_EXPANDED } else { BASH_LINES_COLLAPSED };
+                                let skip = line_count.saturating_sub(limit);
+                                if skip > 0 {
+                                    push_tool_line(
+                                        &mut text,
+                                        area.width,
+                                        vec![
+                                            Span::styled("      ", tool_bg_style),
+                                            Span::styled(
+                                                format!("... ({} earlier lines)", skip),
+                                                Style::default().fg(Color::DarkGray).bg(TOOL_BG),
+                                            ),
+                                        ],
+                                        tool_bg_style,
+                                    );
+                                }
+                                for line in lines.into_iter().skip(skip) {
+                                    push_ansi_line(&mut text, area.width, line, "      ", TOOL_BG);
+                                }
+                            } else {
+                                for line in lines.into_iter().take(TOOL_LINES_MAX) {
+                                    push_ansi_line(&mut text, area.width, line, "      ", TOOL_BG);
+                                }
+                                if line_count > TOOL_LINES_MAX {
+                                    push_tool_line(
+                                        &mut text,
+                                        area.width,
+                                        vec![
+                                            Span::styled("      ", tool_bg_style),
+                                            Span::styled(
+                                                format!("... ({} more lines)", line_count - TOOL_LINES_MAX),
+                                                Style::default().fg(Color::DarkGray).bg(TOOL_BG),
+                                            ),
+                                        ],
+                                        tool_bg_style,
+                                    );
+                                }
+                            }
+                        }
+                        if let Some(diff) = diff {
+                            for line in diff.lines().take(DIFF_LINES_MAX) {
+                                let style = if line.starts_with('+') {
+                                    Style::default().fg(Color::Green).bg(TOOL_BG)
+                                } else if line.starts_with('-') {
+                                    Style::default().fg(Color::Red).bg(TOOL_BG)
+                                } else {
+                                    Style::default().fg(Color::DarkGray).bg(TOOL_BG)
+                                };
+                                push_tool_line(
+                                    &mut text,
+                                    area.width,
+                                    vec![
+                                        Span::styled("      ", tool_bg_style),
+                                        Span::styled(line, style),
+                                    ],
+                                    tool_bg_style,
+                                );
+                            }
+                            let diff_lines = diff.lines().count();
+                            if diff_lines > DIFF_LINES_MAX {
+                                push_tool_line(
+                                    &mut text,
+                                    area.width,
+                                    vec![
+                                        Span::styled("      ", tool_bg_style),
+                                        Span::styled(
+                                            format!("... ({} more lines)", diff_lines - DIFF_LINES_MAX),
+                                            Style::default().fg(Color::DarkGray).bg(TOOL_BG),
+                                        ),
+                                    ],
+                                    tool_bg_style,
+                                );
                             }
                         }
                     }
                     if let Some(ToolDisplayState::Error(err)) = app.tool_states.get(&tc.base.id) {
                         if !err.is_empty() {
-                            for line in err.lines() {
-                                text.push_line(Line::from(vec![
-                                    Span::raw("    "),
-                                    Span::styled(line, Style::default().fg(Color::Red)),
-                                ]));
+                            let parsed = err.as_str().into_text().unwrap_or_default();
+                            for line in parsed.lines {
+                                push_ansi_line(&mut text, area.width, line, "      ", TOOL_BG);
                             }
                         }
                     }
+
+                    // Bottom edge: half tool bg, half default bg.
+                    push_tool_edge(&mut text, area.width, false, TOOL_BG);
+                }
+                Part::File(fp) => {
+                    let name = fp.filename.as_deref()
+                        .or_else(|| fp.url.rsplit('/').next())
+                        .unwrap_or("file");
+                    text.push_line(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("[image]  ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(name.to_string(), Style::default().fg(Color::Cyan)),
+                    ]));
+                    message_had_content = true;
                 }
                 Part::ToolResult(_) => {}
                 _ => {}
             }
         }
 
-        text.push_line(Line::from(""));
+        if message_had_content {
+            text.push_line(Line::from(""));
+        }
     }
 
+    // Compute scroll offset. app.scroll is "lines scrolled up from bottom".
+    // Compute scroll. app.scroll is "lines from top", auto-scroll to bottom.
+    let total_lines = text.lines.len() as u16;
+    let max_scroll = total_lines.saturating_sub(area.height);
+    app.max_scroll = max_scroll;
+
+    if app.auto_scroll {
+        app.scroll = max_scroll;
+    }
+    let scroll_offset = app.scroll.min(max_scroll);
+
     let paragraph = Paragraph::new(text)
-        .wrap(Wrap { trim: true })
-        .scroll((app.scroll, 0));
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_offset, 0));
 
     f.render_widget(paragraph, area);
+
+    // Scrollbar (only when content overflows).
+    if total_lines > area.height {
+        let mut scrollbar_state = ScrollbarState::new(total_lines as usize)
+            .viewport_content_length(area.height as usize)
+            .position(scroll_offset as usize);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
+
+    // Scroll indicators.
+    if app.scroll > 0 {
+        let indicator = Span::styled("↑", Style::default().fg(Color::Yellow));
+        let indicator_area = Rect::new(area.x, area.y, 2, 1);
+        f.render_widget(Paragraph::new(Line::from(indicator)), indicator_area);
+    }
+    if app.scroll < max_scroll {
+        let indicator = Span::styled("↓", Style::default().fg(Color::Yellow));
+        let indicator_area = Rect::new(
+            area.x + area.width - 2,
+            area.y + area.height - 1,
+            2,
+            1,
+        );
+        f.render_widget(Paragraph::new(Line::from(indicator)), indicator_area);
+    }
+}
+
+/// Push a line into `text`, padding with spaces to `width` using `pad_style`.
+fn push_tool_line<'a>(text: &mut Text<'a>, width: u16, spans: Vec<Span<'a>>, pad_style: Style) {
+    let mut line = Line::from(spans);
+    let used = line.width() as u16;
+    if used < width {
+        line.spans.push(Span::styled(" ".repeat((width - used) as usize), pad_style));
+    }
+    text.push_line(line);
+}
+
+/// Pre-process markdown lines: convert em dashes to double-width,
+/// preserving span styles and line-level backgrounds.
+fn fix_em_dashes(lines: Vec<ratatui::text::Line<'static>>) -> Vec<ratatui::text::Line<'static>> {
+    lines.into_iter().map(|line| {
+        let spans: Vec<Span> = line.spans.into_iter()
+            .map(|s| {
+                let content: String = if s.content.contains('\u{2014}') {
+                    s.content.chars()
+                        .map(|c| if c == '\u{2014}' { "— ".to_string() } else { c.to_string() })
+                        .collect()
+                } else {
+                    s.content.to_string()
+                };
+                Span::styled(content, s.style)
+            })
+            .collect();
+        let mut new_line = Line::from(spans);
+        new_line.style = line.style;
+        new_line
+    }).collect()
+}
+
+/// Compute display width of a string using Unicode standard widths.
+fn display_width(s: &str) -> usize {
+    s.chars()
+        .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as usize)
+        .sum()
+}
+
+/// Push a half-block edge line to transition between the terminal default
+/// background and the tool call background.
+fn push_tool_edge(text: &mut Text<'_>, width: u16, is_top: bool, tool_bg: Color) {
+    if width == 0 {
+        return;
+    }
+    let ch = if is_top { '▄' } else { '▀' };
+    let style = Style::default().fg(tool_bg).bg(Color::Reset);
+    text.push_line(Line::from(vec![Span::styled(
+        ch.to_string().repeat(width as usize),
+        style,
+    )]));
+}
+
+/// Push a single ANSI-parsed line with indent and tool background padding.
+fn push_ansi_line<'a>(text: &mut Text<'a>, width: u16, mut line: Line<'static>, indent: &str, tool_bg: Color) {
+    let mut spans = vec![Span::styled(indent.to_string(), Style::default().bg(tool_bg))];
+    spans.extend(line.spans);
+    line.spans = spans;
+    line.style = Style::default().bg(tool_bg);
+    let used = line.width() as u16;
+    if used < width {
+        line.spans.push(Span::styled(
+            " ".repeat((width - used) as usize),
+            Style::default().bg(tool_bg),
+        ));
+    }
+    text.push_line(line);
 }
 
 fn tool_call_label_and_color(app: &App, tc: &mew_message::ToolCallPart) -> (&'static str, Color) {
     match app.tool_states.get(&tc.base.id) {
         Some(ToolDisplayState::Running) => ("▶", Color::Yellow),
-        Some(ToolDisplayState::Completed(_)) => ("✓", Color::Green),
+        Some(ToolDisplayState::Completed { .. }) => ("✓", Color::Green),
         Some(ToolDisplayState::Error(_)) => ("✗", Color::Red),
         None => match &tc.state {
             ToolState::Pending(_) => ("○", Color::Yellow),
@@ -177,6 +515,39 @@ fn tool_call_label_and_color(app: &App, tc: &mew_message::ToolCallPart) -> (&'st
             ToolState::Completed(_) => ("✓", Color::Green),
             ToolState::Error(_) => ("✗", Color::Red),
         },
+    }
+}
+
+/// Extract a short summary of the tool call's key argument for display.
+fn tool_call_args_summary(tc: &mew_message::ToolCallPart) -> Option<String> {
+    let input = tc.state.input();
+    match tc.tool_name.as_str() {
+        "read" | "write" | "edit" => {
+            input.get("path").and_then(|v| v.as_str()).map(|s| s.to_string())
+        }
+        "bash" => input.get("command").and_then(|v| v.as_str()).map(|s| {
+            if s.len() > 50 {
+                format!("{}...", &s[..50])
+            } else {
+                s.to_string()
+            }
+        }),
+        "grep" => input.get("pattern").and_then(|v| v.as_str()).map(|s| {
+            if s.len() > 40 {
+                format!("'{}...'", &s[..40])
+            } else {
+                format!("'{}'", s)
+            }
+        }),
+        "glob" => input.get("pattern").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        "echo" => input.get("input").and_then(|v| v.as_str()).map(|s| {
+            if s.len() > 40 {
+                format!("'{}...'", &s[..40])
+            } else {
+                format!("'{}'", s)
+            }
+        }),
+        _ => None,
     }
 }
 
@@ -190,45 +561,67 @@ fn draw_divider(f: &mut Frame, area: Rect) {
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let style = match app.mode {
-        Mode::SlashCommand => Style::default().fg(Color::Yellow).bg(INPUT_BG),
-        _ => Style::default().fg(Color::White).bg(INPUT_BG),
+        Mode::SlashCommand => Style::default().fg(Color::Yellow).bg(STATUS_BG),
+        _ => Style::default().fg(Color::White).bg(STATUS_BG),
     };
 
     // Fill the input area background.
-    let bg_block = Block::default().style(Style::default().bg(INPUT_BG));
+    let bg_block = Block::default().style(Style::default().bg(STATUS_BG));
     f.render_widget(bg_block, area);
 
     // Content is the middle row with horizontal padding.
-    let content_area = Rect::new(
-        area.x + 1,
-        area.y + 1,
-        area.width.saturating_sub(2),
-        1,
-    );
+    let content_area = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), 1);
 
-    let width = content_area.width as usize;
-    let visible = if app.input.len() <= width {
-        &app.input
+    let col_width = content_area.width as usize;
+    let prefix_width = 2usize; // "> " or "… "
+    let available = col_width.saturating_sub(prefix_width);
+
+    // Compute visible slice based on display width, safe on character boundaries.
+    let (visible, cursor_col) = if display_width(&app.input) <= available {
+        (&app.input[..], display_width(&app.input[..app.cursor]))
     } else {
-        let start = app.cursor.saturating_sub(width / 2);
-        let end = (start + width).min(app.input.len());
-        &app.input[start..end]
+        let cursor_col_in_text = display_width(&app.input[..app.cursor]);
+        let start_col = cursor_col_in_text.saturating_sub(available / 2);
+        let start_byte = byte_at_display_offset(&app.input, start_col);
+        let end_byte = byte_at_display_offset(&app.input, start_col + available);
+        (&app.input[start_byte..end_byte], cursor_col_in_text - start_col)
     };
 
     let prefix = if app.streaming {
-        Span::styled("… ", Style::default().fg(Color::Yellow).bg(INPUT_BG))
+        Span::styled("… ", Style::default().fg(Color::Yellow).bg(STATUS_BG))
     } else {
-        Span::styled("> ", Style::default().fg(Color::Cyan).bg(INPUT_BG))
+        Span::styled("> ", Style::default().fg(Color::Cyan).bg(STATUS_BG))
     };
 
     let text = Text::from(Line::from(vec![prefix, Span::styled(visible, style)]));
     let paragraph = Paragraph::new(text);
     f.render_widget(paragraph, content_area);
 
-    // Position cursor inside the padded content area.
-    let cursor_x = content_area.x + (app.cursor.min(width) as u16);
+    // Position cursor, accounting for prefix width.
+    let cursor_x = content_area.x + prefix_width as u16 + cursor_col.min(available) as u16;
     let cursor_y = content_area.y;
     f.set_cursor_position((cursor_x, cursor_y));
+}
+
+/// Find the byte offset into `s` that corresponds to the given display column.
+fn byte_at_display_offset(s: &str, target_col: usize) -> usize {
+    let mut col = 0usize;
+    for (i, ch) in s.char_indices() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as usize;
+        if col + w > target_col {
+            return i;
+        }
+        col += w;
+    }
+    s.len()
+}
+
+fn fmt_tokens(n: u32) -> String {
+    if n >= 1_000 {
+        format!("{:.1}k", n as f32 / 1_000.0)
+    } else {
+        format!("{}", n)
+    }
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
@@ -237,33 +630,88 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let bg = Block::default().style(Style::default().bg(STATUS_BG));
     f.render_widget(bg, area);
 
-    let left = format!("{}  ·  {}", status.provider, status.model);
-    let right = format!(
-        "{} tok  ·  ${:.2}",
-        status.input_tokens + status.output_tokens,
-        status.cost,
-    );
+    let total = status.input_tokens + status.output_tokens;
+    let right = if status.context_window > 0 {
+        format!(
+            "{} / {}k tok  ·  ${:.2}",
+            fmt_tokens(total),
+            status.context_window / 1_000,
+            status.cost,
+        )
+    } else {
+        format!("{} tok  ·  ${:.2}", fmt_tokens(total), status.cost)
+    };
 
-    let left_span = Span::styled(left, Style::default().fg(Color::Gray).bg(STATUS_BG));
+    let left_spans = if app.esc_cancel_pending.is_some() {
+        vec![Span::styled("esc again to stop agent", Style::default().fg(Color::Yellow).bg(STATUS_BG))]
+    } else {
+        vec![
+            Span::styled(&status.model, Style::default().fg(Color::White).bg(STATUS_BG)),
+            Span::styled("  ", Style::default().bg(STATUS_BG)),
+            Span::styled(&status.provider, Style::default().fg(Color::DarkGray).bg(STATUS_BG)),
+        ]
+    };
+    let right_width = display_width(&right) as u16;
     let right_span = Span::styled(right, Style::default().fg(Color::Gray).bg(STATUS_BG));
-
-    let left_para = Paragraph::new(Line::from(left_span));
+    let left_para = Paragraph::new(Line::from(left_spans));
     let right_para = Paragraph::new(Line::from(right_span)).alignment(Alignment::Right);
+    let inner = Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1);
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(right_width)])
+        .split(inner);
 
-    let left_area = Rect::new(area.x + 1, area.y, area.width / 2, 1);
-    let right_area = Rect::new(area.x + area.width / 2, area.y, area.width / 2 - 1, 1);
+    f.render_widget(left_para, chunks[0]);
+    f.render_widget(right_para, chunks[1]);
+}
 
-    f.render_widget(left_para, left_area);
-    f.render_widget(right_para, right_area);
+fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCommand], area: Rect) {
+    let bg = Block::default().style(Style::default().bg(STATUS_BG));
+    f.render_widget(bg, area);
+
+    let mut text = Text::default();
+    for (i, cmd) in cmds.iter().enumerate() {
+        let is_selected = i == app.slash_selected;
+        let name_style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White).bg(STATUS_BG)
+        };
+        let desc_style = if is_selected {
+            Style::default().fg(Color::Black).bg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray).bg(STATUS_BG)
+        };
+        text.push_line(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(&cmd.name, name_style),
+            Span::raw("  "),
+            Span::styled(&cmd.description, desc_style),
+        ]));
+    }
+
+    let inner = Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    f.render_widget(Paragraph::new(text), inner);
 }
 
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     let mut text = Text::default();
 
     // Header
-    text.push_line(Line::from(vec![
-        Span::styled("Context", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-    ]));
+    text.push_line(Line::from(vec![Span::styled(
+        "Context",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )]));
     text.push_line(Line::from(""));
 
     // Context files
@@ -293,9 +741,12 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     text.push_line(Line::from(""));
 
     // Tools
-    text.push_line(Line::from(vec![
-        Span::styled("Tools", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-    ]));
+    text.push_line(Line::from(vec![Span::styled(
+        "Tools",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )]));
     text.push_line(Line::from(""));
 
     if app.tools.is_empty() {
@@ -320,9 +771,12 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     text.push_line(Line::from(""));
 
     // Session
-    text.push_line(Line::from(vec![
-        Span::styled("Session", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-    ]));
+    text.push_line(Line::from(vec![Span::styled(
+        "Session",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )]));
     text.push_line(Line::from(""));
     text.push_line(Line::from(vec![
         Span::styled("  id  ", Style::default().fg(Color::DarkGray)),
@@ -340,7 +794,12 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
     ]));
 
     let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
-    let inner = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2));
+    let inner = Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
     f.render_widget(paragraph, inner);
 }
 
@@ -355,26 +814,41 @@ fn draw_permission_modal(f: &mut Frame, perm: &PermissionState, area: Rect) {
     f.render_widget(Clear, popup);
 
     // Solid background block, no border.
-    let bg = Block::default().style(Style::default().bg(INPUT_BG));
+    let bg = Block::default().style(Style::default().bg(STATUS_BG));
     f.render_widget(bg, popup);
 
-    let inner = Rect::new(popup.x + 2, popup.y + 1, popup.width.saturating_sub(4), popup.height.saturating_sub(2));
+    let inner = Rect::new(
+        popup.x + 2,
+        popup.y + 1,
+        popup.width.saturating_sub(4),
+        popup.height.saturating_sub(2),
+    );
 
     let tool_input = serde_json::to_string_pretty(&perm.input).unwrap_or_default();
     let text = Text::from(vec![
         Line::from(vec![
-            Span::styled("tool  ", Style::default().fg(Color::DarkGray).bg(INPUT_BG)),
-            Span::styled(&perm.tool_name, Style::default().fg(Color::White).bg(INPUT_BG).add_modifier(Modifier::BOLD)),
+            Span::styled("tool  ", Style::default().fg(Color::DarkGray).bg(STATUS_BG)),
+            Span::styled(
+                &perm.tool_name,
+                Style::default()
+                    .fg(Color::White)
+                    .bg(STATUS_BG)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("input", Style::default().fg(Color::DarkGray).bg(INPUT_BG)),
-        ]),
-        Line::from(Span::styled(tool_input, Style::default().fg(Color::Gray).bg(INPUT_BG))),
+        Line::from(vec![Span::styled(
+            "input",
+            Style::default().fg(Color::DarkGray).bg(STATUS_BG),
+        )]),
+        Line::from(Span::styled(
+            tool_input,
+            Style::default().fg(Color::Gray).bg(STATUS_BG),
+        )),
         Line::from(""),
         Line::from(Span::styled(
             "choose:",
-            Style::default().fg(Color::DarkGray).bg(INPUT_BG),
+            Style::default().fg(Color::DarkGray).bg(STATUS_BG),
         )),
     ]);
 
@@ -391,7 +865,7 @@ fn draw_permission_modal(f: &mut Frame, perm: &PermissionState, area: Rect) {
                 .bg(Color::White)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray).bg(INPUT_BG)
+            Style::default().fg(Color::Gray).bg(STATUS_BG)
         };
         option_lines.push(Span::styled(format!(" [{}] {}  ", key, label), style));
     }
@@ -407,7 +881,7 @@ fn draw_permission_modal(f: &mut Frame, perm: &PermissionState, area: Rect) {
 
 fn draw_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
     let width = 60u16.min(area.width.saturating_sub(4));
-    let max_items = 8u16;
+    let max_items = PICKER_VISIBLE_ITEMS as u16;
     let height = (4 + max_items).min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
@@ -416,15 +890,23 @@ fn draw_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
     f.render_widget(Clear, popup);
 
     // Solid background, no border.
-    let bg = Block::default().style(Style::default().bg(INPUT_BG));
+    let bg = Block::default().style(Style::default().bg(STATUS_BG));
     f.render_widget(bg, popup);
 
-    let inner = Rect::new(popup.x + 2, popup.y + 1, popup.width.saturating_sub(4), popup.height.saturating_sub(2));
+    let inner = Rect::new(
+        popup.x + 2,
+        popup.y + 1,
+        popup.width.saturating_sub(4),
+        popup.height.saturating_sub(2),
+    );
 
     // Filter input at top.
     let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    let prefix = Span::styled("> ", Style::default().fg(Color::Cyan).bg(INPUT_BG));
-    let filter_text = Span::styled(&picker.filter, Style::default().fg(Color::White).bg(INPUT_BG));
+    let prefix = Span::styled("> ", Style::default().fg(Color::Cyan).bg(STATUS_BG));
+    let filter_text = Span::styled(
+        &picker.filter,
+        Style::default().fg(Color::White).bg(STATUS_BG),
+    );
     let filter_para = Paragraph::new(Line::from(vec![prefix, filter_text]));
     f.render_widget(filter_para, filter_area);
 
@@ -452,7 +934,12 @@ fn draw_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
     let mut list_text = Text::default();
 
     let start = picker.scroll;
-    for (i, item) in filtered.iter().enumerate().skip(start).take(list_area.height as usize) {
+    for (i, item) in filtered
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(list_area.height as usize)
+    {
         let is_selected = i == picker.selected;
         let label_style = if is_selected {
             Style::default()
@@ -460,28 +947,27 @@ fn draw_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
                 .bg(Color::White)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White).bg(INPUT_BG)
+            Style::default().fg(Color::White).bg(STATUS_BG)
         };
         let desc_style = if is_selected {
             Style::default().fg(Color::Black).bg(Color::White)
         } else {
-            Style::default().fg(Color::DarkGray).bg(INPUT_BG)
+            Style::default().fg(Color::DarkGray).bg(STATUS_BG)
         };
 
-        list_text.push_line(Line::from(vec![
-            Span::styled(&item.label, label_style),
-        ]));
+        list_text.push_line(Line::from(vec![Span::styled(&item.label, label_style)]));
         if !item.description.is_empty() {
-            list_text.push_line(Line::from(vec![
-                Span::styled(&item.description, desc_style),
-            ]));
+            list_text.push_line(Line::from(vec![Span::styled(
+                &item.description,
+                desc_style,
+            )]));
         }
     }
 
     if filtered.is_empty() {
         list_text.push_line(Line::from(Span::styled(
             "no results",
-            Style::default().fg(Color::DarkGray).bg(INPUT_BG),
+            Style::default().fg(Color::DarkGray).bg(STATUS_BG),
         )));
     }
 
@@ -494,17 +980,15 @@ fn draw_picker(f: &mut Frame, picker: &PickerState, area: Rect) {
             horizontal: 0,
             vertical: 0,
         });
+        let visible = list_area.height as usize;
         let mut scrollbar_state = ScrollbarState::new(filtered.len())
+            .viewport_content_length(visible)
             .position(picker.scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
             .track_symbol(Some("│"))
             .thumb_symbol("█");
-        f.render_stateful_widget(
-            scrollbar,
-            scrollbar_area,
-            &mut scrollbar_state,
-        );
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
 }

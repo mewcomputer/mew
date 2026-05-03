@@ -18,3 +18,7 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 ulid = { workspace = true }
 serde_json = { workspace = true }
+ansi-to-tui = { workspace = true }
+ratatui-mdstream = { workspace = true }
+mdstream = { workspace = true }
+unicode-width = "0.2"

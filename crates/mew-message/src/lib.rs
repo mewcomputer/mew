@@ -218,6 +218,8 @@ pub struct ToolStateCompleted {
     pub output: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
     pub time: ToolTime,
 }
 

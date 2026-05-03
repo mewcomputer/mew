@@ -1,0 +1,22 @@
+[package]
+name = "ratatui-mdstream"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = ["syntect"]
+syntect = ["dep:syntect", "dep:two-face"]
+
+[dependencies]
+ratatui = { workspace = true }
+mdstream = { workspace = true }
+unicode-width = { workspace = true }
+unicode-segmentation = { workspace = true }
+
+syntect = { workspace = true, optional = true }
+two-face = { workspace = true, optional = true }
+
+[dev-dependencies]
+crossterm = { workspace = true }

@@ -23,12 +23,14 @@ mew-catalog = { workspace = true }
 mew-context = { workspace = true }
 mew-hooks = { workspace = true }
 mew-tui = { workspace = true }
+mew-mcp = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 chrono = { workspace = true }
 
 tokio = { workspace = true }
 ulid = { workspace = true }
+serde_json = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }

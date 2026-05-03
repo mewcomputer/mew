@@ -37,6 +37,8 @@ pub enum AgentEvent {
     ToolEnd { call_id: String, success: bool },
     /// A part's content or state has changed (e.g. tool-call state transition).
     PartUpdated { part_id: PartId, part: Part },
+    /// A tool produced intermediate output while running.
+    ToolProgress { call_id: String, chunk: String },
     /// A terminal error occurred.
     Error(String),
 }
@@ -61,6 +63,11 @@ impl std::fmt::Debug for AgentEvent {
                 .debug_struct("PartUpdated")
                 .field("part_id", part_id)
                 .field("part", part)
+                .finish(),
+            AgentEvent::ToolProgress { call_id, chunk } => f
+                .debug_struct("ToolProgress")
+                .field("call_id", call_id)
+                .field("chunk", chunk)
                 .finish(),
             AgentEvent::Error(msg) => f.debug_tuple("Error").field(msg).finish(),
         }
@@ -120,11 +127,16 @@ impl Agent {
 
     /// Starts a single turn and returns a channel of agent events.
     pub fn run(&self, prompt: String) -> mpsc::Receiver<AgentEvent> {
+        self.run_with_parts(prompt, vec![])
+    }
+
+    /// Like `run`, but attaches additional parts (e.g. images) to the user message.
+    pub fn run_with_parts(&self, prompt: String, attachments: Vec<Part>) -> mpsc::Receiver<AgentEvent> {
         let (tx, rx) = mpsc::channel(256);
         let agent = self.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = agent.run_loop(prompt, tx).await {
+            if let Err(e) = agent.run_loop(prompt, attachments, tx).await {
                 tracing::error!("agent loop ended with error: {}", e);
             }
         });
@@ -139,22 +151,32 @@ impl Agent {
     async fn run_loop(
         &self,
         prompt: String,
+        attachments: Vec<Part>,
         ev_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let msg_id = Ulid::new();
+        let mut parts = vec![Part::Text(TextPart {
+            base: PartBase {
+                id: Ulid::new(),
+                message_id: msg_id,
+                session_id: self.session_id,
+            },
+            text: prompt,
+            synthetic: false,
+        })];
+        // Fix attachment IDs to reference this message, then append.
+        for mut attachment in attachments {
+            if let Part::File(ref mut fp) = attachment {
+                fp.base.message_id = msg_id;
+                fp.base.session_id = self.session_id;
+            }
+            parts.push(attachment);
+        }
         let user_msg = Message {
             id: msg_id,
             session_id: self.session_id,
             role: Role::User,
-            parts: vec![Part::Text(TextPart {
-                base: PartBase {
-                    id: Ulid::new(),
-                    message_id: msg_id,
-                    session_id: self.session_id,
-                },
-                text: prompt,
-                synthetic: false,
-            })],
+            parts,
             time: Time {
                 created: Utc::now().timestamp_millis(),
                 completed: None,
@@ -475,9 +497,20 @@ impl Agent {
                     .await;
 
                 let (progress_tx, mut progress_rx) = mpsc::channel::<ToolProgress>(16);
-                // Drain progress so the channel doesn't back-pressure the tool.
+                // Forward progress chunks to the TUI as they arrive.
+                let ev_tx2 = ev_tx.clone();
+                let call_id2 = call_id.clone();
                 tokio::spawn(async move {
-                    while progress_rx.recv().await.is_some() {}
+                    while let Some(progress) = progress_rx.recv().await {
+                        if let ToolProgress::OutputChunk(chunk) = progress {
+                            let _ = ev_tx2
+                                .send(AgentEvent::ToolProgress {
+                                    call_id: call_id2.clone(),
+                                    chunk,
+                                })
+                                .await;
+                        }
+                    }
                 });
 
                 let ctx = ToolCtx {
@@ -501,6 +534,7 @@ impl Agent {
                         ToolOutput {
                             output: String::new(),
                             error: e.to_string(),
+                            diff: None,
                         }
                     }
                 };
@@ -537,6 +571,7 @@ impl Agent {
                             input: input.clone(),
                             output: output.output.clone(),
                             metadata: None,
+                            diff: output.diff.clone(),
                             time: ToolTime {
                                 start: Utc::now().timestamp_millis(),
                                 end: Some(Utc::now().timestamp_millis()),
@@ -885,6 +920,7 @@ mod tests {
             Ok(ToolOutput {
                 output: input.to_string(),
                 error: String::new(),
+                diff: None,
             })
         }
     }
@@ -1026,6 +1062,7 @@ mod tests {
                 input: serde_json::Value::Null,
                 output: "done".into(),
                 metadata: None,
+                diff: None,
                 time: ToolTime {
                     start: now,
                     end: Some(now),

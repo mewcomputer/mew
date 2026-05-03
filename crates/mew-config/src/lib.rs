@@ -90,6 +90,54 @@ fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+fn state_path() -> PathBuf {
+    config_dir().join("state.toml")
+}
+
+/// Runtime state persisted between sessions.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct State {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub last_provider: String,
+}
+
+/// Reads state from the standard location.
+pub fn load_state() -> Result<State, ConfigError> {
+    load_state_from(&state_path())
+}
+
+/// Reads state from an arbitrary path (useful for tests).
+pub fn load_state_from(path: &std::path::Path) -> Result<State, ConfigError> {
+    debug!(?path, "loading state");
+
+    match std::fs::read_to_string(path) {
+        Ok(data) => {
+            let state: State = toml::from_str(&data)?;
+            Ok(state)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            debug!("state file not found, returning default");
+            Ok(State::default())
+        }
+        Err(e) => Err(ConfigError::Io(e)),
+    }
+}
+
+/// Writes state to the standard location.
+pub fn save_state(state: &State) -> Result<(), ConfigError> {
+    let path = state_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let data = toml::to_string_pretty(state)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&path, data)?;
+    debug!(?path, "state saved");
+    Ok(())
+}
+
 /// Resolves a credential reference.
 ///
 /// Resolution order:
@@ -171,5 +219,33 @@ mod tests {
         let cred = get_credential("opencode-zen").unwrap();
         assert_eq!(cred, "test-key-123");
         std::env::remove_var("MEW_CRED_OPENCODE_ZEN");
+    }
+
+    #[test]
+    fn test_state_default_empty() {
+        let state = State::default();
+        assert!(state.last_model.is_empty());
+        assert!(state.last_provider.is_empty());
+    }
+
+    #[test]
+    fn test_state_serde_roundtrip() {
+        let state = State {
+            last_model: "deepseek-v4-flash".into(),
+            last_provider: "opencode-zen".into(),
+        };
+        let serialized = toml::to_string_pretty(&state).unwrap();
+        let deserialized: State = toml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.last_model, "deepseek-v4-flash");
+        assert_eq!(deserialized.last_provider, "opencode-zen");
+    }
+
+    #[test]
+    fn test_state_load_missing_returns_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nonexistent_state.toml");
+        let state = load_state_from(&path).expect("load_state_from should not fail when file missing");
+        assert!(state.last_model.is_empty());
+        assert!(state.last_provider.is_empty());
     }
 }

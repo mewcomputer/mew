@@ -1,22 +1,22 @@
 [package]
-name = "mew-config"
+name = "mew-mcp"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
 [dependencies]
+mew-message = { workspace = true }
+mew-tools = { workspace = true }
+mew-hooks = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
-directories = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-keyring = "3"
-globset = { workspace = true }
-mew-hooks = { workspace = true }
-mew-tools = { workspace = true }
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 tempfile = "3"

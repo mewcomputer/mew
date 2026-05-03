@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "context7": {
+      "url": "https://mcp.context7.com/mcp"
+    },
+    "grep": {
+      "url": "https://mcp.grep.app"
+    },
+    "deepwiki": {
+      "url": "https://mcp.deepwiki.com"
+    },
+    "alphavantage": {
+      "url": "https://mcp.alphavantage.co/mcp"
+    }
+  }
+}

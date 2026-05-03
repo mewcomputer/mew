@@ -1,6 +1,7 @@
-use crate::{Sensitivity, Tool, ToolCtx, ToolError, ToolOutput};
+use crate::{Sensitivity, Tool, ToolCtx, ToolError, ToolOutput, ToolProgress};
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::io::AsyncBufReadExt;
 
 pub struct Bash;
 
@@ -51,7 +52,7 @@ impl Tool for Bash {
             .and_then(|v| v.as_u64())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        let child = tokio::process::Command::new("bash")
+        let mut child = tokio::process::Command::new("bash")
             .arg("-c")
             .arg(command)
             .current_dir(&ctx.cwd)
@@ -61,54 +62,98 @@ impl Tool for Bash {
             .map_err(|e| ToolError::Execution(format!("spawn failed: {}", e)))?;
 
         let pid = child.id().expect("child has no pid");
+
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let mut stdout_reader = tokio::io::BufReader::new(stdout).lines();
+        let mut stderr_reader = tokio::io::BufReader::new(stderr).lines();
+
+        let mut full_output = String::new();
+        let mut stdout_done = false;
+        let mut stderr_done = false;
         let timeout = tokio::time::Duration::from_secs(timeout_secs);
+        let deadline = tokio::time::Instant::now() + timeout;
 
-        let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
-
-        match result {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let exit_code = output.status.code().unwrap_or(-1);
-
-                let mut full_output = stdout.to_string();
-                if !stderr.is_empty() {
-                    if !full_output.is_empty() {
-                        full_output.push('\n');
-                    }
-                    full_output.push_str(&stderr);
-                }
-
-                let truncated = if full_output.len() > OUTPUT_TRUNCATE_AT {
-                    format!(
-                        "{}...[truncated {} chars]",
-                        &full_output[..OUTPUT_TRUNCATE_AT],
-                        full_output.len() - OUTPUT_TRUNCATE_AT
-                    )
-                } else {
-                    full_output
-                };
-
-                if output.status.success() {
-                    Ok(ToolOutput {
-                        output: truncated,
-                        error: String::new(),
-                    })
-                } else {
-                    Ok(ToolOutput {
-                        output: truncated,
-                        error: format!("exit code {}", exit_code),
-                    })
-                }
-            }
-            Ok(Err(e)) => Err(ToolError::Execution(format!("wait failed: {}", e))),
-            Err(_) => {
+        while !stdout_done || !stderr_done {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
                 let _ = tokio::process::Command::new("kill")
                     .arg(pid.to_string())
                     .output()
                     .await;
-                Err(ToolError::Execution("timeout".into()))
+                return Err(ToolError::Execution("timeout".into()));
             }
+
+            let line = tokio::time::timeout(remaining, async {
+                tokio::select! {
+                    line = stdout_reader.next_line(), if !stdout_done => {
+                        match line {
+                            Ok(Some(l)) => Some((l, false)),
+                            Ok(None) => { stdout_done = true; None }
+                            Err(_) => { stdout_done = true; None }
+                        }
+                    }
+                    line = stderr_reader.next_line(), if !stderr_done => {
+                        match line {
+                            Ok(Some(l)) => Some((l, true)),
+                            Ok(None) => { stderr_done = true; None }
+                            Err(_) => { stderr_done = true; None }
+                        }
+                    }
+                    else => None,
+                }
+            }).await;
+
+            match line {
+                Ok(Some((l, _is_stderr))) => {
+                    if !full_output.is_empty() {
+                        full_output.push('\n');
+                    }
+                    full_output.push_str(&l);
+                    let _ = ctx.progress_tx.send(ToolProgress::OutputChunk(l)).await;
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    let _ = tokio::process::Command::new("kill")
+                        .arg(pid.to_string())
+                        .output()
+                        .await;
+                    return Err(ToolError::Execution("timeout".into()));
+                }
+            }
+        }
+
+        let status = tokio::time::timeout(timeout, child.wait()).await
+            .map_err(|_| {
+                let _ = tokio::process::Command::new("kill")
+                    .arg(pid.to_string())
+                    .output();
+                ToolError::Execution("timeout".into())
+            })?
+            .map_err(|e| ToolError::Execution(format!("wait failed: {}", e)))?;
+
+        let truncated = if full_output.len() > OUTPUT_TRUNCATE_AT {
+            format!(
+                "{}...[truncated {} chars]",
+                &full_output[..OUTPUT_TRUNCATE_AT],
+                full_output.len() - OUTPUT_TRUNCATE_AT
+            )
+        } else {
+            full_output
+        };
+
+        if status.success() {
+            Ok(ToolOutput {
+                output: truncated,
+                error: String::new(),
+                diff: None,
+            })
+        } else {
+            Ok(ToolOutput {
+                output: truncated,
+                error: format!("exit code {}", status.code().unwrap_or(-1)),
+                diff: None,
+            })
         }
     }
 }

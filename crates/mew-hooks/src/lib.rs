@@ -22,6 +22,7 @@ pub struct ToolCall {
 pub struct ToolOutput {
     pub output: String,
     pub error: String,
+    pub diff: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

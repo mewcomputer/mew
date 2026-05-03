@@ -8,12 +8,14 @@ members = [
     "crates/mew-provider-fake",
     "crates/mew-agent",
     "crates/mew-tools",
+    "crates/mew-mcp",
     "crates/mew-config",
     "crates/mew-session",
     "crates/mew-catalog",
     "crates/mew-context",
     "crates/mew-hooks",
     "crates/mew-tui",
+    "crates/ratatui-mdstream",
 ]
 resolver = "2"
 
@@ -53,7 +55,7 @@ async-trait = "0.1"
 futures = "0.3"
 
 # tui
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = { version = "0.28", features = ["event-stream"] }
 
 # config
@@ -77,11 +79,26 @@ ignore = "0.4"
 # diff display
 similar = "2"
 
+# ansi parsing for ratatui
+ansi-to-tui = "8.0.1"
+
+# markdown streaming
+mdstream = "0.2"
+
+# text layout
+unicode-width = "0.2"
+unicode-segmentation = "1"
+
+# syntax highlighting
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+
 # internal crates (no version yet, path-based)
 mew-message = { path = "crates/mew-message" }
 mew-provider = { path = "crates/mew-provider" }
 mew-hooks = { path = "crates/mew-hooks" }
 mew-tools = { path = "crates/mew-tools" }
+mew-mcp = { path = "crates/mew-mcp" }
 mew-config = { path = "crates/mew-config" }
 mew-session = { path = "crates/mew-session" }
 mew-catalog = { path = "crates/mew-catalog" }
@@ -91,3 +108,4 @@ mew-tui = { path = "crates/mew-tui" }
 mew-provider-openai = { path = "crates/mew-provider-openai" }
 mew-provider-anthropic = { path = "crates/mew-provider-anthropic" }
 mew-provider-fake = { path = "crates/mew-provider-fake" }
+ratatui-mdstream = { path = "crates/ratatui-mdstream" }

@@ -73,14 +73,38 @@ impl Tool for Edit {
         }
 
         let new_content = content.replacen(old, new, 1);
-        tokio::fs::write(&path, new_content)
+        tokio::fs::write(&path, &new_content)
             .await
             .map_err(|e| ToolError::Execution(format!("write failed: {}", e)))?;
+
+        let diff = make_unified_diff(&content, &new_content, &path);
 
         Ok(ToolOutput {
             output: "replaced 1 occurrence".to_string(),
             error: String::new(),
+            diff: Some(diff),
         })
+    }
+}
+
+/// Build a compact unified diff of two file contents.
+fn make_unified_diff(old: &str, new: &str, path: &std::path::Path) -> String {
+    use similar::TextDiff;
+
+    let diff = TextDiff::from_lines(old, new);
+    let file_name = path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file");
+
+    let mut out = String::new();
+    for hunk in diff.unified_diff().context_radius(3).header(&file_name, &file_name).iter_hunks() {
+        out.push_str(&hunk.to_string());
+    }
+
+    if out.trim().is_empty() {
+        file_name.to_string()
+    } else {
+        out
     }
 }
 
@@ -153,5 +177,25 @@ mod tests {
         let result = tool.execute(ctx, input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("ambiguous"));
+    }
+
+    #[tokio::test]
+    async fn test_edit_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        tokio::fs::write(&path, "hello world").await.unwrap();
+
+        let tool = Edit;
+        let ctx = dummy_ctx(dir.path().to_path_buf());
+        let input = serde_json::json!({
+            "path": "test.txt",
+            "old_string": "world",
+            "new_string": "mew"
+        });
+        let result = tool.execute(ctx, input).await.unwrap();
+        assert!(result.diff.is_some());
+        let diff = result.diff.unwrap();
+        assert!(diff.contains("-hello world"));
+        assert!(diff.contains("+hello mew"));
     }
 }

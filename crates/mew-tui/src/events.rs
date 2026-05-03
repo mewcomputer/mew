@@ -1,4 +1,5 @@
-use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use std::time::Instant;
 use futures::StreamExt;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -38,7 +39,7 @@ impl EventLoop {
             loop {
                 match reader.next().await {
                     Some(Ok(event)) => {
-                        if matches!(event, CrosstermEvent::Key(_)) {
+                        if matches!(event, CrosstermEvent::Key(_) | CrosstermEvent::Mouse(_) | CrosstermEvent::Paste(_)) {
                             if tx.send(Event::Input(event)).await.is_err() {
                                 break;
                             }
@@ -78,6 +79,19 @@ impl EventLoop {
     }
 }
 
+/// Process any crossterm input event and return an action.
+pub fn handle_input_event(
+    app: &mut crate::app::App,
+    event: CrosstermEvent,
+) -> Option<Action> {
+    match event {
+        CrosstermEvent::Key(key) => handle_key_event(app, key),
+        CrosstermEvent::Mouse(mouse) => handle_mouse_event(app, mouse),
+        CrosstermEvent::Paste(text) => handle_paste_event(app, text),
+        _ => None,
+    }
+}
+
 /// Process a crossterm key event and return an action.
 pub fn handle_key_event(
     app: &mut crate::app::App,
@@ -87,6 +101,48 @@ pub fn handle_key_event(
         crate::app::Mode::PermissionPrompt => handle_permission_key(app, key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
         crate::app::Mode::Normal | crate::app::Mode::SlashCommand => handle_normal_key(app, key),
+    }
+}
+
+fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action> {
+    // If the whole paste is a path to an image, turn it into an @mention.
+    let candidate = text.trim().strip_prefix("file://").unwrap_or(text.trim());
+    let is_image = std::path::Path::new(candidate)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp"))
+        .unwrap_or(false);
+    let content = if is_image {
+        format!("@{}", candidate)
+    } else {
+        text
+    };
+    for c in content.chars() {
+        app.insert_char(c);
+    }
+    if app.input.starts_with('/') {
+        app.mode = crate::app::Mode::SlashCommand;
+    }
+    None
+}
+
+fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
+    // Only scroll chat in normal/slash modes.
+    if !matches!(app.mode, crate::app::Mode::Normal | crate::app::Mode::SlashCommand) {
+        return None;
+    }
+    match mouse.kind {
+        // Scroll wheel *up* → show *older* content (scroll up).
+        MouseEventKind::ScrollUp => {
+            app.scroll_up(1);
+            None
+        }
+        // Scroll wheel *down* → show *newer* content (scroll down).
+        MouseEventKind::ScrollDown => {
+            app.scroll_down(1);
+            None
+        }
+        _ => None,
     }
 }
 
@@ -128,8 +184,24 @@ fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Act
 }
 
 fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    // Any key other than Esc dismisses the pending-cancel hint.
+    if key.code != KeyCode::Esc {
+        app.esc_cancel_pending = None;
+    }
+
     // Global shortcuts.
     match key.code {
+        KeyCode::Esc => {
+            if app.streaming {
+                if app.esc_cancel_pending.is_some() {
+                    app.esc_cancel_pending = None;
+                    return Some(Action::Cancel);
+                } else {
+                    app.esc_cancel_pending = Some(Instant::now());
+                }
+            }
+            return None;
+        }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.streaming {
                 return Some(Action::Cancel);
@@ -150,12 +222,31 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.open_command_palette();
             return None;
         }
+        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.toggle_bash_expanded();
+            return None;
+        }
+        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.auto_scroll = true;
+            app.scroll = app.max_scroll;
+            return None;
+        }
         _ => {}
     }
 
     // Input handling.
     match key.code {
         KeyCode::Enter => {
+            // If slash autocomplete is showing, select the highlighted command.
+            if app.mode == crate::app::Mode::SlashCommand
+                && !app.filtered_slash_commands().is_empty()
+            {
+                app.apply_slash_completion();
+                if let Some(text) = app.submit_input() {
+                    return Some(Action::SlashCommand(text));
+                }
+                return None;
+            }
             if let Some(text) = app.submit_input() {
                 if text.starts_with('/') {
                     return Some(Action::SlashCommand(text));
@@ -164,11 +255,64 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             }
             None
         }
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cursor_home();
+            None
+        }
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cursor_end();
+            None
+        }
+        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cursor_right();
+            None
+        }
+        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.cursor_left();
+            None
+        }
+        // Ctrl+U: clear to beginning of line (macOS Cmd+Backspace sends this).
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.input.clear();
+            app.cursor = 0;
+            app.mode = crate::app::Mode::Normal;
+            None
+        }
+        // Ctrl+W: delete word backward (macOS Option+Delete sends this).
+        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Delete back to the previous word boundary.
+            let before = &app.input[..app.cursor];
+            let new_cursor = before
+                .trim_end_matches(|c: char| c.is_whitespace())
+                .rfind(|c: char| c.is_whitespace())
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            app.input.replace_range(new_cursor..app.cursor, "");
+            app.cursor = new_cursor;
+            if !app.input.starts_with('/') {
+                app.mode = crate::app::Mode::Normal;
+            }
+            None
+        }
         KeyCode::Char(c) => {
             app.insert_char(c);
             if app.input.starts_with('/') {
                 app.mode = crate::app::Mode::SlashCommand;
+                app.slash_selected = 0;
             }
+            None
+        }
+        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+            app.delete_word_left();
+            if !app.input.starts_with('/') {
+                app.mode = crate::app::Mode::Normal;
+            }
+            None
+        }
+        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::META) => {
+            app.input.clear();
+            app.cursor = 0;
+            app.mode = crate::app::Mode::Normal;
             None
         }
         KeyCode::Backspace => {
@@ -176,34 +320,69 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             if !app.input.starts_with('/') {
                 app.mode = crate::app::Mode::Normal;
             }
+            app.slash_selected = 0;
             None
         }
         KeyCode::Delete => {
             app.delete_char();
             None
         }
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+            app.cursor_word_left();
+            None
+        }
         KeyCode::Left => {
             app.cursor_left();
+            None
+        }
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+            app.cursor_word_right();
             None
         }
         KeyCode::Right => {
             app.cursor_right();
             None
         }
+        KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.auto_scroll = false;
+            app.scroll = 0;
+            None
+        }
         KeyCode::Home => {
             app.cursor_home();
+            None
+        }
+        KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.auto_scroll = true;
+            app.scroll = app.max_scroll;
             None
         }
         KeyCode::End => {
             app.cursor_end();
             None
         }
+        KeyCode::Tab if app.mode == crate::app::Mode::SlashCommand => {
+            app.apply_slash_completion();
+            None
+        }
         KeyCode::Up => {
-            app.history_up();
+            if app.mode == crate::app::Mode::SlashCommand && !app.filtered_slash_commands().is_empty() {
+                app.slash_prev();
+            } else if app.input.is_empty() {
+                app.scroll_up(1);
+            } else {
+                app.history_up();
+            }
             None
         }
         KeyCode::Down => {
-            app.history_down();
+            if app.mode == crate::app::Mode::SlashCommand && !app.filtered_slash_commands().is_empty() {
+                app.slash_next();
+            } else if app.input.is_empty() {
+                app.scroll_down(1);
+            } else {
+                app.history_down();
+            }
             None
         }
         KeyCode::PageUp => {
@@ -265,6 +444,13 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         }
         KeyCode::Char(c) => {
             app.picker_insert(c);
+            None
+        }
+        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::META) => {
+            if let Some(ref mut p) = app.picker {
+                p.filter.clear();
+                p.cursor = 0;
+            }
             None
         }
         KeyCode::Backspace => {

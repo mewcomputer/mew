@@ -75,6 +75,7 @@ impl Tool for Glob {
         Ok(ToolOutput {
             output: files.join("\n"),
             error: String::new(),
+            diff: None,
         })
     }
 }

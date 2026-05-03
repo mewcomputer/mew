@@ -1,12 +1,35 @@
 use mew_agent::AgentEvent;
-use mew_message::{Message, Part, PartId, Role, ToolState};
+use mew_message::{Message, MessageId, Part, PartId, Role, ToolState};
 use mew_provider::ProviderEvent;
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+pub use mdstream;
 
 /// Minimum terminal width to show the sidebar.
 pub const SIDEBAR_MIN_WIDTH: u16 = 120;
 /// Width of the sidebar in columns.
 pub const SIDEBAR_WIDTH: u16 = 32;
+/// Number of items visible in the picker list at once.
+pub const PICKER_VISIBLE_ITEMS: usize = 8;
+
+/// A single slash command definition.
+#[derive(Debug, Clone)]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+}
+
+/// Result of handling a slash command.
+pub enum SlashResult {
+    /// Command unknown; ignore.
+    Continue,
+    Quit,
+    Clear,
+    /// Display a message in the chat pane.
+    Message(String),
+}
 
 /// The application's main state.
 pub struct App {
@@ -16,8 +39,10 @@ pub struct App {
     pub input: String,
     /// Cursor position in the input buffer (byte offset).
     pub cursor: usize,
-    /// Scroll offset in the chat area (number of lines from bottom).
+    /// Scroll offset in the chat area (number of lines from top).
     pub scroll: u16,
+    /// Whether to auto-scroll to the bottom when content changes.
+    pub auto_scroll: bool,
     /// Current UI mode.
     pub mode: Mode,
     /// Status information.
@@ -30,6 +55,8 @@ pub struct App {
     pub history: Vec<String>,
     /// Current history index when navigating.
     pub history_index: Option<usize>,
+    /// Draft input saved when history navigation starts.
+    pub history_draft: Option<String>,
     /// Whether the agent is currently streaming.
     pub streaming: bool,
     /// Whether to exit the application.
@@ -42,6 +69,24 @@ pub struct App {
     pub models: Vec<(String, String)>,
     /// Active picker, if any.
     pub picker: Option<PickerState>,
+    /// Selected slash command suggestion index.
+    pub slash_selected: usize,
+    /// Whether bash output is expanded (shows all lines vs last 10).
+    pub bash_expanded: bool,
+    /// Message ID pending markdown re-render after streaming completes.
+    pub pending_md_rerender: Option<mew_message::MessageId>,
+    /// Incremental markdown render state.
+    pub md_state: mdstream::DocumentState,
+    /// Active markdown stream (set during streaming, taken on completion).
+    pub md_stream: Option<mdstream::MdStream>,
+    /// Cached rendered markdown lines by message ID.
+    pub rendered_md_cache: HashMap<MessageId, (u16, String, Rc<Vec<ratatui::text::Line<'static>>>)>,
+    /// Last render width for cache invalidation.
+    pub last_md_width: u16,
+    /// Max scroll offset from the most recent render, used to re-attach auto-scroll.
+    pub max_scroll: u16,
+    /// Set on the first Esc press while streaming; second Esc within the window cancels.
+    pub esc_cancel_pending: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +153,7 @@ pub struct Status {
     pub output_tokens: u32,
     pub cost: f64,
     pub session_id: String,
+    pub context_window: u32,
 }
 
 impl Default for Status {
@@ -119,6 +165,7 @@ impl Default for Status {
             output_tokens: 0,
             cost: 0.0,
             session_id: String::new(),
+            context_window: 0,
         }
     }
 }
@@ -137,16 +184,8 @@ pub struct PermissionState {
 #[derive(Debug, Clone)]
 pub enum ToolDisplayState {
     Running,
-    Completed(String),
+    Completed { output: String, diff: Option<String> },
     Error(String),
-}
-
-/// How the TUI was launched.
-pub enum RunMode {
-    /// Interactive chat.
-    Interactive,
-    /// Single prompt (used by `mew run`).
-    Single(String),
 }
 
 impl App {
@@ -156,18 +195,29 @@ impl App {
             input: String::new(),
             cursor: 0,
             scroll: 0,
+            auto_scroll: true,
             mode: Mode::Normal,
             status: Status::default(),
             permission: None,
             tool_states: HashMap::new(),
             history: Vec::new(),
             history_index: None,
+            history_draft: None,
             streaming: false,
             should_quit: false,
             context_files: Vec::new(),
             tools: Vec::new(),
             models: Vec::new(),
             picker: None,
+            slash_selected: 0,
+            bash_expanded: false,
+            pending_md_rerender: None,
+            md_state: mdstream::DocumentState::new(),
+            md_stream: None,
+            rendered_md_cache: HashMap::new(),
+            last_md_width: 0,
+            max_scroll: 0,
+            esc_cancel_pending: None,
         }
     }
 
@@ -260,7 +310,7 @@ impl App {
             let count = p.filtered().len();
             if count > 0 {
                 p.selected = (p.selected + 1).min(count - 1);
-                p.adjust_scroll(6);
+                p.adjust_scroll(PICKER_VISIBLE_ITEMS);
             }
         }
     }
@@ -269,7 +319,7 @@ impl App {
     pub fn picker_up(&mut self) {
         if let Some(ref mut p) = self.picker {
             p.selected = p.selected.saturating_sub(1);
-            p.adjust_scroll(6);
+            p.adjust_scroll(PICKER_VISIBLE_ITEMS);
         }
     }
 
@@ -279,7 +329,7 @@ impl App {
             p.cursor = p.filter[..p.cursor]
                 .char_indices()
                 .last()
-                .map(|(i, c)| i + c.len_utf8())
+                .map(|(i, _)| i)
                 .unwrap_or(0);
         }
     }
@@ -327,7 +377,7 @@ impl App {
             self.cursor = self.input[..self.cursor]
                 .char_indices()
                 .last()
-                .map(|(i, c)| i + c.len_utf8())
+                .map(|(i, _)| i)
                 .unwrap_or(0);
         }
     }
@@ -353,6 +403,65 @@ impl App {
         self.cursor = self.input.len();
     }
 
+    /// Move cursor to the previous word boundary.
+    pub fn cursor_word_left(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let before = &self.input[..self.cursor];
+        let chars: Vec<(usize, char)> = before.char_indices().collect();
+        if chars.len() < 2 {
+            self.cursor = 0;
+            return;
+        }
+
+        // Start from the character before cursor.
+        let mut i = chars.len() - 1;
+        let start_is_word = chars[i].1.is_alphanumeric();
+
+        // Skip word chars if we started on one, or skip non-word chars if we started on one.
+        while i > 0 && chars[i].1.is_alphanumeric() == start_is_word {
+            i -= 1;
+        }
+
+        // If we ended on a different kind, land on the boundary.
+        if chars[i].1.is_alphanumeric() != start_is_word {
+            self.cursor = chars[i + 1].0;
+        } else {
+            self.cursor = chars[i].0;
+        }
+    }
+
+    /// Move cursor to the next word boundary.
+    pub fn cursor_word_right(&mut self) {
+        if self.cursor >= self.input.len() {
+            return;
+        }
+        let after: Vec<(usize, char)> = self.input[self.cursor..]
+            .char_indices()
+            .collect();
+        if after.is_empty() {
+            return;
+        }
+
+        let start_is_word = after[0].1.is_alphanumeric();
+        let mut i = 0;
+
+        // Skip chars of the same kind.
+        while i + 1 < after.len() && after[i + 1].1.is_alphanumeric() == start_is_word {
+            i += 1;
+        }
+
+        self.cursor = self.cursor + after[i].0 + after[i].1.len_utf8();
+    }
+
+    /// Delete from cursor back to the previous word boundary.
+    pub fn delete_word_left(&mut self) {
+        let old_cursor = self.cursor;
+        self.cursor_word_left();
+        self.input.replace_range(self.cursor..old_cursor, "");
+    }
+
     /// Submit the current input, returning it if non-empty.
     pub fn submit_input(&mut self) -> Option<String> {
         let text = self.input.trim();
@@ -364,6 +473,7 @@ impl App {
         self.history_index = None;
         self.input.clear();
         self.cursor = 0;
+        self.mode = Mode::Normal;
         Some(result)
     }
 
@@ -378,8 +488,7 @@ impl App {
             None => self.history.len() - 1,
         };
         if self.history_index.is_none() {
-            // Save current draft.
-            // (simplified: we don't restore draft on history down)
+            self.history_draft = Some(self.input.clone());
         }
         self.history_index = Some(idx);
         self.input = self.history[idx].clone();
@@ -392,8 +501,8 @@ impl App {
             Some(i) if i + 1 < self.history.len() => i + 1,
             Some(_) => {
                 self.history_index = None;
-                self.input.clear();
-                self.cursor = 0;
+                self.input = self.history_draft.take().unwrap_or_default();
+                self.cursor = self.input.len();
                 return;
             }
             None => return,
@@ -403,14 +512,163 @@ impl App {
         self.cursor = self.input.len();
     }
 
-    /// Scroll chat up.
+    /// Scroll chat up (show older messages). Disables auto-scroll.
     pub fn scroll_up(&mut self, amount: u16) {
-        self.scroll = self.scroll.saturating_add(amount);
+        if self.auto_scroll {
+            // Anchor to the actual bottom before subtracting so the first
+            // scroll event is immediately visible even if the render hasn't
+            // updated app.scroll yet.
+            self.scroll = self.max_scroll;
+        }
+        self.auto_scroll = false;
+        self.scroll = self.scroll.saturating_sub(amount);
     }
 
-    /// Scroll chat down.
+    /// Scroll chat down (show newer messages). Re-attaches auto-scroll at bottom.
     pub fn scroll_down(&mut self, amount: u16) {
-        self.scroll = self.scroll.saturating_sub(amount);
+        self.scroll = self.scroll.saturating_add(amount);
+        if self.scroll >= self.max_scroll {
+            self.auto_scroll = true;
+        }
+    }
+
+    fn push_synthetic_message(&mut self, text: String) {
+        let msg_id = ulid::Ulid::new();
+        self.messages.push(Message {
+            id: msg_id,
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::Text(mew_message::TextPart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: msg_id,
+                    session_id: ulid::Ulid::new(),
+                },
+                text,
+                synthetic: true,
+            })],
+            time: mew_message::Time {
+                created: chrono::Utc::now().timestamp_millis(),
+                completed: Some(chrono::Utc::now().timestamp_millis()),
+            },
+            assistant: None,
+        });
+    }
+
+    /// Clear the chat display and all associated render state.
+    pub fn clear_messages(&mut self) {
+        self.messages.clear();
+        self.tool_states.clear();
+        self.rendered_md_cache.clear();
+        self.pending_md_rerender = None;
+    }
+
+    /// Toggle bash output expansion.
+    pub fn toggle_bash_expanded(&mut self) {
+        self.bash_expanded = !self.bash_expanded;
+    }
+
+    /// Expire the pending-cancel hint if it has been showing too long.
+    pub fn tick(&mut self) {
+        if let Some(since) = self.esc_cancel_pending {
+            if since.elapsed() > Duration::from_secs(2) {
+                self.esc_cancel_pending = None;
+            }
+        }
+    }
+
+    /// Available slash commands (single source of truth for autocomplete and handling).
+    pub fn slash_commands() -> Vec<SlashCommand> {
+        vec![
+            SlashCommand { name: "/clear".into(),  description: "clear chat".into() },
+            SlashCommand { name: "/cost".into(),   description: "show cost breakdown".into() },
+            SlashCommand { name: "/help".into(),   description: "show available commands".into() },
+            SlashCommand { name: "/quit".into(),   description: "exit mew".into() },
+        ]
+    }
+
+    /// Handle a slash command, returning what the caller should do.
+    pub fn handle_slash(&self, input: &str) -> SlashResult {
+        let cmd = input.splitn(2, ' ').next().unwrap_or(input);
+        match cmd {
+            "/quit" | "/q" => SlashResult::Quit,
+            "/clear"       => SlashResult::Clear,
+            "/cost"        => SlashResult::Message(self.build_cost_report()),
+            "/help"        => SlashResult::Message(self.build_help()),
+            _              => SlashResult::Continue,
+        }
+    }
+
+    fn build_cost_report(&self) -> String {
+        let mut total = 0f64;
+        let mut turns: Vec<(usize, f64)> = Vec::new();
+        for (i, msg) in self.messages.iter().enumerate() {
+            if let Some(ref meta) = msg.assistant {
+                if meta.cost > 0.0 {
+                    total += meta.cost;
+                    turns.push((i, meta.cost));
+                }
+            }
+        }
+        let mut report = format!("session cost: ${:.4}\n", total);
+        if turns.is_empty() {
+            report.push_str("no recorded costs yet");
+        } else {
+            report.push_str("per-turn breakdown:\n");
+            for (idx, cost) in turns {
+                report.push_str(&format!("  turn {}: ${:.4}\n", idx, cost));
+            }
+        }
+        report
+    }
+
+    fn build_help(&self) -> String {
+        let mut out = String::from("commands:\n");
+        for cmd in Self::slash_commands() {
+            out.push_str(&format!("  {:12}  {}\n", cmd.name, cmd.description));
+        }
+        out.trim_end().to_string()
+    }
+
+    /// Filter slash commands matching the current input.
+    pub fn filtered_slash_commands(&self) -> Vec<SlashCommand> {
+        let all = Self::slash_commands();
+        if !self.input.starts_with('/') {
+            return Vec::new();
+        }
+        let prefix = self.input.to_lowercase();
+        all.into_iter()
+            .filter(|c| c.name.to_lowercase().starts_with(&prefix))
+            .collect()
+    }
+
+    /// Cycle to next slash command suggestion.
+    pub fn slash_next(&mut self) {
+        let filtered = self.filtered_slash_commands();
+        if !filtered.is_empty() {
+            self.slash_selected = (self.slash_selected + 1) % filtered.len();
+        }
+    }
+
+    /// Cycle to previous slash command suggestion.
+    pub fn slash_prev(&mut self) {
+        let filtered = self.filtered_slash_commands();
+        if !filtered.is_empty() {
+            self.slash_selected = if self.slash_selected == 0 {
+                filtered.len() - 1
+            } else {
+                self.slash_selected - 1
+            };
+        }
+    }
+
+    /// Apply the selected slash command completion.
+    pub fn apply_slash_completion(&mut self) {
+        let filtered = self.filtered_slash_commands();
+        if let Some(cmd) = filtered.get(self.slash_selected) {
+            self.input = format!("{} ", cmd.name);
+            self.cursor = self.input.len();
+        }
     }
 
     /// Process an agent event and update state.
@@ -420,6 +678,13 @@ impl App {
                 // Append part to the last assistant message, or create one.
                 if let Some(msg) = self.messages.last_mut() {
                     if msg.role == Role::Assistant {
+                        // When a new text part starts (e.g. after tool execution in a
+                        // multi-turn loop), reset the streaming state so incremental
+                        // deltas are rendered for this part, not silently dropped.
+                        if matches!(part, Part::Text(_)) {
+                            self.md_stream = Some(mdstream::MdStream::new(mdstream::Options::default()));
+                            self.md_state = mdstream::DocumentState::new();
+                        }
                         msg.parts.push(part);
                         return;
                     }
@@ -436,6 +701,9 @@ impl App {
                     },
                     assistant: None,
                 });
+                // Start incremental markdown stream for this message.
+                self.md_stream = Some(mdstream::MdStream::new(mdstream::Options::default()));
+                self.md_state = mdstream::DocumentState::new();
             }
             AgentEvent::Provider(ProviderEvent::PartDelta { part_id, delta, .. }) => {
                 if let Some(msg) = self.messages.last_mut() {
@@ -448,21 +716,30 @@ impl App {
                         }
                     }
                 }
-            }
-            AgentEvent::Provider(ProviderEvent::PartEnd { part_id }) => {
-                if let Some(msg) = self.messages.last_mut() {
-                    if msg.role == Role::Assistant {
-                        for part in &mut msg.parts {
-                            if part.id() == part_id {
-                                finalize_part(part);
-                                break;
-                            }
-                        }
-                    }
+                // Feed delta into the incremental markdown stream.
+                if let Some(ref mut stream) = self.md_stream {
+                    let update = stream.append(&delta);
+                    self.md_state.apply(update);
                 }
             }
-            AgentEvent::Provider(ProviderEvent::MessageEnd { usage, cost, .. }) => {
-                self.streaming = false;
+            AgentEvent::Provider(ProviderEvent::PartEnd { .. }) => {}
+            AgentEvent::Provider(ProviderEvent::MessageEnd { finish, usage, cost }) => {
+                // Finalize the incremental markdown stream.
+                if let Some(mut stream) = self.md_stream.take() {
+                    let update: mdstream::Update = stream.finalize();
+                    self.md_state.apply(update);
+                }
+                // Mark the last message for re-render on next frame.
+                if let Some(msg) = self.messages.last() {
+                    self.pending_md_rerender = Some(msg.id);
+                }
+                // Invalidate cache so next render re-highlights from scratch.
+                // ToolUse means the agent is still working - it will execute tools
+                // and request another stream. Stay in streaming mode.
+                if finish != mew_message::Finish::ToolUse {
+                    self.streaming = false;
+                    self.esc_cancel_pending = None;
+                }
                 self.status.input_tokens += usage.input;
                 self.status.output_tokens += usage.output;
                 self.status.cost += cost;
@@ -472,25 +749,8 @@ impl App {
             }
             AgentEvent::Provider(ProviderEvent::Error(err)) => {
                 self.streaming = false;
-                self.messages.push(Message {
-                    id: ulid::Ulid::new(),
-                    session_id: ulid::Ulid::new(),
-                    role: Role::Assistant,
-                    parts: vec![Part::Text(mew_message::TextPart {
-                        base: mew_message::PartBase {
-                            id: ulid::Ulid::new(),
-                            message_id: ulid::Ulid::new(),
-                            session_id: ulid::Ulid::new(),
-                        },
-                        text: format!("Provider error: {}", err.message),
-                        synthetic: true,
-                    })],
-                    time: mew_message::Time {
-                        created: chrono::Utc::now().timestamp_millis(),
-                        completed: Some(chrono::Utc::now().timestamp_millis()),
-                    },
-                    assistant: None,
-                });
+                self.esc_cancel_pending = None;
+                self.push_synthetic_message(format!("Provider error: {}", err.message));
             }
             AgentEvent::PermissionRequest { call, tx } => {
                 self.mode = Mode::PermissionPrompt;
@@ -518,17 +778,42 @@ impl App {
                     }
                 }
             }
+            AgentEvent::ToolProgress { call_id, chunk } => {
+                // Append chunk to the running tool call's output.
+                for msg in self.messages.iter_mut().rev() {
+                    for part in &mut msg.parts {
+                        if let Part::ToolCall(tc) = part {
+                            if tc.call_id == call_id {
+                                if let ToolState::Running(ref mut running) = tc.state {
+                                    if !running.output.is_empty() {
+                                        running.output.push('\n');
+                                    }
+                                    running.output.push_str(&chunk);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             AgentEvent::ToolEnd { call_id, success } => {
                 for msg in self.messages.iter_mut().rev() {
                     for part in &mut msg.parts {
                         if let Part::ToolCall(tc) = part {
                             if tc.call_id == call_id {
-                                let state = if success {
-                                    ToolDisplayState::Completed(String::new())
-                                } else {
-                                    ToolDisplayState::Error(String::new())
-                                };
-                                self.tool_states.insert(tc.base.id, state);
+                                // Only set a default state if PartUpdated hasn't
+                                // already populated it (which carries the diff).
+                                if !self.tool_states.contains_key(&tc.base.id) {
+                                    let state = if success {
+                                        ToolDisplayState::Completed {
+                                            output: String::new(),
+                                            diff: None,
+                                        }
+                                    } else {
+                                        ToolDisplayState::Error(String::new())
+                                    };
+                                    self.tool_states.insert(tc.base.id, state);
+                                }
                                 break;
                             }
                         }
@@ -539,7 +824,10 @@ impl App {
                 if let Part::ToolCall(tc) = &part {
                     let state = match &tc.state {
                         ToolState::Running(_) => ToolDisplayState::Running,
-                        ToolState::Completed(c) => ToolDisplayState::Completed(c.output.clone()),
+                        ToolState::Completed(c) => ToolDisplayState::Completed {
+                            output: c.output.clone(),
+                            diff: c.diff.clone(),
+                        },
                         ToolState::Error(e) => ToolDisplayState::Error(e.error.clone()),
                         _ => ToolDisplayState::Running,
                     };
@@ -557,26 +845,8 @@ impl App {
             }
             AgentEvent::Error(msg) => {
                 self.streaming = false;
-                // Add an error message.
-                self.messages.push(Message {
-                    id: ulid::Ulid::new(),
-                    session_id: ulid::Ulid::new(),
-                    role: Role::Assistant,
-                    parts: vec![Part::Text(mew_message::TextPart {
-                        base: mew_message::PartBase {
-                            id: ulid::Ulid::new(),
-                            message_id: ulid::Ulid::new(),
-                            session_id: ulid::Ulid::new(),
-                        },
-                        text: format!("Error: {}", msg),
-                        synthetic: true,
-                    })],
-                    time: mew_message::Time {
-                        created: chrono::Utc::now().timestamp_millis(),
-                        completed: Some(chrono::Utc::now().timestamp_millis()),
-                    },
-                    assistant: None,
-                });
+                self.esc_cancel_pending = None;
+                self.push_synthetic_message(format!("Error: {}", msg));
             }
         }
     }
@@ -614,12 +884,57 @@ fn append_to_part(part: &mut Part, delta: &str) {
     }
 }
 
-fn finalize_part(_part: &mut Part) {
-    // Nothing special needed for most parts.
-}
-
 impl Default for App {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Extract `@path` file mentions from input text.
+/// Returns a list of path strings (without the `@` prefix).
+pub fn parse_file_mentions(text: &str) -> Vec<String> {
+    let mut mentions = Vec::new();
+    for word in text.split_whitespace() {
+        if let Some(path) = word.strip_prefix('@') {
+            // Strip trailing punctuation.
+            let path = path.trim_end_matches(|c: char| c.is_ascii_punctuation());
+            if !path.is_empty() {
+                mentions.push(path.to_string());
+            }
+        }
+    }
+    mentions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_file_mentions_basic() {
+        let text = "fix the bug in @src/main.rs";
+        let mentions = parse_file_mentions(text);
+        assert_eq!(mentions, vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn test_parse_file_mentions_multiple() {
+        let text = "compare @a.txt and @b.txt";
+        let mentions = parse_file_mentions(text);
+        assert_eq!(mentions, vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn test_parse_file_mentions_with_punctuation() {
+        let text = "check @README.md, then @Cargo.toml.";
+        let mentions = parse_file_mentions(text);
+        assert_eq!(mentions, vec!["README.md", "Cargo.toml"]);
+    }
+
+    #[test]
+    fn test_parse_file_mentions_none() {
+        let text = "no mentions here";
+        let mentions = parse_file_mentions(text);
+        assert!(mentions.is_empty());
     }
 }

@@ -78,6 +78,7 @@ impl Tool for Grep {
                     Ok(ToolOutput {
                         output: stdout.to_string(),
                         error: String::new(),
+                        diff: None,
                     })
                 } else {
                     Err(ToolError::Execution(format!("rg failed: {}", stderr)))
@@ -104,6 +105,7 @@ impl Tool for Grep {
                 Ok(ToolOutput {
                     output: String::from_utf8_lossy(&output.stdout).to_string(),
                     error: String::new(),
+                    diff: None,
                 })
             }
         }

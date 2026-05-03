@@ -836,6 +836,7 @@ mod tests {
                     input: serde_json::json!({"input": "hello"}),
                     output: "echo: hello".to_string(),
                     metadata: None,
+                    diff: None,
                     time: ToolTime {
                         start: 0,
                         end: Some(1),
