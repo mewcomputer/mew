@@ -87,3 +87,66 @@ Reviewed `crates/mew-mcp/src/lib.rs` against the MCP `2025-11-25` spec. Key find
 - All MCP tools hardcoded to `Sensitivity::Mutating`.
 
 Decided to document findings rather than fix them immediately — these are spec-compliance notes for future improvement.
+
+---
+
+## 2026-05-03: M0–M4 audit pass + gap fixes
+
+Systematic audit of M0–M4 against PLAN.md. Fixed all blocking gaps and most partials:
+
+**M0 gaps fixed:**
+- `mew-message`: 23 tests (22 table-driven round-trip + proptest fuzz 100 cases). Added `PartialEq` to all types.
+- `mew-provider-openai` + `mew-provider-anthropic`: wiremock SSE fixture replay tests. Fixed broken fixture files (extra `}` in message_delta, malformed JSON escaping in tool-call fixture).
+- Anthropic `signature_delta` inbound parsing: added `signature` field to `Delta` struct in `handle_content_block_delta`, wired in agent's `apply_delta`.
+
+**M2 gaps fixed:**
+- `mew-skills` crate: full implementation with 8-path discovery (`.mew/skills`, `.opencode/skills`, `.claude/skills`, `.agents/skills` × project + global), YAML frontmatter parsing via `serde_yaml`, name validation (`^[a-z0-9]+(-[a-z0-9]+)*$`, max 64), duplicate resolution (project beats global, first within tier wins). 8 tests.
+- `skill` built-in tool: loads skill bodies on demand, registered in `build_tools()`. Skills listed in system prompt as `<available_skills>` XML block.
+- Skill permissions: `[[permissions.skills]]` TOML config with `name_glob` matching. `PermissionEngine::check_skill()` evaluates top-to-bottom, first match wins.
+- `RuleDecision::Ask` now wired in permission engine as step 2.5 (between Allow and Session allow) — forces a prompt even for ReadOnly tools.
+
+**M0/M1 partials fixed:**
+- 3 missing `Dispatcher` hooks: `on_chat_message` called before each turn, `on_event` called after each provider event, `on_shell_env` called in bash tool before subprocess spawn.
+- `ToolCtx.dispatcher` added, passed from agent to tools.
+- Vision gate: `Agent.supports_vision` flag from catalog, rejects image attachments pre-send.
+- Bash env passthrough: calls `on_shell_env` with current env vars, applies filtered result to subprocess.
+
+---
+
+## 2026-05-03: M3 TUI enhancements
+
+All items from the M3 "done when" gate that were missing or partial:
+
+- **Cost computation**: Agent-side per-token cost from catalog pricing (`usage / 1M * price`), refreshed on model switch. `Agent.input_price/output_price/etc` fields.
+- **50ms debounce**: Bash output chunks batched via `tokio::time::interval` before forwarding to TUI. Buffer flushes on tick or channel close.
+- **Double-ctrl-c**: First ctrl-c during streaming shows "ctrl-c again to quit" (1s window, red). Second exits unconditionally. Status line integration.
+- **Multiline input**: Alt+Enter inserts newline. Cursor moves line-wise (home/end). Input area height: `min(line_count, 12) + 2`. Dynamic layout constraint.
+- **Slash commands**: `/model <id>` (switch), `/model` solo → opens model picker, `/sessions` (lists .jsonl files by modified time), `/compact` (force compaction next turn), `/resume <id>` (loads session from disk via `mew_session::Reader`). All 8 slash commands implemented.
+- **@-mention file picker**: typing `@` at word boundary opens dropdown via existing `Picker`. Walks cwd with `ignore` crate (.gitignore filtered), max depth 4, 1MB file size limit, 50 results sorted shortest-first. Kind "file" routes to `InsertAtMention` action.
+- **TUI retry prompt**: `ProviderEvent::RetryWait` emitted by both adapters before each sleep with attempt count, max, delay, and reason (`classify_reason` maps HTTP status to "rate limited"/"server overloaded"). TUI status line shows light-blue countdown.
+
+- **Session resume**: `mew_session::Reader::load(session_id)` reads JSONL. `/resume <id>` loads messages into agent + TUI display, updates session_id.
+- **Context compaction**: `/compact` sets `agent.force_compact` for next turn. Auto-compaction at 95% context window (configurable `compaction_threshold`). Keeps last 4 turns, inserts synthetic summary, drops older messages from request. `estimated_tokens()` heuristic (chars / 4).
+
+- **Agent refactor**: split `lib.rs` (1625 lines) into `agent.rs` (139), `turn.rs` (289), `events.rs` (182), `tools.rs` (379), `tests.rs` (685).
+
+---
+
+## 2026-05-03: M5 — router / auto mode
+
+- `mew-provider-router` crate: `Router` wraps small + big `Arc<dyn Provider>`, heuristic picks small for tool-free turns under threshold.
+- `Routed` wrapper carries `display_model`/`display_provider` for TUI status line.
+- `ProviderConfig` gains `kind` (default "direct"), `small`, `big` fields for TOML config.
+- Config example: `[providers.auto] kind = "router" small = "z-ai/glm-4.5-air" big = "z-ai/glm-4.6"`
+- 3 tests: simple turn → small, tool results → big, turn threshold → big.
+- Wired into `build_provider()`: resolves inner models, sets pricing/vision from big model.
+
+---
+
+## 2026-05-03: M6 — ACP integration (groundwork)
+
+- `mew-acp` crate: hand-rolled JSON-RPC 2.0 framing over stdio (newline-delimited). No external deps.
+- `AcpClient`: spawns ACP agent subprocess, handles `initialize` + `session/new`, runs prompt turns via sequential read-after-write.
+- Translates `session/update` notifications → `AgentEvent` (agent_message_chunk, tool_call, tool_call_update).
+- CLI: `mew chat --acp-agent <cmd>` flag, `mew acp` subcommand (server stub).
+- TUI integration and server mode pending.
