@@ -204,7 +204,13 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.streaming {
-                return Some(Action::Cancel);
+                if app.ctrl_c_quit_pending.is_some() {
+                    app.should_quit = true;
+                    return Some(Action::Quit);
+                } else {
+                    app.ctrl_c_quit_pending = Some(Instant::now());
+                    return None;
+                }
             } else if !app.input.is_empty() {
                 app.input.clear();
                 app.cursor = 0;
@@ -237,6 +243,11 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
     // Input handling.
     match key.code {
         KeyCode::Enter => {
+            // Alt+Enter inserts a newline (multiline input).
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                app.insert_newline();
+                return None;
+            }
             // If slash autocomplete is showing, select the highlighted command.
             if app.mode == crate::app::Mode::SlashCommand
                 && !app.filtered_slash_commands().is_empty()
@@ -299,6 +310,13 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             if app.input.starts_with('/') {
                 app.mode = crate::app::Mode::SlashCommand;
                 app.slash_selected = 0;
+            }
+            // Auto-open file picker when @ is typed at start or after a space.
+            if c == '@' {
+                let before = &app.input[..app.cursor.saturating_sub(1)];
+                if before.is_empty() || before.ends_with(' ') {
+                    app.open_file_picker("");
+                }
             }
             None
         }
@@ -424,6 +442,8 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                         }
                     } else if kind == "model" {
                         Some(Action::SwitchModel(id))
+                    } else if kind == "file" {
+                        Some(Action::InsertAtMention(format!("@{}", id)))
                     } else {
                         None
                     }
@@ -484,4 +504,6 @@ pub enum Action {
     Clear,
     /// Switch to a different model.
     SwitchModel(String),
+    /// Insert an @mention path into the input.
+    InsertAtMention(String),
 }

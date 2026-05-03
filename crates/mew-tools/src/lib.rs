@@ -5,6 +5,7 @@ use mew_hooks::ToolOutput;
 use mew_message::SessionId;
 use serde_json::Value;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -21,6 +22,7 @@ pub struct ToolCtx {
     pub cancel: CancellationToken,
     pub progress_tx: mpsc::Sender<ToolProgress>,
     pub cwd: PathBuf,
+    pub dispatcher: Option<Arc<dyn mew_hooks::Dispatcher>>,
 }
 
 #[derive(Debug, Clone)]

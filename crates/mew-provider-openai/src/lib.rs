@@ -795,4 +795,99 @@ mod tests {
         assert_eq!(content[1]["type"], "image_url");
         assert!(content[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
     }
+
+    // -----------------------------------------------------------------------
+    // SSE fixture replay tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_fixture_text_only() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let fixture = std::fs::read_to_string("src/testdata/text-only.sse")
+            .expect("read text-only fixture");
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(fixture, "text/event-stream"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let adapter = Adapter::new(
+            "test".to_string(),
+            mock_server.uri(),
+            "test-model".to_string(),
+            "test-key".to_string(),
+        );
+
+        let req = Request {
+            model: "test-model".into(),
+            messages: vec![],
+            tools: vec![],
+            system: String::new(),
+        };
+
+        let mut stream = adapter.stream(req).await.expect("stream");
+        let mut events: Vec<ProviderEvent> = Vec::new();
+        while let Some(ev) = futures::StreamExt::next(&mut stream).await {
+            events.push(ev);
+        }
+
+        // Should have PartStart(Text), PartDelta(text) x3, PartEnd, MessageEnd
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartStart { .. })));
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartDelta { field: "text", .. })));
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartEnd { .. })));
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::MessageEnd { finish: Finish::Stop, .. })));
+    }
+
+    #[tokio::test]
+    async fn test_fixture_tool_call() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let fixture = std::fs::read_to_string("src/testdata/tool-call.sse")
+            .expect("read tool-call fixture");
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(fixture, "text/event-stream"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let adapter = Adapter::new(
+            "test".to_string(),
+            mock_server.uri(),
+            "test-model".to_string(),
+            "test-key".to_string(),
+        );
+
+        let req = Request {
+            model: "test-model".into(),
+            messages: vec![],
+            tools: vec![],
+            system: String::new(),
+        };
+
+        let mut stream = adapter.stream(req).await.expect("stream");
+        let mut events: Vec<ProviderEvent> = Vec::new();
+        while let Some(ev) = futures::StreamExt::next(&mut stream).await {
+            events.push(ev);
+        }
+
+        println!("events: {events:?}");
+
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartStart { .. })));
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartDelta { field: "arguments", .. })));
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartDelta { field: "call_id", .. })));
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
+    }
 }

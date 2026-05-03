@@ -124,6 +124,7 @@ mod tests {
             cancel: tokio_util::sync::CancellationToken::new(),
             progress_tx: tokio::sync::mpsc::channel(1).0,
             cwd,
+            dispatcher: None,
         }
     }
 

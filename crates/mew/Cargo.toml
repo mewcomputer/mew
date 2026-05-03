@@ -21,6 +21,7 @@ mew-config = { workspace = true }
 mew-session = { workspace = true }
 mew-catalog = { workspace = true }
 mew-context = { workspace = true }
+mew-skills = { workspace = true }
 mew-hooks = { workspace = true }
 mew-tui = { workspace = true }
 mew-mcp = { workspace = true }

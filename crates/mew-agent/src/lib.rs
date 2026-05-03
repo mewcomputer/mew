@@ -86,6 +86,12 @@ pub struct Agent {
     pub system: String,
     pub cancel_token: CancellationToken,
     pub permission_engine: Option<Arc<mew_config::permissions::PermissionEngine>>,
+    pub supports_vision: bool,
+    pub input_price: f64,
+    pub output_price: f64,
+    pub cache_read_price: f64,
+    pub cache_write_price: f64,
+    pub reasoning_price: f64,
 }
 
 impl Agent {
@@ -112,6 +118,12 @@ impl Agent {
             system: String::new(),
             cancel_token: CancellationToken::new(),
             permission_engine: None,
+            supports_vision: true,
+            input_price: 0.0,
+            output_price: 0.0,
+            cache_read_price: 0.0,
+            cache_write_price: 0.0,
+            reasoning_price: 0.0,
         }
     }
 
@@ -165,12 +177,26 @@ impl Agent {
             synthetic: false,
         })];
         // Fix attachment IDs to reference this message, then append.
+        let mut has_image = false;
         for mut attachment in attachments {
             if let Part::File(ref mut fp) = attachment {
                 fp.base.message_id = msg_id;
                 fp.base.session_id = self.session_id;
+                if fp.mime.starts_with("image/") {
+                    has_image = true;
+                }
             }
             parts.push(attachment);
+        }
+
+        // Reject image attachments if the model doesn't support vision.
+        if has_image && !self.supports_vision {
+            let _ = ev_tx
+                .send(AgentEvent::Error(
+                    "image attachments not supported by the current model".into(),
+                ))
+                .await;
+            return Ok(());
         }
         let user_msg = Message {
             id: msg_id,
@@ -203,7 +229,12 @@ impl Agent {
                 })
                 .collect();
 
-            let messages = self.messages.lock().await.clone();
+            let mut messages = self.messages.lock().await.clone();
+
+            // Apply on_chat_message hook to each message.
+            for msg in &mut messages {
+                *msg = self.dispatcher.on_chat_message(msg.clone()).await;
+            }
 
             let req = Request {
                 model: String::new(),
@@ -270,6 +301,8 @@ impl Agent {
                                     &mut assistant_msg,
                                     &ev_tx,
                                 ).await;
+                                let agent_ev = AgentEvent::Provider(ev.clone());
+                                self.dispatcher.on_event(&agent_ev).await;
                                 if matches!(ev, ProviderEvent::Error(_)) {
                                     return Ok(());
                                 }
@@ -497,18 +530,48 @@ impl Agent {
                     .await;
 
                 let (progress_tx, mut progress_rx) = mpsc::channel::<ToolProgress>(16);
-                // Forward progress chunks to the TUI as they arrive.
+                // Forward progress chunks to the TUI with 50ms debounce.
                 let ev_tx2 = ev_tx.clone();
                 let call_id2 = call_id.clone();
                 tokio::spawn(async move {
-                    while let Some(progress) = progress_rx.recv().await {
-                        if let ToolProgress::OutputChunk(chunk) = progress {
-                            let _ = ev_tx2
-                                .send(AgentEvent::ToolProgress {
-                                    call_id: call_id2.clone(),
-                                    chunk,
-                                })
-                                .await;
+                    let mut buf = String::new();
+                    let mut tick = tokio::time::interval(
+                        tokio::time::Duration::from_millis(50),
+                    );
+                    // Skip immediate first tick so first chunk isn't delayed.
+                    tick.tick().await;
+                    loop {
+                        tokio::select! {
+                            progress = progress_rx.recv() => {
+                                match progress {
+                                    Some(ToolProgress::OutputChunk(chunk)) => {
+                                        buf.push_str(&chunk);
+                                    }
+                                    Some(ToolProgress::Metadata(_)) => {}
+                                    None => {
+                                        // Channel closed; flush remaining.
+                                        if !buf.is_empty() {
+                                            let _ = ev_tx2
+                                                .send(AgentEvent::ToolProgress {
+                                                    call_id: call_id2.clone(),
+                                                    chunk: std::mem::take(&mut buf),
+                                                })
+                                                .await;
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                            _ = tick.tick() => {
+                                if !buf.is_empty() {
+                                    let _ = ev_tx2
+                                        .send(AgentEvent::ToolProgress {
+                                            call_id: call_id2.clone(),
+                                            chunk: std::mem::take(&mut buf),
+                                        })
+                                        .await;
+                                }
+                            }
                         }
                     }
                 });
@@ -520,6 +583,7 @@ impl Agent {
                     progress_tx,
                     cwd: std::env::current_dir()
                         .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                    dispatcher: Some(self.dispatcher.clone()),
                 };
 
                 tracing::info!(tool = %tc.tool_name, call_id = %call_id, input = %input, "executing tool");
@@ -724,15 +788,20 @@ impl Agent {
             ProviderEvent::MessageEnd {
                 finish,
                 usage,
-                cost,
+                cost: _,
             } => {
                 if let Some(ref mut msg) = assistant_msg {
                     let now = Utc::now().timestamp_millis();
                     msg.time.completed = Some(now);
+                    let computed_cost = usage.input as f64 / 1_000_000.0 * self.input_price
+                        + usage.output as f64 / 1_000_000.0 * self.output_price
+                        + usage.reasoning as f64 / 1_000_000.0 * self.reasoning_price
+                        + usage.cache_read as f64 / 1_000_000.0 * self.cache_read_price
+                        + usage.cache_write as f64 / 1_000_000.0 * self.cache_write_price;
                     if let Some(ref mut meta) = msg.assistant {
                         meta.finish = Some(*finish);
                         meta.tokens = *usage;
-                        meta.cost = *cost;
+                        meta.cost = computed_cost;
                     }
                     self.append_message(msg.clone()).await;
                 }
@@ -740,7 +809,7 @@ impl Agent {
                     .send(AgentEvent::Provider(ProviderEvent::MessageEnd {
                         finish: *finish,
                         usage: *usage,
-                        cost: *cost,
+                        cost: 0.0,
                     }))
                     .await;
             }
@@ -778,6 +847,8 @@ impl Agent {
                 Part::Reasoning(ref mut p) => {
                     if field == "text" || field.is_empty() {
                         p.text.push_str(delta);
+                    } else if field == "signature" {
+                        p.signature = Some(delta.to_string());
                     }
                 }
                 Part::ToolCall(ref mut p) => {

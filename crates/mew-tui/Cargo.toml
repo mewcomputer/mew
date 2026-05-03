@@ -9,6 +9,7 @@ license.workspace = true
 mew-message = { workspace = true }
 mew-agent = { workspace = true }
 mew-provider = { workspace = true }
+mew-session = { workspace = true }
 mew-hooks = { workspace = true }
 tokio = { workspace = true }
 ratatui = { workspace = true }
@@ -21,4 +22,5 @@ serde_json = { workspace = true }
 ansi-to-tui = { workspace = true }
 ratatui-mdstream = { workspace = true }
 mdstream = { workspace = true }
+ignore = { workspace = true }
 unicode-width = "0.2"

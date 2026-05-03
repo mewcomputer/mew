@@ -31,9 +31,25 @@ pub struct MatchConditions {
     pub path_glob: Option<String>,
 }
 
+/// A single permission rule for skills.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillPermissionRule {
+    #[serde(rename = "match")]
+    pub r#match: SkillMatchConditions,
+    pub decision: RuleDecision,
+}
+
+/// Match conditions for a skill rule.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkillMatchConditions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_glob: Option<String>,
+}
+
 /// Evaluates permission rules and tracks session-level allowances.
 pub struct PermissionEngine {
     rules: Vec<PermissionRule>,
+    skill_rules: Vec<SkillPermissionRule>,
     session_allows: Mutex<HashSet<String>>,
 }
 
@@ -41,6 +57,15 @@ impl PermissionEngine {
     pub fn new(rules: Vec<PermissionRule>) -> Self {
         Self {
             rules,
+            skill_rules: Vec::new(),
+            session_allows: Mutex::new(HashSet::new()),
+        }
+    }
+
+    pub fn new_with_skills(rules: Vec<PermissionRule>, skill_rules: Vec<SkillPermissionRule>) -> Self {
+        Self {
+            rules,
+            skill_rules,
             session_allows: Mutex::new(HashSet::new()),
         }
     }
@@ -84,6 +109,19 @@ impl PermissionEngine {
             }
         }
 
+        // 2.5 Ask rules (force a prompt even for ReadOnly tools)
+        for rule in &self.rules {
+            if rule.decision != RuleDecision::Ask {
+                continue;
+            }
+            if !self.rule_applies(rule, tool_name) {
+                continue;
+            }
+            if self.matches(&rule.r#match, input) {
+                return mew_hooks::PermissionDecision::Prompt;
+            }
+        }
+
         // 3. Session allows
         let session = self.session_allows.lock().await;
         if session.contains(tool_name) {
@@ -96,6 +134,34 @@ impl PermissionEngine {
             mew_tools::Sensitivity::ReadOnly => mew_hooks::PermissionDecision::AllowOnce,
             _ => mew_hooks::PermissionDecision::Prompt,
         }
+    }
+
+    /// Evaluate skill permission rules and return the decision.
+    ///
+    /// Evaluation order: top-to-bottom, first match wins.
+    /// Returns `AllowOnce` if no rules match.
+    pub fn check_skill(&self, name: &str) -> mew_hooks::PermissionDecision {
+        for rule in &self.skill_rules {
+            if self.skill_matches(&rule.r#match, name) {
+                return match rule.decision {
+                    RuleDecision::Allow => mew_hooks::PermissionDecision::AllowOnce,
+                    RuleDecision::Deny => mew_hooks::PermissionDecision::Deny,
+                    RuleDecision::Ask => mew_hooks::PermissionDecision::Prompt,
+                };
+            }
+        }
+        mew_hooks::PermissionDecision::AllowOnce
+    }
+
+    fn skill_matches(&self, conditions: &SkillMatchConditions, name: &str) -> bool {
+        if let Some(ref glob) = conditions.name_glob {
+            if let Ok(g) = globset::Glob::new(glob) {
+                return g.compile_matcher().is_match(name);
+            }
+            return false;
+        }
+        // No conditions means match everything.
+        true
     }
 
     /// Record that a tool is allowed for the remainder of this session.

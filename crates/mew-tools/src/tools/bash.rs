@@ -1,6 +1,7 @@
 use crate::{Sensitivity, Tool, ToolCtx, ToolError, ToolOutput, ToolProgress};
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashMap;
 use tokio::io::AsyncBufReadExt;
 
 pub struct Bash;
@@ -52,12 +53,23 @@ impl Tool for Bash {
             .and_then(|v| v.as_u64())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        let mut child = tokio::process::Command::new("bash")
-            .arg("-c")
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c")
             .arg(command)
             .current_dir(&ctx.cwd)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        // Apply shell env hook if a dispatcher is available.
+        if let Some(ref dispatcher) = ctx.dispatcher {
+            let current_env = std::env::vars().collect::<HashMap<String, String>>();
+            let filtered = dispatcher.on_shell_env(current_env).await;
+            for (k, v) in &filtered {
+                cmd.env(k, v);
+            }
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| ToolError::Execution(format!("spawn failed: {}", e)))?;
 
@@ -170,6 +182,7 @@ mod tests {
             cancel: tokio_util::sync::CancellationToken::new(),
             progress_tx: tokio::sync::mpsc::channel(1).0,
             cwd,
+            dispatcher: None,
         }
     }
 

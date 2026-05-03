@@ -490,6 +490,7 @@ impl Adapter {
             #[serde(rename = "partial_json")]
             partial_json: Option<String>,
             thinking: Option<String>,
+            signature: Option<String>,
         }
 
         let event: Event = match serde_json::from_str(data) {
@@ -538,6 +539,19 @@ impl Adapter {
                     }
                 }
             }
+            "signature_delta" => {
+                if let Some(rp) = current_reasoning_part {
+                    if let Some(signature) = event.delta.signature {
+                        let _ = tx
+                            .send(ProviderEvent::PartDelta {
+                                part_id: rp.base.id,
+                                field: "signature",
+                                delta: signature,
+                            })
+                            .await;
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -565,37 +579,22 @@ impl Adapter {
     }
 
     async fn handle_message_delta(data: &str, tx: &mut mpsc::Sender<ProviderEvent>) {
-        #[derive(Debug, serde::Deserialize)]
-        struct MsgDelta {
-            delta: Delta,
-            usage: Usage,
-        }
-        #[derive(Debug, serde::Deserialize)]
-        struct Delta {
-            #[serde(rename = "stop_reason")]
-            #[serde(default)]
-            stop_reason: String,
-        }
-        #[derive(Debug, serde::Deserialize)]
-        struct Usage {
-            #[serde(rename = "input_tokens")]
-            input_tokens: u32,
-            #[serde(rename = "output_tokens")]
-            output_tokens: u32,
-        }
-
-        let msg_delta: MsgDelta = match serde_json::from_str(data) {
-            Ok(m) => m,
+        let v: serde_json::Value = match serde_json::from_str(data) {
+            Ok(v) => v,
             Err(_) => return,
         };
 
-        let finish = map_finish_reason(&msg_delta.delta.stop_reason);
+        let stop_reason = v["delta"]["stop_reason"].as_str().unwrap_or("");
+        let input_tokens = v["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
+        let output_tokens = v["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+
+        let finish = map_finish_reason(stop_reason);
         let _ = tx
             .send(ProviderEvent::MessageEnd {
                 finish,
                 usage: Tokens {
-                    input: msg_delta.usage.input_tokens,
-                    output: msg_delta.usage.output_tokens,
+                    input: input_tokens,
+                    output: output_tokens,
                     ..Default::default()
                 },
                 cost: 0.0,
@@ -936,5 +935,117 @@ mod tests {
         assert_eq!(content[1]["source"]["type"], "base64");
         assert_eq!(content[1]["source"]["media_type"], "image/png");
         assert!(content[1]["source"]["data"].as_str().unwrap().len() > 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // SSE fixture replay tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_fixture_text_only() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let fixture = std::fs::read_to_string("src/testdata/text-only.sse")
+            .expect("read text-only fixture");
+
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(fixture, "text/event-stream"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let adapter = Adapter::new(
+            "test".to_string(),
+            mock_server.uri(),
+            "test-model".to_string(),
+            "test-key".to_string(),
+        );
+
+        let req = Request {
+            model: "test-model".into(),
+            messages: vec![],
+            tools: vec![],
+            system: String::new(),
+        };
+
+        let mut stream = adapter.stream(req).await.expect("stream");
+        let mut events: Vec<ProviderEvent> = Vec::new();
+        while let Some(ev) = futures::StreamExt::next(&mut stream).await {
+            events.push(ev);
+        }
+
+        println!("events: {events:?}");
+
+        // Should have PartStart(Text), PartDelta(text), PartEnd, MessageEnd
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartStart { .. })));
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartDelta { field: "text", .. })));
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::PartEnd { .. })));
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_fixture_tool_call_reasoning() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let fixture = std::fs::read_to_string("src/testdata/tool-call-reasoning.sse")
+            .expect("read tool-call-reasoning fixture");
+
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(fixture, "text/event-stream"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let adapter = Adapter::new(
+            "test".to_string(),
+            mock_server.uri(),
+            "test-model".to_string(),
+            "test-key".to_string(),
+        );
+
+        let req = Request {
+            model: "test-model".into(),
+            messages: vec![],
+            tools: vec![],
+            system: String::new(),
+        };
+
+        let mut stream = adapter.stream(req).await.expect("stream");
+        let mut events: Vec<ProviderEvent> = Vec::new();
+        while let Some(ev) = futures::StreamExt::next(&mut stream).await {
+            events.push(ev);
+        }
+
+        println!("events: {events:?}");
+
+        let has_reasoning = events.iter().any(|e| {
+            if let ProviderEvent::PartStart { part } = e {
+                matches!(part, Part::Reasoning(_))
+            } else {
+                false
+            }
+        });
+        assert!(has_reasoning, "expected reasoning part start");
+
+        let has_tool_use = events.iter().any(|e| {
+            if let ProviderEvent::PartStart { part } = e {
+                matches!(part, Part::ToolCall(_))
+            } else {
+                false
+            }
+        });
+        assert!(has_tool_use, "expected tool call part start");
+
+        assert!(events.iter().any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
     }
 }

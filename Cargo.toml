@@ -13,6 +13,7 @@ members = [
     "crates/mew-session",
     "crates/mew-catalog",
     "crates/mew-context",
+    "crates/mew-skills",
     "crates/mew-hooks",
     "crates/mew-tui",
     "crates/ratatui-mdstream",
@@ -103,6 +104,7 @@ mew-config = { path = "crates/mew-config" }
 mew-session = { path = "crates/mew-session" }
 mew-catalog = { path = "crates/mew-catalog" }
 mew-context = { path = "crates/mew-context" }
+mew-skills = { path = "crates/mew-skills" }
 mew-agent = { path = "crates/mew-agent" }
 mew-tui = { path = "crates/mew-tui" }
 mew-provider-openai = { path = "crates/mew-provider-openai" }

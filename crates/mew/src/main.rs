@@ -20,6 +20,7 @@ use mew_tools::tools::edit::Edit;
 use mew_tools::tools::glob::Glob;
 use mew_tools::tools::grep::Grep;
 use mew_tools::tools::read::Read;
+use mew_tools::tools::skill::Skill;
 use mew_tools::tools::write::Write;
 
 #[derive(Parser)]
@@ -138,8 +139,8 @@ async fn main() -> Result<()> {
     }
 }
 
-fn build_tools() -> Vec<Arc<dyn mew_tools::Tool>> {
-    vec![
+fn build_tools(skills: Arc<Vec<mew_skills::Skill>>) -> Vec<Arc<dyn mew_tools::Tool>> {
+    let mut tools: Vec<Arc<dyn mew_tools::Tool>> = vec![
         Arc::new(Read),
         Arc::new(Write),
         Arc::new(Edit),
@@ -147,52 +148,60 @@ fn build_tools() -> Vec<Arc<dyn mew_tools::Tool>> {
         Arc::new(Glob),
         Arc::new(Grep),
         Arc::new(Echo),
-    ]
+    ];
+    if !skills.is_empty() {
+        tools.push(Arc::new(Skill::new(skills)));
+    }
+    tools
 }
 
 fn build_permission_engine(cfg: &Config) -> Arc<mew_config::permissions::PermissionEngine> {
-    Arc::new(mew_config::permissions::PermissionEngine::new(
+    Arc::new(mew_config::permissions::PermissionEngine::new_with_skills(
         cfg.permissions.rules.clone(),
+        cfg.permissions.skills.clone(),
     ))
 }
 
 /// Load MCP server configs from cwd/mcp.json (Claude-Code-compatible format).
 fn load_mcp_configs() -> Vec<mew_mcp::McpServerConfig> {
-    let path = std::env::current_dir()
-        .unwrap_or_default()
-        .join("mcp.json");
+    let path = std::env::current_dir().unwrap_or_default().join("mcp.json");
 
     match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(v) => {
-                    let servers = v.get("mcpServers").and_then(|s| s.as_object());
-                    match servers {
-                        Some(servers) => servers
-                            .iter()
-                            .map(|(name, cfg)| mew_mcp::McpServerConfig {
-                                name: name.clone(),
-                                url: cfg.get("url").and_then(|v| v.as_str()).map(String::from),
-                                command: cfg.get("command").and_then(|v| v.as_str()).map(String::from),
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(v) => {
+                let servers = v.get("mcpServers").and_then(|s| s.as_object());
+                match servers {
+                    Some(servers) => servers
+                        .iter()
+                        .map(|(name, cfg)| mew_mcp::McpServerConfig {
+                            name: name.clone(),
+                            url: cfg.get("url").and_then(|v| v.as_str()).map(String::from),
+                            command: cfg
+                                .get("command")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
                             args: cfg
                                 .get("args")
                                 .and_then(|v| v.as_array())
-                                .map(|a| a.iter().filter_map(|v: &serde_json::Value| v.as_str().map(String::from)).collect())
-                                    .unwrap_or_default(),
-                            })
-                            .collect(),
-                        None => Vec::new(),
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("failed to parse mcp.json: {}", e);
-                    Vec::new()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v: &serde_json::Value| {
+                                            v.as_str().map(String::from)
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                        })
+                        .collect(),
+                    None => Vec::new(),
                 }
             }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Vec::new()
-        }
+            Err(e) => {
+                tracing::warn!("failed to parse mcp.json: {}", e);
+                Vec::new()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => {
             tracing::warn!("failed to read mcp.json: {}", e);
             Vec::new()
@@ -200,11 +209,31 @@ fn load_mcp_configs() -> Vec<mew_mcp::McpServerConfig> {
     }
 }
 
-/// Connect to all configured MCP servers and discover their tools.
+fn build_skills_xml(skills: &[mew_skills::Skill]) -> String {
+    let mut buf = String::from("<available_skills>\n");
+    for skill in skills {
+        buf.push_str(&format!(
+            "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n  </skill>\n",
+            escape_xml(&skill.name),
+            escape_xml(&skill.description),
+        ));
+    }
+    buf.push_str("</available_skills>\n");
+    buf
+}
+
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 async fn connect_mcp_servers(
     configs: &[mew_mcp::McpServerConfig],
-) -> Vec<Arc<dyn mew_tools::Tool>> {
+) -> (Vec<Arc<dyn mew_tools::Tool>>, Vec<Arc<mew_mcp::McpClient>>) {
     let mut tools: Vec<Arc<dyn mew_tools::Tool>> = Vec::new();
+    let mut clients: Vec<Arc<mew_mcp::McpClient>> = Vec::new();
 
     for cfg in configs {
         let client = if let Some(ref url) = cfg.url {
@@ -233,9 +262,14 @@ async fn connect_mcp_servers(
                 let client = Arc::new(client);
                 for def in &mcp_tools {
                     let name = def.qualified_name(&cfg.name);
-                    tools.push(Arc::new(mew_mcp::McpTool::new(&cfg.name, def, client.clone())));
+                    tools.push(Arc::new(mew_mcp::McpTool::new(
+                        &cfg.name,
+                        def,
+                        client.clone(),
+                    )));
                     tracing::info!(tool = %name, server = %cfg.name, "registered MCP tool");
                 }
+                clients.push(client);
             }
             Err(e) => {
                 tracing::warn!(server = %cfg.name, error = %e, "failed to list MCP tools");
@@ -243,7 +277,7 @@ async fn connect_mcp_servers(
         }
     }
 
-    tools
+    (tools, clients)
 }
 
 async fn run_cmd(
@@ -270,11 +304,7 @@ async fn run_cmd(
     build_and_run(&cfg, Some(&cat), &provider_flag, model_flag, raw, prompt).await
 }
 
-async fn chat_cmd(
-    provider_flag: String,
-    model_flag: Option<String>,
-    raw: bool,
-) -> Result<()> {
+async fn chat_cmd(provider_flag: String, model_flag: Option<String>, raw: bool) -> Result<()> {
     let cfg = mew_config::load().context("load config")?;
 
     let cat = match mew_catalog::load().await {
@@ -297,7 +327,8 @@ async fn run_tui(
 ) -> Result<()> {
     let (provider_id, model_id) = resolve_model(cfg, cat, provider_flag, model_flag);
 
-    let provider = build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
+    let provider =
+        build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
 
     let session_id = ulid::Ulid::new().to_string();
     let session_writer = SessionWriter::open(&session_id)
@@ -305,13 +336,21 @@ async fn run_tui(
         .context("open session")?;
 
     let dispatcher = Arc::new(NopDispatcher);
-    let mut tools = build_tools();
+
+    // Load skills for the skill tool.
+    let skills_loader = mew_skills::Loader::new(std::env::current_dir().unwrap_or_default());
+    let loaded_skills = skills_loader.load().unwrap_or_default();
+    let skills = Arc::new(loaded_skills);
+
+    let mut tools = build_tools(skills.clone());
 
     // Load MCP tools.
     let mcp_configs = load_mcp_configs();
+    let mut _mcp_clients: Vec<Arc<McpClient>> = Vec::new();
     if !mcp_configs.is_empty() {
-        let mcp_tools = connect_mcp_servers(&mcp_configs).await;
+        let (mcp_tools, mcp_cls) = connect_mcp_servers(&mcp_configs).await;
         tools.extend(mcp_tools);
+        _mcp_clients = mcp_cls;
     }
 
     let permission_engine = build_permission_engine(cfg);
@@ -321,14 +360,40 @@ async fn run_tui(
     let ctx_files = ctx_loader.load().unwrap_or_default();
 
     // Populate sidebar data before moving tools.
-    let context_files: Vec<String> = ctx_files.iter().map(|f| f.path.to_string_lossy().to_string()).collect();
+    let context_files: Vec<String> = ctx_files
+        .iter()
+        .map(|f| f.path.to_string_lossy().to_string())
+        .collect();
     let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
 
     let mut agent = Agent::new(provider, dispatcher, Some(session_writer), tools, None);
     agent.set_permission_engine(permission_engine);
 
+    // Set vision capability and pricing from catalog.
+    if let Some(c) = cat {
+        agent.supports_vision = c.supports_vision(&model_id);
+        if let Some(m) = c.lookup(&model_id) {
+            agent.input_price = m.pricing.input;
+            agent.output_price = m.pricing.output;
+            agent.cache_read_price = m.pricing.cache_read;
+            agent.cache_write_price = m.pricing.cache_write;
+            agent.reasoning_price = m.pricing.reasoning;
+        }
+    }
+
     if !ctx_files.is_empty() {
         agent.set_system(mew_context::build_system_prompt(&ctx_files));
+    }
+
+    // If skills are loaded, append the skill listing to the system prompt.
+    if !skills.is_empty() {
+        let mut system = if ctx_files.is_empty() {
+            String::new()
+        } else {
+            mew_context::build_system_prompt(&ctx_files)
+        };
+        system.push_str(&build_skills_xml(&skills));
+        agent.set_system(system);
     }
 
     let mut app = mew_tui::App::new();
@@ -377,71 +442,136 @@ async fn run_tui(
         let mut should_break = false;
         match event {
             mew_tui::Event::Input(crossterm_event) => {
-                if let Some(action) = mew_tui::events::handle_input_event(&mut app, crossterm_event) {
-                        match action {
-                            mew_tui::events::Action::Submit(text) => {
-                                let cwd = std::env::current_dir().unwrap_or_default();
-                                let (enriched, attachments) = process_mentions(&text, &cwd, &mut app.context_files).await;
-                                app.messages.push(user_message(enriched.clone(), attachments.clone()));
-                                app.streaming = true;
-                                let agent_rx = agent.run_with_parts(enriched, attachments);
-                                event_loop.forward_agent_events(agent_rx);
-                            }
-                            mew_tui::events::Action::SlashCommand(text) => {
-                                match app.handle_slash(&text) {
-                                    mew_tui::SlashResult::Continue => {}
-                                    mew_tui::SlashResult::Quit => should_break = true,
-                                    mew_tui::SlashResult::Clear => {
-                                        app.clear_messages();
-                                    }
-                                    mew_tui::SlashResult::Message(msg) => {
-                                        app.messages.push(synthetic_message(msg));
+                if let Some(action) = mew_tui::events::handle_input_event(&mut app, crossterm_event)
+                {
+                    match action {
+                        mew_tui::events::Action::Submit(text) => {
+                            let cwd = std::env::current_dir().unwrap_or_default();
+                            let (enriched, attachments) =
+                                process_mentions(&text, &cwd, &mut app.context_files).await;
+                            app.messages
+                                .push(user_message(enriched.clone(), attachments.clone()));
+                            app.streaming = true;
+                            let agent_rx = agent.run_with_parts(enriched, attachments);
+                            event_loop.forward_agent_events(agent_rx);
+                        }
+                        mew_tui::events::Action::SlashCommand(text) => {
+                            match app.handle_slash(&text) {
+                                mew_tui::SlashResult::Continue => {}
+                                mew_tui::SlashResult::Quit => should_break = true,
+                                mew_tui::SlashResult::Clear => {
+                                    app.clear_messages();
+                                }
+                                mew_tui::SlashResult::Message(msg) => {
+                                    app.messages.push(synthetic_message(msg));
+                                }
+                                mew_tui::SlashResult::Compact => {
+                                    app.messages.push(synthetic_message(
+                                        "compaction is not yet implemented".into(),
+                                    ));
+                                }
+                                mew_tui::SlashResult::SwitchModel(new_model) => {
+                                    let (new_provider_id, new_model_id) = if let Some(idx) = new_model.find('/') {
+                                        (&new_model[..idx], &new_model[idx + 1..])
+                                    } else {
+                                        (provider_id.as_str(), new_model.as_str())
+                                    };
+                                    match build_provider(cfg, cat, new_provider_id, new_model_id, raw) {
+                                        Ok(new_provider) => {
+                                            agent.provider = new_provider;
+                                            app.status.model = new_model_id.to_string();
+                                            app.status.provider = new_provider_id.to_string();
+                                            if let Some(c) = cat {
+                                                app.status.context_window = c.context_window(new_model_id) as u32;
+                                                if let Some(m) = c.lookup(new_model_id) {
+                                                    agent.input_price = m.pricing.input;
+                                                    agent.output_price = m.pricing.output;
+                                                    agent.cache_read_price = m.pricing.cache_read;
+                                                    agent.cache_write_price = m.pricing.cache_write;
+                                                    agent.reasoning_price = m.pricing.reasoning;
+                                                }
+                                            }
+                                            let state = mew_config::State {
+                                                last_model: new_model_id.to_string(),
+                                                last_provider: new_provider_id.to_string(),
+                                            };
+                                            if let Err(e) = mew_config::save_state(&state) {
+                                                tracing::warn!("failed to save state: {}", e);
+                                            }
+                                            app.messages.push(synthetic_message(format!("switched to {}", new_model)));
+                                        }
+                                        Err(e) => {
+                                            app.messages.push(synthetic_message(format!("failed to switch: {}", e)));
+                                        }
                                     }
                                 }
+                                mew_tui::SlashResult::ResumeSession(_id) => {
+                                    app.messages.push(synthetic_message(
+                                        "session resume is not yet implemented".into(),
+                                    ));
+                                }
+                                mew_tui::SlashResult::OpenModelPicker => {
+                                    app.open_command_palette();
+                                }
                             }
-                            mew_tui::events::Action::Clear => {
-                                app.clear_messages();
-                            }
-                            mew_tui::events::Action::SwitchModel(new_model) => {
-                                let (new_provider_id, new_model_id) = if let Some(idx) = new_model.find('/') {
+                        }
+                        mew_tui::events::Action::Clear => {
+                            app.clear_messages();
+                        }
+                        mew_tui::events::Action::SwitchModel(new_model) => {
+                            let (new_provider_id, new_model_id) =
+                                if let Some(idx) = new_model.find('/') {
                                     (&new_model[..idx], &new_model[idx + 1..])
                                 } else {
                                     (provider_id.as_str(), new_model.as_str())
                                 };
-                                match build_provider(cfg, cat, new_provider_id, new_model_id, raw) {
-                                    Ok(new_provider) => {
-                                        agent.provider = new_provider;
-                                        app.status.model = new_model_id.to_string();
-                                        app.status.provider = new_provider_id.to_string();
-                                        if let Some(c) = cat {
-                                            app.status.context_window = c.context_window(new_model_id) as u32;
+                            match build_provider(cfg, cat, new_provider_id, new_model_id, raw) {
+                                Ok(new_provider) => {
+                                    agent.provider = new_provider;
+                                    app.status.model = new_model_id.to_string();
+                                    app.status.provider = new_provider_id.to_string();
+                                    if let Some(c) = cat {
+                                        app.status.context_window = c.context_window(new_model_id) as u32;
+                                        if let Some(m) = c.lookup(new_model_id) {
+                                            agent.input_price = m.pricing.input;
+                                            agent.output_price = m.pricing.output;
+                                            agent.cache_read_price = m.pricing.cache_read;
+                                            agent.cache_write_price = m.pricing.cache_write;
+                                            agent.reasoning_price = m.pricing.reasoning;
                                         }
-                                        let state = mew_config::State {
-                                            last_model: new_model_id.to_string(),
-                                            last_provider: new_provider_id.to_string(),
-                                        };
-                                        if let Err(e) = mew_config::save_state(&state) {
-                                            tracing::warn!("failed to save state: {}", e);
-                                        }
-                                        app.messages.push(synthetic_message(format!("switched to {}", new_model)));
                                     }
-                                    Err(e) => {
-                                        app.messages.push(synthetic_message(format!("failed to switch model: {}", e)));
+                                    let state = mew_config::State {
+                                        last_model: new_model_id.to_string(),
+                                        last_provider: new_provider_id.to_string(),
+                                    };
+                                    if let Err(e) = mew_config::save_state(&state) {
+                                        tracing::warn!("failed to save state: {}", e);
                                     }
+                                    app.messages.push(synthetic_message(format!("switched to {}", new_model)));
+                                }
+                                Err(e) => {
+                                    app.messages.push(synthetic_message(format!("failed to switch model: {}", e)));
                                 }
                             }
-                            mew_tui::events::Action::Cancel => {
-                                agent.cancel_token.cancel();
-                                app.streaming = false;
-                            }
-                            mew_tui::events::Action::Quit => should_break = true,
                         }
+                        mew_tui::events::Action::Cancel => {
+                            agent.cancel_token.cancel();
+                            app.streaming = false;
+                        }
+                        mew_tui::events::Action::InsertAtMention(mention) => {
+                            app.input.push_str(&mention);
+                            app.cursor += mention.len();
+                        }
+                        mew_tui::events::Action::Quit => should_break = true,
                     }
+                }
             }
             mew_tui::Event::Agent(event) => {
                 app.handle_agent_event(event);
             }
-            mew_tui::Event::Tick => { app.tick(); }
+            mew_tui::Event::Tick => {
+                app.tick();
+            }
             mew_tui::Event::Quit => should_break = true,
         }
 
@@ -474,7 +604,9 @@ async fn run_tui(
                             _ => {}
                         }
                     }
-                    if let Some(action) = mew_tui::events::handle_input_event(&mut app, crossterm_event) {
+                    if let Some(action) =
+                        mew_tui::events::handle_input_event(&mut app, crossterm_event)
+                    {
                         match action {
                             mew_tui::events::Action::Quit => {
                                 should_break = true;
@@ -491,6 +623,10 @@ async fn run_tui(
                             mew_tui::events::Action::Clear => {
                                 app.clear_messages();
                             }
+                            mew_tui::events::Action::InsertAtMention(mention) => {
+                                app.input.push_str(&mention);
+                                app.cursor += mention.len();
+                            }
                             mew_tui::events::Action::SlashCommand(text) => {
                                 match app.handle_slash(&text) {
                                     mew_tui::SlashResult::Continue => {}
@@ -503,6 +639,22 @@ async fn run_tui(
                                     }
                                     mew_tui::SlashResult::Message(msg) => {
                                         app.messages.push(synthetic_message(msg));
+                                    }
+                                    mew_tui::SlashResult::Compact => {
+                                        app.messages.push(synthetic_message(
+                                            "compaction is not yet implemented".into(),
+                                        ));
+                                    }
+                                    mew_tui::SlashResult::SwitchModel(_) => {
+                                        // Model switches are deferred; handled in main loop.
+                                    }
+                                    mew_tui::SlashResult::ResumeSession(_) => {
+                                        app.messages.push(synthetic_message(
+                                            "session resume is not yet implemented".into(),
+                                        ));
+                                    }
+                                    mew_tui::SlashResult::OpenModelPicker => {
+                                        // Deferred to main loop; ignored during drain.
                                     }
                                 }
                             }
@@ -522,19 +674,23 @@ async fn run_tui(
                         break 'drain;
                     }
                 }
-                mew_tui::Event::Tick => { app.tick(); }
+                mew_tui::Event::Tick => {
+                    app.tick();
+                }
                 mew_tui::Event::Quit => {
                     should_break = true;
                     break 'drain;
-                },
+                }
             }
         }
 
         // Process a Submit action deferred from the drain (needs async @mention reads).
         if let Some(text) = pending_drain_submit {
             let cwd = std::env::current_dir().unwrap_or_default();
-            let (enriched, attachments) = process_mentions(&text, &cwd, &mut app.context_files).await;
-            app.messages.push(user_message(enriched.clone(), attachments.clone()));
+            let (enriched, attachments) =
+                process_mentions(&text, &cwd, &mut app.context_files).await;
+            app.messages
+                .push(user_message(enriched.clone(), attachments.clone()));
             app.streaming = true;
             let agent_rx = agent.run_with_parts(enriched, attachments);
             event_loop.forward_agent_events(agent_rx);
@@ -559,9 +715,11 @@ async fn run_tui(
     )?;
     terminal.show_cursor()?;
 
+    // Note: MCP client shutdown is best-effort. Subprocess cleanup
+    // on exit is handled by the transport's Drop implementation.
+
     result
 }
-
 
 fn image_mime(path: &str) -> Option<&'static str> {
     let ext = std::path::Path::new(path)
@@ -569,9 +727,9 @@ fn image_mime(path: &str) -> Option<&'static str> {
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase());
     match ext.as_deref() {
-        Some("png")  => Some("image/png"),
+        Some("png") => Some("image/png"),
         Some("jpg") | Some("jpeg") => Some("image/jpeg"),
-        Some("gif")  => Some("image/gif"),
+        Some("gif") => Some("image/gif"),
         Some("webp") => Some("image/webp"),
         _ => None,
     }
@@ -682,11 +840,7 @@ fn synthetic_message(text: String) -> mew_message::Message {
     }
 }
 
-async fn discover_models(
-    cfg: &Config,
-    cat: Option<&Catalog>,
-    raw: bool,
-) -> Vec<(String, String)> {
+async fn discover_models(cfg: &Config, cat: Option<&Catalog>, raw: bool) -> Vec<(String, String)> {
     use std::collections::HashSet;
 
     let mut seen = HashSet::new();
@@ -740,9 +894,15 @@ async fn discover_models(
     if models.is_empty() {
         tracing::warn!("discovery: no models from any provider, using fallbacks");
         let fallbacks: Vec<(String, String)> = vec![
-            ("opencode-zen/deepseek-v4-flash".into(), "opencode-zen · openai".into()),
+            (
+                "opencode-zen/deepseek-v4-flash".into(),
+                "opencode-zen · openai".into(),
+            ),
             ("z-ai/glm-5.1".into(), "z-ai · anthropic".into()),
-            ("opencode-go/minimax-text-01".into(), "opencode-go · anthropic".into()),
+            (
+                "opencode-go/minimax-text-01".into(),
+                "opencode-go · anthropic".into(),
+            ),
         ];
         for (id, desc) in fallbacks {
             if seen.insert(id.clone()) {
@@ -773,7 +933,8 @@ async fn build_and_run(
 ) -> Result<()> {
     let (provider_id, model_id) = resolve_model(cfg, cat, provider_flag, model_flag);
 
-    let provider = build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
+    let provider =
+        build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
 
     let session_id = ulid::Ulid::new().to_string();
     let session_writer = SessionWriter::open(&session_id)
@@ -781,13 +942,21 @@ async fn build_and_run(
         .context("open session")?;
 
     let dispatcher = Arc::new(NopDispatcher);
-    let mut tools = build_tools();
+
+    // Load skills for the skill tool.
+    let skills_loader = mew_skills::Loader::new(std::env::current_dir().unwrap_or_default());
+    let loaded_skills = skills_loader.load().unwrap_or_default();
+    let skills = Arc::new(loaded_skills);
+
+    let mut tools = build_tools(skills.clone());
 
     // Load MCP tools.
     let mcp_configs = load_mcp_configs();
+    let mut _mcp_clients: Vec<Arc<McpClient>> = Vec::new();
     if !mcp_configs.is_empty() {
-        let mcp_tools = connect_mcp_servers(&mcp_configs).await;
+        let (mcp_tools, mcp_cls) = connect_mcp_servers(&mcp_configs).await;
         tools.extend(mcp_tools);
+        _mcp_clients = mcp_cls;
     }
 
     let permission_engine = build_permission_engine(cfg);
@@ -795,11 +964,28 @@ async fn build_and_run(
     let mut agent = Agent::new(provider, dispatcher, Some(session_writer), tools, None);
     agent.set_permission_engine(permission_engine);
 
+    // Set vision capability and pricing from catalog.
+    if let Some(c) = cat {
+        agent.supports_vision = c.supports_vision(&model_id);
+        if let Some(m) = c.lookup(&model_id) {
+            agent.input_price = m.pricing.input;
+            agent.output_price = m.pricing.output;
+            agent.cache_read_price = m.pricing.cache_read;
+            agent.cache_write_price = m.pricing.cache_write;
+            agent.reasoning_price = m.pricing.reasoning;
+        }
+    }
+
     // Load project context files and prepend to system prompt
     let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());
     let ctx_files = ctx_loader.load().unwrap_or_default();
     if !ctx_files.is_empty() {
         agent.set_system(mew_context::build_system_prompt(&ctx_files));
+    }
+    if !skills.is_empty() {
+        let mut system = agent.system.clone();
+        system.push_str(&build_skills_xml(&skills));
+        agent.set_system(system);
     }
 
     let mut rx = agent.run(prompt);
@@ -955,6 +1141,11 @@ fn build_provider(
                 base_url: "https://api.z.ai/api/anthropic/v1".to_string(),
                 credential_ref: "z-ai".to_string(),
             }),
+            "deepseek" => Some(ProviderConfig {
+                shape: "deepseek".to_string(),
+                base_url: "https://api.deepseek.ai/v1".to_string(),
+                credential_ref: "deepseek".to_string(),
+            }),
             _ => None,
         })
         .with_context(|| format!("unknown provider {}", provider_id))?;
@@ -987,24 +1178,15 @@ fn build_provider(
 
     match shape.as_str() {
         "openai" => {
-            let mut adapter = OpenAIAdapter::new(
-                provider_id.to_string(),
-                base_url,
-                model,
-                creds,
-            );
+            let mut adapter = OpenAIAdapter::new(provider_id.to_string(), base_url, model, creds);
             if raw {
                 adapter.set_dump(true);
             }
             Ok(Arc::new(adapter))
         }
         "anthropic" => {
-            let mut adapter = AnthropicAdapter::new(
-                provider_id.to_string(),
-                base_url,
-                model,
-                creds,
-            );
+            let mut adapter =
+                AnthropicAdapter::new(provider_id.to_string(), base_url, model, creds);
             if raw {
                 adapter.set_dump(true);
             }

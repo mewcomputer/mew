@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 mew-message = { workspace = true }
 mew-hooks = { workspace = true }
+mew-skills = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

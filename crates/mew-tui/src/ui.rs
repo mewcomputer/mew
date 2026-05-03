@@ -69,15 +69,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         0
     };
 
+    let input_height = (app.input_line_count().max(1).min(12) + 2) as u16;
+
     // Vertical layout inside main area.
     let vert = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),              // chat
-            Constraint::Length(1),           // divider
-            Constraint::Length(slash_height), // slash autocomplete
-            Constraint::Length(3),           // input
-            Constraint::Length(1),           // status
+            Constraint::Min(1),                  // chat
+            Constraint::Length(1),               // divider
+            Constraint::Length(slash_height),     // slash autocomplete
+            Constraint::Length(input_height),     // input
+            Constraint::Length(1),               // status
         ])
         .split(main_area);
 
@@ -565,41 +567,57 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         _ => Style::default().fg(Color::White).bg(STATUS_BG),
     };
 
-    // Fill the input area background.
+    let line_count = app.input_line_count().max(1);
+    // Clamp input area height: use as many rows as needed, up to a max.
+    let input_height = line_count.min(12) as u16 + 2; // +2 for padding
+    let input_area = Rect::new(area.x, area.y, area.width, input_height.min(area.height));
+
+    // Fill background.
     let bg_block = Block::default().style(Style::default().bg(STATUS_BG));
-    f.render_widget(bg_block, area);
+    f.render_widget(bg_block, input_area);
 
-    // Content is the middle row with horizontal padding.
-    let content_area = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), 1);
+    let content_area = Rect::new(
+        input_area.x + 1,
+        input_area.y + 1,
+        input_area.width.saturating_sub(2),
+        input_area.height.saturating_sub(2),
+    );
 
-    let col_width = content_area.width as usize;
     let prefix_width = 2usize; // "> " or "… "
-    let available = col_width.saturating_sub(prefix_width);
+    let (cursor_line, cursor_col) = app.cursor_line_col();
 
-    // Compute visible slice based on display width, safe on character boundaries.
-    let (visible, cursor_col) = if display_width(&app.input) <= available {
-        (&app.input[..], display_width(&app.input[..app.cursor]))
-    } else {
-        let cursor_col_in_text = display_width(&app.input[..app.cursor]);
-        let start_col = cursor_col_in_text.saturating_sub(available / 2);
-        let start_byte = byte_at_display_offset(&app.input, start_col);
-        let end_byte = byte_at_display_offset(&app.input, start_col + available);
-        (&app.input[start_byte..end_byte], cursor_col_in_text - start_col)
-    };
+    let lines: Vec<&str> = app.input.split('\n').collect();
+    for (li, line) in lines.iter().enumerate() {
+        let y = content_area.y + li as u16;
+        if y >= content_area.y + content_area.height {
+            break;
+        }
 
-    let prefix = if app.streaming {
-        Span::styled("… ", Style::default().fg(Color::Yellow).bg(STATUS_BG))
-    } else {
-        Span::styled("> ", Style::default().fg(Color::Cyan).bg(STATUS_BG))
-    };
+        let available = content_area.width as usize;
+        let (visible, col) = if display_width(line) <= available {
+            (*line, cursor_col.min(available))
+        } else {
+            let cursor_col_in_text = if li == cursor_line { cursor_col } else { 0 };
+            let start_col = cursor_col_in_text.saturating_sub(available / 2);
+            let start_byte = byte_at_display_offset(line, start_col);
+            let end_byte = byte_at_display_offset(line, start_col + available);
+            (&line[start_byte..end_byte], cursor_col_in_text - start_col)
+        };
 
-    let text = Text::from(Line::from(vec![prefix, Span::styled(visible, style)]));
-    let paragraph = Paragraph::new(text);
-    f.render_widget(paragraph, content_area);
+        let prefix = if app.streaming {
+            Span::styled("… ", Style::default().fg(Color::Yellow).bg(STATUS_BG))
+        } else {
+            Span::styled("> ", Style::default().fg(Color::Cyan).bg(STATUS_BG))
+        };
 
-    // Position cursor, accounting for prefix width.
-    let cursor_x = content_area.x + prefix_width as u16 + cursor_col.min(available) as u16;
-    let cursor_y = content_area.y;
+        let text = Text::from(Line::from(vec![prefix, Span::styled(visible, style)]));
+        let row = Rect::new(content_area.x, y, content_area.width, 1);
+        f.render_widget(Paragraph::new(text), row);
+    }
+
+    // Position cursor on the active line.
+    let cursor_x = content_area.x + prefix_width as u16 + cursor_col.min(content_area.width as usize) as u16;
+    let cursor_y = content_area.y + cursor_line.min(content_area.height as usize) as u16;
     f.set_cursor_position((cursor_x, cursor_y));
 }
 
@@ -644,6 +662,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 
     let left_spans = if app.esc_cancel_pending.is_some() {
         vec![Span::styled("esc again to stop agent", Style::default().fg(Color::Yellow).bg(STATUS_BG))]
+    } else if app.ctrl_c_quit_pending.is_some() {
+        vec![Span::styled("ctrl-c again to quit", Style::default().fg(Color::Red).bg(STATUS_BG))]
     } else {
         vec![
             Span::styled(&status.model, Style::default().fg(Color::White).bg(STATUS_BG)),

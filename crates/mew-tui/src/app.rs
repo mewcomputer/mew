@@ -23,12 +23,20 @@ pub struct SlashCommand {
 
 /// Result of handling a slash command.
 pub enum SlashResult {
-    /// Command unknown; ignore.
+    /// Command unknown; fall through to the model.
     Continue,
     Quit,
     Clear,
     /// Display a message in the chat pane.
     Message(String),
+    /// Switch to a different model.
+    SwitchModel(String),
+    /// Open the model picker.
+    OpenModelPicker,
+    /// Resume a previous session by ID.
+    ResumeSession(String),
+    /// Force context compaction.
+    Compact,
 }
 
 /// The application's main state.
@@ -87,6 +95,8 @@ pub struct App {
     pub max_scroll: u16,
     /// Set on the first Esc press while streaming; second Esc within the window cancels.
     pub esc_cancel_pending: Option<Instant>,
+    /// Set on the first Ctrl-c press while streaming; second Ctrl-c within 1s exits.
+    pub ctrl_c_quit_pending: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +228,7 @@ impl App {
             last_md_width: 0,
             max_scroll: 0,
             esc_cancel_pending: None,
+            ctrl_c_quit_pending: None,
         }
     }
 
@@ -345,10 +356,67 @@ impl App {
         }
     }
 
+    /// Open the file picker for @-mentions, filtered by a prefix.
+    pub fn open_file_picker(&mut self, prefix: &str) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut items: Vec<PickerItem> = Vec::new();
+
+        let walker = ignore::WalkBuilder::new(&cwd)
+            .max_depth(Some(4))
+            .hidden(false)
+            .git_ignore(true)
+            .build();
+
+        for entry in walker.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                if meta.len() > 1_048_576 {
+                    continue;
+                }
+            }
+            let rel = path.strip_prefix(&cwd).unwrap_or(path).to_string_lossy().to_string();
+            if !rel.to_lowercase().contains(&prefix.to_lowercase()) {
+                continue;
+            }
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            items.push(PickerItem {
+                id: rel.clone(),
+                label: format!("@{}", rel),
+                description: if size > 1024 {
+                    format!("{} KB", size / 1024)
+                } else {
+                    format!("{} B", size)
+                },
+            });
+        }
+
+        items.sort_by_key(|i| i.label.len());
+        items.truncate(50);
+
+        self.mode = Mode::CommandPalette;
+        self.picker = Some(PickerState {
+            kind: "file".into(),
+            items,
+            filter: prefix.to_string(),
+            selected: 0,
+            cursor: prefix.len(),
+            scroll: 0,
+        });
+    }
+
     /// Insert a character at the cursor position.
     pub fn insert_char(&mut self, c: char) {
         self.input.insert(self.cursor, c);
         self.cursor += c.len_utf8();
+    }
+
+    /// Insert a newline at cursor position.
+    pub fn insert_newline(&mut self) {
+        self.input.insert(self.cursor, '\n');
+        self.cursor += 1;
     }
 
     /// Delete the character before the cursor.
@@ -395,12 +463,39 @@ impl App {
 
     /// Move cursor to start.
     pub fn cursor_home(&mut self) {
-        self.cursor = 0;
+        // Move to start of current line.
+        let before = &self.input[..self.cursor];
+        if let Some(ln_pos) = before.rfind('\n') {
+            self.cursor = ln_pos + 1;
+        } else {
+            self.cursor = 0;
+        }
     }
 
-    /// Move cursor to end.
+    /// Move cursor to end of current line.
     pub fn cursor_end(&mut self) {
-        self.cursor = self.input.len();
+        if let Some(ln_pos) = self.input[self.cursor..].find('\n') {
+            self.cursor = self.cursor + ln_pos;
+        } else {
+            self.cursor = self.input.len();
+        }
+    }
+
+    /// Number of lines in the input.
+    pub fn input_line_count(&self) -> usize {
+        self.input.lines().count()
+    }
+
+    /// Return (line index, byte offset within that line) for the cursor.
+    pub fn cursor_line_col(&self) -> (usize, usize) {
+        let before = &self.input[..self.cursor];
+        let line = before.lines().count().saturating_sub(1);
+        let col = if let Some(ln_pos) = before.rfind('\n') {
+            self.cursor - ln_pos - 1
+        } else {
+            self.cursor
+        };
+        (line, col)
     }
 
     /// Move cursor to the previous word boundary.
@@ -568,11 +663,17 @@ impl App {
         self.bash_expanded = !self.bash_expanded;
     }
 
-    /// Expire the pending-cancel hint if it has been showing too long.
+    /// Expire the pending-cancel hint and pending-quit hint.
     pub fn tick(&mut self) {
         if let Some(since) = self.esc_cancel_pending {
             if since.elapsed() > Duration::from_secs(2) {
                 self.esc_cancel_pending = None;
+                self.ctrl_c_quit_pending = None;
+            }
+        }
+        if let Some(since) = self.ctrl_c_quit_pending {
+            if since.elapsed() > Duration::from_secs(1) {
+                self.ctrl_c_quit_pending = None;
             }
         }
     }
@@ -580,21 +681,44 @@ impl App {
     /// Available slash commands (single source of truth for autocomplete and handling).
     pub fn slash_commands() -> Vec<SlashCommand> {
         vec![
-            SlashCommand { name: "/clear".into(),  description: "clear chat".into() },
-            SlashCommand { name: "/cost".into(),   description: "show cost breakdown".into() },
-            SlashCommand { name: "/help".into(),   description: "show available commands".into() },
-            SlashCommand { name: "/quit".into(),   description: "exit mew".into() },
+            SlashCommand { name: "/clear".into(),    description: "clear chat".into() },
+            SlashCommand { name: "/compact".into(),  description: "force context compaction".into() },
+            SlashCommand { name: "/cost".into(),     description: "show cost breakdown".into() },
+            SlashCommand { name: "/help".into(),     description: "show available commands".into() },
+            SlashCommand { name: "/model".into(),    description: "switch model (e.g. /model deepseek-v4-flash)".into() },
+            SlashCommand { name: "/quit".into(),     description: "exit mew".into() },
+            SlashCommand { name: "/sessions".into(), description: "list previous sessions".into() },
+            SlashCommand { name: "/resume".into(),   description: "resume a session (e.g. /resume <id>)".into() },
         ]
     }
 
     /// Handle a slash command, returning what the caller should do.
     pub fn handle_slash(&self, input: &str) -> SlashResult {
-        let cmd = input.splitn(2, ' ').next().unwrap_or(input);
+        let (cmd, arg) = match input.split_once(' ') {
+            Some((c, a)) => (c, Some(a)),
+            None => (input, None),
+        };
         match cmd {
             "/quit" | "/q" => SlashResult::Quit,
             "/clear"       => SlashResult::Clear,
+            "/compact"     => SlashResult::Compact,
             "/cost"        => SlashResult::Message(self.build_cost_report()),
             "/help"        => SlashResult::Message(self.build_help()),
+            "/model" => {
+                if let Some(id) = arg {
+                    SlashResult::SwitchModel(id.to_string())
+                } else {
+                    SlashResult::OpenModelPicker
+                }
+            }
+            "/sessions"    => SlashResult::Message(self.build_sessions_list()),
+            "/resume" => {
+                if let Some(id) = arg {
+                    SlashResult::ResumeSession(id.to_string())
+                } else {
+                    SlashResult::Message("usage: /resume <session-id>".into())
+                }
+            }
             _              => SlashResult::Continue,
         }
     }
@@ -626,6 +750,47 @@ impl App {
         let mut out = String::from("commands:\n");
         for cmd in Self::slash_commands() {
             out.push_str(&format!("  {:12}  {}\n", cmd.name, cmd.description));
+        }
+        out.trim_end().to_string()
+    }
+
+    fn build_sessions_list(&self) -> String {
+        use std::time::UNIX_EPOCH;
+        let dir = mew_session::session_dir();
+        let mut out = String::from("sessions:\n");
+        match std::fs::read_dir(&dir) {
+            Ok(entries) => {
+                let mut files: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| n.ends_with(".jsonl"))
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                files.sort_by_key(|e| {
+                    e.metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(UNIX_EPOCH)
+                });
+                for entry in files.iter().rev().take(20) {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let id = name.strip_suffix(".jsonl").unwrap_or(&name);
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    out.push_str(&format!(
+                        "  {}  ({} bytes)\n",
+                        id,
+                        size
+                    ));
+                }
+                if files.is_empty() {
+                    out.push_str("  (no sessions found)\n");
+                }
+            }
+            Err(_) => {
+                out.push_str("  (unable to read sessions directory)\n");
+            }
         }
         out.trim_end().to_string()
     }
@@ -739,6 +904,7 @@ impl App {
                 if finish != mew_message::Finish::ToolUse {
                     self.streaming = false;
                     self.esc_cancel_pending = None;
+                    self.ctrl_c_quit_pending = None;
                 }
                 self.status.input_tokens += usage.input;
                 self.status.output_tokens += usage.output;
@@ -750,6 +916,7 @@ impl App {
             AgentEvent::Provider(ProviderEvent::Error(err)) => {
                 self.streaming = false;
                 self.esc_cancel_pending = None;
+                self.ctrl_c_quit_pending = None;
                 self.push_synthetic_message(format!("Provider error: {}", err.message));
             }
             AgentEvent::PermissionRequest { call, tx } => {
@@ -846,6 +1013,7 @@ impl App {
             AgentEvent::Error(msg) => {
                 self.streaming = false;
                 self.esc_cancel_pending = None;
+                self.ctrl_c_quit_pending = None;
                 self.push_synthetic_message(format!("Error: {}", msg));
             }
         }

@@ -70,7 +70,7 @@ impl Writer {
     }
 }
 
-fn session_dir() -> PathBuf {
+pub fn session_dir() -> PathBuf {
     directories::ProjectDirs::from("ai", "mew", "mew")
         .map(|d| d.config_dir().join("sessions"))
         .unwrap_or_else(|| {

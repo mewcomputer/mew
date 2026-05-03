@@ -23,6 +23,8 @@ pub struct Config {
 pub struct PermissionsConfig {
     #[serde(default)]
     pub rules: Vec<permissions::PermissionRule>,
+    #[serde(default)]
+    pub skills: Vec<permissions::SkillPermissionRule>,
 }
 
 impl Default for Config {
