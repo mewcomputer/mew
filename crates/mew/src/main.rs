@@ -1205,8 +1205,7 @@ async fn build_and_run(
     let provider =
         build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
 
-    // For router providers, use the big model for display.
-    let (display_provider, display_model) = if let Some(pc) = cfg.providers.get(&provider_id) {
+    let (_display_provider, display_model) = if let Some(pc) = cfg.providers.get(&provider_id) {
         if pc.kind == "router" && !pc.big.is_empty() {
             let (_, big_mid) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
             let (big_pid, _) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));

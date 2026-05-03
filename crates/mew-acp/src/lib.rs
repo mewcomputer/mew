@@ -303,9 +303,21 @@ use mew_agent::Agent as AgentCore;
 pub async fn run_server(agent: AgentCore) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let reader = BufReader::new(stdin);
+    run_server_on(
+        agent,
+        BufReader::new(stdin),
+        tokio::io::BufWriter::new(stdout),
+    )
+    .await
+}
+
+pub async fn run_server_on(
+    agent: AgentCore,
+    reader: impl tokio::io::AsyncBufRead + Unpin,
+    writer: impl tokio::io::AsyncWrite + Unpin,
+) -> Result<()> {
     let mut lines = reader.lines();
-    let mut stdout = tokio::io::BufWriter::new(stdout);
+    let mut stdout = writer;
 
     let mut session_id: Option<String> = None;
     let agent = Arc::new(agent);
@@ -362,6 +374,19 @@ pub async fn run_server(agent: AgentCore) -> Result<()> {
                     }
                 });
                 send_line(&mut stdout, &resp).await?;
+
+                let notif = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": sid,
+                        "update": {
+                            "sessionUpdate": "available_commands_update",
+                            "availableCommands": available_commands()
+                        }
+                    }
+                });
+                send_line(&mut stdout, &notif).await?;
             }
             "session/prompt" => {
                 let Some(ref sid) = session_id else {
@@ -379,6 +404,32 @@ pub async fn run_server(agent: AgentCore) -> Result<()> {
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
                 info!("acp server: prompt \"{}\"", &text[..text.len().min(80)]);
+
+                let (cmd, _arg) = match text.split_once(' ') {
+                    Some((c, a)) => (c, Some(a)),
+                    None => (text, None),
+                };
+                if let Some(response_text) = handle_slash(cmd, &agent).await {
+                    let chunk = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/update",
+                        "params": {
+                            "sessionId": sid,
+                            "update": {
+                                "sessionUpdate": "agent_message_chunk",
+                                "content": { "type": "text", "text": response_text }
+                            }
+                        }
+                    });
+                    send_line(&mut stdout, &chunk).await?;
+                    let reply = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": resp_id,
+                        "result": { "stopReason": "end_turn" }
+                    });
+                    send_line(&mut stdout, &reply).await?;
+                    continue;
+                }
 
                 let agent = agent.clone();
                 let sid = sid.clone();
@@ -644,15 +695,87 @@ fn translate_notification(msg: &RawMessage, ev_tx: &mpsc::Sender<mew_agent::Agen
 }
 
 // ---------------------------------------------------------------------------
+// Slash command definitions and handlers (server-side)
+// ---------------------------------------------------------------------------
+
+async fn handle_slash(cmd: &str, agent: &mew_agent::Agent) -> Option<String> {
+    match cmd {
+        "/compact" => {
+            agent.force_compact().await;
+            Some("[mew] compaction will run on next turn\n".into())
+        }
+        "/clear" => {
+            agent.load_messages(vec![]).await;
+            Some("[mew] conversation cleared\n".into())
+        }
+        "/cost" => Some(build_cost_report(agent).await),
+        "/help" => Some(build_help_text()),
+        _ => None,
+    }
+}
+
+fn available_commands() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "compact",
+            "description": "force context compaction on next turn",
+        }),
+        serde_json::json!({
+            "name": "clear",
+            "description": "clear conversation history",
+        }),
+        serde_json::json!({
+            "name": "cost",
+            "description": "show session cost breakdown",
+        }),
+        serde_json::json!({
+            "name": "help",
+            "description": "show available slash commands",
+        }),
+    ]
+}
+
+fn build_help_text() -> String {
+    let mut out = String::from("[mew] available commands:\n");
+    for cmd in available_commands() {
+        let name = cmd["name"].as_str().unwrap_or("");
+        let desc = cmd["description"].as_str().unwrap_or("");
+        out.push_str(&format!("  /{name} — {desc}\n"));
+    }
+    out
+}
+
+async fn build_cost_report(agent: &mew_agent::Agent) -> String {
+    let messages = agent.messages.lock().await;
+    let mut total = 0f64;
+    let mut turns: Vec<(usize, f64)> = Vec::new();
+    for (i, msg) in messages.iter().enumerate() {
+        if let Some(ref meta) = msg.assistant {
+            if meta.cost > 0.0 {
+                total += meta.cost;
+                turns.push((i, meta.cost));
+            }
+        }
+    }
+    let mut report = format!("[mew] session cost: ${total:.4}\n");
+    if turns.is_empty() {
+        report.push_str("no recorded costs yet");
+    } else {
+        report.push_str("per-turn breakdown:\n");
+        for (idx, cost) in turns {
+            report.push_str(&format!("  turn {idx}: ${cost:.4}\n"));
+        }
+    }
+    report
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mew_agent::AgentEvent;
-    use mew_message::Part;
-    use mew_provider::ProviderEvent;
 
     #[test]
     fn test_request_serialization() {
@@ -783,4 +906,122 @@ mod tests {
         translate_notification(&msg, &tx);
         // Unknown types should not panic and not send events.
     }
+
+    #[tokio::test]
+    async fn test_server_initialize_and_session() {
+        use serde_json::Value;
+        use std::sync::Arc;
+        let provider = Arc::new(mew_provider_fake::FakeProvider::new(
+            mew_provider_fake::FakeProvider::text_response("hello"),
+        ));
+        let dispatcher = Arc::new(mew_hooks::NopDispatcher);
+        let agent = mew_agent::Agent::new(provider, dispatcher, None, vec![], None);
+        let (cr, sw) = tokio::io::duplex(4096);
+        let (sr, cw) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let _ = run_server_on(agent, BufReader::new(sr), sw).await;
+        });
+        let mut reader = BufReader::new(cr);
+        let mut writer = tokio::io::BufWriter::new(cw);
+        let init = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}});
+        send_line(&mut writer, &init).await.unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        let resp: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(resp["id"], 1);
+        let new_sess = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}});
+        send_line(&mut writer, &new_sess).await.unwrap();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let sid = serde_json::from_str::<Value>(line.trim()).unwrap()["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let prompt = serde_json::json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":sid,"prompt":[{"type":"text","text":"hi"}]}});
+        send_line(&mut writer, &prompt).await.unwrap();
+        let got_response = loop {
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            let msg: Value = serde_json::from_str(line.trim()).unwrap();
+            if msg.get("id").and_then(|v| v.as_u64()) == Some(3) {
+                break true;
+            }
+        };
+        assert!(got_response);
+    }
+}
+
+#[test]
+fn test_available_commands_format() {
+    let cmds = available_commands();
+    assert_eq!(cmds.len(), 4);
+    for cmd in &cmds {
+        assert!(cmd["name"].is_string());
+        assert!(cmd["description"].is_string());
+    }
+    let names: Vec<&str> = cmds.iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"compact"));
+    assert!(names.contains(&"clear"));
+    assert!(names.contains(&"cost"));
+    assert!(names.contains(&"help"));
+}
+
+#[test]
+fn test_build_help_text() {
+    let help = build_help_text();
+    assert!(help.contains("/compact"));
+    assert!(help.contains("/clear"));
+    assert!(help.contains("/cost"));
+    assert!(help.contains("/help"));
+}
+
+#[tokio::test]
+async fn test_handle_slash_known_commands() {
+    let provider = Arc::new(mew_provider_fake::FakeProvider::new(
+        mew_provider_fake::FakeProvider::text_response("ok"),
+    ));
+    let dispatcher = Arc::new(mew_hooks::NopDispatcher);
+    let agent = mew_agent::Agent::new(provider, dispatcher, None, vec![], None);
+
+    assert!(handle_slash("/compact", &agent).await.is_some());
+    assert!(handle_slash("/clear", &agent).await.is_some());
+    assert!(handle_slash("/cost", &agent).await.is_some());
+    assert!(handle_slash("/help", &agent).await.is_some());
+    assert!(handle_slash("/unknown", &agent).await.is_none());
+    assert!(handle_slash("hello", &agent).await.is_none());
+}
+
+#[tokio::test]
+async fn test_handle_slash_clear_empties_messages() {
+    let provider = Arc::new(mew_provider_fake::FakeProvider::new(
+        mew_provider_fake::FakeProvider::text_response("ok"),
+    ));
+    let dispatcher = Arc::new(mew_hooks::NopDispatcher);
+    let agent = mew_agent::Agent::new(provider, dispatcher, None, vec![], None);
+
+    agent.messages.lock().await.push(mew_message::Message {
+        id: ulid::Ulid::new(),
+        session_id: ulid::Ulid::new(),
+        role: mew_message::Role::User,
+        parts: vec![mew_message::Part::Text(mew_message::TextPart {
+            base: mew_message::PartBase {
+                id: ulid::Ulid::new(),
+                message_id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+            },
+            text: "hello".into(),
+            synthetic: false,
+        })],
+        time: mew_message::Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    });
+    assert_eq!(agent.messages.lock().await.len(), 1);
+
+    let result = handle_slash("/clear", &agent).await;
+    assert!(result.is_some());
+    assert!(result.unwrap().contains("cleared"));
+    assert!(agent.messages.lock().await.is_empty());
 }

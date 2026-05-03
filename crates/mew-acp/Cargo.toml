@@ -15,3 +15,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 ulid = { workspace = true }
+
+[dev-dependencies]
+mew-hooks = { workspace = true }
+mew-provider-fake = { workspace = true }
+
