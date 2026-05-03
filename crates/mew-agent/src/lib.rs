@@ -92,6 +92,14 @@ pub struct Agent {
     pub cache_read_price: f64,
     pub cache_write_price: f64,
     pub reasoning_price: f64,
+    /// Model context window size (0 = unknown).
+    pub context_window: u32,
+    /// Fraction of context window at which compaction triggers (default 0.95).
+    pub compaction_threshold: f64,
+    /// Number of most recent turns to keep verbatim during compaction.
+    pub keep_turns: usize,
+    /// Set to true to force compaction on the next turn.
+    force_compact: Arc<tokio::sync::Mutex<bool>>,
 }
 
 impl Agent {
@@ -124,6 +132,10 @@ impl Agent {
             cache_read_price: 0.0,
             cache_write_price: 0.0,
             reasoning_price: 0.0,
+            context_window: 0,
+            compaction_threshold: 0.95,
+            keep_turns: 4,
+            force_compact: Arc::new(tokio::sync::Mutex::new(false)),
         }
     }
 
@@ -135,6 +147,36 @@ impl Agent {
     /// Sets the system prompt prepended to every provider request.
     pub fn set_system(&mut self, system: String) {
         self.system = system;
+    }
+
+    /// Replace the conversation history (used for session resume).
+    pub async fn load_messages(&self, messages: Vec<Message>) {
+        *self.messages.lock().await = messages;
+    }
+
+    /// Force compaction on the next turn.
+    pub async fn force_compact(&self) {
+        *self.force_compact.lock().await = true;
+    }
+
+    /// Rough estimate of total tokens in the current conversation.
+    /// Uses 1 token per ~4 characters (conservative for English text).
+    fn estimated_tokens(&self, messages: &[Message]) -> u32 {
+        let mut chars: usize = self.system.chars().count();
+        for msg in messages {
+            for part in &msg.parts {
+                if let Part::Text(tp) = part {
+                    chars += tp.text.chars().count();
+                } else if let Part::Reasoning(rp) = part {
+                    chars += rp.text.chars().count();
+                } else if let Part::ToolCall(tc) = part {
+                    if let Some(output) = tc.state.output() {
+                        chars += output.chars().count();
+                    }
+                }
+            }
+        }
+        (chars / 4) as u32
     }
 
     /// Starts a single turn and returns a channel of agent events.
@@ -234,6 +276,60 @@ impl Agent {
             // Apply on_chat_message hook to each message.
             for msg in &mut messages {
                 *msg = self.dispatcher.on_chat_message(msg.clone()).await;
+            }
+
+            // Check if compaction is needed (forced or auto).
+            let force = {
+                let mut flag = self.force_compact.lock().await;
+                let was = *flag;
+                *flag = false;
+                was
+            };
+            let estimated = self.estimated_tokens(&messages);
+            let threshold = (self.context_window as f64 * self.compaction_threshold) as u32;
+            let should_compact = force
+                || (self.context_window > 0 && estimated > threshold);
+            if should_compact {
+                tracing::info!(
+                    estimated,
+                    threshold,
+                    context_window = self.context_window,
+                    force,
+                    "compacting context"
+                );
+                let keep_count = self.keep_turns.min(messages.len());
+                let compacted = messages.split_off(messages.len() - keep_count);
+                let compact_msg = Message {
+                    id: Ulid::new(),
+                    session_id: self.session_id,
+                    role: Role::User,
+                    parts: vec![Part::Text(TextPart {
+                        base: PartBase {
+                            id: Ulid::new(),
+                            message_id: Ulid::new(),
+                            session_id: self.session_id,
+                        },
+                        text: "Previous conversation has been compacted to stay within the context window. Recent turns are preserved below."
+                            .into(),
+                        synthetic: true,
+                    })],
+                    time: Time {
+                        created: chrono::Utc::now().timestamp_millis(),
+                        completed: None,
+                    },
+                    assistant: None,
+                };
+                let len_before = messages.len();
+                messages = compacted;
+                // Prepend the summary note.
+                messages.insert(0, compact_msg);
+                let _ = ev_tx
+                    .send(AgentEvent::Error(format!(
+                        "context compacted: {} turns removed ({} estimated tokens)",
+                        len_before,
+                        estimated
+                    )))
+                    .await;
             }
 
             let req = Request {

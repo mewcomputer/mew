@@ -80,6 +80,24 @@ pub fn session_dir() -> PathBuf {
         })
 }
 
+/// Reads messages from a JSONL session file.
+pub struct Reader;
+
+impl Reader {
+    /// Loads all messages from the session file for the given ID.
+    pub async fn load(session_id: &str) -> Result<Vec<Message>, SessionError> {
+        let path = session_dir().join(format!("{}.jsonl", session_id));
+        let data = tokio::fs::read_to_string(&path).await?;
+        let messages: Vec<Message> = data
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).map_err(SessionError::Serialize))
+            .collect::<Result<Vec<_>, _>>()?;
+        debug!(session = %session_id, count = messages.len(), "loaded session");
+        Ok(messages)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

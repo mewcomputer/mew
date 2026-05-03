@@ -372,6 +372,7 @@ async fn run_tui(
     // Set vision capability and pricing from catalog.
     if let Some(c) = cat {
         agent.supports_vision = c.supports_vision(&model_id);
+        agent.context_window = c.context_window(&model_id).max(0) as u32;
         if let Some(m) = c.lookup(&model_id) {
             agent.input_price = m.pricing.input;
             agent.output_price = m.pricing.output;
@@ -466,8 +467,9 @@ async fn run_tui(
                                     app.messages.push(synthetic_message(msg));
                                 }
                                 mew_tui::SlashResult::Compact => {
+                                    agent.force_compact().await;
                                     app.messages.push(synthetic_message(
-                                        "compaction is not yet implemented".into(),
+                                        "compaction will run on next turn".into(),
                                     ));
                                 }
                                 mew_tui::SlashResult::SwitchModel(new_model) => {
@@ -505,10 +507,27 @@ async fn run_tui(
                                         }
                                     }
                                 }
-                                mew_tui::SlashResult::ResumeSession(_id) => {
-                                    app.messages.push(synthetic_message(
-                                        "session resume is not yet implemented".into(),
-                                    ));
+                                mew_tui::SlashResult::ResumeSession(ref id) => {
+                                    match mew_session::Reader::load(id).await {
+                                        Ok(msgs) => {
+                                            agent.load_messages(msgs.clone()).await;
+                                            app.clear_messages();
+                                            for msg in &msgs {
+                                                app.messages.push(msg.clone());
+                                            }
+                                            app.status.session_id = id.clone();
+                                            app.auto_scroll = true;
+                                            app.scroll = app.max_scroll;
+                                            app.messages.push(synthetic_message(
+                                                format!("resumed session {}", id),
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            app.messages.push(synthetic_message(
+                                                format!("failed to load session {}: {}", id, e),
+                                            ));
+                                        }
+                                    }
                                 }
                                 mew_tui::SlashResult::OpenModelPicker => {
                                     app.open_command_palette();
@@ -641,17 +660,16 @@ async fn run_tui(
                                         app.messages.push(synthetic_message(msg));
                                     }
                                     mew_tui::SlashResult::Compact => {
+                                        agent.force_compact().await;
                                         app.messages.push(synthetic_message(
-                                            "compaction is not yet implemented".into(),
+                                            "compaction will run on next turn".into(),
                                         ));
                                     }
                                     mew_tui::SlashResult::SwitchModel(_) => {
                                         // Model switches are deferred; handled in main loop.
                                     }
                                     mew_tui::SlashResult::ResumeSession(_) => {
-                                        app.messages.push(synthetic_message(
-                                            "session resume is not yet implemented".into(),
-                                        ));
+                                        // Deferred; handled in main loop when not streaming.
                                     }
                                     mew_tui::SlashResult::OpenModelPicker => {
                                         // Deferred to main loop; ignored during drain.
@@ -967,6 +985,7 @@ async fn build_and_run(
     // Set vision capability and pricing from catalog.
     if let Some(c) = cat {
         agent.supports_vision = c.supports_vision(&model_id);
+        agent.context_window = c.context_window(&model_id).max(0) as u32;
         if let Some(m) = c.lookup(&model_id) {
             agent.input_price = m.pricing.input;
             agent.output_price = m.pricing.output;
