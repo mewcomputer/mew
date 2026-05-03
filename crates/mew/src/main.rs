@@ -330,6 +330,20 @@ async fn run_tui(
     let provider =
         build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
 
+    // For router providers, use the big model for display.
+    let (display_provider, display_model) =
+        if let Some(pc) = cfg.providers.get(&provider_id) {
+            if pc.kind == "router" && !pc.big.is_empty() {
+                let (_, big_mid) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
+                let (big_pid, _) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
+                (big_pid, big_mid)
+            } else {
+                (provider_id.clone(), model_id.clone())
+            }
+        } else {
+            (provider_id.clone(), model_id.clone())
+        };
+
     let session_id = ulid::Ulid::new().to_string();
     let session_writer = SessionWriter::open(&session_id)
         .await
@@ -371,9 +385,9 @@ async fn run_tui(
 
     // Set vision capability and pricing from catalog.
     if let Some(c) = cat {
-        agent.supports_vision = c.supports_vision(&model_id);
-        agent.context_window = c.context_window(&model_id).max(0) as u32;
-        if let Some(m) = c.lookup(&model_id) {
+        agent.supports_vision = c.supports_vision(&display_model);
+        agent.context_window = c.context_window(&display_model).max(0) as u32;
+        if let Some(m) = c.lookup(&display_model) {
             agent.input_price = m.pricing.input;
             agent.output_price = m.pricing.output;
             agent.cache_read_price = m.pricing.cache_read;
@@ -398,8 +412,8 @@ async fn run_tui(
     }
 
     let mut app = mew_tui::App::new();
-    app.status.model = model_id.clone();
-    app.status.provider = provider_id.clone();
+    app.status.model = display_model.clone();
+    app.status.provider = display_provider.clone();
     app.status.session_id = session_id.clone();
     if let Some(c) = cat {
         app.status.context_window = c.context_window(&model_id) as u32;
@@ -954,6 +968,20 @@ async fn build_and_run(
     let provider =
         build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
 
+    // For router providers, use the big model for display.
+    let (display_provider, display_model) =
+        if let Some(pc) = cfg.providers.get(&provider_id) {
+            if pc.kind == "router" && !pc.big.is_empty() {
+                let (_, big_mid) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
+                let (big_pid, _) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
+                (big_pid, big_mid)
+            } else {
+                (provider_id.clone(), model_id.clone())
+            }
+        } else {
+            (provider_id.clone(), model_id.clone())
+        };
+
     let session_id = ulid::Ulid::new().to_string();
     let session_writer = SessionWriter::open(&session_id)
         .await
@@ -984,9 +1012,9 @@ async fn build_and_run(
 
     // Set vision capability and pricing from catalog.
     if let Some(c) = cat {
-        agent.supports_vision = c.supports_vision(&model_id);
-        agent.context_window = c.context_window(&model_id).max(0) as u32;
-        if let Some(m) = c.lookup(&model_id) {
+        agent.supports_vision = c.supports_vision(&display_model);
+        agent.context_window = c.context_window(&display_model).max(0) as u32;
+        if let Some(m) = c.lookup(&display_model) {
             agent.input_price = m.pricing.input;
             agent.output_price = m.pricing.output;
             agent.cache_read_price = m.pricing.cache_read;
@@ -1148,28 +1176,61 @@ fn build_provider(
             "opencode-zen" => Some(ProviderConfig {
                 shape: "openai".to_string(),
                 base_url: "https://opencode.ai/zen/v1".to_string(),
-                credential_ref: "opencode-zen".to_string(),
+                credential_ref: "opencode-zen".to_string(), kind: "direct".into(), small: String::new(), big: String::new(),
             }),
             "opencode-go" => Some(ProviderConfig {
                 shape: "openai".to_string(),
                 base_url: "https://opencode.ai/zen/go/v1".to_string(),
-                credential_ref: "opencode-zen".to_string(),
+                credential_ref: "opencode-zen".to_string(), kind: "direct".into(), small: String::new(), big: String::new(),
             }),
             "z-ai" => Some(ProviderConfig {
                 shape: "anthropic".to_string(),
                 base_url: "https://api.z.ai/api/anthropic/v1".to_string(),
-                credential_ref: "z-ai".to_string(),
+                credential_ref: "z-ai".to_string(), kind: "direct".into(), small: String::new(), big: String::new(),
             }),
             "deepseek" => Some(ProviderConfig {
                 shape: "deepseek".to_string(),
                 base_url: "https://api.deepseek.ai/v1".to_string(),
-                credential_ref: "deepseek".to_string(),
+                credential_ref: "deepseek".to_string(), kind: "direct".into(), small: String::new(), big: String::new(),
             }),
             _ => None,
         })
         .with_context(|| format!("unknown provider {}", provider_id))?;
 
     let creds = mew_config::get_credential(&pc.credential_ref).context("get credential")?;
+
+    // Router: build a router provider wrapping small + big models.
+    if pc.kind == "router" && !pc.small.is_empty() && !pc.big.is_empty() {
+        let (small_pid, small_mid) = resolve_model(cfg, cat, provider_id, Some(pc.small.clone()));
+        let (big_pid, big_mid) = resolve_model(cfg, cat, provider_id, Some(pc.big.clone()));
+
+        let small = build_provider(cfg, cat, &small_pid, &small_mid, raw)?;
+        let big = build_provider(cfg, cat, &big_pid, &big_mid, raw)?;
+
+        tracing::info!(
+            small_provider = %small_pid,
+            small_model = %small_mid,
+            big_provider = %big_pid,
+            big_model = %big_mid,
+            "built router provider"
+        );
+
+        // Use the big model for display.
+        let model = if model_override.is_empty() {
+            big_mid.clone()
+        } else {
+            model_override.to_string()
+        };
+
+        let mut router = mew_provider_router::Router::new(small, big);
+        router.set_turn_threshold(3);
+
+        return Ok(Arc::new(mew_provider_router::Routed::new(
+            router,
+            big_pid,
+            model,
+        )));
+    }
 
     let model = if model_override.is_empty() {
         if cfg.default_model.is_empty() {

@@ -14,6 +14,7 @@ mew-message = { workspace = true }
 mew-provider = { workspace = true }
 mew-provider-openai = { workspace = true }
 mew-provider-anthropic = { workspace = true }
+mew-provider-router = { workspace = true }
 mew-provider-fake = { workspace = true }
 mew-agent = { workspace = true }
 mew-tools = { workspace = true }

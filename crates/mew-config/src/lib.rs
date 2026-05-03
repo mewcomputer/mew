@@ -41,10 +41,23 @@ impl Default for Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub shape: String,
-    #[serde(rename = "base_url")]
+    #[serde(rename = "base_url", default)]
     pub base_url: String,
-    #[serde(rename = "credential_ref")]
+    #[serde(rename = "credential_ref", default)]
     pub credential_ref: String,
+    /// Provider kind: "direct" (default) or "router".
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// Router: small model ID for simple turns.
+    #[serde(default)]
+    pub small: String,
+    /// Router: big model ID for complex turns.
+    #[serde(default)]
+    pub big: String,
+}
+
+fn default_kind() -> String {
+    "direct".into()
 }
 
 #[derive(Error, Debug)]
