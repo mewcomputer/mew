@@ -1268,11 +1268,10 @@ async fn run_tui(
                                                     agent.reasoning_price = m.pricing.reasoning;
                                                 }
                                             }
-                                            let state = mew_config::State {
-                                                last_model: new_model_id.to_string(),
-                                                last_provider: new_provider_id.to_string(),
-                                                ..Default::default()
-                                            };
+                                            let mut state =
+                                                mew_config::load_state().unwrap_or_default();
+                                            state.last_model = new_model_id.to_string();
+                                            state.last_provider = new_provider_id.to_string();
                                             if let Err(e) = mew_config::save_state(&state) {
                                                 tracing::warn!("failed to save state: {}", e);
                                             }
@@ -1361,12 +1360,10 @@ async fn run_tui(
                                             agent.reasoning_price = m.pricing.reasoning;
                                         }
                                     }
-                                    let state = mew_config::State {
-                                        last_model: new_model_id.to_string(),
-                                        last_provider: new_provider_id.to_string(),
-                                        sidebar_collapsed: app.sidebar_collapsed.clone(),
-                                        disabled_plugins: Vec::new(),
-                                    };
+                                    let mut state = mew_config::load_state().unwrap_or_default();
+                                    state.last_model = new_model_id.to_string();
+                                    state.last_provider = new_provider_id.to_string();
+                                    state.sidebar_collapsed = app.sidebar_collapsed.clone();
                                     if let Err(e) = mew_config::save_state(&state) {
                                         tracing::warn!("failed to save state: {}", e);
                                     }

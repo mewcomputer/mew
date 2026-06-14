@@ -45,6 +45,9 @@ impl Agent {
                     .await;
             }
             ProviderEvent::PartEnd { part_id } => {
+                if let Some(ref mut msg) = assistant_msg {
+                    self.reconcile_tool_call_input(msg, *part_id);
+                }
                 let _ = ev_tx
                     .send(AgentEvent::Provider(ProviderEvent::PartEnd {
                         part_id: *part_id,
@@ -136,6 +139,38 @@ impl Agent {
                     _ => {}
                 },
                 _ => {}
+            }
+        }
+    }
+
+    /// Materialize the streamed tool-call arguments into `state.input`.
+    ///
+    /// Both providers send `PartDelta { field: "arguments", ... }` deltas that
+    /// the agent appends to `raw_input`. The provider-side accumulator parses
+    /// them into a `Value`, but only on a local copy that is never re-emitted
+    /// to the agent. Without this hook, `state.input` stays at `Value::Null`
+    /// for the entire streaming window — and the JSONL session file, the
+    /// downstream tool execution, and any consumer that reads `state.input()`
+    /// (e.g. the subagent dispatcher) all see a null/empty input.
+    pub fn reconcile_tool_call_input(&self, msg: &mut Message, part_id: PartId) {
+        for part in &mut msg.parts {
+            if part.id() != part_id {
+                continue;
+            }
+            if let Part::ToolCall(ref mut p) = part {
+                if p.raw_input.is_empty() {
+                    return;
+                }
+                match serde_json::from_str(&p.raw_input) {
+                    Ok(value) => p.state.set_input(value),
+                    Err(e) => tracing::warn!(
+                        part_id = %part_id,
+                        raw_input = %p.raw_input,
+                        error = %e,
+                        "failed to parse streamed tool arguments",
+                    ),
+                }
+                return;
             }
         }
     }

@@ -522,7 +522,12 @@ impl ConfigEditor {
         }
     }
 
-    /// Save the config to disk.
+    /// Save the config and runtime state (including plugin enable/disable) to disk.
+    ///
+    /// `config.toml` is overwritten with the in-memory config. `state.toml` is
+    /// read first and updated in place so that fields owned by other code
+    /// paths (`last_model`, `last_provider`, `sidebar_collapsed`) are
+    /// preserved.
     pub fn save(&self) -> Result<()> {
         let config_path = mew_config::config_dir().join("config.toml");
         if let Some(parent) = config_path.parent() {
@@ -532,6 +537,19 @@ impl ConfigEditor {
             .map_err(|e| anyhow::anyhow!("serialize config: {}", e))?;
         std::fs::write(&config_path, toml).context("write config file")?;
         tracing::info!(path = ?config_path, "config saved");
+
+        let disabled_plugins = self
+            .plugins
+            .iter()
+            .filter(|p| !p.enabled)
+            .map(|p| p.name.clone())
+            .collect();
+        let mut state = mew_config::load_state().unwrap_or_default();
+        state.disabled_plugins = disabled_plugins;
+        if let Err(e) = mew_config::save_state(&state) {
+            return Err(anyhow::anyhow!("save state: {}", e));
+        }
+        tracing::info!("plugin enable/disable state saved");
         Ok(())
     }
 
@@ -954,18 +972,20 @@ impl ConfigEditor {
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
     let popup_layout = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Length(area.height.saturating_sub(h) / 2),
+        Constraint::Length(h),
+        Constraint::Length(area.height.saturating_sub(h) / 2),
     ])
     .split(area);
 
     Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Length(area.width.saturating_sub(w) / 2),
+        Constraint::Length(w),
+        Constraint::Length(area.width.saturating_sub(w) / 2),
     ])
     .split(popup_layout[1])[1]
 }

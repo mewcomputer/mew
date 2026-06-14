@@ -734,3 +734,284 @@ async fn test_permission_engine_session_allow() {
         "AllowSession should skip second prompt within same turn"
     );
 }
+
+// ------------------------------------------------------------------
+// Streaming tool-call argument reconciliation
+//
+// Regression: streamed deltas accumulated into `raw_input`, but
+// `state.input` stayed at `Value::Null` for the entire streaming window,
+// so the session JSONL, tool execution, and subagent dispatcher all saw a
+// null/empty input.
+// ------------------------------------------------------------------
+
+#[test]
+fn test_reconcile_tool_call_input_parses_streamed_arguments() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let session_id = agent.session_id;
+    let msg_id = ulid::Ulid::new();
+    let part_id = ulid::Ulid::new();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let mut msg = Message {
+        id: msg_id,
+        session_id,
+        role: Role::Assistant,
+        parts: vec![Part::ToolCall(ToolCallPart {
+            base: PartBase {
+                id: part_id,
+                message_id: msg_id,
+                session_id,
+            },
+            tool_name: "subagent_start".into(),
+            call_id: "c1".into(),
+            state: ToolState::Pending(ToolStatePending {
+                input: serde_json::Value::Null,
+                time: ToolTime {
+                    start: now,
+                    end: None,
+                },
+            }),
+            raw_input: r#"{"name":"explore","prompt":"what is the repo vibe?"}"#.into(),
+        })],
+        time: Time {
+            created: now,
+            completed: None,
+        },
+        assistant: None,
+    };
+
+    agent.reconcile_tool_call_input(&mut msg, part_id);
+
+    let Part::ToolCall(tc) = &msg.parts[0] else {
+        panic!("expected tool call part");
+    };
+    assert_eq!(
+        tc.state.input(),
+        &serde_json::json!({"name": "explore", "prompt": "what is the repo vibe?"}),
+        "state.input should be parsed from raw_input at PartEnd"
+    );
+}
+
+#[test]
+fn test_reconcile_tool_call_input_leaves_other_parts_alone() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let session_id = agent.session_id;
+    let msg_id = ulid::Ulid::new();
+    let target_id = ulid::Ulid::new();
+    let other_id = ulid::Ulid::new();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let mut msg = Message {
+        id: msg_id,
+        session_id,
+        role: Role::Assistant,
+        parts: vec![
+            Part::Text(mew_message::TextPart {
+                base: PartBase {
+                    id: other_id,
+                    message_id: msg_id,
+                    session_id,
+                },
+                text: "hello".into(),
+                synthetic: false,
+            }),
+            Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: target_id,
+                    message_id: msg_id,
+                    session_id,
+                },
+                tool_name: "echo".into(),
+                call_id: "c1".into(),
+                state: ToolState::Pending(ToolStatePending {
+                    input: serde_json::Value::Null,
+                    time: ToolTime {
+                        start: now,
+                        end: None,
+                    },
+                }),
+                raw_input: r#"{"input":"hi"}"#.into(),
+            }),
+        ],
+        time: Time {
+            created: now,
+            completed: None,
+        },
+        assistant: None,
+    };
+
+    let phantom = ulid::Ulid::new();
+    agent.reconcile_tool_call_input(&mut msg, phantom);
+
+    let Part::ToolCall(tc) = &msg.parts[1] else {
+        panic!("expected tool call part");
+    };
+    assert_eq!(
+        tc.state.input(),
+        &serde_json::Value::Null,
+        "unrelated reconcile call should not touch other parts"
+    );
+
+    agent.reconcile_tool_call_input(&mut msg, target_id);
+    let Part::ToolCall(tc) = &msg.parts[1] else {
+        panic!("expected tool call part");
+    };
+    assert_eq!(tc.state.input(), &serde_json::json!({"input": "hi"}));
+}
+
+#[test]
+fn test_reconcile_tool_call_input_no_op_on_empty_raw_input() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let session_id = agent.session_id;
+    let msg_id = ulid::Ulid::new();
+    let part_id = ulid::Ulid::new();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let mut msg = Message {
+        id: msg_id,
+        session_id,
+        role: Role::Assistant,
+        parts: vec![Part::ToolCall(ToolCallPart {
+            base: PartBase {
+                id: part_id,
+                message_id: msg_id,
+                session_id,
+            },
+            tool_name: "echo".into(),
+            call_id: "c1".into(),
+            state: ToolState::Pending(ToolStatePending {
+                input: serde_json::Value::Null,
+                time: ToolTime {
+                    start: now,
+                    end: None,
+                },
+            }),
+            raw_input: String::new(),
+        })],
+        time: Time {
+            created: now,
+            completed: None,
+        },
+        assistant: None,
+    };
+
+    agent.reconcile_tool_call_input(&mut msg, part_id);
+
+    let Part::ToolCall(tc) = &msg.parts[0] else {
+        panic!("expected tool call part");
+    };
+    assert_eq!(
+        tc.state.input(),
+        &serde_json::Value::Null,
+        "empty raw_input should not overwrite a Null state with anything else"
+    );
+}
+
+#[tokio::test]
+async fn test_streaming_tool_call_appends_with_parsed_input() {
+    let part_id = ulid::Ulid::new();
+    let script = vec![
+        mew_provider::ProviderEvent::PartStart {
+            part: Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: part_id,
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                tool_name: "echo".into(),
+                call_id: "c1".into(),
+                state: ToolState::Pending(ToolStatePending {
+                    input: serde_json::Value::Null,
+                    time: ToolTime {
+                        start: 0,
+                        end: None,
+                    },
+                }),
+                raw_input: String::new(),
+            }),
+        },
+        mew_provider::ProviderEvent::PartDelta {
+            part_id,
+            field: "arguments",
+            delta: "{\"input\":\"".into(),
+        },
+        mew_provider::ProviderEvent::PartDelta {
+            part_id,
+            field: "arguments",
+            delta: "hel".into(),
+        },
+        mew_provider::ProviderEvent::PartDelta {
+            part_id,
+            field: "arguments",
+            delta: "lo\"}".into(),
+        },
+        mew_provider::ProviderEvent::PartEnd { part_id },
+        mew_provider::ProviderEvent::MessageEnd {
+            finish: Finish::ToolUse,
+            usage: Tokens::default(),
+            cost: 0.0,
+        },
+    ];
+    let script2 = FakeProvider::text_response("done");
+    let provider = std::sync::Arc::new(StatefulFakeProvider::new(vec![script, script2]));
+
+    let agent = Agent::new(
+        provider,
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![std::sync::Arc::new(EchoTool::mutating())],
+        None,
+    );
+
+    let mut rx = agent.run("call echo".into());
+    while let Some(ev) = rx.recv().await {
+        if let AgentEvent::Provider(ProviderEvent::MessageEnd {
+            finish: Finish::Stop,
+            ..
+        }) = ev
+        {
+            break;
+        }
+    }
+
+    let msgs = agent.messages.lock().await;
+    let assistant = msgs
+        .iter()
+        .find(|m| m.role == Role::Assistant)
+        .expect("expected an assistant message");
+    let tool_call = assistant
+        .parts
+        .iter()
+        .find_map(|p| match p {
+            Part::ToolCall(tc) => Some(tc),
+            _ => None,
+        })
+        .expect("expected a tool call part");
+    assert_eq!(
+        tool_call.state.input(),
+        &serde_json::json!({"input": "hello"}),
+        "after stream ends, state.input must be the parsed arguments, not Null"
+    );
+    assert_eq!(
+        tool_call.raw_input, r#"{"input":"hello"}"#,
+        "raw_input should retain the full streamed payload for debugging"
+    );
+}

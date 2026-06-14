@@ -189,6 +189,17 @@ impl ToolState {
         }
     }
 
+    /// Replace the input on the current variant, leaving other fields
+    /// (output, error, time) untouched.
+    pub fn set_input(&mut self, value: serde_json::Value) {
+        match self {
+            ToolState::Pending(s) => s.input = value,
+            ToolState::Running(s) => s.input = value,
+            ToolState::Completed(s) => s.input = value,
+            ToolState::Error(s) => s.input = value,
+        }
+    }
+
     pub fn output(&self) -> Option<&str> {
         match self {
             ToolState::Running(s) => Some(&s.output),

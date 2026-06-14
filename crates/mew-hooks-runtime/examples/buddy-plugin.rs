@@ -61,13 +61,21 @@ impl Rarity {
 }
 
 const SPECIES: &[&str] = &[
-    "duck", "goose", "blob", "cat", "dragon", "octopus", "owl", "penguin",
-    "turtle", "snail", "ghost", "axolotl", "capybara", "cactus", "robot",
-    "rabbit", "mushroom", "chonk",
+    "duck", "goose", "blob", "cat", "dragon", "octopus", "owl", "penguin", "turtle", "snail",
+    "ghost", "axolotl", "capybara", "cactus", "robot", "rabbit", "mushroom", "chonk",
 ];
 
 const EYES: &[&str] = &["\u{b7}", "\u{2726}", "\u{d7}", "\u{25c9}", "@", "\u{b0}"];
-const HATS: &[&str] = &["none", "crown", "tophat", "propeller", "halo", "wizard", "beanie", "tinyduck"];
+const HATS: &[&str] = &[
+    "none",
+    "crown",
+    "tophat",
+    "propeller",
+    "halo",
+    "wizard",
+    "beanie",
+    "tinyduck",
+];
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Stats {
@@ -163,7 +171,11 @@ fn generate_bones(user_id: &str) -> CompanionBones {
     let peak_stat = rng.next() % 5;
     let dump_stat = {
         let d = rng.next() % 5;
-        if d == peak_stat { (d + 1) % 5 } else { d }
+        if d == peak_stat {
+            (d + 1) % 5
+        } else {
+            d
+        }
     };
 
     let mut stats = [0u32; 5];
@@ -234,70 +246,55 @@ fn render_sprite(bones: &CompanionBones, frame: i32) -> Vec<String> {
 
 fn species_frames(species: &str) -> Vec<Vec<String>> {
     match species {
-        "duck" => vec![
-            vec![
-                "".into(),
-                "  __".into(),
-                "{E} <(o )___".into(),
-                " (___)    )".into(),
-                "  //  \\\\".into(),
-            ],
-        ],
-        "cat" => vec![
-            vec![
-                "  /\\_/\\".into(),
-                "{E}( ^.^ )".into(),
-                "  >   <".into(),
-                " /  _  \\".into(),
-                "/  (_)  \\".into(),
-            ],
-        ],
-        "blob" => vec![
-            vec![
-                "".into(),
-                "  .-'''''-.  ".into(),
-                " | {E}   {E} | ".into(),
-                "  '.  _  .'  ".into(),
-                "    '---'    ".into(),
-            ],
-        ],
-        "ghost" => vec![
-            vec![
-                "".into(),
-                "   .-._".into(),
-                "  {E}_{E}_} ".into(),
-                "  (  _  )".into(),
-                "  '-----'".into(),
-            ],
-        ],
-        "robot" => vec![
-            vec![
-                "".into(),
-                "  [\"{E}_{E}\"] ".into(),
-                "   | ___ |".into(),
-                "  /|     |\\".into(),
-                "   |_____|".into(),
-            ],
-        ],
-        "dragon" => vec![
-            vec![
-                "     __".into(),
-                "   {E}/  \\^".into(),
-                "  _/\\__/\\_".into(),
-                " /  \\  /  \\".into(),
-                "(____)(____)".into(),
-            ],
-        ],
-        _ => vec![
-            
-            vec![
-                "".into(),
-                "   {E}_{E}".into(),
-                "  ( o_o )".into(),
-                "  (     )".into(),
-                "   \"\"\"\"\"".into(),
-            ],
-        ],
+        "duck" => vec![vec![
+            "".into(),
+            "  __".into(),
+            "{E} <(o )___".into(),
+            " (___)    )".into(),
+            "  //  \\\\".into(),
+        ]],
+        "cat" => vec![vec![
+            "  /\\_/\\".into(),
+            "{E}( ^.^ )".into(),
+            "  >   <".into(),
+            " /  _  \\".into(),
+            "/  (_)  \\".into(),
+        ]],
+        "blob" => vec![vec![
+            "".into(),
+            "  .-'''''-.  ".into(),
+            " | {E}   {E} | ".into(),
+            "  '.  _  .'  ".into(),
+            "    '---'    ".into(),
+        ]],
+        "ghost" => vec![vec![
+            "".into(),
+            "   .-._".into(),
+            "  {E}_{E}_} ".into(),
+            "  (  _  )".into(),
+            "  '-----'".into(),
+        ]],
+        "robot" => vec![vec![
+            "".into(),
+            "  [\"{E}_{E}\"] ".into(),
+            "   | ___ |".into(),
+            "  /|     |\\".into(),
+            "   |_____|".into(),
+        ]],
+        "dragon" => vec![vec![
+            "     __".into(),
+            "   {E}/  \\^".into(),
+            "  _/\\__/\\_".into(),
+            " /  \\  /  \\".into(),
+            "(____)(____)".into(),
+        ]],
+        _ => vec![vec![
+            "".into(),
+            "   {E}_{E}".into(),
+            "  ( o_o )".into(),
+            "  (     )".into(),
+            "   \"\"\"\"\"".into(),
+        ]],
     }
 }
 
@@ -352,7 +349,11 @@ impl BuddyState {
         if let Some(ref soul) = self.soul {
             card.push_str(&format!("{} the {}\n", soul.name, self.bones.species));
         } else {
-            card.push_str(&format!("{} {}\n", self.bones.species, self.bones.rarity.stars()));
+            card.push_str(&format!(
+                "{} {}\n",
+                self.bones.species,
+                self.bones.rarity.stars()
+            ));
         }
         if self.bones.shiny {
             card.push_str("* shiny *\n");
@@ -452,10 +453,7 @@ fn handle_hook(
                      don't acknowledge it unless the user addresses it directly by name.\n\
                      if they do, respond with one short line as if you were {}.\n\
                      otherwise stay out of it.\n\n{}",
-                    soul.name, state.bones.species,
-                    soul.name,
-                    soul.name,
-                    prompt,
+                    soul.name, state.bones.species, soul.name, soul.name, prompt,
                 );
                 serde_json::json!(intro)
             }
@@ -475,8 +473,8 @@ fn handle_hook(
                     "cool cool",
                 ];
                 let idx = state.tick as usize % quips.len();
-            let quip = quips[idx];
-            send_host_request(
+                let quip = quips[idx];
+                send_host_request(
                     "host-set-ui",
                     &serde_json::json!({
                         "key": format!("buddy/bubble"),
@@ -503,7 +501,14 @@ fn handle_hook(
                         hatch_companion(state);
                     }
                     pull_reaction(state, "pet! purr...");
-                    serde_json::json!(format!("you pet {}. they appreciate it.", state.soul.as_ref().map(|s| s.name.as_str()).unwrap_or("your companion")))
+                    serde_json::json!(format!(
+                        "you pet {}. they appreciate it.",
+                        state
+                            .soul
+                            .as_ref()
+                            .map(|s| s.name.as_str())
+                            .unwrap_or("your companion")
+                    ))
                 }
                 "mute" => {
                     if state.soul.is_none() {
@@ -542,7 +547,10 @@ fn handle_hook(
 
         _ => {
             // Pass-through for unknown hooks.
-            params.get("value").cloned().unwrap_or(serde_json::Value::Null)
+            params
+                .get("value")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null)
         }
     }
 }
@@ -587,8 +595,8 @@ fn hatch_companion(state: &mut BuddyState) {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let names = &[
-        "blobby", "quackers", "snappy", "bubbles", "pixel", "nibbles",
-        "waddles", "chirpy", "sprout", "tofu", "biscuit", "noodle",
+        "blobby", "quackers", "snappy", "bubbles", "pixel", "nibbles", "waddles", "chirpy",
+        "sprout", "tofu", "biscuit", "noodle",
     ];
     let personalities = &[
         "curious and cheerful",

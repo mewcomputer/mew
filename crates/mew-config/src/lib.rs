@@ -259,13 +259,17 @@ pub fn load_state_from(path: &std::path::Path) -> Result<State, ConfigError> {
 
 /// Writes state to the standard location.
 pub fn save_state(state: &State) -> Result<(), ConfigError> {
-    let path = state_path();
+    save_state_to(&state_path(), state)
+}
+
+/// Writes state to an arbitrary path (useful for tests).
+pub fn save_state_to(path: &std::path::Path, state: &State) -> Result<(), ConfigError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let data =
         toml::to_string_pretty(state).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&path, data)?;
+    std::fs::write(path, data)?;
     debug!(?path, "state saved");
     Ok(())
 }
@@ -427,5 +431,51 @@ provider = "my-provider"
             load_state_from(&path).expect("load_state_from should not fail when file missing");
         assert!(state.last_model.is_empty());
         assert!(state.last_provider.is_empty());
+    }
+
+    #[test]
+    fn test_state_disabled_plugins_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.toml");
+
+        let state = State {
+            last_model: "deepseek-v4-flash".into(),
+            last_provider: "opencode-zen".into(),
+            disabled_plugins: vec!["buddy".into(), "linter".into()],
+            ..Default::default()
+        };
+        save_state_to(&path, &state).expect("save");
+
+        let loaded = load_state_from(&path).expect("load");
+        assert_eq!(loaded.last_model, "deepseek-v4-flash");
+        assert_eq!(loaded.last_provider, "opencode-zen");
+        assert_eq!(loaded.disabled_plugins, vec!["buddy", "linter"]);
+    }
+
+    #[test]
+    fn test_state_merge_preserves_disabled_plugins() {
+        // Simulates the model-switch path: load existing state, mutate only
+        // last_model, write back. disabled_plugins from a prior session must
+        // survive.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.toml");
+
+        let prior = State {
+            last_model: "old-model".into(),
+            last_provider: "old-provider".into(),
+            disabled_plugins: vec!["buddy".into()],
+            ..Default::default()
+        };
+        save_state_to(&path, &prior).expect("save prior");
+
+        let mut next = load_state_from(&path).expect("load");
+        next.last_model = "new-model".into();
+        next.last_provider = "new-provider".into();
+        save_state_to(&path, &next).expect("save next");
+
+        let final_state = load_state_from(&path).expect("load final");
+        assert_eq!(final_state.last_model, "new-model");
+        assert_eq!(final_state.last_provider, "new-provider");
+        assert_eq!(final_state.disabled_plugins, vec!["buddy"]);
     }
 }
