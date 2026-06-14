@@ -10,12 +10,80 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter, Lines};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use mew_message::Part;
+
+// ---------------------------------------------------------------------------
+// Transport trait
+// ---------------------------------------------------------------------------
+
+/// Abstract transport for ACP message framing.
+///
+/// Implementations provide a line-delimited reader and writer. m6 ships
+/// StdioTransport; m8 can add iroh/tcp without touching protocol code.
+pub trait Transport: Send + 'static {
+    type Reader: tokio::io::AsyncBufRead + Unpin + Send;
+    type Writer: tokio::io::AsyncWrite + Unpin + Send;
+
+    fn split(self) -> (Self::Reader, Self::Writer);
+}
+
+/// Stdio transport for server mode (stdin/stdout).
+pub struct StdioTransport {
+    _private: (),
+}
+
+impl StdioTransport {
+    pub fn new() -> Self {
+        Self { _private: () }
+    }
+}
+
+impl Transport for StdioTransport {
+    type Reader = BufReader<tokio::io::Stdin>;
+    type Writer = BufWriter<tokio::io::Stdout>;
+
+    fn split(self) -> (Self::Reader, Self::Writer) {
+        (
+            BufReader::new(tokio::io::stdin()),
+            BufWriter::new(tokio::io::stdout()),
+        )
+    }
+}
+
+impl Default for StdioTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Transport for tests: wraps a duplex pair.
+#[cfg(test)]
+struct DuplexTransport<
+    R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+> {
+    reader: R,
+    writer: W,
+}
+
+#[cfg(test)]
+impl<
+        R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    > Transport for DuplexTransport<R, W>
+{
+    type Reader = R;
+    type Writer = W;
+
+    fn split(self) -> (Self::Reader, Self::Writer) {
+        (self.reader, self.writer)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0
@@ -56,11 +124,11 @@ struct RawMessage {
 // ACP Client — spawns an agent, runs prompt turns, translates to AgentEvent
 // ---------------------------------------------------------------------------
 
-/// Connects to an external ACP agent over stdio.
+/// Connects to an external ACP agent over stdio or a transport.
 pub struct AcpClient {
-    _child: Child,
-    reader: Arc<tokio::sync::Mutex<BufReader<tokio::process::ChildStdout>>>,
-    writer: Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>,
+    _child: Option<Child>,
+    reader: Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncBufRead + Unpin + Send>>>,
+    writer: Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
     next_id: AtomicU64,
     session_id: String,
 }
@@ -80,18 +148,43 @@ impl AcpClient {
 
         let stdout = child.stdout.take().context("stdout")?;
         let stdin = child.stdin.take().context("stdin")?;
-        let reader = Arc::new(tokio::sync::Mutex::new(BufReader::new(stdout)));
-        let writer = Arc::new(tokio::sync::Mutex::new(stdin));
+        let reader = Arc::new(tokio::sync::Mutex::new(
+            Box::new(BufReader::new(stdout)) as _
+        ));
+        let writer = Arc::new(tokio::sync::Mutex::new(Box::new(stdin) as _));
 
         let mut client = Self {
-            _child: child,
+            _child: Some(child),
             reader,
             writer,
             next_id: AtomicU64::new(1),
             session_id: String::new(),
         };
 
-        // Initialize
+        Self::init_session(&mut client, cwd).await?;
+        Ok(client)
+    }
+
+    pub async fn from_transport(
+        reader: impl tokio::io::AsyncBufRead + Unpin + Send + 'static,
+        writer: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+    ) -> Result<Self> {
+        let reader = Arc::new(tokio::sync::Mutex::new(Box::new(reader) as _));
+        let writer = Arc::new(tokio::sync::Mutex::new(Box::new(writer) as _));
+
+        let mut client = Self {
+            _child: None,
+            reader,
+            writer,
+            next_id: AtomicU64::new(1),
+            session_id: String::new(),
+        };
+
+        Self::init_session(&mut client, "").await?;
+        Ok(client)
+    }
+
+    async fn init_session(client: &mut Self, cwd: &str) -> Result<()> {
         let _ = client
             .call_rpc(
                 "initialize",
@@ -112,7 +205,6 @@ impl AcpClient {
             .await?;
         info!("acp agent initialized");
 
-        // Create session
         let session_id = client
             .call_rpc(
                 "session/new",
@@ -126,7 +218,7 @@ impl AcpClient {
             .context("create session")?;
 
         client.session_id = session_id;
-        Ok(client)
+        Ok(())
     }
 
     /// Run a single prompt turn. Returns a receiver of agent events that the
@@ -142,7 +234,8 @@ impl AcpClient {
         });
 
         let reader = self.reader.clone();
-        let mut writer = self.writer.lock().await;
+        let writer_arc = self.writer.clone();
+        let mut writer = writer_arc.lock().await;
         let next_id = &self.next_id;
 
         let id = next_id.fetch_add(1, Ordering::SeqCst);
@@ -199,6 +292,12 @@ impl AcpClient {
                         ))
                         .await;
                     break;
+                }
+
+                let method = msg.method.as_deref().unwrap_or("");
+                if method == "session/request_permission" {
+                    handle_client_permission_request(&msg, &ev_tx, &writer_arc).await;
+                    continue;
                 }
 
                 translate_notification(&msg, &ev_tx);
@@ -301,25 +400,16 @@ use mew_agent::Agent as AgentCore;
 /// Run an ACP server on stdin/stdout, using the provided agent.
 /// Reads JSON-RPC requests, runs the agent, and streams updates back.
 pub async fn run_server(agent: AgentCore) -> Result<()> {
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
-    run_server_on(
-        agent,
-        BufReader::new(stdin),
-        tokio::io::BufWriter::new(stdout),
-    )
-    .await
+    run_server_on(agent, StdioTransport::new()).await
 }
 
-pub async fn run_server_on(
-    agent: AgentCore,
-    reader: impl tokio::io::AsyncBufRead + Unpin,
-    writer: impl tokio::io::AsyncWrite + Unpin,
-) -> Result<()> {
-    let mut lines = reader.lines();
-    let mut stdout = writer;
+pub async fn run_server_on<T: Transport>(agent: AgentCore, transport: T) -> Result<()> {
+    let (reader, writer) = transport.split();
+    let mut lines = BufReader::new(reader).lines();
+    let mut stdout = BufWriter::new(writer);
 
     let mut session_id: Option<String> = None;
+    let mut perm_request_id: u64 = 900_000;
     let agent = Arc::new(agent);
 
     while let Ok(Some(line)) = lines.next_line().await {
@@ -440,11 +530,10 @@ pub async fn run_server_on(
 
                 let mut stop_reason = "end_turn".to_string();
                 while let Some(event) = rx.recv().await {
-                    match &event {
+                    match event {
                         mew_agent::AgentEvent::Provider(pe) => match pe {
-                            // PartDelta carries the actual streaming text content.
                             mew_provider::ProviderEvent::PartDelta { field, delta, .. } => {
-                                if *field == "text" || field.is_empty() {
+                                if field == "text" || field.is_empty() {
                                     let notif = serde_json::json!({
                                         "jsonrpc": "2.0",
                                         "method": "session/update",
@@ -508,7 +597,7 @@ pub async fn run_server_on(
                                     "update": {
                                         "sessionUpdate": "tool_call_update",
                                         "toolCallId": call_id,
-                                        "status": if *success {
+                                        "status": if success {
                                             "completed"
                                         } else {
                                             "failed"
@@ -534,6 +623,38 @@ pub async fn run_server_on(
                                 }
                             });
                             send_line(&mut stdout, &notif).await?;
+                        }
+                        mew_agent::AgentEvent::PermissionRequest { call, tx } => {
+                            let call_id = call.call_id.clone();
+                            let tool_name = call.tool_name.clone();
+                            let input = call.input.clone();
+                            let pid = perm_request_id;
+                            perm_request_id += 1;
+
+                            let req = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": pid,
+                                "method": "session/request_permission",
+                                "params": {
+                                    "sessionId": sid,
+                                    "toolCall": {
+                                        "toolCallId": call_id,
+                                        "title": format!("{} permission", tool_name),
+                                        "rawInput": input,
+                                    },
+                                    "options": [
+                                        { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
+                                        { "optionId": "allow-session", "name": "Allow for session", "kind": "allow_always" },
+                                        { "optionId": "reject-once", "name": "Reject", "kind": "reject_once" }
+                                    ]
+                                }
+                            });
+                            send_line(&mut stdout, &req).await?;
+
+                            let decision =
+                                read_permission_response(&mut lines, &mut stdout, pid, &call_id)
+                                    .await;
+                            let _ = tx.send(decision);
                         }
                         _ => {}
                     }
@@ -597,6 +718,151 @@ async fn send_error(
         "error": { "code": code, "message": message }
     });
     send_line(w, &err).await
+}
+
+async fn read_permission_response<
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+>(
+    _lines: &mut Lines<R>,
+    _stdout: &mut W,
+    _perm_request_id: u64,
+    _call_id: &str,
+) -> mew_hooks::PermissionDecision {
+    loop {
+        let line = match _lines.next_line().await {
+            Ok(Some(l)) => l,
+            Ok(None) | Err(_) => break mew_hooks::PermissionDecision::Deny,
+        };
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        debug!(
+            "acp server ← permission response: {}",
+            &line[..line.len().min(200)]
+        );
+        let msg: RawMessage = match serde_json::from_str(&line) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        if msg.id != Some(_perm_request_id) {
+            debug!(
+                "acp server: ignoring message with wrong id while waiting for permission response"
+            );
+            continue;
+        }
+
+        if msg.error.is_some() {
+            break mew_hooks::PermissionDecision::Deny;
+        }
+
+        let outcome = msg
+            .result
+            .as_ref()
+            .and_then(|r| r.get("outcome"))
+            .and_then(|o| o.get("outcome"))
+            .and_then(|o| o.as_str())
+            .unwrap_or("cancelled");
+
+        if outcome == "cancelled" {
+            break mew_hooks::PermissionDecision::Deny;
+        }
+
+        let option_id = msg
+            .result
+            .as_ref()
+            .and_then(|r| r.get("outcome"))
+            .and_then(|o| o.get("optionId"))
+            .and_then(|o| o.as_str())
+            .unwrap_or("reject-once");
+
+        break if option_id.starts_with("allow") {
+            if option_id.contains("always") || option_id.contains("session") {
+                mew_hooks::PermissionDecision::AllowSession
+            } else {
+                mew_hooks::PermissionDecision::AllowOnce
+            }
+        } else {
+            mew_hooks::PermissionDecision::Deny
+        };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Client-side permission handling
+// ---------------------------------------------------------------------------
+
+async fn handle_client_permission_request(
+    msg: &RawMessage,
+    ev_tx: &mpsc::Sender<mew_agent::AgentEvent>,
+    writer: &Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
+) {
+    let request_id = msg.id.unwrap_or(0);
+    let tool_call = msg.params.as_ref().and_then(|p| p.get("toolCall"));
+
+    let call_id = tool_call
+        .and_then(|tc| tc.get("toolCallId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let tool_name = tool_call
+        .and_then(|tc| tc.get("title"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let input = tool_call
+        .and_then(|tc| tc.get("rawInput"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let (perm_tx, perm_rx) = tokio::sync::oneshot::channel();
+
+    let hook_call = mew_hooks::ToolCall {
+        tool_name: tool_name.clone(),
+        call_id: call_id.clone(),
+        input,
+    };
+
+    let _ = ev_tx
+        .send(mew_agent::AgentEvent::PermissionRequest {
+            call: hook_call,
+            tx: perm_tx,
+        })
+        .await;
+
+    let writer = writer.clone();
+    tokio::spawn(async move {
+        let decision = match perm_rx.await {
+            Ok(d) => d,
+            Err(_) => mew_hooks::PermissionDecision::Deny,
+        };
+
+        let option_id = match decision {
+            mew_hooks::PermissionDecision::AllowOnce => "allow-once",
+            mew_hooks::PermissionDecision::AllowSession => "allow-session",
+            mew_hooks::PermissionDecision::Deny => "reject-once",
+            mew_hooks::PermissionDecision::Prompt => "reject-once",
+        };
+
+        let resp = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": option_id
+                }
+            }
+        });
+        let mut w = writer.lock().await;
+        if let Ok(line) = serde_json::to_string(&resp) {
+            let _ = w.write_all(line.as_bytes()).await;
+            let _ = w.write_all(b"\n").await;
+            let _ = w.flush().await;
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -919,7 +1185,14 @@ mod tests {
         let (cr, sw) = tokio::io::duplex(4096);
         let (sr, cw) = tokio::io::duplex(4096);
         tokio::spawn(async move {
-            let _ = run_server_on(agent, BufReader::new(sr), sw).await;
+            let _ = run_server_on(
+                agent,
+                DuplexTransport {
+                    reader: BufReader::new(sr),
+                    writer: sw,
+                },
+            )
+            .await;
         });
         let mut reader = BufReader::new(cr);
         let mut writer = tokio::io::BufWriter::new(cw);
@@ -948,6 +1221,552 @@ mod tests {
             }
         };
         assert!(got_response);
+    }
+
+    #[tokio::test]
+    async fn test_server_sends_available_commands_after_session_new() {
+        use serde_json::Value;
+        use std::sync::Arc;
+
+        let provider = Arc::new(mew_provider_fake::FakeProvider::new(
+            mew_provider_fake::FakeProvider::text_response("ok"),
+        ));
+        let dispatcher = Arc::new(mew_hooks::NopDispatcher);
+        let agent = mew_agent::Agent::new(provider, dispatcher, None, vec![], None);
+        let (cr, sw) = tokio::io::duplex(4096);
+        let (sr, cw) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let _ = run_server_on(
+                agent,
+                DuplexTransport {
+                    reader: BufReader::new(sr),
+                    writer: sw,
+                },
+            )
+            .await;
+        });
+        let mut reader = BufReader::new(cr);
+        let mut writer = tokio::io::BufWriter::new(cw);
+
+        send_line(
+            &mut writer,
+            &serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        )
+        .await
+        .unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+
+        send_line(
+            &mut writer,
+            &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}),
+        )
+        .await
+        .unwrap();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let _sess_resp: Value = serde_json::from_str(line.trim()).unwrap();
+
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let notif: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(notif["method"], "session/update");
+        let update = &notif["params"]["update"];
+        assert_eq!(update["sessionUpdate"], "available_commands_update");
+        let cmds = update["availableCommands"].as_array().unwrap();
+        assert!(!cmds.is_empty());
+        let names: Vec<&str> = cmds.iter().map(|c| c["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"compact"));
+        assert!(names.contains(&"clear"));
+        assert!(names.contains(&"help"));
+        assert!(names.contains(&"cost"));
+    }
+
+    #[tokio::test]
+    async fn test_server_slash_commands() {
+        use serde_json::Value;
+        use std::sync::Arc;
+
+        let provider = Arc::new(mew_provider_fake::FakeProvider::new(
+            mew_provider_fake::FakeProvider::text_response("ok"),
+        ));
+        let dispatcher = Arc::new(mew_hooks::NopDispatcher);
+        let agent = mew_agent::Agent::new(provider, dispatcher, None, vec![], None);
+        let (cr, sw) = tokio::io::duplex(4096);
+        let (sr, cw) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            let _ = run_server_on(
+                agent,
+                DuplexTransport {
+                    reader: BufReader::new(sr),
+                    writer: sw,
+                },
+            )
+            .await;
+        });
+        let mut reader = BufReader::new(cr);
+        let mut writer = tokio::io::BufWriter::new(cw);
+
+        send_line(
+            &mut writer,
+            &serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        )
+        .await
+        .unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+
+        send_line(
+            &mut writer,
+            &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}),
+        )
+        .await
+        .unwrap();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let sid = serde_json::from_str::<Value>(line.trim()).unwrap()["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+
+        let help_prompt = serde_json::json!({
+            "jsonrpc": "2.0", "id": 10,
+            "method": "session/prompt",
+            "params": { "sessionId": sid, "prompt": [{ "type": "text", "text": "/help" }] }
+        });
+        send_line(&mut writer, &help_prompt).await.unwrap();
+
+        let mut got_chunk = false;
+        loop {
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            let msg: Value = serde_json::from_str(line.trim()).unwrap();
+            if msg.get("id").and_then(|v| v.as_u64()) == Some(10) {
+                assert_eq!(msg["result"]["stopReason"], "end_turn");
+                break;
+            }
+            if msg["method"] == "session/update" {
+                let text = msg["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .unwrap_or("");
+                if text.contains("/compact") && text.contains("/help") {
+                    got_chunk = true;
+                }
+            }
+        }
+        assert!(got_chunk, "expected help text in notification");
+    }
+
+    #[tokio::test]
+    async fn test_server_multi_turn_with_tool_call() {
+        use async_trait::async_trait;
+        use mew_hooks::ToolOutput;
+        use mew_provider::{EventStream, Provider, ProviderError, ProviderEvent, Request};
+        use mew_tools::Tool;
+        use mew_tools::{Sensitivity, ToolCtx, ToolError};
+        use serde_json::Value;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        struct TestEcho;
+
+        impl TestEcho {
+            fn schema_value() -> &'static serde_json::Value {
+                static SCHEMA: std::sync::LazyLock<serde_json::Value> =
+                    std::sync::LazyLock::new(|| {
+                        serde_json::json!({
+                            "type": "object",
+                            "properties": { "message": { "type": "string" } },
+                            "required": ["message"]
+                        })
+                    });
+                &SCHEMA
+            }
+        }
+
+        #[async_trait]
+        impl Tool for TestEcho {
+            fn name(&self) -> &str {
+                "echo"
+            }
+            fn description(&self) -> &str {
+                "echo input back"
+            }
+            fn schema(&self) -> &serde_json::Value {
+                Self::schema_value()
+            }
+            fn sensitivity(&self) -> Sensitivity {
+                Sensitivity::ReadOnly
+            }
+            async fn execute(
+                &self,
+                _ctx: ToolCtx,
+                input: serde_json::Value,
+            ) -> Result<ToolOutput, ToolError> {
+                let msg = input["message"].as_str().unwrap_or("");
+                Ok(ToolOutput {
+                    output: msg.to_string(),
+                    error: String::new(),
+                    diff: None,
+                })
+            }
+        }
+
+        struct TwoPhaseProvider {
+            call_count: AtomicU32,
+            tool_script: Vec<ProviderEvent>,
+            text_script: Vec<ProviderEvent>,
+        }
+
+        #[async_trait]
+        impl Provider for TwoPhaseProvider {
+            fn name(&self) -> &str {
+                "twophase"
+            }
+            async fn stream(&self, _req: Request) -> Result<EventStream, ProviderError> {
+                let n = self.call_count.fetch_add(1, Ordering::SeqCst);
+                let script = if n == 0 {
+                    self.tool_script.clone()
+                } else {
+                    self.text_script.clone()
+                };
+                let stream = futures::stream::unfold(
+                    script.into_iter(),
+                    |mut iter: std::vec::IntoIter<ProviderEvent>| async move {
+                        match iter.next() {
+                            Some(ev) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                                Some((ev, iter))
+                            }
+                            None => None,
+                        }
+                    },
+                );
+                Ok(Box::pin(stream))
+            }
+        }
+
+        let tool_script = mew_provider_fake::FakeProvider::tool_call(
+            "echo",
+            "call_1",
+            serde_json::json!({"message": "hi"}),
+        );
+        let text_script = mew_provider_fake::FakeProvider::text_response("done");
+
+        let provider = Arc::new(TwoPhaseProvider {
+            call_count: AtomicU32::new(0),
+            tool_script,
+            text_script,
+        });
+        let dispatcher = Arc::new(mew_hooks::NopDispatcher);
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(TestEcho)];
+        let agent = mew_agent::Agent::new(provider, dispatcher, None, tools, None);
+
+        let (cr, sw) = tokio::io::duplex(8192);
+        let (sr, cw) = tokio::io::duplex(8192);
+        tokio::spawn(async move {
+            let _ = run_server_on(
+                agent,
+                DuplexTransport {
+                    reader: BufReader::new(sr),
+                    writer: sw,
+                },
+            )
+            .await;
+        });
+        let mut reader = BufReader::new(cr);
+        let mut writer = tokio::io::BufWriter::new(cw);
+
+        send_line(
+            &mut writer,
+            &serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        )
+        .await
+        .unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+
+        send_line(
+            &mut writer,
+            &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}),
+        )
+        .await
+        .unwrap();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let sid = serde_json::from_str::<Value>(line.trim()).unwrap()["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+
+        let prompt = serde_json::json!({
+            "jsonrpc": "2.0", "id": 10,
+            "method": "session/prompt",
+            "params": { "sessionId": sid, "prompt": [{ "type": "text", "text": "use echo" }] }
+        });
+        send_line(&mut writer, &prompt).await.unwrap();
+
+        let mut got_tool_start = false;
+        let mut got_tool_end = false;
+        let mut got_text = false;
+        loop {
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            let msg: Value = serde_json::from_str(line.trim()).unwrap();
+            if msg.get("id").and_then(|v| v.as_u64()) == Some(10) {
+                assert_eq!(msg["result"]["stopReason"], "end_turn");
+                break;
+            }
+            if msg["method"] != "session/update" {
+                continue;
+            }
+            let update_type = msg["params"]["update"]["sessionUpdate"]
+                .as_str()
+                .unwrap_or("");
+            match update_type {
+                "tool_call" => {
+                    got_tool_start = true;
+                }
+                "tool_call_update" => {
+                    let status = msg["params"]["update"]["status"].as_str().unwrap_or("");
+                    if status == "completed" {
+                        got_tool_end = true;
+                    }
+                }
+                "agent_message_chunk" => {
+                    let text = msg["params"]["update"]["content"]["text"]
+                        .as_str()
+                        .unwrap_or("");
+                    if !text.is_empty() {
+                        got_text = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(got_tool_start, "expected tool_call notification");
+        assert!(got_tool_end, "expected tool_call_update completed");
+        assert!(got_text, "expected text after tool execution");
+    }
+
+    #[tokio::test]
+    async fn test_server_permission_request_flow() {
+        use async_trait::async_trait;
+        use mew_hooks::ToolOutput;
+        use mew_provider::{EventStream, Provider, ProviderError, ProviderEvent, Request};
+        use mew_tools::{Sensitivity, Tool, ToolCtx, ToolError};
+        use serde_json::Value;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        struct TestWrite;
+
+        impl TestWrite {
+            fn schema_value() -> &'static serde_json::Value {
+                static SCHEMA: std::sync::LazyLock<serde_json::Value> =
+                    std::sync::LazyLock::new(|| {
+                        serde_json::json!({
+                            "type": "object",
+                            "properties": { "path": { "type": "string" } },
+                            "required": ["path"]
+                        })
+                    });
+                &SCHEMA
+            }
+        }
+
+        #[async_trait]
+        impl Tool for TestWrite {
+            fn name(&self) -> &str {
+                "test_write"
+            }
+            fn description(&self) -> &str {
+                "a mutating tool for testing"
+            }
+            fn schema(&self) -> &serde_json::Value {
+                Self::schema_value()
+            }
+            fn sensitivity(&self) -> Sensitivity {
+                Sensitivity::Mutating
+            }
+            async fn execute(
+                &self,
+                _ctx: ToolCtx,
+                input: serde_json::Value,
+            ) -> Result<ToolOutput, ToolError> {
+                let path = input["path"].as_str().unwrap_or("");
+                Ok(ToolOutput {
+                    output: format!("wrote {path}"),
+                    error: String::new(),
+                    diff: None,
+                })
+            }
+        }
+
+        struct TwoPhaseProvider {
+            call_count: AtomicU32,
+            tool_script: Vec<ProviderEvent>,
+            text_script: Vec<ProviderEvent>,
+        }
+
+        #[async_trait]
+        impl Provider for TwoPhaseProvider {
+            fn name(&self) -> &str {
+                "twophase"
+            }
+            async fn stream(&self, _req: Request) -> Result<EventStream, ProviderError> {
+                let n = self.call_count.fetch_add(1, Ordering::SeqCst);
+                let script = if n == 0 {
+                    self.tool_script.clone()
+                } else {
+                    self.text_script.clone()
+                };
+                let stream = futures::stream::unfold(
+                    script.into_iter(),
+                    |mut iter: std::vec::IntoIter<ProviderEvent>| async move {
+                        match iter.next() {
+                            Some(ev) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                                Some((ev, iter))
+                            }
+                            None => None,
+                        }
+                    },
+                );
+                Ok(Box::pin(stream))
+            }
+        }
+
+        let tool_script = mew_provider_fake::FakeProvider::tool_call(
+            "test_write",
+            "perm_1",
+            serde_json::json!({"path": "/tmp/test"}),
+        );
+        let text_script = mew_provider_fake::FakeProvider::text_response("written");
+
+        let provider = Arc::new(TwoPhaseProvider {
+            call_count: AtomicU32::new(0),
+            tool_script,
+            text_script,
+        });
+        let dispatcher = Arc::new(mew_hooks::NopDispatcher);
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(TestWrite)];
+        let agent = mew_agent::Agent::new(provider, dispatcher, None, tools, None);
+
+        let (cr, sw) = tokio::io::duplex(8192);
+        let (sr, cw) = tokio::io::duplex(8192);
+        tokio::spawn(async move {
+            let _ = run_server_on(
+                agent,
+                DuplexTransport {
+                    reader: BufReader::new(sr),
+                    writer: sw,
+                },
+            )
+            .await;
+        });
+        let mut reader = BufReader::new(cr);
+        let mut writer = tokio::io::BufWriter::new(cw);
+
+        send_line(
+            &mut writer,
+            &serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+        )
+        .await
+        .unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+
+        send_line(
+            &mut writer,
+            &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}),
+        )
+        .await
+        .unwrap();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        let sid = serde_json::from_str::<Value>(line.trim()).unwrap()["result"]["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+
+        let prompt = serde_json::json!({
+            "jsonrpc": "2.0", "id": 10,
+            "method": "session/prompt",
+            "params": { "sessionId": sid, "prompt": [{ "type": "text", "text": "write file" }] }
+        });
+        send_line(&mut writer, &prompt).await.unwrap();
+
+        let mut got_permission_request = false;
+        let mut got_tool_completed = false;
+        let mut got_text = false;
+        loop {
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            let msg: Value = serde_json::from_str(line.trim()).unwrap();
+
+            if msg.get("id").and_then(|v| v.as_u64()) == Some(10) {
+                assert_eq!(msg["result"]["stopReason"], "end_turn");
+                break;
+            }
+
+            let method = msg["method"].as_str().unwrap_or("");
+            if method == "session/request_permission" {
+                got_permission_request = true;
+                let perm_id = msg["id"].as_u64().unwrap();
+                assert_eq!(msg["params"]["toolCall"]["toolCallId"], "perm_1");
+
+                let perm_resp = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": perm_id,
+                    "result": {
+                        "outcome": {
+                            "outcome": "selected",
+                            "optionId": "allow-once"
+                        }
+                    }
+                });
+                send_line(&mut writer, &perm_resp).await.unwrap();
+                continue;
+            }
+
+            if method != "session/update" {
+                continue;
+            }
+            let update_type = msg["params"]["update"]["sessionUpdate"]
+                .as_str()
+                .unwrap_or("");
+
+            match update_type {
+                "tool_call_update" => {
+                    let status = msg["params"]["update"]["status"].as_str().unwrap_or("");
+                    if status == "completed" {
+                        got_tool_completed = true;
+                    }
+                }
+                "agent_message_chunk" => {
+                    let text = msg["params"]["update"]["content"]["text"]
+                        .as_str()
+                        .unwrap_or("");
+                    if !text.is_empty() {
+                        got_text = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            got_permission_request,
+            "expected session/request_permission"
+        );
+        assert!(got_tool_completed, "expected tool completed after approval");
+        assert!(got_text, "expected text after tool execution");
     }
 }
 

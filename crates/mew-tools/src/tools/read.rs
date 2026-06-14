@@ -4,6 +4,8 @@ use serde_json::Value;
 
 pub struct Read;
 
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+
 #[async_trait]
 impl Tool for Read {
     fn name(&self) -> &str {
@@ -49,9 +51,26 @@ impl Tool for Read {
             .ok_or_else(|| ToolError::InvalidInput("missing path".into()))?;
         let path = ctx.cwd.join(path);
 
+        // Check file size before reading.
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .map_err(|e| ToolError::Execution(format!("stat failed: {}", e)))?;
+        if metadata.len() > MAX_FILE_SIZE {
+            return Err(ToolError::Execution(format!(
+                "file too large ({} bytes, max {})",
+                metadata.len(),
+                MAX_FILE_SIZE
+            )));
+        }
+
         let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| ToolError::Execution(format!("read failed: {}", e)))?;
+
+        // Detect binary files via null byte.
+        if content.contains('\0') {
+            return Err(ToolError::Execution("cannot read binary file".into()));
+        }
 
         let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let limit = input

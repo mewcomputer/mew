@@ -10,7 +10,7 @@ this document is the source of truth for scope and architecture. milestones are 
 
 - not a claude code clone in features. parity with the tool-use loop, tui polish, and permission model is the bar. fancy session branching, ide integrations beyond acp, and team/cloud features are out of scope.
 - terminal only, for now. web version is a maybe but not planned for v1. design with a clean separation between core and tui to keep that door open (likely already doing this for ACP).
-- tools are either built-in (in-tree rust) or mcp. a general plugin system (hooks beyond tool registration) is deferred to m7. hook *points* are defined in the agent loop from m0 onward so adding the runtime later isn't a refactor.
+- tools are either built-in (in-tree rust) or mcp. a general plugin system (hooks, lifecycle, dynamic tool registration, notifications) is deferred to m7. hook *points* are defined in the agent loop from m0 onward so adding the runtime later isn't a refactor.
 - no multi-tenant server mode. single user, local-first. acp is the only remoting story.
 - no telemetry, ever. no analytics, no crash reporting phoning home, no usage pings. logs are local-only. if this changes it requires explicit user opt-in and a config flag, never a default.
 - image *input* is supported, voice input and tts output is a maybe but probably not. focus on text and images having the best experience.
@@ -405,6 +405,11 @@ image input lands in m1 (so both shapes are exercised), not m0. m0 covers text-o
 ## the agent loop
 
 ```text
+startup:
+  hooks.init(host).await                   ← pass PluginHost for session access
+  registry.load(hooks.on_register_tools().await)
+                                          ← merge dynamic tools into agent's tool registry
+
 loop:
   hooks.on_chat_message(msg).await        ← may rewrite outbound message
   hooks.on_chat_params(params).await      ← may rewrite temp/topP/maxTokens
@@ -431,6 +436,9 @@ loop:
       goto loop
     else:
       done
+
+shutdown:
+  hooks.shutdown().await
 ```
 
 every `hooks.*` call is a no-op in the default `NopDispatcher` shipped through m6. the dispatcher trait is wired through the loop from m0 so adding a real runtime in m7 doesn't touch loop code.
@@ -444,32 +452,81 @@ abort: a `tokio_util::sync::CancellationToken` propagates through the loop. on c
 ```rust
 #[async_trait::async_trait]
 pub trait Dispatcher: Send + Sync {
+    // lifecycle (m7)
+    async fn init(&self, host: &PluginHost);
+    async fn shutdown(&self);
+
+    // dynamic tool registration (m7): called at startup and on plugin reload.
+    // returns additional tools to merge into the agent's tool registry.
+    async fn on_register_tools(&self) -> Vec<ToolRegistration>;
+
+    // dynamic slash command registration (m10): returns slash commands to
+    // merge into the TUI's command registry.
+    async fn on_register_slash_commands(&self) -> Vec<SlashCommandDef>;
+
+    // observability
     async fn on_event(&self, ev: &AgentEvent);
 
+    // turn-grain observer (m7): fires after each assistant turn completes
+    // (tool results pushed, about to loop back or terminate). errors logged,
+    // never propagated. non-blocking.
+    async fn on_turn_end(&self, messages: &[Message]);
+
+    // mutation hooks
     async fn on_chat_message(&self, msg: Message) -> Message;
     async fn on_chat_params(&self, p: ChatParams) -> ChatParams;
     async fn on_chat_headers(&self, h: HeaderMap) -> HeaderMap;
+    /// Called when the system prompt is assembled, before it's sent to the
+    /// model. Plugins may prepend, append, or replace sections. Called every
+    /// turn (system prompt is rebuilt from scratch each turn).
+    async fn on_system_prompt(&self, prompt: String) -> String;
     async fn on_tool_execute_before(&self, call: &ToolCall, input: Value) -> Value;
     async fn on_tool_execute_after(&self, call: &ToolCall, output: ToolOutput) -> ToolOutput;
     async fn on_permission_ask(&self, call: &ToolCall, current: PermissionDecision) -> PermissionDecision;
     async fn on_shell_env(&self, env: HashMap<String, String>) -> HashMap<String, String>;
 }
 
+/// Host handle plugins receive during init. Provides session-context access.
+pub struct PluginHost {
+    /// Pushes a non-modal alert to the TUI (supports CC Notification hook in m11).
+    pub notify: Box<dyn Fn(String) + Send + Sync>,
+    /// Read-only access to a safe subset of config values (known keys only).
+    pub config_read: Box<dyn Fn(&str) -> Option<String> + Send + Sync>,
+    /// Restricted log channel (prefixed with plugin name, rate-limited).
+    pub log: Box<dyn Fn(String) + Send + Sync>,
+    /// Read a per-plugin persistent value. Key is namespaced to the plugin.
+    pub storage_read: Box<dyn Fn(&str) -> Option<String> + Send + Sync>,
+    /// Write a per-plugin persistent value (stored to disk, `~/.config/mew/plugin-storage/<name>.json`).
+    pub storage_write: Box<dyn Fn(&str, &str) + Send + Sync>,
+    /// Delete a per-plugin persistent value.
+    pub storage_delete: Box<dyn Fn(&str) + Send + Sync>,
+    /// Push named text content to the TUI for rendering. The TUI exposes plugin
+    /// data via a designated area (e.g. companion sprite beside the input prompt).
+    /// Keys are plugin-namespaced; the TUI reads `app.plugin_ui` during render.
+    pub set_ui: Box<dyn Fn(&str, &str) + Send + Sync>,
+}
+
 pub struct NopDispatcher;
 
 #[async_trait::async_trait]
 impl Dispatcher for NopDispatcher {
+    async fn init(&self, _: &PluginHost) {}
+    async fn shutdown(&self) {}
+    async fn on_register_tools(&self) -> Vec<ToolRegistration> { vec![] }
+    async fn on_register_slash_commands(&self) -> Vec<SlashCommandDef> { vec![] }
     async fn on_event(&self, _: &AgentEvent) {}
+    async fn on_turn_end(&self, _: &[Message]) {}
     async fn on_chat_message(&self, msg: Message) -> Message { msg }
+    async fn on_system_prompt(&self, prompt: String) -> String { prompt }
     // etc.
 }
 ```
 
 omitted from opencode's set on purpose:
 
-- their `tool` hook (plugin registers a tool) — already covered by mcp and the in-tree `Tool` trait. plugins that want tools implement `Tool` directly.
+- their `tool` hook (plugin registers a tool) — covered by mew's own `on_register_tools` (m7), plus mcp and the in-tree `Tool` trait.
 - their `auth` hook — defer until mew supports oauth flows; byok covers everything until then.
-- their `command.execute.before` — slash commands aren't a v1 plugin concern beyond fixed built-ins.
+- their `command.execute.before` — covered by mew's `on_register_slash_commands` (m7 trait, m10 runtime) which lets plugins register and execute slash commands directly, rather than intercepting built-in commands.
 
 ---
 
@@ -822,12 +879,24 @@ scope:
 
 - pick the runtime, document the decision in this file under "decisions made".
 - implement `Dispatcher` backed by the runtime. preserve the contract: errors logged, never propagated; mutating hooks fall back to input on failure.
+- **lifecycle hooks.** implement `async fn init(host: &PluginHost)` and `async fn shutdown()`. `PluginHost` gives plugins a handle to session-context resources. wasm modules get corresponding `wasi:init` and `shutdown` exports.
+- **user-facing notifications.** implement the `PluginHost::notify` channel. the agent core forwards these to the TUI as non-modal alerts. this directly supports the CC `Notification` hook in m11 and gives plugins a safe way to inform the user without calling `print`.
+- **dynamic tool registration.** implement `on_register_tools` — plugins return `Vec<ToolRegistration>`, the agent core merges them into its tool registry at startup (and when plugins are reloaded). the wasm host provides a function to register a tool descriptor and an execution callback. this fills the gap between MCP and purely observer-level hooks.
+- **system prompt hook.** implement `on_system_prompt` — plugins receive the assembled system prompt each turn (before it's sent to the model) and may prepend, append, or replace sections. called every turn since the system prompt is rebuilt from scratch. a plugin that injects an LLM companion introduction (e.g. "you're working alongside [name], a [species] companion…") uses this hook.
+- **turn-end observer.** implement `on_turn_end` — fires after each assistant turn completes (tool results pushed, about to loop back or terminate). plugins receive a snapshot of the current conversation. intended for lightweight, non-blocking observation: reaction quips, stat tracking, ambient companion chatter. errors are logged, never propagated. the runtime implementation should be fire-and-forget (spawn a task, don't block the turn loop).
+- **event observation wired.** implement `on_event` in the runtime. all `AgentEvent` variants (Provider, ToolStart, ToolEnd, PartUpdated, PermissionRequest, etc.) are forwarded to plugins. batch or coalesce stream-level events (PartDelta) to avoid per-chunk overhead; ToolStart/ToolEnd/Turn-level events are forwarded immediately.
+- **plugin persistent storage.** implement `PluginHost::storage_read`, `storage_write`, and `storage_delete`. each plugin gets a namespaced key-value store persisted to `~/.config/mew/plugin-storage/<plugin-name>.json`. used for companion soul, plugin-level preferences, cached state that must survive restarts. keys are simple strings; values are strings (plugins serialize/deserialize themselves). the store is read on init, written on each `storage_write` call. atomic writes (temp file + rename).
+- **plugin UI state.** implement `PluginHost::set_ui`. plugins push named text content (e.g. `buddy-sprite`, `buddy-bubble`) to the TUI. the TUI mirrors these in `app.plugin_ui: HashMap<String, String>` and renders them in a designated area beside the input prompt. this is intentionally primitive — plugins send strings, the TUI blits them. richer UI (line arrays, color spans) can be added later without changing the trait. keys are plugin-namespaced; the last write wins.
+- **hook ordering (runtime side).** load plugins by directory name alphabetically, run hooks in that order. log every transformation so a user can see which plugin changed what. no priority system yet — that arrives in m10 without changing runtime code.
+- **async wasm pragmatics.**
+  - Batch `on_event` (fire-and-forget or coalesce multiple events before calling the wasm boundary) to avoid per-chunk streaming overhead.
+  - Provide a `sync_dispatcher` fallback that runs hooks on a threadpool if async wasm proves flaky for non-Rust targets.
+  - Hard-code a minimal host API (read-only config for known keys, a restricted log channel, the notify callback, storage, and set_ui) so the initial sandbox is safe even without a manifest capability system.
 - plugin loading from `~/.config/mew/plugins/` and `<project>/.mew/plugins/` in that order, all loaded, hooks run in load order.
-- a host api exposed via wit covering: read session messages, log, fetch http (gated), read config values. no filesystem or shell access by default; plugins needing those use mcp.
-- a sample plugin in-tree demonstrating each hook (rust, compiled to wasm component).
+- a sample plugin in-tree demonstrating each hook including lifecycle, dynamic tool registration, notifications, system prompt injection, turn-end observer, and mutation (rust, compiled to wasm component).
 - docs for plugin authors: which hooks exist, host api surface, examples in at least two source languages.
 
-done when: a plugin loaded from `~/.config/mew/plugins/` can (a) inject a custom http header into provider requests, (b) deny a `bash` permission for commands matching a regex, (c) rewrite a tool's output to redact secrets — all observed end-to-end with mew running against a real provider, and the same plugin works unchanged when written in at least two languages compiling to wasm.
+done when: a plugin loaded from `~/.config/mew/plugins/` can (a) inject a custom http header into provider requests, (b) deny a `bash` permission for commands matching a regex, (c) rewrite a tool's output to redact secrets, (d) register a new tool via `on_register_tools` that the model can discover and call, (e) send a notification that appears in the TUI, (f) receive `init`/`shutdown` calls at session boundaries, (g) inject text into the system prompt via `on_system_prompt` that the model can observe, (h) observe turn completions via `on_turn_end` and push a reaction quip via `set_ui`, (i) persist data across restarts via `storage_read`/`storage_write`, and (j) push UI content that renders beside the input prompt — all observed end-to-end with mew running against a real provider, and the same plugin works unchanged when written in at least two languages compiling to wasm.
 
 ### m8: remote agent over iroh (stretch — feature-flagged)
 
@@ -989,14 +1058,46 @@ plugin-name/
 
 scope:
 
-- `mew-plugin.toml` schema: name, version, description, author, license, optional component path overrides.
+- `mew-plugin.toml` schema:
+  ```toml
+  [plugin]
+  name = "my-plugin"
+  version = "1.0.0"
+  api_version = 1                     # m7 runtime API version
+  mew_min_version = "0.7.0"           # semver; reject if running mew is older
+  description = "does something useful"
+  author = "you"
+  license = "MIT"
+  priority = 100                      # default; lower numbers run hooks first
+
+  [capabilities]
+  http = ["api.github.com"]           # allowed HTTP hosts
+  config_read = ["openai_api_key"]    # specific config keys readable
+  log = true                          # whether log channel is enabled
+  ```
+- **api_version and mew_min_version.** the loader rejects plugins with an incompatible `api_version`, showing a clear error and a hint to update the plugin or mew itself. `mew_min_version` is checked against the running binary version and rejected on mismatch.
+- **capability declaration.** the `[capabilities]` section controls what host functions are granted to the wasm module. the wasm host uses this to grant or deny host functions per plugin. m10 also adds a pre-install prompt showing requested capabilities so the user can review before accepting:
+  ```
+  plugin "my-plugin" requests:
+    http access to: api.github.com
+    config read: openai_api_key
+    log: yes
+  install? [y/N]
+  ```
+  without a manifest (m7-era plugins), the minimal sandbox from m7 applies: no HTTP, no filesystem, config-read for recognized keys only, log enabled.
+- **hook ordering by manifest priority.** the `priority` field in `mew-plugin.toml` (integer, lower runs first, default 100) lets plugin authors declare ordering. the m10 loader sorts plugins by this value, overriding the alphabetical m7 default. the m7 runtime doesn't change; only the loading logic in m10 adds priority-based sorting. alphabetical order remains the tiebreaker for equal priorities.
 - discovery: `~/.config/mew/plugins/<name>/` and `<project>/.mew/plugins/<name>/`. each directory is a plugin if it contains either `mew-plugin.toml` or `.claude-plugin/plugin.json`.
 - on session start: load all plugins; register their components (skills into the skills registry, agents into the subagents registry, slash commands into the command registry, mcp servers into the mcp client config, hooks into the dispatcher).
 - markdown slash commands: a new `Command` impl `MarkdownCommand` that, when invoked, expands the markdown body (with argument substitution) into a user prompt sent to the model. cc-compatible.
+- **dynamic slash command registration.** implement `on_register_slash_commands` from the `Dispatcher` trait (added in m7 to the trait, implemented in m10). plugins return `Vec<SlashCommandDef>` — named commands with an async JSON-RPC callback. this enables stateful commands like `/buddy pet` that need code, not just markdown expansion. the TUI's slash command registry merges both markdown commands (from `commands/`) and dynamic commands (from `on_register_slash_commands`) at session start.
 - enable/disable: `mew plugin list`, `mew plugin enable <name>`, `mew plugin disable <name>`. disabled plugins skip registration. state persisted in config.
 - install: `mew plugin install <git-url>` clones into `~/.config/mew/plugins/<name>/`. `mew plugin update <name>` git-pulls. nothing fancier; trust the user's git.
 
-done when: a single git repo containing `mew-plugin.toml`, `commands/foo.md`, `skills/bar/SKILL.md`, and `agents/baz.md` can be installed via `mew plugin install <url>`, all components surface correctly (the slash command shows in `/help`, the skill in the `skill` tool listing, the subagent in subagent invocations), and `mew plugin disable` removes them from registration without uninstalling files.
+done when: a single git repo containing `mew-plugin.toml` (with `api_version`, `mew_min_version`, `priority`, and `[capabilities]`), `commands/foo.md`, `skills/bar/SKILL.md`, and `agents/baz.md` can be installed via `mew plugin install <url>`, all components surface correctly (the slash command shows in `/help`, the skill in the `skill` tool listing, the subagent in subagent invocations), `mew plugin disable` removes them from registration without uninstalling files, a plugin with `on_register_slash_commands` can register a stateful command visible in `/help` and executable from the TUI, and:
+- installing a plugin with an incompatible `api_version` produces a clear error with upgrade hint.
+- installing a plugin with `mew_min_version > current` is rejected before any code loads.
+- a plugin with `priority = 50` runs its hooks before a plugin with `priority = 100`.
+- the pre-install prompt shows requested capabilities, and a denied capability gates the corresponding host function.
 
 ### m11: claude code plugin compatibility (stretch)
 
@@ -1050,13 +1151,13 @@ done when: a representative sample of three popular cc plugins (one skill-heavy,
 - router is a `Provider`. tui never knows.
 - structured logging: `tracing` + `tracing-subscriber` jsonl per session, separate from session files.
 - error handling: `thiserror` for library crates (typed errors), `anyhow` only at the binary boundary. no `Box<dyn Error>` floating around. every error in the codebase maps to one `ErrorKind` variant when crossing into a `Message`.
-- hook points wired through the agent loop from m0. nop impl through m6. plugin runtime decided at m7 start, leaning hard toward wasmtime + components.
+- hook points wired through the agent loop from m0. nop impl through m6. plugin runtime decided at m7 start, leaning hard toward wasmtime + components. lifecycle hooks (`init`/`shutdown`), dynamic tool registration (`on_register_tools`), system prompt injection (`on_system_prompt`), turn-end observer (`on_turn_end`), event observation (`on_event` — all AgentEvent variants forwarded), plugin persistent storage (`PluginHost::storage_read/write/delete`), plugin UI state (`PluginHost::set_ui`), and user-facing notifications (`PluginHost::notify`) are part of the m7 Dispatcher trait. slash command registration (`on_register_slash_commands`) is in the trait from m7 but fully implemented in m10. hook ordering is alphabetical by directory name in m7; m10 adds manifest-based priority sorting without changing runtime code. wasm sandbox is hard-coded minimal in m7 (no filesystem, no network, config-read for known keys, restricted log); m10 exposes the boundary with a `[capabilities]` manifest section.
 - project context files: load `AGENTS.md`, `CLAUDE.md`, `.mew/AGENTS.md` walking up from cwd to git root, plus global. concatenate into system prompt. cross-tool filename support is a hard requirement.
 - skills: opencode-compatible frontmatter and discovery. on-demand via the `skill` built-in tool, never bulk-injected. multi-path discovery covers `.mew/`, `.opencode/`, `.claude/`, `.agents/`. permission rules share the engine with tool permissions.
 - acp transport is pluggable behind a `Transport: AsyncRead + AsyncWrite` trait. m6 ships stdio. m8 adds iroh, feature-flagged. acp protocol code never knows or cares which transport it's running on.
 - iroh remote agents authenticate via spake2 pake with a 6-digit pairing code, plus optional trust-on-first-use for repeat connections. iroh node identity is *routing*, not authorization — pairing is the trust anchor. pairing code never transmitted; spake2 derives session keys from it. failed pairings delay 1s before close to defeat online brute force.
 - subagents are nested sessions invoked via a built-in `subagent` tool. permissions do *not* inherit from parent — child prompts for its own approvals. tool sets are restrictable in the subagent definition; model is selectable or inheritable.
-- mew's native plugin format is a superset of claude code's. components live at plugin root (`commands/`, `agents/`, `skills/`, `hooks/`, mcp config). manifest is `mew-plugin.toml`; `.claude-plugin/plugin.json` also accepted. designed this way so cc compat is a thin adapter, not a parallel system.
+- mew's native plugin format is a superset of claude code's. components live at plugin root (`commands/`, `agents/`, `skills/`, `hooks/`, mcp config). manifest is `mew-plugin.toml`; `.claude-plugin/plugin.json` also accepted. manifest declares `api_version`, `mew_min_version`, `priority` (hook ordering, default 100, lower first), and `[capabilities]` (http hosts, config keys, log toggle). designed this way so cc compat is a thin adapter, not a parallel system.
 - cc plugin compatibility is best-effort, not guaranteed. plugins that are essentially packaged skills/agents/commands/mcp/hooks work; plugins depending on cc-specific internals (model names, env vars beyond `${CLAUDE_PLUGIN_ROOT}`, internal behaviors) are unsupported. document the known-incompat list as plugins get tested.
 - cancellation: `tokio_util::sync::CancellationToken` threaded through the loop, tools, and provider streams.
 - ulids for ids (`ulid` crate). sortable by creation, random enough.
@@ -1124,32 +1225,14 @@ the actual message array sent to the provider, layered:
    ├── concatenated AGENTS.md / CLAUDE.md / .mew/AGENTS.md content,
    │     each wrapped: <context source="<path>">...</context>
    │     order: ~/.config/mew/AGENTS.md → git-root → cwd
+   ├── plugin system prompt contributions (from on_system_prompt hooks,
+   │     run in load order, each seeing the output of the previous)
    └── tool definitions block (provider-specific encoding)
        includes the `skill` tool with its dynamic listing:
        <available_skills>
          <skill><name>...</name><description>...</description></skill>
          ...
        </available_skills>
-
-2. conversation messages, in order, each as a Message:
-   - user messages: parts include text, file attachments (from @-mentions), images
-   - assistant messages: parts include text, reasoning, tool_call (with terminal state), tool_result markers
-   - on the wire: anthropic shape preserves blocks 1:1; openai shape splits
-     assistant tool_use into the assistant message's tool_calls field and
-     synthesizes role: tool messages for tool results
-
-3. if a CompactionPart exists in history, everything before it is replaced
-   by a synthesized summary message:
-   - role: user (anthropic) or system (openai shape)
-   - content: "Summary of earlier conversation: <generated summary>"
-   - the CompactionPart itself is not sent; it's a session-record artifact
-
-4. skill bodies are NOT in the system prompt. they're returned as tool
-   results when the model calls the `skill` tool. each loaded skill becomes
-   a tool_result part in the conversation, just like any other tool output.
-
-5. file attachments via @-mentions are NOT in the system prompt either.
-   they're FilePart entries in the user message that referenced them.
 ```
 
 invariants:

@@ -186,6 +186,26 @@ impl Adapter {
             "stream": true,
         });
 
+        if let Some(ref reasoning) = req.reasoning {
+            if let Some(body_obj) = body.as_object_mut() {
+                for (k, v) in &reasoning.params {
+                    body_obj.insert(k.clone(), v.clone());
+                }
+            }
+            // If thinking was enabled with a budget, ensure max_tokens is sufficient.
+            if let Some(budget) = body
+                .get("thinking")
+                .and_then(|t| t.get("budget_tokens"))
+                .and_then(|b| b.as_u64())
+            {
+                let min_max = budget + 4096;
+                let current = body["max_tokens"].as_u64().unwrap_or(4096);
+                if current < min_max {
+                    body["max_tokens"] = json!(min_max);
+                }
+            }
+        }
+
         if !req.system.is_empty() {
             body["system"] = json!(req.system);
         }
@@ -722,6 +742,16 @@ mod tests {
     use super::*;
     use mew_message::{AssistantMeta, TextPart, ToolResultPart};
 
+    fn make_minimal_png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xD7, 0x63, 0x60, 0x60, 0x60, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0xF6, 0x17, 0xA4,
+            0x49, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ]
+    }
+
     #[tokio::test]
     async fn test_build_wire_message_user() {
         let adapter = Adapter::new(
@@ -912,6 +942,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_wire_message_user_with_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let img_path = dir.path().join("test.png");
+        tokio::fs::write(&img_path, make_minimal_png())
+            .await
+            .unwrap();
+        let img_url = format!("file://{}", img_path.display());
+
         let adapter = Adapter::new(
             "test".to_string(),
             "https://example.com".to_string(),
@@ -940,7 +977,7 @@ mod tests {
                     },
                     mime: "image/png".to_string(),
                     filename: Some("test.png".to_string()),
-                    url: "file:///tmp/test.png".to_string(),
+                    url: img_url,
                 }),
             ],
             time: mew_message::Time {
@@ -993,6 +1030,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             system: String::new(),
+            reasoning: None,
         };
 
         let mut stream = adapter.stream(req).await.expect("stream");
@@ -1045,6 +1083,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             system: String::new(),
+            reasoning: None,
         };
 
         let mut stream = adapter.stream(req).await.expect("stream");

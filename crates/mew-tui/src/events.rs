@@ -1,5 +1,6 @@
 use crossterm::event::{
-    Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+    Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use futures::StreamExt;
 use std::time::Duration;
@@ -102,6 +103,8 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
         crate::app::Mode::PermissionPrompt => handle_permission_key(app, key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
         crate::app::Mode::Normal | crate::app::Mode::SlashCommand => handle_normal_key(app, key),
+        // Settings mode key handling is done by ConfigEditor in main.rs
+        crate::app::Mode::Settings => None,
     }
 }
 
@@ -133,7 +136,6 @@ fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action>
 }
 
 fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
-    // Only scroll chat in normal/slash modes.
     if !matches!(
         app.mode,
         crate::app::Mode::Normal | crate::app::Mode::SlashCommand
@@ -141,14 +143,109 @@ fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Ac
         return None;
     }
     match mouse.kind {
-        // Scroll wheel *up* → show *older* content (scroll up).
         MouseEventKind::ScrollUp => {
             app.scroll_up(1);
             None
         }
-        // Scroll wheel *down* → show *newer* content (scroll down).
         MouseEventKind::ScrollDown => {
             app.scroll_down(1);
+            None
+        }
+        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Down(MouseButton::Right) => {
+            let row = mouse.row.saturating_sub(1);
+            let col = mouse.column.saturating_sub(1);
+
+            // Scrollbar click → seek.
+            let scrollbar_col = app.chat_area.right().saturating_sub(1);
+            if col == scrollbar_col && app.chat_area.height > 0 && app.max_scroll > 0 {
+                let rel_y = row.saturating_sub(app.chat_area.y) as f64;
+                let ratio = (rel_y / app.chat_area.height as f64).clamp(0.0, 1.0);
+                let target = (app.max_scroll as f64 * ratio).round() as u16;
+                let target = target.min(app.max_scroll);
+                if target >= app.max_scroll {
+                    app.auto_scroll = true;
+                    app.scroll = app.max_scroll;
+                } else {
+                    app.auto_scroll = false;
+                    app.scroll = target;
+                }
+                return None;
+            }
+
+            // Input click → position cursor and clear selection.
+            if app.input_area.contains((col, row).into()) {
+                app.clear_selection();
+                let rel_x = col.saturating_sub(app.input_area.x) as usize;
+                let line_count = app.input_line_count();
+                let input_lines: Vec<&str> = app.input.split('\n').collect();
+                let rel_y = row.saturating_sub(app.input_area.y) as usize;
+
+                if rel_y < line_count && rel_y < input_lines.len() {
+                    let line = input_lines[rel_y];
+                    let col_in_line = rel_x.saturating_sub(2).min(line.len());
+                    let mut buf_offset = 0;
+                    for (i, l) in input_lines.iter().enumerate() {
+                        if i == rel_y {
+                            let byte_offset = line
+                                .char_indices()
+                                .take(col_in_line)
+                                .last()
+                                .map(|(i, _)| i)
+                                .unwrap_or(0);
+                            buf_offset += byte_offset;
+                            break;
+                        }
+                        buf_offset += l.len() + 1;
+                    }
+                    app.cursor = buf_offset.min(app.input.len());
+                }
+                return None;
+            }
+
+            // Sidebar click → toggle section.
+            if app.sidebar_rect.contains((col, row).into()) {
+                for (header_row, section) in &app.sidebar_header_rows.clone() {
+                    if row == *header_row {
+                        app.toggle_sidebar_section(section);
+                        return None;
+                    }
+                }
+            }
+
+            // Chat area click → start selection.
+            if app.chat_area.contains((col, row).into()) && !app.chat_rows.is_empty() {
+                let rel_row = row.saturating_sub(app.chat_area.y) as usize;
+                let visual_row = (app.scroll as usize + rel_row).min(app.chat_rows.len() - 1);
+                let rel_col = col.saturating_sub(app.chat_area.x) as usize;
+                app.sel_anchor_row = Some(visual_row);
+                app.sel_anchor_col = Some(rel_col);
+                app.sel_end_row = Some(visual_row);
+                app.sel_end_col = Some(rel_col);
+                return None;
+            }
+            None
+        }
+        MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Right) => {
+            let row = mouse.row.saturating_sub(1);
+            let col = mouse.column.saturating_sub(1);
+            if app.chat_area.contains((col, row).into())
+                && !app.chat_rows.is_empty()
+                && app.sel_anchor_row.is_some()
+            {
+                let rel_row = row.saturating_sub(app.chat_area.y) as usize;
+                let visual_row = (app.scroll as usize + rel_row).min(app.chat_rows.len() - 1);
+                let rel_col = col.saturating_sub(app.chat_area.x) as usize;
+                app.sel_end_row = Some(visual_row);
+                app.sel_end_col = Some(rel_col);
+                return None;
+            }
+            None
+        }
+        MouseEventKind::Up(MouseButton::Left) | MouseEventKind::Up(MouseButton::Right) => {
+            let text = app.selected_text();
+            if !text.is_empty() {
+                return Some(Action::CopySelection(text));
+            }
             None
         }
         _ => None,
@@ -201,6 +298,11 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
     // Global shortcuts.
     match key.code {
         KeyCode::Esc => {
+            // If there's an active selection, clear it on Esc.
+            if app.sel_anchor_row.is_some() {
+                app.clear_selection();
+                return None;
+            }
             if app.streaming {
                 if app.esc_cancel_pending.is_some() {
                     app.esc_cancel_pending = None;
@@ -208,6 +310,24 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 } else {
                     app.esc_cancel_pending = Some(Instant::now());
                 }
+            }
+            return None;
+        }
+        // Ctrl+1/2/3: toggle sidebar sections
+        KeyCode::Char('1') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Some(Action::ToggleSidebarContext);
+        }
+        KeyCode::Char('2') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Some(Action::ToggleSidebarTools);
+        }
+        KeyCode::Char('3') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Some(Action::ToggleSidebarMcp);
+        }
+        // Ctrl+Shift+C: copy selected text to clipboard.
+        KeyCode::Char('C') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let text = app.selected_text();
+            if !text.is_empty() {
+                return Some(Action::CopySelection(text));
             }
             return None;
         }
@@ -246,6 +366,15 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.auto_scroll = true;
             app.scroll = app.max_scroll;
+            return None;
+        }
+        KeyCode::Char('x') if app.input.is_empty() => {
+            // Cancel the most recently started running subagent. Only
+            // triggers when the input is empty so it doesn't shadow the
+            // literal character in chat messages.
+            if let Some(task_id) = app.most_recent_running_subagent() {
+                return Some(Action::CancelMostRecentSubagent(task_id));
+            }
             return None;
         }
         _ => {}
@@ -321,6 +450,7 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             if app.input.starts_with('/') {
                 app.mode = crate::app::Mode::SlashCommand;
                 app.slash_selected = 0;
+                app.slash_scroll = 0;
             }
             // Auto-open file picker when @ is typed at start or after a space.
             if c == '@' {
@@ -350,6 +480,7 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 app.mode = crate::app::Mode::Normal;
             }
             app.slash_selected = 0;
+            app.slash_scroll = 0;
             None
         }
         KeyCode::Delete => {
@@ -437,30 +568,33 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             None
         }
         KeyCode::Enter => {
-            if let Some(ref p) = app.picker {
-                if let Some(item) = p.selected_item() {
-                    let id = item.id.clone();
-                    let kind = p.kind.clone();
-                    app.close_picker();
-                    if kind == "command" {
-                        match id.as_str() {
-                            "switch-model" => {
-                                app.open_model_picker();
-                                None
-                            }
-                            "clear" => Some(Action::Clear),
-                            "quit" => {
-                                app.should_quit = true;
-                                Some(Action::Quit)
-                            }
-                            _ => None,
+            let picker_data = app.picker.as_ref().and_then(|p| {
+                p.selected_item()
+                    .map(|item| (item.id.clone(), p.kind.clone(), item.label.clone()))
+            });
+            if let Some((id, kind, label)) = picker_data {
+                app.close_picker();
+                if kind == "command" {
+                    match id.as_str() {
+                        "switch-model" => {
+                            app.open_model_picker();
+                            None
                         }
-                    } else if kind == "model" {
-                        Some(Action::SwitchModel(id))
-                    } else if kind == "file" {
-                        Some(Action::InsertAtMention(format!("@{}", id)))
+                        "settings" => Some(Action::OpenSettings),
+                        "clear" => Some(Action::Clear),
+                        "quit" => {
+                            app.should_quit = true;
+                            Some(Action::Quit)
+                        }
+                        _ => None,
+                    }
+                } else if kind == "model" {
+                    Some(Action::SwitchModel(id))
+                } else if kind == "file" {
+                    if label.contains("[subagent]") {
+                        Some(Action::InsertSubagentMention(id))
                     } else {
-                        None
+                        Some(Action::InsertAtMention(format!("@{}", id)))
                     }
                 } else {
                     None
@@ -521,4 +655,24 @@ pub enum Action {
     SwitchModel(String),
     /// Insert an @mention path into the input.
     InsertAtMention(String),
+    /// Insert an @mention subagent reference.
+    InsertSubagentMention(String),
+    /// Copy selected text to clipboard.
+    CopySelection(String),
+    /// Toggle sidebar section collapsed state.
+    ToggleSidebarContext,
+    ToggleSidebarTools,
+    ToggleSidebarMcp,
+    /// Save settings from the settings page.
+    SaveSettings,
+    /// Start editing a field in the settings page.
+    SettingsEditStart,
+    /// Complete editing a field in the settings page.
+    SettingsEditComplete,
+    /// Open the settings page (populate plugins).
+    OpenSettings,
+    /// Cancel the most recently started running subagent. Carries the
+    /// task id so the main loop can resolve which task to cancel without
+    /// re-deriving it from app state.
+    CancelMostRecentSubagent(String),
 }

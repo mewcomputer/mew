@@ -28,42 +28,55 @@ impl Loader {
     }
 
     /// Walks from `cwd` up to the git worktree root (or `$HOME`), collecting
-    /// `AGENTS.md`, `CLAUDE.md`, and `.mew/AGENTS.md` along the way. Also loads
-    /// `~/.config/mew/AGENTS.md` if present.
+    /// context files along the way.
+    ///
+    /// Precedence (per directory): `AGENTS.md` preferred, `CLAUDE.md` as fallback.
+    /// Only one file is loaded per directory level.
+    ///
+    /// Global: `~/.config/mew/AGENTS.md` first, then `~/.claude/CLAUDE.md` as fallback.
     ///
     /// Files are returned from most-general to most-specific.
     pub fn load(&self) -> Result<Vec<File>, ContextError> {
         let mut files = Vec::new();
 
-        // Global config file first.
+        // Global config: AGENTS.md preferred, CLAUDE.md fallback.
         if let Some(cfg_dir) = config_dir() {
             let p = cfg_dir.join("AGENTS.md");
             if let Some(f) = try_read(&p) {
-                trace!(?p, "loaded global context file");
+                trace!(?p, "loaded global AGENTS.md");
                 files.push(f);
+            } else if let Some(home) = home_dir() {
+                let cc = home.join(".claude").join("CLAUDE.md");
+                if let Some(f) = try_read(&cc) {
+                    trace!(?cc, "loaded global CLAUDE.md (fallback)");
+                    files.push(f);
+                }
             }
         }
 
         // Determine root: git worktree root or home.
-        let root = find_git_root(&self.cwd).unwrap_or_else(|_| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| self.cwd.clone())
-        });
+        let root = find_git_root(&self.cwd)
+            .unwrap_or_else(|_| home_dir().unwrap_or_else(|| self.cwd.clone()));
 
         // Collect paths from root down to cwd so most-general comes first.
         let paths = paths_between(&root, &self.cwd);
         for dir in &paths {
-            for name in &["AGENTS.md", "CLAUDE.md"] {
-                let p = dir.join(name);
-                if let Some(f) = try_read(&p) {
-                    trace!(?p, "loaded project context file");
-                    files.push(f);
-                }
+            let agents = dir.join("AGENTS.md");
+            let claude = dir.join("CLAUDE.md");
+            let dot_mew = dir.join(".mew").join("AGENTS.md");
+
+            // Per-level: AGENTS.md preferred, CLAUDE.md fallback.
+            if let Some(f) = try_read(&agents) {
+                trace!(?agents, "loaded project AGENTS.md");
+                files.push(f);
+            } else if let Some(f) = try_read(&claude) {
+                trace!(?claude, "loaded project CLAUDE.md (fallback)");
+                files.push(f);
             }
-            let p = dir.join(".mew").join("AGENTS.md");
-            if let Some(f) = try_read(&p) {
-                trace!(?p, "loaded .mew context file");
+
+            // .mew/AGENTS.md is always loaded separately (additive, not a fallback).
+            if let Some(f) = try_read(&dot_mew) {
+                trace!(?dot_mew, "loaded .mew/AGENTS.md");
                 files.push(f);
             }
         }
@@ -78,6 +91,10 @@ fn try_read(path: &Path) -> Option<File> {
         path: path.to_path_buf(),
         content,
     })
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -270,7 +287,7 @@ mod tests {
 
         let agents_files: Vec<_> = files
             .iter()
-            .filter(|f| f.path.ends_with("AGENTS.md"))
+            .filter(|f| f.path.ends_with("AGENTS.md") && f.path.starts_with(root.path()))
             .collect();
         assert_eq!(agents_files.len(), 2);
         assert_eq!(agents_files[0].content, "root");
@@ -282,7 +299,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let loader = Loader::new(dir.path());
         let files = loader.load().unwrap();
-        assert!(files.is_empty());
+        // Project files should be empty; global files may exist on dev machine.
+        let local: Vec<_> = files
+            .iter()
+            .filter(|f| f.path.starts_with(dir.path()))
+            .collect();
+        assert!(local.is_empty(), "expected no project files, got {local:?}");
     }
 
     #[test]
@@ -290,6 +312,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let loader = Loader::new(dir.path());
         let files = loader.load().unwrap();
-        assert!(files.is_empty());
+        let local: Vec<_> = files
+            .iter()
+            .filter(|f| f.path.starts_with(dir.path()))
+            .collect();
+        assert!(local.is_empty(), "expected no project files, got {local:?}");
     }
 }

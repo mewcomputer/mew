@@ -1,152 +1,93 @@
-## M0: Skeleton + OpenAI adapter + Opencode providers
+## Milestones
 
-- rust project skeleton with workspace crates
-- `mew-provider-openai` adapter (SSE streaming, delta-based)
-- two built-in providers: `opencode-zen` and `opencode-go`
-- clap CLI with `run` and `chat` subcommands
-- `mew-message` canonical message/part types
-- `mew-catalog` model catalog with 24h cache
-- `mew-config` config loading + credential resolution
-- `mew-session` JSONL session persistence
-- `mew-hooks` Dispatcher trait
+### M0: Skeleton + OpenAI adapter
+`mew-message` canonical types (23 tests, proptest), `mew-provider-openai` (SSE delta-based), `opencode-zen`/`opencode-go` built-in providers, `mew-catalog` (models.dev, 24h cache), `mew-config` (credential resolution, config.toml), `mew-session` (JSONL persistence), `mew-hooks` (Dispatcher trait), clap CLI with `run`/`chat`.
+- Anthropic `signature_delta` parsing in `handle_content_block_delta`, vision gate (`supports_vision`).
+- Wiremock SSE fixture tests (openai + anthropic), broken fixtures repaired.
+- `mew-message` got `PartialEq` on all types, build wire-message image tests (tempdir instead of hardcoded `/tmp/test.png`).
 
-## M1: Anthropic adapter + provider routing + tests
+### M1: Anthropic adapter + routing
+`mew-provider-anthropic` (SSE content-block events), `z-ai` built-in provider (anthropic-shape, glm models), model routing, catalog parsing fix.
 
-- `mew-provider-anthropic` adapter (SSE, content-block events)
-- `z-ai` built-in provider (anthropic-shape, glm-5.1)
-- model routing: minimax models go through anthropic adapter
-- catalog parsing fix (array format)
-- retry policy tests, image wire-format tests, adapter tests
+### M2: Tools + permissions + skills
+`mew-tools` (Read, Write, Edit, Bash, Glob, Grep, Echo), `PermissionEngine` with declarative rules (`allow`/`ask`/`deny` per glob), `Tool` trait sensitivity levels, `RuleDecision::Ask` wired as step 2.5.
+`mew-skills` crate: 8-path discovery (`.mew/skills`, `.opencode/skills`, `.claude/skills`, `.agents/skills` × project + global), YAML frontmatter, name validation, duplicate resolution (8 tests). Skills listed as `<available_skills>` in system prompt. `[[permissions.skills]]` config with `name_glob`.
+Dispatcher hooks: `on_chat_message` (pre-turn), `on_event` (post-event), `on_shell_env` (bash tool). `ToolCtx.dispatcher` wired.
 
-## M2: Built-in tools + permission engine
+### M3: Ratatui TUI
+Full event loop with `App` state, streaming text, tool call state tracking, permission modal, model picker, status line, context sidebar.
+Markdown via ratatui-mdstream (syntect, cached per message-id, streaming `render_streaming`), tool blocks (colored bg, half-block edges), bash collapse/expand, ansi-to-tui, diff coloring, scrollbar/indicators.
+Keyboard UX: esc-to-cancel, slash autocomplete, input editing (ctrl+a/e/f/b, ctrl+u/w, alt+left/right/backspace), multiline input, bracket paste, stream drain coalescing (max 4 events/frame).
+Slash commands: `/model`, `/sessions`, `/compact`, `/resume`, `/help`, `/clear`, `/cost` — all 8.
+@-mention file picker (walk cwd with `.gitignore` filtering, max depth 4, 1MB limit, 50 results), `InsertAtMention` action.
+Cost computation (catalog pricing `usage/1M × price`), retry prompt (`RetryWait` event, HTTP status → reason mapping).
+Session resume (`mew_session::Reader::load`), context compaction (auto at 95% window, forced via `/compact`, keeps last 4 turns + synthetic summary).
+Agent refactor: `lib.rs` (1625 lines) → `agent.rs`/`turn.rs`/`events.rs`/`tools.rs`/`tests.rs`.
 
-- `mew-tools` crate with Read, Write, Edit, Bash, Glob, Grep, Echo
-- `PermissionEngine` with declarative rules matching
-- `Tool` trait with sensitivity levels (ReadOnly, Mutating, Dangerous)
-- minimal interactive mode (crossterm line input)
+### M4: MCP integration + state
+`mew-mcp` crate: HTTP (SSE streamable) and stdio transports, `McpClient::connect_http()`/`connect_stdio()`, initialize handshake, `McpTool` wrapping (`mcp__<server>__<tool>` namespace). Four HTTP MCP servers: context7, grep, deepwiki, alphavantage.
+State persistence: last model/provider in `state.toml` (`load_state`/`save_state`). `ToolOutput.diff` + `similar` dep. `AgentEvent::ToolProgress` for live output streaming. Protocol version negotiation fix (accept ≤ max, `MCP-Protocol-Version` header extraction, `std::sync::Mutex` for `HttpTransport`).
 
-## M3: Ratatui TUI
+### M5: Router / auto mode
+`mew-provider-router`: `Router` wraps `small` + `big` `Arc<dyn Provider>`, heuristic picks small for tool-free turns under threshold. `ProviderConfig.kind = "router"`. 3 tests. Wired into `build_provider()`.
 
-- full ratatui event loop with `App` state
-- streaming text display, tool call state tracking
-- permission prompt modal, model picker
-- status line with model/provider/cost
-- context sidebar on wide screens
-- ctrl+p command palette, model switching
-- model discovery by querying each provider API
-- picker scrolling + scrollbar
+### M6: ACP integration
+`mew-acp` crate: hand-rolled JSON-RPC 2.0 framing over `Transport` trait (`split() -> (Reader, Writer)`). `StdioTransport`, `DuplexTransport` for tests. 16 tests.
+`AcpClient`: spawns subprocess, initialize + session/new, translates `session/update` → `AgentEvent`.
+Server mode (`mew acp`): `run_server_on(transport)`, permission gating via `session/request_permission` (spec-compliant JSON-RPC request/response), slash command handling.
+CLI: `mew chat --acp-agent <cmd>`, `mew acp`.
 
-## M3.5 (uncommitted): TUI overhaul — markdown, tool display, keyboard UX
+### M7: Plugin runtime
+`mew-hooks-runtime`: `SubprocessDispatcher` (JSON-RPC subprocess plugins), `PluginLoader` (`.mew/plugins/`, `~/.config/mew/plugins/`), `DynamicTool` wrapper. `Dispatcher` extended with `init`/`shutdown`/`on_register_tools`. `PluginHost` trait. 6 integration tests + Rust sample plugin.
 
-- ratatui-mdstream markdown rendering with syntect highlighting
-- cached markdown rendering (per message-id, re-rendered on width change)
-- streaming markdown support via `render_streaming(md_state)`
-- tool call blocks with colored backgrounds and half-block edges
-- bash output collapse/expand (ctrl+o)
-- ansi-to-tui rendering for tool output
-- diff display with green/red coloring
-- scroll indicators (↑/↓), scrollbar, ctrl+home/end for scroll-to-top/bottom
-- esc-to-cancel agent (double-esc with pending state)
-- slash autocomplete with keyboard navigation (tab/arrows)
-- input editing: ctrl+a/e/f/b, ctrl+u/w, alt+backspace/cmd+backspace
-- word-level cursor movement (alt+left/right)
-- ctrl+l to jump to bottom
-- image file attachments via @mentions (png/jpg/gif/webp)
-- streaming drain coalescing (max 4 agent events per frame)
-- model attribution in assistant messages
-- context window display in status line
-- bracket paste mode
+### M8: iroh transport
+`mew-acp-iroh`: `IrohTransport<R,W>` impls `Transport`, `PairingTicket` (base64 JSON), `listen(agent)`/`connect(ticket, code)` with OPAQUE (Ristretto255 + TripleDh/SHA-512, 5 tests) + AEAD (ChaCha20-Poly1305 framing, 3 tests). Feature-flagged `iroh` on `mew` binary. CLI: `mew acp --listen iroh`, `mew chat --acp-agent iroh://<ticket>#<code>`.
 
-## M4 (uncommitted): MCP integration + state persistence + agent improvements
+### M9: Subagents
+`mew-subagents`: `SubagentDef`, `Loader` (8-path discovery, YAML frontmatter, 10 tests), `SubagentRunner` trait. `subagent` built-in tool (agent intercepts). `MewSubagentRunner` in main.rs: resolves model (inherit/specific/router), filters tools, creates child Agent, forwards `SubagentEvent`s. `max_turns` enforcement. Config overrides via `[agents.<name>]`. System prompt `<available_subagents>` XML. TUI handles `SubagentStart`/`End`/`PermissionRequest`. @-mention subagent invocation: `@subagent-name` → `InsertSubagentMention` → rewrite on submit.
 
-- new `mew-mcp` crate: MCP client with HTTP (streamable) and stdio transports
-- `McpClient::connect_http()` / `connect_stdio()` with initialize handshake
-- `McpTool` wraps MCP tools into `mew_tools::Tool` with `mcp__<server>__<tool>` namespace
-- `load_mcp_configs()` reads Claude Code-compatible `mcp.json`
-- `connect_mcp_servers()` wires MCP tools into agent startup
-- four HTTP MCP servers configured: context7, grep, deepwiki, alphavantage
-- `State` persistence: last-used model/provider saved to `state.toml`
-- `load_state`/`save_state` in `mew-config` with test coverage
-- `ToolOutput.diff` field + `similar` dep for diff computation
-- `AgentEvent::ToolProgress` for live tool output streaming
-- `run_with_parts()` for file attachment support in agent
+### MCP protocol version fix
+`HttpTransport.set_protocol_version` as trait impl override (was inherent → vtable no-op). `std::sync::Mutex` for protocol_version/session_id (avoid `blocking_lock` panics). `MCP-Protocol-Version` header extraction. `version_acceptable()` checks `server_version <= MAX_PROTOCOL_VERSION`. grep/director/stage servers now connect.
 
----
+### Cleanup (2026-05-05)
+- **Hard blocker fixes**:
+  - bash `pid.expect()` → `ok_or_else` error return; cancel polling in output loop
+  - `assistant_msg.as_ref().unwrap()` in 8 locations → captured `assistant_id` with early-return guards
+  - `subagent_runner.unwrap()` → `if let Some` guard
+  - glob: cancel polling in walker loop
+  - `read` tool: 10MB file size limit, null-byte binary detection
+- **Workspace path sandboxing**:
+  - Config: `[workspace] roots = [...]`, defaults to cwd
+  - `AgentEvent::WorkspacePermissionRequest` with oneshot response channel
+  - `ensure_workspace_path()` checks containment, prompts TUI modal if outside workspace
+  - Applies to read/write/edit (file path) + glob/grep (directory path); bash/echo skip
+  - Non-interactive CLI auto-allows workspace requests
+- **Sidebar compaction**: removed blank headers-and-content gaps, trimmed divider padding (saves 3-4 lines/section).
+- **UI module split**: `ui.rs` → `ui/` with `mod.rs` + `chat.rs` + `sidebar.rs` + `input.rs` + `status.rs` + `overlays.rs` + `welcome.rs`.
+- MCP sidebar status, context file precedence, copy fix, sidebar collapse, welcome screen.
 
-## 2026-05-02: MCP client implementation review
+### 2026-06-13: config system overhaul
 
-Reviewed `crates/mew-mcp/src/lib.rs` against the MCP `2025-11-25` spec. Key findings:
+- **dotenvy**: `.env` loaded by binary at startup (before tracing, so `RUST_LOG` works).
+- **Credential errors**: actionable message showing env var name, keyring command, credentials.json path.
+- **config-rs migration** (`config` crate 0.15, TOML feature only):
+  - `Config::default()` now contains built-in providers (opencode-zen, opencode-go, z-ai, deepseek) instead of hardcoded fallbacks in `build_provider`.
+  - `mew_config::load()` uses config-rs builder: defaults → config.toml → `MEW_` env vars (`__` separator for nesting).
+  - `build_provider` simplified: provider lookup is a plain HashMap get, no inline provider definitions.
+- **clap state fallback fix**: removed `default_value = "opencode-zen"` from `--provider`; state.toml `last_provider`/`last_model` now actually works. Extracted `resolve_provider`/`resolve_model_opt` helpers.
+- **Dead code removal**: `Config.agents` + `AgentConfig` (never read), `PermissionEngine::check_skill` + `SkillPermissionRule`/`SkillMatchConditions` + `PermissionsConfig.skills` (loaded but never enforced), `MEW_RECORD` doc (unimplemented).
+- **Clippy/fmt fixes**: pre-existing warnings in mew-tui, mew, mew-acp-iroh cleaned up. Full CI gate passes (`just ci` equivalent: fmt + clippy -D warnings + test --all).
 
-- Initialize handshake is correct but `MCP-Protocol-Version` header is hardcoded (should reflect negotiated version) and `MCP-Session-Id` is not handled at all.
-- SSE parsing works for the request-response pattern but ignores `event:`, `id:`, `retry:` fields and doesn't handle server-to-client requests on the stream.
-- tools/list pagination is correct; edge case with empty-string `nextCursor` could infinite-loop.
-- isError handling is correct; text is properly routed to error/output fields.
-- HTTP headers are correct (`Accept`, `MCP-Protocol-Version`).
-- Stdio transport has no timeouts, shutdown goes straight to kill (skipping graceful close), and failed init orphans the child process.
-- Transport trait has inconsistent error handling between `call` and `notify`, and `call_tool` only extracts text content (drops image/audio/resource/structuredContent results).
-- All MCP tools hardcoded to `Sensitivity::Mutating`.
+### 2026-06-14: subagent polish (M9.1)
 
-Decided to document findings rather than fix them immediately — these are spec-compliance notes for future improvement.
+Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each invocation creates an isolated **subsession** — its own session file, separate history. The parent never sees the subagent's tool calls in its own message history (already true). Goal: make this concrete, persistent, and observable.
 
----
-
-## 2026-05-03: M0–M4 audit pass + gap fixes
-
-Systematic audit of M0–M4 against PLAN.md. Fixed all blocking gaps and most partials:
-
-**M0 gaps fixed:**
-- `mew-message`: 23 tests (22 table-driven round-trip + proptest fuzz 100 cases). Added `PartialEq` to all types.
-- `mew-provider-openai` + `mew-provider-anthropic`: wiremock SSE fixture replay tests. Fixed broken fixture files (extra `}` in message_delta, malformed JSON escaping in tool-call fixture).
-- Anthropic `signature_delta` inbound parsing: added `signature` field to `Delta` struct in `handle_content_block_delta`, wired in agent's `apply_delta`.
-
-**M2 gaps fixed:**
-- `mew-skills` crate: full implementation with 8-path discovery (`.mew/skills`, `.opencode/skills`, `.claude/skills`, `.agents/skills` × project + global), YAML frontmatter parsing via `serde_yaml`, name validation (`^[a-z0-9]+(-[a-z0-9]+)*$`, max 64), duplicate resolution (project beats global, first within tier wins). 8 tests.
-- `skill` built-in tool: loads skill bodies on demand, registered in `build_tools()`. Skills listed in system prompt as `<available_skills>` XML block.
-- Skill permissions: `[[permissions.skills]]` TOML config with `name_glob` matching. `PermissionEngine::check_skill()` evaluates top-to-bottom, first match wins.
-- `RuleDecision::Ask` now wired in permission engine as step 2.5 (between Allow and Session allow) — forces a prompt even for ReadOnly tools.
-
-**M0/M1 partials fixed:**
-- 3 missing `Dispatcher` hooks: `on_chat_message` called before each turn, `on_event` called after each provider event, `on_shell_env` called in bash tool before subprocess spawn.
-- `ToolCtx.dispatcher` added, passed from agent to tools.
-- Vision gate: `Agent.supports_vision` flag from catalog, rejects image attachments pre-send.
-- Bash env passthrough: calls `on_shell_env` with current env vars, applies filtered result to subprocess.
-
----
-
-## 2026-05-03: M3 TUI enhancements
-
-All items from the M3 "done when" gate that were missing or partial:
-
-- **Cost computation**: Agent-side per-token cost from catalog pricing (`usage / 1M * price`), refreshed on model switch. `Agent.input_price/output_price/etc` fields.
-- **50ms debounce**: Bash output chunks batched via `tokio::time::interval` before forwarding to TUI. Buffer flushes on tick or channel close.
-- **Double-ctrl-c**: First ctrl-c during streaming shows "ctrl-c again to quit" (1s window, red). Second exits unconditionally. Status line integration.
-- **Multiline input**: Alt+Enter inserts newline. Cursor moves line-wise (home/end). Input area height: `min(line_count, 12) + 2`. Dynamic layout constraint.
-- **Slash commands**: `/model <id>` (switch), `/model` solo → opens model picker, `/sessions` (lists .jsonl files by modified time), `/compact` (force compaction next turn), `/resume <id>` (loads session from disk via `mew_session::Reader`). All 8 slash commands implemented.
-- **@-mention file picker**: typing `@` at word boundary opens dropdown via existing `Picker`. Walks cwd with `ignore` crate (.gitignore filtered), max depth 4, 1MB file size limit, 50 results sorted shortest-first. Kind "file" routes to `InsertAtMention` action.
-- **TUI retry prompt**: `ProviderEvent::RetryWait` emitted by both adapters before each sleep with attempt count, max, delay, and reason (`classify_reason` maps HTTP status to "rate limited"/"server overloaded"). TUI status line shows light-blue countdown.
-
-- **Session resume**: `mew_session::Reader::load(session_id)` reads JSONL. `/resume <id>` loads messages into agent + TUI display, updates session_id.
-- **Context compaction**: `/compact` sets `agent.force_compact` for next turn. Auto-compaction at 95% context window (configurable `compaction_threshold`). Keeps last 4 turns, inserts synthetic summary, drops older messages from request. `estimated_tokens()` heuristic (chars / 4).
-
-- **Agent refactor**: split `lib.rs` (1625 lines) into `agent.rs` (139), `turn.rs` (289), `events.rs` (182), `tools.rs` (379), `tests.rs` (685).
-
----
-
-## 2026-05-03: M5 — router / auto mode
-
-- `mew-provider-router` crate: `Router` wraps small + big `Arc<dyn Provider>`, heuristic picks small for tool-free turns under threshold.
-- `Routed` wrapper carries `display_model`/`display_provider` for TUI status line.
-- `ProviderConfig` gains `kind` (default "direct"), `small`, `big` fields for TOML config.
-- Config example: `[providers.auto] kind = "router" small = "z-ai/glm-4.5-air" big = "z-ai/glm-4.6"`
-- 3 tests: simple turn → small, tool results → big, turn threshold → big.
-- Wired into `build_provider()`: resolves inner models, sets pricing/vision from big model.
-
----
-
-## 2026-05-03: M6 — ACP integration (groundwork)
-
-- `mew-acp` crate: hand-rolled JSON-RPC 2.0 framing over stdio (newline-delimited). No external deps.
-- `AcpClient`: spawns ACP agent subprocess, handles `initialize` + `session/new`, runs prompt turns via sequential read-after-write.
-- Translates `session/update` notifications → `AgentEvent` (agent_message_chunk, tool_call, tool_call_update).
-- CLI: `mew chat --acp-agent <cmd>` flag, `mew acp` subcommand (server stub).
-- TUI integration and server mode pending.
+**Phase plan:**
+- **0. session folder migration** (foundation): `Writer::open` → `<dir>/<id>/session.jsonl` + `meta.json`. Flat `<id>.jsonl` auto-migrated on first read/write.
+- **1. subagent session persistence**: `SubagentRunner::run` gains `parent_session_id`. `SimpleRunner` writes subagent's own session to `<parent>/subagents/<child>/session.jsonl`. Parent's `meta.json` tracks `children_session_ids`.
+- **2. nested depth cap**: `max_subagent_depth = 3`. `start_subagent` rejects beyond cap.
+- **3. structured `subagent_wait` result**: `SubagentResult` = `Complete { text, turns_used } | Error { reason } | Cancelled`. Tool result encodes status.
+- **4. sidebar error state**: `SubagentState.error: Option<String>`. ✗ for failed/cancelled.
+- **5. auto-delivery (sync default)**: `subagent_start` gains `async: bool = false`. Default blocks until done, returns final result. `subagent_wait` becomes the opt-in async path.
+- **6. cancel**: per-task `CancellationToken` (child of parent's). Sidebar keybinding (`x`). Cascading on parent cancel. `wait` returns `Cancelled` on mid-wait cancel.
+- **7. per-subagent model override**: `def.model.unwrap_or(parent_model)`. Future session pop-in (`<parent>/subagents/<child>`) unlocks viewing subagent transcripts.

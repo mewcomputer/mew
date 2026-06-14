@@ -5,17 +5,108 @@ use std::path::PathBuf;
 use thiserror::Error;
 use tracing::{debug, warn};
 
+/// Sidebar section collapsed state: section name → collapsed.
+pub type SidebarState = HashMap<String, bool>;
+
 pub mod permissions;
 
 /// Top-level user configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
     #[serde(rename = "default_model", default)]
     pub default_model: String,
     #[serde(default)]
+    pub models: Vec<CustomModel>,
+    #[serde(default)]
     pub permissions: PermissionsConfig,
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "opencode-zen".into(),
+            ProviderConfig {
+                shape: "openai".into(),
+                base_url: "https://opencode.ai/zen/v1".into(),
+                credential_ref: "opencode-zen".into(),
+                ..Default::default()
+            },
+        );
+        providers.insert(
+            "opencode-go".into(),
+            ProviderConfig {
+                shape: "openai".into(),
+                base_url: "https://opencode.ai/zen/go/v1".into(),
+                credential_ref: "opencode-zen".into(),
+                ..Default::default()
+            },
+        );
+        providers.insert(
+            "z-ai".into(),
+            ProviderConfig {
+                shape: "openai".into(),
+                base_url: "https://api.z.ai/api/coding/paas/v4".into(),
+                credential_ref: "z-ai".into(),
+                ..Default::default()
+            },
+        );
+        providers.insert(
+            "deepseek".into(),
+            ProviderConfig {
+                shape: "openai".into(),
+                base_url: "https://api.deepseek.com/v1".into(),
+                credential_ref: "deepseek".into(),
+                ..Default::default()
+            },
+        );
+        Self {
+            providers,
+            default_model: String::new(),
+            models: Vec::new(),
+            permissions: PermissionsConfig::default(),
+            workspace: WorkspaceConfig::default(),
+        }
+    }
+}
+
+/// Workspace path sandboxing configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkspaceConfig {
+    /// Directories the agent is allowed to access.
+    /// Defaults to [current directory] if empty.
+    #[serde(default)]
+    pub roots: Vec<std::path::PathBuf>,
+}
+
+/// A user-defined model entry that overrides or extends the models.dev catalog.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CustomModel {
+    /// Model identifier (e.g. "glm-5.3").
+    pub id: String,
+    /// Provider ID that serves this model.
+    pub provider: String,
+    /// Adapter shape: "openai" or "anthropic".
+    #[serde(default)]
+    pub shape: String,
+    /// Context window in tokens.
+    #[serde(default)]
+    pub context_window: i64,
+    /// User-defined thinking variants. When set, overrides built-in defaults.
+    #[serde(default)]
+    pub thinking_variants: Vec<ThinkingVariantDef>,
+}
+
+/// A named thinking variant in config.toml.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThinkingVariantDef {
+    pub name: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
 }
 
 /// Permission configuration section.
@@ -23,8 +114,6 @@ pub struct Config {
 pub struct PermissionsConfig {
     #[serde(default)]
     pub rules: Vec<permissions::PermissionRule>,
-    #[serde(default)]
-    pub skills: Vec<permissions::SkillPermissionRule>,
 }
 
 /// Describes a single provider entry.
@@ -50,38 +139,74 @@ fn default_kind() -> String {
     "direct".into()
 }
 
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            shape: String::new(),
+            base_url: String::new(),
+            credential_ref: String::new(),
+            kind: default_kind(),
+            small: String::new(),
+            big: String::new(),
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum ConfigError {
     #[error("io error: {0}")]
     Io(#[from] io::Error),
     #[error("parse error: {0}")]
     Parse(#[from] toml::de::Error),
-    #[error("credential not found: {0}")]
-    CredentialNotFound(String),
+    #[error("config error: {0}")]
+    Build(String),
+    #[error(
+        "credential not found: {ref_name}\n  \
+         Set it via one of:\n  \
+         \x20   export {env_key}=<key>\n  \
+         \x20   keyring set mew {ref_name}\n  \
+         \x20   credentials.json: {{\"{ref_name}\": \"<key>\"}} at {creds_path}"
+    )]
+    CredentialNotFound {
+        ref_name: String,
+        env_key: String,
+        creds_path: PathBuf,
+    },
 }
 
-/// Reads config from the standard location.
+/// Reads config from the standard location, layered over built-in defaults.
+///
+/// Layer order (later wins):
+/// 1. Built-in provider definitions (`Config::default()`)
+/// 2. `config.toml` in the config directory
+/// 3. Environment variables with `MEW_` prefix
+///    (`MEW_DEFAULT_MODEL`, `MEW_WORKSPACE__ROOTS`, etc.)
 pub fn load() -> Result<Config, ConfigError> {
-    let path = config_path();
+    let path = config_dir().join("config");
     debug!(?path, "loading config");
 
-    match std::fs::read_to_string(&path) {
-        Ok(data) => {
-            let mut cfg: Config = toml::from_str(&data)?;
-            if cfg.providers.is_empty() {
-                cfg.providers = HashMap::new();
-            }
-            Ok(cfg)
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            debug!("config file not found, returning default");
-            Ok(Config::default())
-        }
-        Err(e) => Err(ConfigError::Io(e)),
-    }
+    let defaults = config::Config::try_from(&Config::default())
+        .map_err(|e| ConfigError::Build(e.to_string()))?;
+
+    let settings = config::Config::builder()
+        .add_source(defaults)
+        .add_source(
+            config::File::with_name(path.to_str().expect("config path is utf-8")).required(false),
+        )
+        .add_source(
+            config::Environment::with_prefix("MEW")
+                .prefix_separator("_")
+                .separator("__"),
+        )
+        .build()
+        .map_err(|e| ConfigError::Build(e.to_string()))?;
+
+    settings
+        .try_deserialize()
+        .map_err(|e| ConfigError::Build(e.to_string()))
 }
 
-fn config_dir() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     directories::ProjectDirs::from("ai", "mew", "mew")
         .map(|d| d.config_dir().to_path_buf())
         .unwrap_or_else(|| {
@@ -91,21 +216,23 @@ fn config_dir() -> PathBuf {
         })
 }
 
-fn config_path() -> PathBuf {
-    config_dir().join("config.toml")
-}
-
 fn state_path() -> PathBuf {
     config_dir().join("state.toml")
 }
 
 /// Runtime state persisted between sessions.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_model: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_provider: String,
+    /// Sidebar section collapsed state: section name → collapsed.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sidebar_collapsed: HashMap<String, bool>,
+    /// Plugin names that the user has disabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disabled_plugins: Vec<String>,
 }
 
 /// Reads state from the standard location.
@@ -204,7 +331,11 @@ pub fn get_credential(ref_name: &str) -> Result<String, ConfigError> {
         }
     }
 
-    Err(ConfigError::CredentialNotFound(ref_name.to_string()))
+    Err(ConfigError::CredentialNotFound {
+        ref_name: ref_name.to_string(),
+        env_key,
+        creds_path,
+    })
 }
 
 #[cfg(test)]
@@ -213,10 +344,43 @@ mod tests {
 
     #[test]
     fn test_load_default_when_missing() {
-        // This test assumes no config.toml is present in the default location,
-        // which is true in CI / clean environments.
+        // With no config.toml present, load() returns Config::default()
+        // which includes the built-in providers.
         let cfg = load().expect("load should not fail when file missing");
-        assert!(cfg.providers.is_empty());
+        assert!(cfg.providers.contains_key("opencode-zen"));
+        assert!(cfg.providers.contains_key("opencode-go"));
+        assert!(cfg.providers.contains_key("z-ai"));
+    }
+
+    #[test]
+    fn test_default_has_builtin_providers() {
+        let cfg = Config::default();
+        let zen = cfg.providers.get("opencode-zen").unwrap();
+        assert_eq!(zen.shape, "openai");
+        assert_eq!(zen.base_url, "https://opencode.ai/zen/v1");
+        assert_eq!(zen.credential_ref, "opencode-zen");
+        assert_eq!(zen.kind, "direct");
+    }
+
+    #[test]
+    fn test_custom_model_parse() {
+        let toml = r#"
+[[models]]
+id = "glm-5.3"
+provider = "z-ai"
+shape = "anthropic"
+context_window = 128000
+
+[[models]]
+id = "custom-llama"
+provider = "my-provider"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.models.len(), 2);
+        assert_eq!(cfg.models[0].id, "glm-5.3");
+        assert_eq!(cfg.models[0].shape, "anthropic");
+        assert_eq!(cfg.models[1].id, "custom-llama");
+        assert!(cfg.models[1].shape.is_empty());
     }
 
     #[test]
@@ -225,6 +389,14 @@ mod tests {
         let cred = get_credential("opencode-zen").unwrap();
         assert_eq!(cred, "test-key-123");
         std::env::remove_var("MEW_CRED_OPENCODE_ZEN");
+    }
+
+    #[test]
+    fn test_env_var_overrides_default_model() {
+        std::env::set_var("MEW_DEFAULT_MODEL", "test-model-from-env");
+        let cfg = load().expect("load should succeed");
+        assert_eq!(cfg.default_model, "test-model-from-env");
+        std::env::remove_var("MEW_DEFAULT_MODEL");
     }
 
     #[test]
@@ -239,6 +411,7 @@ mod tests {
         let state = State {
             last_model: "deepseek-v4-flash".into(),
             last_provider: "opencode-zen".into(),
+            ..Default::default()
         };
         let serialized = toml::to_string_pretty(&state).unwrap();
         let deserialized: State = toml::from_str(&serialized).unwrap();

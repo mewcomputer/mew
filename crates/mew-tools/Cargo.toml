@@ -9,6 +9,7 @@ license.workspace = true
 mew-message = { workspace = true }
 mew-hooks = { workspace = true }
 mew-skills = { workspace = true }
+mew-subagents = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -18,7 +19,7 @@ thiserror = { workspace = true }
 globset = { workspace = true }
 ignore = { workspace = true }
 similar = { workspace = true }
+ulid = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-ulid = { workspace = true }

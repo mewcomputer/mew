@@ -2,6 +2,8 @@ use crate::{Sensitivity, Tool, ToolCtx, ToolError, ToolOutput};
 use async_trait::async_trait;
 use serde_json::Value;
 
+const MAX_OUTPUT: usize = 100_000; // 100KB
+
 pub struct Grep;
 
 #[async_trait]
@@ -67,13 +69,13 @@ impl Tool for Grep {
 
         match output {
             Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stdout = format_output(&output.stdout, MAX_OUTPUT);
                 let stderr = String::from_utf8_lossy(&output.stderr);
 
                 // rg exits 1 when no matches found, which is not an error
                 if output.status.success() || output.status.code() == Some(1) {
                     Ok(ToolOutput {
-                        output: stdout.to_string(),
+                        output: stdout,
                         error: String::new(),
                         diff: None,
                     })
@@ -100,12 +102,22 @@ impl Tool for Grep {
                     .map_err(|e| ToolError::Execution(format!("grep failed: {}", e)))?;
 
                 Ok(ToolOutput {
-                    output: String::from_utf8_lossy(&output.stdout).to_string(),
+                    output: format_output(&output.stdout, MAX_OUTPUT),
                     error: String::new(),
                     diff: None,
                 })
             }
         }
+    }
+}
+
+fn format_output(raw: &[u8], max: usize) -> String {
+    let text = String::from_utf8_lossy(raw);
+    if text.len() > max {
+        let truncated = &text[..max];
+        format!("{}\n...[truncated {} bytes]", truncated, text.len() - max)
+    } else {
+        text.to_string()
     }
 }
 

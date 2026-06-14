@@ -1,6 +1,7 @@
 use mew_agent::AgentEvent;
 use mew_message::{Message, MessageId, Part, PartId, Role, ToolState};
 use mew_provider::ProviderEvent;
+use ratatui::layout::Rect;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -22,6 +23,7 @@ pub struct SlashCommand {
 }
 
 /// Result of handling a slash command.
+#[derive(Debug)]
 pub enum SlashResult {
     /// Command unknown; fall through to the model.
     Continue,
@@ -35,8 +37,15 @@ pub enum SlashResult {
     OpenModelPicker,
     /// Resume a previous session by ID.
     ResumeSession(String),
+    /// Toggle mouse capture on/off for native text selection.
+    ToggleMouseCapture,
     /// Force context compaction.
     Compact,
+    /// A plugin-registered slash command that needs dispatcher execution.
+    PluginCommand {
+        name: String,
+        args: String,
+    },
 }
 
 /// The application's main state.
@@ -73,12 +82,24 @@ pub struct App {
     pub context_files: Vec<String>,
     /// Available tool names.
     pub tools: Vec<String>,
+    /// MCP server status: (name, connected, tool_count)
+    pub mcp_status: Vec<(String, bool, usize)>,
+    /// Available subagent names and descriptions for @-mention.
+    pub subagent_names: Vec<(String, String)>,
+    /// Sidebar section collapsed state: section name → collapsed.
+    pub sidebar_collapsed: std::collections::HashMap<String, bool>,
+    /// y-positions of sidebar section headers from last render (for click detection).
+    pub sidebar_header_rows: Vec<(u16, String)>,
+    /// Sidebar area rect from last render.
+    pub sidebar_rect: Rect,
     /// Available models (id -> description) for the palette.
     pub models: Vec<(String, String)>,
     /// Active picker, if any.
     pub picker: Option<PickerState>,
     /// Selected slash command suggestion index.
     pub slash_selected: usize,
+    /// Scroll offset for slash autocomplete.
+    pub slash_scroll: usize,
     /// Whether bash output is expanded (shows all lines vs last 10).
     pub bash_expanded: bool,
     /// Message ID pending markdown re-render after streaming completes.
@@ -99,6 +120,50 @@ pub struct App {
     pub ctrl_c_quit_pending: Option<Instant>,
     /// Current retry status for display in the status line.
     pub retry_status: Option<String>,
+    /// Whether mouse capture (scroll/clicks) is enabled instead of native selection.
+    pub mouse_capture: bool,
+    /// Chat area position from last render, for mouse click mapping.
+    pub chat_area: Rect,
+    /// Input area position from last render, for mouse click mapping.
+    pub input_area: Rect,
+    /// Start row (visual row in chat_rows) of drag selection.
+    pub sel_anchor_row: Option<usize>,
+    /// Start column (byte offset within the anchor row) of drag selection.
+    pub sel_anchor_col: Option<usize>,
+    /// End row of drag selection.
+    pub sel_end_row: Option<usize>,
+    /// End column of drag selection.
+    pub sel_end_col: Option<usize>,
+    /// Text of each rendered visual row from the last frame, for selection copy.
+    pub chat_rows: Vec<String>,
+    /// Temporary alert text to display (e.g. "copied 42 chars").
+    pub alert: Option<(String, Instant)>,
+    /// Plugin UI content pushed via PluginHost::set_ui. Keys are namespaced
+    /// as "plugin-name/key". Rendered beside the input prompt.
+    pub plugin_ui: std::collections::HashMap<String, String>,
+    /// Slash commands registered by plugins via on_register_slash_commands.
+    pub dynamic_slash_commands: Vec<SlashCommand>,
+    /// When the companion speech bubble was set (for auto-dismiss).
+    pub companion_bubble_since: Option<Instant>,
+    /// Running subagent tasks for sidebar display.
+    pub subagents: Vec<SubagentState>,
+}
+
+/// A running or completed subagent task shown in the sidebar.
+#[derive(Debug, Clone)]
+pub struct SubagentState {
+    pub task_id: String,
+    pub name: String,
+    pub started_at: Instant,
+    pub status: SubagentStatus,
+}
+
+#[derive(Debug, Clone)]
+pub enum SubagentStatus {
+    Running,
+    Completed,
+    Failed { reason: String },
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +172,7 @@ pub enum Mode {
     PermissionPrompt,
     SlashCommand,
     CommandPalette,
+    Settings,
 }
 
 /// A single item in the command palette.
@@ -128,6 +194,8 @@ pub struct PickerState {
     pub cursor: usize,
     /// First visible item index in the filtered list.
     pub scroll: usize,
+    /// How many items fit in the visible area (updated by draw_picker).
+    pub visible_items: usize,
 }
 
 impl PickerState {
@@ -146,12 +214,13 @@ impl PickerState {
         filtered.get(self.selected).copied()
     }
 
-    /// Ensure scroll keeps selected item in view for the given visible count.
-    pub fn adjust_scroll(&mut self, visible_count: usize) {
+    /// Ensure scroll keeps selected item in view.
+    pub fn adjust_scroll(&mut self) {
+        let visible = self.visible_items;
         if self.selected < self.scroll {
             self.scroll = self.selected;
-        } else if self.selected >= self.scroll + visible_count {
-            self.scroll = self.selected.saturating_sub(visible_count - 1);
+        } else if self.selected >= self.scroll + visible {
+            self.scroll = self.selected.saturating_sub(visible - 1);
         }
     }
 }
@@ -221,9 +290,15 @@ impl App {
             should_quit: false,
             context_files: Vec::new(),
             tools: Vec::new(),
+            mcp_status: Vec::new(),
+            subagent_names: Vec::new(),
+            sidebar_collapsed: std::collections::HashMap::new(),
+            sidebar_header_rows: Vec::new(),
+            sidebar_rect: Rect::default(),
             models: Vec::new(),
             picker: None,
             slash_selected: 0,
+            slash_scroll: 0,
             bash_expanded: false,
             pending_md_rerender: None,
             md_state: mdstream::DocumentState::new(),
@@ -234,6 +309,19 @@ impl App {
             esc_cancel_pending: None,
             ctrl_c_quit_pending: None,
             retry_status: None,
+            mouse_capture: true,
+            chat_area: Rect::ZERO,
+            input_area: Rect::ZERO,
+            sel_anchor_row: None,
+            sel_anchor_col: None,
+            sel_end_row: None,
+            sel_end_col: None,
+            chat_rows: Vec::new(),
+            alert: None,
+            plugin_ui: std::collections::HashMap::new(),
+            dynamic_slash_commands: Vec::new(),
+            companion_bubble_since: None,
+            subagents: Vec::new(),
         }
     }
 
@@ -244,6 +332,11 @@ impl App {
                 id: "switch-model".into(),
                 label: "Switch Model".into(),
                 description: "Change the active LLM".into(),
+            },
+            PickerItem {
+                id: "settings".into(),
+                label: "Settings".into(),
+                description: "Configure mew (providers, plugins)".into(),
             },
             PickerItem {
                 id: "clear".into(),
@@ -264,6 +357,7 @@ impl App {
             selected: 0,
             cursor: 0,
             scroll: 0,
+            visible_items: PICKER_VISIBLE_ITEMS,
         });
     }
 
@@ -286,6 +380,7 @@ impl App {
             selected: 0,
             cursor: 0,
             scroll: 0,
+            visible_items: PICKER_VISIBLE_ITEMS,
         });
     }
 
@@ -293,6 +388,116 @@ impl App {
     pub fn close_picker(&mut self) {
         self.picker = None;
         self.mode = Mode::Normal;
+    }
+
+    /// Show a temporary alert that auto-clears on the next render.
+    pub fn set_alert(&mut self, text: impl Into<String>) {
+        self.alert = Some((text.into(), Instant::now()));
+    }
+
+    /// Mark companion bubble as just-updated (for auto-dismiss timer).
+    pub fn touch_companion_bubble(&mut self) {
+        self.companion_bubble_since = Some(Instant::now());
+    }
+
+    /// Duration the companion bubble stays visible: max(3s, text_len * 0.075s).
+    pub fn companion_bubble_ttl(text: &str) -> Duration {
+        let char_ttl = Duration::from_secs_f64(text.len() as f64 * 0.075);
+        char_ttl.max(Duration::from_secs(3))
+    }
+
+    /// Clear expired alerts (older than 3 seconds).
+    pub fn clear_expired_alerts(&mut self) {
+        if let Some((_, at)) = &self.alert {
+            if at.elapsed() > Duration::from_secs(3) {
+                self.alert = None;
+            }
+        }
+    }
+
+    /// Return the selected text accounting for row and column ranges.
+    /// `sel_anchor_col` / `sel_end_col` are display columns; convert to byte offsets.
+    pub fn selected_text(&self) -> String {
+        let (ar, ac, er, ec) = match (
+            self.sel_anchor_row,
+            self.sel_anchor_col,
+            self.sel_end_row,
+            self.sel_end_col,
+        ) {
+            (Some(ar), Some(ac), Some(er), Some(ec)) => (ar, ac, er, ec),
+            _ => return String::new(),
+        };
+        let lo = ar.min(er);
+        let hi = ar.max(er).min(self.chat_rows.len().saturating_sub(1));
+        if lo >= self.chat_rows.len() {
+            return String::new();
+        }
+        let (lo_col, hi_col) = if ar < er {
+            (ac, ec)
+        } else if ar > er {
+            (ec, ac)
+        } else {
+            (ac.min(ec), ac.max(ec))
+        };
+        let mut parts: Vec<String> = Vec::new();
+        for (row, line) in self
+            .chat_rows
+            .iter()
+            .enumerate()
+            .skip(lo)
+            .take(hi.saturating_sub(lo) + 1)
+        {
+            let byte_lo = byte_at_display_offset(line, lo_col);
+            let byte_hi = byte_at_display_offset(line, hi_col);
+            if row == lo && row == hi {
+                if byte_lo < byte_hi {
+                    parts.push(line[byte_lo..byte_hi].to_string());
+                }
+            } else if row == lo {
+                parts.push(line[byte_lo..].to_string());
+            } else if row == hi {
+                parts.push(line[..byte_hi].to_string());
+            } else {
+                parts.push(line.to_string());
+            }
+        }
+
+        // For multi-line selections, strip the common leading whitespace
+        // prefix (the TUI's left margin / padding that the user didn't
+        // intend to copy). Single-line selections are left verbatim since
+        // the user explicitly positioned the column cursor.
+        if parts.len() > 1 {
+            let common_ws = parts
+                .iter()
+                .map(|p| p.chars().take_while(|c| c.is_whitespace()).count())
+                .min()
+                .unwrap_or(0);
+            if common_ws > 0 {
+                for part in &mut parts {
+                    *part = part.chars().skip(common_ws).collect();
+                }
+            }
+        }
+
+        // Strip carriage returns that leak from terminal rendering.
+        let result = parts.join("\n");
+        result.replace('\r', "")
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.sel_anchor_row = None;
+        self.sel_anchor_col = None;
+        self.sel_end_row = None;
+        self.sel_end_col = None;
+    }
+
+    /// Toggle a sidebar section's collapsed state by name ("context", "tools", "mcp").
+    pub fn toggle_sidebar_section(&mut self, section: &str) {
+        let collapsed = self
+            .sidebar_collapsed
+            .entry(section.to_string())
+            .or_insert(false);
+        *collapsed = !*collapsed;
     }
 
     /// Insert a character into the picker filter.
@@ -326,7 +531,7 @@ impl App {
             let count = p.filtered().len();
             if count > 0 {
                 p.selected = (p.selected + 1).min(count - 1);
-                p.adjust_scroll(PICKER_VISIBLE_ITEMS);
+                p.adjust_scroll();
             }
         }
     }
@@ -335,7 +540,7 @@ impl App {
     pub fn picker_up(&mut self) {
         if let Some(ref mut p) = self.picker {
             p.selected = p.selected.saturating_sub(1);
-            p.adjust_scroll(PICKER_VISIBLE_ITEMS);
+            p.adjust_scroll();
         }
     }
 
@@ -362,9 +567,22 @@ impl App {
     }
 
     /// Open the file picker for @-mentions, filtered by a prefix.
+    /// Also includes subagent names if they match the prefix.
     pub fn open_file_picker(&mut self, prefix: &str) {
         let cwd = std::env::current_dir().unwrap_or_default();
         let mut items: Vec<PickerItem> = Vec::new();
+
+        let prefix_lower = prefix.to_lowercase();
+
+        for (name, description) in &self.subagent_names {
+            if name.to_lowercase().contains(&prefix_lower) {
+                items.push(PickerItem {
+                    id: name.clone(),
+                    label: format!("@{} [subagent]", name),
+                    description: description.clone(),
+                });
+            }
+        }
 
         let walker = ignore::WalkBuilder::new(&cwd)
             .max_depth(Some(4))
@@ -387,7 +605,7 @@ impl App {
                 .unwrap_or(path)
                 .to_string_lossy()
                 .to_string();
-            if !rel.to_lowercase().contains(&prefix.to_lowercase()) {
+            if !rel.to_lowercase().contains(&prefix_lower) {
                 continue;
             }
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -413,6 +631,7 @@ impl App {
             selected: 0,
             cursor: prefix.len(),
             scroll: 0,
+            visible_items: PICKER_VISIBLE_ITEMS,
         });
     }
 
@@ -670,6 +889,16 @@ impl App {
         self.bash_expanded = !self.bash_expanded;
     }
 
+    /// Return the task id of the most recently started running subagent, if
+    /// any. Used by the `x` key to cancel the most recent in-flight subagent.
+    pub fn most_recent_running_subagent(&self) -> Option<String> {
+        self.subagents
+            .iter()
+            .rev()
+            .find(|sa| matches!(sa.status, SubagentStatus::Running))
+            .map(|sa| sa.task_id.clone())
+    }
+
     /// Expire the pending-cancel hint and pending-quit hint.
     pub fn tick(&mut self) {
         if let Some(since) = self.esc_cancel_pending {
@@ -685,8 +914,8 @@ impl App {
         }
     }
 
-    /// Available slash commands (single source of truth for autocomplete and handling).
-    pub fn slash_commands() -> Vec<SlashCommand> {
+    /// Available built-in slash commands.
+    pub fn builtin_slash_commands() -> Vec<SlashCommand> {
         vec![
             SlashCommand {
                 name: "/clear".into(),
@@ -720,7 +949,23 @@ impl App {
                 name: "/resume".into(),
                 description: "resume a session (e.g. /resume <id>)".into(),
             },
+            SlashCommand {
+                name: "/mouse".into(),
+                description: "toggle mouse capture for text selection".into(),
+            },
         ]
+    }
+
+    /// All slash commands including dynamic ones from plugins.
+    pub fn all_slash_commands(&self) -> Vec<SlashCommand> {
+        let mut cmds = Self::builtin_slash_commands();
+        cmds.extend(self.dynamic_slash_commands.clone());
+        cmds
+    }
+
+    /// Register dynamic slash commands from a plugin.
+    pub fn add_dynamic_slash_commands(&mut self, cmds: Vec<SlashCommand>) {
+        self.dynamic_slash_commands.extend(cmds);
     }
 
     /// Handle a slash command, returning what the caller should do.
@@ -743,6 +988,7 @@ impl App {
                 }
             }
             "/sessions" => SlashResult::Message(self.build_sessions_list()),
+            "/mouse" | "/m" => SlashResult::ToggleMouseCapture,
             "/resume" => {
                 if let Some(id) = arg {
                     SlashResult::ResumeSession(id.to_string())
@@ -750,7 +996,18 @@ impl App {
                     SlashResult::Message("usage: /resume <session-id>".into())
                 }
             }
-            _ => SlashResult::Continue,
+            _ => {
+                // Check dynamic/plugin commands.
+                if let Some(dyn_cmd) = self.dynamic_slash_commands.iter().find(|c| c.name == cmd) {
+                    let args = arg.unwrap_or("").to_string();
+                    SlashResult::PluginCommand {
+                        name: dyn_cmd.name.clone(),
+                        args,
+                    }
+                } else {
+                    SlashResult::Continue
+                }
+            }
         }
     }
 
@@ -779,7 +1036,7 @@ impl App {
 
     fn build_help(&self) -> String {
         let mut out = String::from("commands:\n");
-        for cmd in Self::slash_commands() {
+        for cmd in self.all_slash_commands() {
             out.push_str(&format!("  {:12}  {}\n", cmd.name, cmd.description));
         }
         out.trim_end().to_string()
@@ -791,27 +1048,32 @@ impl App {
         let mut out = String::from("sessions:\n");
         match std::fs::read_dir(&dir) {
             Ok(entries) => {
-                let mut files: Vec<_> = entries
+                // Top-level sessions are folders containing `session.jsonl`.
+                // Subagent sessions are nested under `<parent>/subagents/<id>/`
+                // and intentionally hidden from the top-level list.
+                let mut folders: Vec<_> = entries
                     .filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.file_name()
-                            .to_str()
-                            .map(|n| n.ends_with(".jsonl"))
-                            .unwrap_or(false)
-                    })
+                    .filter(|e| e.path().is_dir())
+                    .filter(|e| e.path().join("session.jsonl").exists())
                     .collect();
-                files.sort_by_key(|e| {
-                    e.metadata()
+                folders.sort_by_key(|e| {
+                    e.path()
+                        .join("session.jsonl")
+                        .metadata()
                         .and_then(|m| m.modified())
                         .unwrap_or(UNIX_EPOCH)
                 });
-                for entry in files.iter().rev().take(20) {
+                for entry in folders.iter().rev().take(20) {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    let id = name.strip_suffix(".jsonl").unwrap_or(&name);
-                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                    out.push_str(&format!("  {}  ({} bytes)\n", id, size));
+                    let size = entry
+                        .path()
+                        .join("session.jsonl")
+                        .metadata()
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    out.push_str(&format!("  {}  ({} bytes)\n", name, size));
                 }
-                if files.is_empty() {
+                if folders.is_empty() {
                     out.push_str("  (no sessions found)\n");
                 }
             }
@@ -824,7 +1086,7 @@ impl App {
 
     /// Filter slash commands matching the current input.
     pub fn filtered_slash_commands(&self) -> Vec<SlashCommand> {
-        let all = Self::slash_commands();
+        let all = self.all_slash_commands();
         if !self.input.starts_with('/') {
             return Vec::new();
         }
@@ -839,6 +1101,7 @@ impl App {
         let filtered = self.filtered_slash_commands();
         if !filtered.is_empty() {
             self.slash_selected = (self.slash_selected + 1) % filtered.len();
+            self.adjust_slash_scroll();
         }
     }
 
@@ -851,6 +1114,22 @@ impl App {
             } else {
                 self.slash_selected - 1
             };
+            self.adjust_slash_scroll();
+        }
+    }
+
+    fn adjust_slash_scroll(&mut self) {
+        let filtered = self.filtered_slash_commands();
+        if filtered.is_empty() {
+            return;
+        }
+        // Visible count matches the inner area in draw_slash_autocomplete:
+        // cap to 5 total, minus 2 padding = 3.
+        let visible: usize = 3;
+        if self.slash_selected < self.slash_scroll {
+            self.slash_scroll = self.slash_selected;
+        } else if self.slash_selected >= self.slash_scroll + visible {
+            self.slash_scroll = self.slash_selected.saturating_sub(visible - 1);
         }
     }
 
@@ -1061,6 +1340,58 @@ impl App {
                 self.ctrl_c_quit_pending = None;
                 self.push_synthetic_message(format!("Error: {}", msg));
             }
+            AgentEvent::SubagentStart {
+                parent_call_id,
+                name,
+                ..
+            } => {
+                self.subagents.push(SubagentState {
+                    task_id: parent_call_id.clone(),
+                    name: name.clone(),
+                    started_at: Instant::now(),
+                    status: SubagentStatus::Running,
+                });
+            }
+            AgentEvent::SubagentProgress { .. } => {}
+            AgentEvent::SubagentEnd {
+                parent_call_id,
+                outcome,
+                ..
+            } => {
+                if let Some(sa) = self
+                    .subagents
+                    .iter_mut()
+                    .find(|s| s.task_id == parent_call_id)
+                {
+                    sa.status = match outcome {
+                        mew_agent::SubagentOutcome::Completed => SubagentStatus::Completed,
+                        mew_agent::SubagentOutcome::Cancelled => SubagentStatus::Cancelled,
+                        mew_agent::SubagentOutcome::Failed { reason } => {
+                            SubagentStatus::Failed { reason }
+                        }
+                    };
+                }
+            }
+            AgentEvent::SubagentPermissionRequest { call, tx, .. } => {
+                self.permission = Some(crate::app::PermissionState {
+                    tool_name: call.tool_name.clone(),
+                    call_id: call.call_id.clone(),
+                    input: call.input.clone(),
+                    tx: Some(tx),
+                    selected: 0,
+                });
+                self.mode = crate::app::Mode::PermissionPrompt;
+            }
+            AgentEvent::WorkspacePermissionRequest { path, tx } => {
+                self.permission = Some(crate::app::PermissionState {
+                    tool_name: "workspace".into(),
+                    call_id: String::new(),
+                    input: serde_json::json!({"path": path.to_string_lossy()}),
+                    tx: Some(tx),
+                    selected: 0,
+                });
+                self.mode = crate::app::Mode::PermissionPrompt;
+            }
         }
     }
 
@@ -1105,6 +1436,19 @@ impl Default for App {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Find the byte offset into `s` that corresponds to the given display column.
+pub(crate) fn byte_at_display_offset(s: &str, target_col: usize) -> usize {
+    let mut col = 0usize;
+    for (i, ch) in s.char_indices() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col + w > target_col {
+            return i;
+        }
+        col += w;
+    }
+    s.len()
 }
 
 /// Extract `@path` file mentions from input text.
@@ -1153,5 +1497,188 @@ mod tests {
         let text = "no mentions here";
         let mentions = parse_file_mentions(text);
         assert!(mentions.is_empty());
+    }
+
+    #[test]
+    fn test_builtin_slash_commands_has_core_commands() {
+        let cmds = App::builtin_slash_commands();
+        let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"/help"));
+        assert!(names.contains(&"/clear"));
+        assert!(names.contains(&"/quit"));
+    }
+
+    #[test]
+    fn test_all_slash_commands_includes_dynamic() {
+        let mut app = App::new();
+        app.add_dynamic_slash_commands(vec![SlashCommand {
+            name: "/buddy".into(),
+            description: "pet companion".into(),
+        }]);
+        let all = app.all_slash_commands();
+        let names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"/buddy"));
+        assert!(names.contains(&"/help"));
+    }
+
+    #[test]
+    fn test_all_slash_commands_no_dynamic_still_has_builtins() {
+        let app = App::new();
+        let all = app.all_slash_commands();
+        let builtins = App::builtin_slash_commands();
+        assert_eq!(all.len(), builtins.len());
+    }
+
+    #[test]
+    fn test_handle_slash_routes_dynamic_command() {
+        let mut app = App::new();
+        app.add_dynamic_slash_commands(vec![SlashCommand {
+            name: "/buddy".into(),
+            description: "pet companion".into(),
+        }]);
+        let result = app.handle_slash("/buddy pet");
+        match result {
+            SlashResult::PluginCommand { name, args } => {
+                assert_eq!(name, "/buddy");
+                assert_eq!(args, "pet");
+            }
+            _ => panic!("expected PluginCommand, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_handle_slash_unknown_dynamic_command_continues() {
+        let mut app = App::new();
+        app.add_dynamic_slash_commands(vec![SlashCommand {
+            name: "/buddy".into(),
+            description: "pet companion".into(),
+        }]);
+        let result = app.handle_slash("/nonexistent");
+        assert!(matches!(result, SlashResult::Continue));
+    }
+
+    #[test]
+    fn test_handle_slash_dynamic_command_without_args() {
+        let mut app = App::new();
+        app.add_dynamic_slash_commands(vec![SlashCommand {
+            name: "/stats".into(),
+            description: "show stats".into(),
+        }]);
+        let result = app.handle_slash("/stats");
+        match result {
+            SlashResult::PluginCommand { name, args } => {
+                assert_eq!(name, "/stats");
+                assert_eq!(args, "");
+            }
+            _ => panic!("expected PluginCommand"),
+        }
+    }
+
+    #[test]
+    fn test_add_dynamic_slash_commands_accumulates() {
+        let mut app = App::new();
+        app.add_dynamic_slash_commands(vec![SlashCommand {
+            name: "/foo".into(),
+            description: "first".into(),
+        }]);
+        app.add_dynamic_slash_commands(vec![SlashCommand {
+            name: "/bar".into(),
+            description: "second".into(),
+        }]);
+        let all = app.all_slash_commands();
+        let names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"/foo"));
+        assert!(names.contains(&"/bar"));
+    }
+
+    #[test]
+    fn test_filtered_slash_commands_includes_dynamic() {
+        let mut app = App::new();
+        app.add_dynamic_slash_commands(vec![SlashCommand {
+            name: "/buddy".into(),
+            description: "pet companion".into(),
+        }]);
+        app.input = "/bud".to_string();
+        let filtered = app.filtered_slash_commands();
+        assert!(filtered.len() >= 1);
+        assert!(filtered.iter().any(|c| c.name == "/buddy"));
+    }
+
+    #[test]
+    fn test_plugin_ui_starts_empty() {
+        let app = App::new();
+        assert!(app.plugin_ui.is_empty());
+    }
+
+    #[test]
+    fn test_plugin_ui_can_store_values() {
+        let mut app = App::new();
+        app.plugin_ui
+            .insert("buddy/sprite".into(), "(\u{b7}>".into());
+        assert_eq!(app.plugin_ui.get("buddy/sprite").unwrap(), "(\u{b7}>");
+    }
+
+    #[test]
+    fn test_filtered_slash_commands_no_match_returns_empty() {
+        let app = App::new();
+        // Set input to a prefix that matches nothing
+        let mut app = app;
+        app.input = "/zzz".to_string();
+        let filtered = app.filtered_slash_commands();
+        assert!(filtered.is_empty(), "no commands should match /zzz");
+    }
+
+    #[test]
+    fn test_filtered_slash_commands_non_slash_no_results() {
+        let mut app = App::new();
+        app.input = "hello".to_string();
+        let filtered = app.filtered_slash_commands();
+        assert!(filtered.is_empty(), "non-slash input returns empty");
+    }
+
+    #[test]
+    fn test_build_help_includes_dynamic_commands() {
+        let mut app = App::new();
+        app.add_dynamic_slash_commands(vec![SlashCommand {
+            name: "/buddy".into(),
+            description: "pet companion".into(),
+        }]);
+        let help = app.build_help();
+        assert!(help.contains("/buddy"), "help should list /buddy: {help}");
+        assert!(
+            help.contains("pet companion"),
+            "help should include description"
+        );
+    }
+
+    #[test]
+    fn test_build_help_no_dynamic_commands_works() {
+        let app = App::new();
+        let help = app.build_help();
+        assert!(help.contains("/help"), "help should list built-in commands");
+        assert!(help.contains("/clear"), "help should list /clear");
+    }
+
+    #[test]
+    fn test_dynamic_slash_commands_uses_all_slash_for_autocomplete() {
+        let mut app = App::new();
+        app.add_dynamic_slash_commands(vec![
+            SlashCommand {
+                name: "/buddy".into(),
+                description: "buddy".into(),
+            },
+            SlashCommand {
+                name: "/stats".into(),
+                description: "stats".into(),
+            },
+        ]);
+        app.input = "/bu".to_string();
+        let filtered = app.filtered_slash_commands();
+        assert!(!filtered.is_empty());
+        let names: Vec<&str> = filtered.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            !names.contains(&"/stats"),
+            "/stats should not match /bu prefix"
+        );
     }
 }

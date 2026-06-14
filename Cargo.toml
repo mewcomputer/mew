@@ -8,6 +8,7 @@ members = [
     "crates/mew-provider-router",
     "crates/mew-provider-fake",
     "crates/mew-acp",
+    "crates/mew-acp-iroh",
     "crates/mew-agent",
     "crates/mew-tools",
     "crates/mew-mcp",
@@ -16,7 +17,9 @@ members = [
     "crates/mew-catalog",
     "crates/mew-context",
     "crates/mew-skills",
+    "crates/mew-subagents",
     "crates/mew-hooks",
+    "crates/mew-hooks-runtime",
     "crates/mew-tui",
     "crates/ratatui-mdstream",
 ]
@@ -64,6 +67,8 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 # config
 toml = "0.8"
 directories = "5"
+dotenvy = "0.15"
+config = { version = "0.15", default-features = false, features = ["toml"] }
 
 # time
 chrono = { version = "0.4", features = ["serde"] }
@@ -100,6 +105,7 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-fan
 mew-message = { path = "crates/mew-message" }
 mew-provider = { path = "crates/mew-provider" }
 mew-hooks = { path = "crates/mew-hooks" }
+mew-hooks-runtime = { path = "crates/mew-hooks-runtime" }
 mew-tools = { path = "crates/mew-tools" }
 mew-mcp = { path = "crates/mew-mcp" }
 mew-config = { path = "crates/mew-config" }
@@ -107,6 +113,7 @@ mew-session = { path = "crates/mew-session" }
 mew-catalog = { path = "crates/mew-catalog" }
 mew-context = { path = "crates/mew-context" }
 mew-skills = { path = "crates/mew-skills" }
+mew-subagents = { path = "crates/mew-subagents" }
 mew-agent = { path = "crates/mew-agent" }
 mew-tui = { path = "crates/mew-tui" }
 mew-provider-openai = { path = "crates/mew-provider-openai" }
@@ -114,4 +121,11 @@ mew-provider-anthropic = { path = "crates/mew-provider-anthropic" }
 mew-provider-router = { path = "crates/mew-provider-router" }
 mew-provider-fake = { path = "crates/mew-provider-fake" }
 mew-acp = { path = "crates/mew-acp" }
+mew-acp-iroh = { path = "crates/mew-acp-iroh" }
 ratatui-mdstream = { path = "crates/ratatui-mdstream" }
+
+# iroh transport (feature-flagged, not in default builds)
+iroh = "0.98"
+opaque-ke = "4.0"
+chacha20poly1305 = "0.10"
+rand = "0.8"

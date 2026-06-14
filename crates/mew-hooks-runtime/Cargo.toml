@@ -1,0 +1,24 @@
+[package]
+name = "mew-hooks-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mew-hooks = { workspace = true }
+mew-message = { workspace = true }
+mew-tools = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+http = "1"
+directories = { workspace = true }
+
+[dev-dependencies]
+mew-provider-fake = { workspace = true }
+futures = { workspace = true }
+tempfile = "3"

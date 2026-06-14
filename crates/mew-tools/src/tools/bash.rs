@@ -73,7 +73,9 @@ impl Tool for Bash {
             .spawn()
             .map_err(|e| ToolError::Execution(format!("spawn failed: {}", e)))?;
 
-        let pid = child.id().expect("child has no pid");
+        let pid = child
+            .id()
+            .ok_or_else(|| ToolError::Execution("child process has no pid".into()))?;
 
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
@@ -87,6 +89,14 @@ impl Tool for Bash {
         let deadline = tokio::time::Instant::now() + timeout;
 
         while !stdout_done || !stderr_done {
+            if ctx.cancel.is_cancelled() {
+                let _ = tokio::process::Command::new("kill")
+                    .arg(pid.to_string())
+                    .output()
+                    .await;
+                return Err(ToolError::Cancelled);
+            }
+
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 let _ = tokio::process::Command::new("kill")

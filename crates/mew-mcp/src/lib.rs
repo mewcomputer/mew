@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 // ---------------------------------------------------------------------------
@@ -67,8 +67,9 @@ trait Transport: Send + Sync {
     async fn cancel(&self, _request_id: u64) -> Result<(), McpError> {
         Ok(())
     }
-    #[allow(dead_code)]
-    fn set_protocol_version(&self, _version: &str) {}
+    fn set_protocol_version(&self, _version: &str) {
+        // Default no-op for transports that don't need version negotiation.
+    }
     async fn close(&mut self) -> Result<(), McpError>;
 }
 
@@ -144,14 +145,25 @@ fn try_parse_sse_data(data: &str) -> Option<Result<Value, McpError>> {
     response.result.map(Ok)
 }
 
+/// Maximum MCP protocol version this client supports. Servers reporting
+/// a version at or below this are accepted (the protocol is backward-compatible).
+/// Servers reporting a newer version are rejected since we may not understand
+/// new protocol features.
+const MAX_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Returns true if the server's protocol version is acceptable (≤ our max).
+fn version_acceptable(server_version: &str) -> bool {
+    server_version <= MAX_PROTOCOL_VERSION
+}
+
 struct HttpTransport {
     client: reqwest::Client,
     url: String,
     request_id: AtomicU64,
     /// Negotiated MCP protocol version from the initialize response.
-    protocol_version: Mutex<String>,
+    protocol_version: StdMutex<String>,
     /// Optional session ID returned by the server.
-    session_id: Mutex<Option<String>>,
+    session_id: StdMutex<Option<String>>,
 }
 
 impl HttpTransport {
@@ -160,8 +172,8 @@ impl HttpTransport {
             client: reqwest::Client::new(),
             url: url.trim_end_matches('/').to_string(),
             request_id: AtomicU64::new(1),
-            protocol_version: Mutex::new("2025-11-25".into()),
-            session_id: Mutex::new(None),
+            protocol_version: StdMutex::new(MAX_PROTOCOL_VERSION.into()),
+            session_id: StdMutex::new(None),
         }
     }
 
@@ -177,37 +189,34 @@ impl HttpTransport {
             .header("Accept", "application/json, text/event-stream")
             .body(body);
 
-        // Attach negotiated version and session headers synchronously
-        // since Mutex::try_lock on an uncontested lock won't block.
-        if let Ok(ver) = self.protocol_version.try_lock() {
-            builder = builder.header("MCP-Protocol-Version", ver.as_str());
-        }
-        if let Ok(sid) = self.session_id.try_lock() {
-            if let Some(ref id) = *sid {
-                builder = builder.header("MCP-Session-Id", id.as_str());
-            }
+        let ver = self.protocol_version.lock().unwrap();
+        builder = builder.header("MCP-Protocol-Version", ver.as_str());
+        let sid = self.session_id.lock().unwrap();
+        if let Some(ref id) = *sid {
+            builder = builder.header("MCP-Session-Id", id.as_str());
         }
 
         builder
     }
 
-    /// Update headers from an HTTP response (session id).
+    /// Update headers from an HTTP response (session id, protocol version).
     fn update_from_response(&self, resp: &reqwest::Response) {
         if let Some(val) = resp.headers().get("mcp-session-id") {
             if let Ok(id) = val.to_str() {
-                if let Ok(mut sid) = self.session_id.try_lock() {
-                    *sid = Some(id.to_string());
-                }
+                *self.session_id.lock().unwrap() = Some(id.to_string());
+            }
+        }
+        if let Some(val) = resp.headers().get("mcp-protocol-version") {
+            if let Ok(ver) = val.to_str() {
+                self.set_protocol_version_inherent(ver);
             }
         }
     }
 
     /// Set the negotiated protocol version (called during initialize).
-    #[allow(dead_code)]
-    fn set_protocol_version(&self, version: &str) {
-        if let Ok(mut ver) = self.protocol_version.try_lock() {
-            *ver = version.to_string();
-        }
+    /// This is an inherent method used by update_from_response.
+    fn set_protocol_version_inherent(&self, version: &str) {
+        *self.protocol_version.lock().unwrap() = version.to_string();
     }
 }
 
@@ -299,6 +308,10 @@ impl Transport for HttpTransport {
     async fn close(&mut self) -> Result<(), McpError> {
         Ok(())
     }
+
+    fn set_protocol_version(&self, version: &str) {
+        self.set_protocol_version_inherent(version);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -306,9 +319,9 @@ impl Transport for HttpTransport {
 // ---------------------------------------------------------------------------
 
 struct StdioTransport {
-    child: Mutex<tokio::process::Child>,
-    stdin: Mutex<Option<tokio::process::ChildStdin>>,
-    stdout: Mutex<BufReader<tokio::process::ChildStdout>>,
+    child: tokio::sync::Mutex<tokio::process::Child>,
+    stdin: tokio::sync::Mutex<Option<tokio::process::ChildStdin>>,
+    stdout: tokio::sync::Mutex<BufReader<tokio::process::ChildStdout>>,
     request_id: AtomicU64,
 }
 
@@ -324,9 +337,9 @@ impl StdioTransport {
             .ok_or_else(|| McpError::Transport("child has no stdout".into()))?;
 
         Ok(Self {
-            child: Mutex::new(child),
-            stdin: Mutex::new(Some(stdin)),
-            stdout: Mutex::new(BufReader::new(stdout)),
+            child: tokio::sync::Mutex::new(child),
+            stdin: tokio::sync::Mutex::new(Some(stdin)),
+            stdout: tokio::sync::Mutex::new(BufReader::new(stdout)),
             request_id: AtomicU64::new(1),
         })
     }
@@ -449,6 +462,9 @@ impl Transport for StdioTransport {
 pub struct McpServerConfig {
     /// Server name (e.g. "context7")
     pub name: String,
+    /// Transport type: "stdio" (default) or "http"
+    #[serde(default, rename = "type")]
+    pub type_: Option<String>,
     /// HTTP URL (streamable HTTP transport)
     #[serde(default)]
     pub url: Option<String>,
@@ -504,7 +520,7 @@ impl McpClient {
         // Ensure cleanup if initialization fails.
         if let Err(e) = client.initialize().await {
             let _ = client.shutdown().await;
-            return Err(McpError::Init(format!("{command} init: {e}")));
+            return Err(McpError::Init(e.to_string()));
         }
         Ok(client)
     }
@@ -518,7 +534,7 @@ impl McpClient {
             .call(
                 "initialize",
                 Some(serde_json::json!({
-                    "protocolVersion": "2025-11-25",
+                    "protocolVersion": MAX_PROTOCOL_VERSION,
                     "capabilities": {
                         "roots": { "listChanged": true }
                     },
@@ -533,15 +549,18 @@ impl McpClient {
 
         info!(server = %self.name, protocol_version = %result["protocolVersion"], "MCP server initialized");
 
-        // Version negotiation: check the server's protocol version.
         let server_version = result["protocolVersion"].as_str().unwrap_or("");
-        if server_version != "2025-11-25" && server_version != "2024-11-05" {
+        if server_version.is_empty() {
+            // Server may have sent the version only in the response header.
+            // update_from_response already extracted it if present.
+            debug!("no protocolVersion in body, using header value");
+        } else if !version_acceptable(server_version) {
             return Err(McpError::Init(format!(
-                "unsupported protocol version: {server_version}"
+                "unsupported protocol version: {server_version} (max: {})",
+                MAX_PROTOCOL_VERSION
             )));
         }
 
-        // Store negotiated version for use in subsequent request headers.
         self.set_negotiated_version(server_version);
 
         // Send initialized notification (no response expected).

@@ -46,25 +46,37 @@ impl Tool for Glob {
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
         let base = ctx.cwd.join(path);
 
-        let glob = globset::Glob::new(pattern)
-            .map_err(|e| ToolError::InvalidInput(format!("invalid pattern: {}", e)))?;
-        let matcher = glob.compile_matcher();
+        let cancel = ctx.cancel.clone();
+        let bg_base = base.clone();
+        let glob_clone = globset::Glob::new(pattern)
+            .map_err(|e| ToolError::InvalidInput(format!("invalid pattern: {}", e)))?
+            .compile_matcher();
 
-        let mut files = Vec::new();
-        let walker = ignore::WalkBuilder::new(&base).hidden(false).build();
+        let files = tokio::task::spawn_blocking(move || {
+            let mut files = Vec::new();
+            let walker = ignore::WalkBuilder::new(&bg_base).hidden(false).build();
 
-        for result in walker {
-            let entry = result.map_err(|e| ToolError::Execution(format!("walk error: {}", e)))?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
+            for result in walker {
+                if cancel.is_cancelled() {
+                    return Err(ToolError::Cancelled);
+                }
+                let entry =
+                    result.map_err(|e| ToolError::Execution(format!("walk error: {}", e)))?;
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let rel = path.strip_prefix(&bg_base).unwrap_or(path);
+                let rel_str = rel.to_string_lossy();
+                if glob_clone.is_match(&*rel_str) {
+                    files.push(rel_str.to_string());
+                }
             }
-            let rel = path.strip_prefix(&base).unwrap_or(path);
-            let rel_str = rel.to_string_lossy();
-            if matcher.is_match(&*rel_str) {
-                files.push(rel_str.to_string());
-            }
-        }
+            Ok(files)
+        })
+        .await
+        .map_err(|e| ToolError::Execution(format!("glob join error: {}", e)))?;
+        let mut files = files?;
 
         files.sort();
         Ok(ToolOutput {

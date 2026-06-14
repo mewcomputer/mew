@@ -1,0 +1,55 @@
+package mew:plugin;
+
+/// Plugin host interface — functions imported by plugins from the host.
+interface host {
+    /// Push a non-modal alert visible in the TUI.
+    notify: func(msg: string);
+
+    /// Read a config value for a known key. Returns empty string if not found.
+    config-read: func(key: string) -> string;
+
+    /// Write to the plugin's rate-limited log channel.
+    log: func(msg: string);
+}
+
+/// Plugin interface — functions exported by plugins for the host to invoke.
+interface plugin {
+    /// Called once at session startup with the plugin name.
+    init: func(plugin-name: string);
+
+    /// Called once at session shutdown.
+    shutdown: func();
+
+    /// Observe-only hook.
+    on-event: func(event-json: string);
+
+    /// Mutating hook: chat message.
+    on-chat-message: func(msg-json: string) -> string;
+
+    /// Mutating hook: chat params.
+    on-chat-params: func(params-json: string) -> string;
+
+    /// Mutating hook: HTTP headers.
+    on-chat-headers: func(headers-json: string) -> string;
+
+    /// Mutating hook: tool input before execution.
+    on-tool-execute-before: func(call-json: string, input-json: string) -> string;
+
+    /// Mutating hook: tool output after execution.
+    on-tool-execute-after: func(call-json: string, output-json: string) -> string;
+
+    /// Mutating hook: permission decision.
+    on-permission-ask: func(call-json: string, current-decision: string) -> string;
+
+    /// Mutating hook: shell env.
+    on-shell-env: func(env-json: string) -> string;
+
+    /// Dynamic tool registration. Returns JSON array of tool descriptors.
+    on-register-tools: func() -> string;
+}
+
+/// The plugin world: what a plugin imports (host) and exports (plugin).
+world plugin-world {
+    import host;
+    export plugin;
+}

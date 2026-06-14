@@ -11,6 +11,12 @@ use mew_tools::{Sensitivity, ToolCtx, ToolProgress};
 use crate::agent::{Agent, ToolInput};
 use crate::AgentEvent;
 
+// Track whether the subagent tool returned an error, not whether the
+// output text contains specific substrings.
+fn is_subagent_success(result: &str) -> bool {
+    !result.starts_with("subagent '")
+}
+
 impl Agent {
     pub(crate) fn pending_tool_calls(&self, msg: &Message) -> Vec<ToolCallPart> {
         msg.parts
@@ -46,9 +52,38 @@ impl Agent {
         ev_tx: &mpsc::Sender<AgentEvent>,
     ) -> Vec<Part> {
         let mut result_parts: Vec<Part> = Vec::with_capacity(pending.len());
+
+        // Capture the assistant message id for result parts; if None
+        // (shouldn't happen once the stream guard in turn_loop passes),
+        // return early with no result parts rather than panicking.
+        let assistant_id = match assistant_msg {
+            Some(ref msg) => msg.id,
+            None => {
+                tracing::error!("execute_pending_tool_calls called with no assistant message");
+                return result_parts;
+            }
+        };
         for tc in pending {
             let call_id = tc.call_id.clone();
             let part_id = tc.base.id;
+
+            if tc.tool_name == "subagent" && self.subagent_runner.is_some() {
+                self.execute_subagent_call(tc, assistant_msg, ev_tx, &mut result_parts)
+                    .await;
+                continue;
+            }
+
+            if tc.tool_name == "subagent_start" {
+                self.execute_subagent_start(tc, assistant_msg, ev_tx, &mut result_parts)
+                    .await;
+                continue;
+            }
+
+            if tc.tool_name == "subagent_wait" {
+                self.execute_subagent_wait(tc, assistant_msg, ev_tx, &mut result_parts)
+                    .await;
+                continue;
+            }
 
             // Mark as running.
             let running_state = ToolState::Running(ToolStateRunning {
@@ -77,6 +112,11 @@ impl Agent {
                 .await;
             let _ = ev_tx
                 .send(AgentEvent::ToolStart {
+                    call_id: call_id.clone(),
+                })
+                .await;
+            self.dispatcher
+                .on_event(&AgentEvent::ToolStart {
                     call_id: call_id.clone(),
                 })
                 .await;
@@ -163,7 +203,7 @@ impl Agent {
                 result_parts.push(Part::ToolResult(ToolResultPart {
                     base: PartBase {
                         id: ulid::Ulid::new(),
-                        message_id: assistant_msg.as_ref().unwrap().id,
+                        message_id: assistant_id,
                         session_id: self.session_id,
                     },
                     call_id: tc.call_id.clone(),
@@ -203,10 +243,16 @@ impl Agent {
                             success: false,
                         })
                         .await;
+                    self.dispatcher
+                        .on_event(&AgentEvent::ToolEnd {
+                            call_id: call_id.clone(),
+                            success: false,
+                        })
+                        .await;
                     result_parts.push(Part::ToolResult(ToolResultPart {
                         base: PartBase {
                             id: ulid::Ulid::new(),
-                            message_id: assistant_msg.as_ref().unwrap().id,
+                            message_id: assistant_id,
                             session_id: self.session_id,
                         },
                         call_id: tc.call_id.clone(),
@@ -278,6 +324,58 @@ impl Agent {
                 cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
                 dispatcher: Some(self.dispatcher.clone()),
             };
+
+            // Workspace sandbox check for path-based tools (skip bash/echo).
+            let tool_cwd = ctx.cwd.clone();
+            if let Some(arg_path) = self.workspace_path_for_tool(&tc.tool_name, &input) {
+                let resolved = tool_cwd.join(&arg_path);
+                if let Err(msg) = self.ensure_workspace_path(&resolved, ev_tx).await {
+                    let error_state = ToolState::Error(ToolStateError {
+                        input: input.clone(),
+                        error: msg,
+                        time: ToolTime {
+                            start: Utc::now().timestamp_millis(),
+                            end: Some(Utc::now().timestamp_millis()),
+                        },
+                    });
+                    if let Some(ref mut msg) = assistant_msg {
+                        self.update_tool_call(msg, part_id, error_state.clone());
+                    }
+                    let _ = ev_tx
+                        .send(AgentEvent::PartUpdated {
+                            part_id,
+                            part: Part::ToolCall(ToolCallPart {
+                                base: tc.base.clone(),
+                                tool_name: tc.tool_name.clone(),
+                                call_id: tc.call_id.clone(),
+                                state: error_state,
+                                raw_input: tc.raw_input.clone(),
+                            }),
+                        })
+                        .await;
+                    let _ = ev_tx
+                        .send(AgentEvent::ToolEnd {
+                            call_id: call_id.clone(),
+                            success: false,
+                        })
+                        .await;
+                    self.dispatcher
+                        .on_event(&AgentEvent::ToolEnd {
+                            call_id: call_id.clone(),
+                            success: false,
+                        })
+                        .await;
+                    result_parts.push(Part::ToolResult(ToolResultPart {
+                        base: PartBase {
+                            id: ulid::Ulid::new(),
+                            message_id: assistant_id,
+                            session_id: self.session_id,
+                        },
+                        call_id: tc.call_id.clone(),
+                    }));
+                    continue;
+                }
+            }
 
             tracing::info!(tool = %tc.tool_name, call_id = %call_id, input = %input, "executing tool");
             let exec_result = tool.execute(ctx, input.clone()).await;
@@ -358,16 +456,545 @@ impl Agent {
                     success,
                 })
                 .await;
+            self.dispatcher
+                .on_event(&AgentEvent::ToolEnd {
+                    call_id: call_id.clone(),
+                    success,
+                })
+                .await;
 
             result_parts.push(Part::ToolResult(ToolResultPart {
                 base: PartBase {
                     id: ulid::Ulid::new(),
-                    message_id: assistant_msg.as_ref().unwrap().id,
+                    message_id: assistant_id,
                     session_id: self.session_id,
                 },
                 call_id: tc.call_id.clone(),
             }));
         }
         result_parts
+    }
+
+    async fn execute_subagent_call(
+        &self,
+        tc: &ToolCallPart,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        result_parts: &mut Vec<Part>,
+    ) {
+        let call_id = tc.call_id.clone();
+        let part_id = tc.base.id;
+
+        let assistant_id = match assistant_msg {
+            Some(ref msg) => msg.id,
+            None => {
+                tracing::error!("execute_subagent_call called with no assistant message");
+                return;
+            }
+        };
+
+        let input = tc.input().clone();
+        let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let prompt = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+
+        let def = match self.subagent_defs.iter().find(|d| d.name == name) {
+            Some(d) => d,
+            None => {
+                let error_state = ToolState::Error(ToolStateError {
+                    input: input.clone(),
+                    error: format!("unknown subagent: {name}"),
+                    time: ToolTime {
+                        start: Utc::now().timestamp_millis(),
+                        end: Some(Utc::now().timestamp_millis()),
+                    },
+                });
+                if let Some(ref mut msg) = assistant_msg {
+                    self.update_tool_call(msg, part_id, error_state.clone());
+                }
+                let _ = ev_tx
+                    .send(AgentEvent::PartUpdated {
+                        part_id,
+                        part: Part::ToolCall(ToolCallPart {
+                            base: tc.base.clone(),
+                            tool_name: tc.tool_name.clone(),
+                            call_id: tc.call_id.clone(),
+                            state: error_state,
+                            raw_input: tc.raw_input.clone(),
+                        }),
+                    })
+                    .await;
+                let _ = ev_tx
+                    .send(AgentEvent::ToolEnd {
+                        call_id: call_id.clone(),
+                        success: false,
+                    })
+                    .await;
+                result_parts.push(Part::ToolResult(ToolResultPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: assistant_id,
+                        session_id: self.session_id,
+                    },
+                    call_id: tc.call_id.clone(),
+                }));
+                return;
+            }
+        };
+
+        let running_state = ToolState::Running(ToolStateRunning {
+            input: input.clone(),
+            output: String::new(),
+            time: ToolTime {
+                start: Utc::now().timestamp_millis(),
+                end: None,
+            },
+        });
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, running_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: running_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::ToolStart {
+                call_id: call_id.clone(),
+            })
+            .await;
+
+        let runner = match self.subagent_runner.as_ref() {
+            Some(r) => r.clone(),
+            None => {
+                tracing::error!("subagent_runner missing despite earlier is_some check");
+                return;
+            }
+        };
+        let def = def.clone();
+        let def_name = def.name.clone();
+        let prompt = prompt.to_string();
+        let call_id_clone = call_id.clone();
+        let ev_tx_clone = ev_tx.clone();
+        let cancel = self.cancel_token.child_token();
+
+        let (sa_event_tx, mut sa_event_rx) = mpsc::channel(256);
+
+        let parent_session_id = self.session_id;
+        let runner_handle = tokio::spawn(async move {
+            runner
+                .run(
+                    &def,
+                    prompt,
+                    call_id_clone.clone(),
+                    parent_session_id,
+                    sa_event_tx,
+                    cancel,
+                )
+                .await
+        });
+
+        while let Some(event) = sa_event_rx.recv().await {
+            match event {
+                mew_subagents::SubagentEvent::Started { child_session_id } => {
+                    let _ = ev_tx_clone
+                        .send(AgentEvent::SubagentStart {
+                            parent_call_id: call_id.clone(),
+                            name: def_name.clone(),
+                            child_session_id,
+                        })
+                        .await;
+                }
+                mew_subagents::SubagentEvent::Finished {
+                    child_session_id,
+                    outcome,
+                } => {
+                    let _ = ev_tx_clone
+                        .send(AgentEvent::SubagentEnd {
+                            parent_call_id: call_id.clone(),
+                            child_session_id,
+                            outcome,
+                        })
+                        .await;
+                }
+                mew_subagents::SubagentEvent::TextDelta { text } => {
+                    let _ = ev_tx_clone
+                        .send(AgentEvent::SubagentProgress {
+                            parent_call_id: call_id.clone(),
+                            child_event: Box::new(AgentEvent::Provider(
+                                mew_provider::ProviderEvent::PartDelta {
+                                    part_id: ulid::Ulid::new(),
+                                    field: "text",
+                                    delta: text,
+                                },
+                            )),
+                        })
+                        .await;
+                }
+                mew_subagents::SubagentEvent::ToolStart {
+                    call_id: tool_call_id,
+                    tool_name: _,
+                } => {
+                    let _ = ev_tx_clone
+                        .send(AgentEvent::SubagentProgress {
+                            parent_call_id: call_id.clone(),
+                            child_event: Box::new(AgentEvent::ToolStart {
+                                call_id: tool_call_id,
+                            }),
+                        })
+                        .await;
+                }
+                mew_subagents::SubagentEvent::ToolEnd {
+                    call_id: tool_call_id,
+                    success,
+                } => {
+                    let _ = ev_tx_clone
+                        .send(AgentEvent::SubagentProgress {
+                            parent_call_id: call_id.clone(),
+                            child_event: Box::new(AgentEvent::ToolEnd {
+                                call_id: tool_call_id,
+                                success,
+                            }),
+                        })
+                        .await;
+                }
+                mew_subagents::SubagentEvent::PermissionRequest {
+                    tool_name: req_tool_name,
+                    call_id: req_call_id,
+                    input: req_input,
+                    tx,
+                } => {
+                    let hook_call = mew_hooks::ToolCall {
+                        tool_name: req_tool_name,
+                        call_id: req_call_id,
+                        input: req_input,
+                    };
+                    let _ = ev_tx_clone
+                        .send(AgentEvent::SubagentPermissionRequest {
+                            parent_call_id: call_id.clone(),
+                            call: hook_call,
+                            tx,
+                        })
+                        .await;
+                }
+            }
+        }
+
+        let result = match runner_handle.await {
+            Ok(Ok(mew_subagents::SubagentResult::Complete {
+                text,
+                turns_used,
+                hit_turn_limit,
+            })) => {
+                tracing::info!(subagent = %name, output_len = text.len(), turns_used, hit_turn_limit, "subagent completed");
+                let mut out = text;
+                if hit_turn_limit {
+                    out.insert_str(
+                        0,
+                        &format!(
+                            "warning: subagent hit max_turns limit ({} turns); result may be incomplete\n\n",
+                            turns_used
+                        ),
+                    );
+                }
+                out
+            }
+            Ok(Ok(mew_subagents::SubagentResult::Cancelled)) => {
+                tracing::info!(subagent = %name, "subagent cancelled");
+                format!("subagent '{}' was cancelled before completion", name)
+            }
+            Ok(Ok(mew_subagents::SubagentResult::Error { reason })) => {
+                tracing::warn!(subagent = %name, error = %reason, "subagent failed");
+                format!("subagent '{}' failed: {}", name, reason)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(subagent = %name, error = %e, "subagent failed");
+                format!("subagent '{}' failed: {}", name, e)
+            }
+            Err(e) => {
+                tracing::warn!(subagent = %name, error = %e, "subagent task panicked");
+                format!("subagent '{}' panicked: {}", name, e)
+            }
+        };
+
+        let success = is_subagent_success(&result);
+        let final_state = if success {
+            ToolState::Completed(ToolStateCompleted {
+                input: input.clone(),
+                output: result,
+                metadata: None,
+                diff: None,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        } else {
+            ToolState::Error(ToolStateError {
+                input: input.clone(),
+                error: result,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        };
+
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, final_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: final_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::ToolEnd {
+                call_id: call_id.clone(),
+                success,
+            })
+            .await;
+
+        result_parts.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            call_id: tc.call_id.clone(),
+        }));
+    }
+
+    async fn execute_subagent_start(
+        &self,
+        tc: &ToolCallPart,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        result_parts: &mut Vec<Part>,
+    ) {
+        let call_id = tc.call_id.clone();
+        let part_id = tc.base.id;
+        let input = tc.input().clone();
+
+        let assistant_id = match assistant_msg {
+            Some(ref msg) => msg.id,
+            None => return,
+        };
+
+        let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let prompt = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+        let async_mode = input
+            .get("async")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Default (async=false): block until the subagent finishes, return the
+        // result inline. This is the common case — the model doesn't have to
+        // remember to call subagent_wait.
+        // Async mode (async=true): return a task_id; the model calls
+        // subagent_wait later. Use this for parallelism.
+        let start_result = self.start_subagent(name, prompt, ev_tx).await;
+        let (output, success) = match start_result {
+            Ok(task_id) if async_mode => (task_id, true),
+            Ok(task_id) => {
+                let wait_result = self.wait_subagent(&task_id).await;
+                match wait_result {
+                    Ok(mew_subagents::SubagentResult::Complete {
+                        text,
+                        turns_used,
+                        hit_turn_limit,
+                    }) => {
+                        let mut out = text;
+                        if hit_turn_limit {
+                            out.insert_str(
+                                0,
+                                &format!(
+                                    "warning: subagent hit max_turns limit ({} turns); result may be incomplete\n\n",
+                                    turns_used
+                                ),
+                            );
+                        }
+                        (out, true)
+                    }
+                    Ok(mew_subagents::SubagentResult::Cancelled) => (
+                        "subagent was cancelled before completion".to_string(),
+                        false,
+                    ),
+                    Ok(mew_subagents::SubagentResult::Error { reason }) => {
+                        (format!("subagent failed: {}", reason), false)
+                    }
+                    Err(e) => (format!("error: {}", e), false),
+                }
+            }
+            Err(e) => (format!("error: {}", e), false),
+        };
+
+        let final_state = if success {
+            ToolState::Completed(ToolStateCompleted {
+                input: input.clone(),
+                output,
+                metadata: None,
+                diff: None,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        } else {
+            ToolState::Error(ToolStateError {
+                input: input.clone(),
+                error: output,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        };
+
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, final_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: final_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::ToolEnd {
+                call_id: call_id.clone(),
+                success,
+            })
+            .await;
+
+        result_parts.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            call_id: tc.call_id.clone(),
+        }));
+    }
+
+    async fn execute_subagent_wait(
+        &self,
+        tc: &ToolCallPart,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        result_parts: &mut Vec<Part>,
+    ) {
+        let call_id = tc.call_id.clone();
+        let part_id = tc.base.id;
+        let input = tc.input().clone();
+
+        let assistant_id = match assistant_msg {
+            Some(ref msg) => msg.id,
+            None => return,
+        };
+
+        let task_id = input.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+
+        let result = self.wait_subagent(task_id).await;
+
+        let (output, success) = match result {
+            Ok(mew_subagents::SubagentResult::Complete {
+                text,
+                turns_used,
+                hit_turn_limit,
+            }) => {
+                let mut out = text;
+                if hit_turn_limit {
+                    out.insert_str(
+                        0,
+                        &format!(
+                            "warning: subagent hit max_turns limit ({} turns); result may be incomplete\n\n",
+                            turns_used
+                        ),
+                    );
+                }
+                (out, true)
+            }
+            Ok(mew_subagents::SubagentResult::Cancelled) => (
+                "subagent was cancelled before completion".to_string(),
+                false,
+            ),
+            Ok(mew_subagents::SubagentResult::Error { reason }) => {
+                (format!("subagent failed: {}", reason), false)
+            }
+            Err(e) => (format!("error: {}", e), false),
+        };
+
+        let final_state = if success {
+            ToolState::Completed(ToolStateCompleted {
+                input: input.clone(),
+                output,
+                metadata: None,
+                diff: None,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        } else {
+            ToolState::Error(ToolStateError {
+                input: input.clone(),
+                error: output,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        };
+
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, final_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: final_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::ToolEnd {
+                call_id: call_id.clone(),
+                success,
+            })
+            .await;
+
+        result_parts.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            call_id: tc.call_id.clone(),
+        }));
     }
 }

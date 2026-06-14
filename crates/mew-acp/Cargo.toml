@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 mew-agent = { workspace = true }
+mew-hooks = { workspace = true }
 mew-message = { workspace = true }
 mew-provider = { workspace = true }
 tokio = { workspace = true }
@@ -17,6 +18,9 @@ anyhow = { workspace = true }
 ulid = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
 mew-hooks = { workspace = true }
 mew-provider-fake = { workspace = true }
+mew-tools = { workspace = true }
 

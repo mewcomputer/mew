@@ -204,6 +204,14 @@ impl Adapter {
             body["tools"] = json!(tools);
         }
 
+        if let Some(ref reasoning) = req.reasoning {
+            if let Some(body_obj) = body.as_object_mut() {
+                for (k, v) in &reasoning.params {
+                    body_obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
         serde_json::to_vec(&body).map_err(ProviderError::Json)
     }
 
@@ -678,6 +686,16 @@ mod tests {
     use super::*;
     use mew_message::AssistantMeta;
 
+    fn make_minimal_png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xD7, 0x63, 0x60, 0x60, 0x60, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0xF6, 0x17, 0xA4,
+            0x49, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ]
+    }
+
     #[tokio::test]
     async fn test_build_wire_message_user() {
         let adapter = Adapter::new(
@@ -774,6 +792,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_wire_message_user_with_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let img_path = dir.path().join("test.png");
+        tokio::fs::write(&img_path, make_minimal_png())
+            .await
+            .unwrap();
+        let img_url = format!("file://{}", img_path.display());
+
         let adapter = Adapter::new(
             "test".to_string(),
             "https://example.com".to_string(),
@@ -802,7 +827,7 @@ mod tests {
                     },
                     mime: "image/png".to_string(),
                     filename: Some("test.png".to_string()),
-                    url: "file:///tmp/test.png".to_string(),
+                    url: img_url,
                 }),
             ],
             time: mew_message::Time {
@@ -814,16 +839,14 @@ mod tests {
         let wire = adapter.build_wire_message(&[], &msg).await;
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0]["role"], "user");
-        // When images are present, content should be an array
         let content = wire[0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "Describe this image");
         assert_eq!(content[1]["type"], "image_url");
-        assert!(content[1]["image_url"]["url"]
-            .as_str()
-            .unwrap()
-            .starts_with("data:image/png;base64,"));
+        let data_url = content[1]["image_url"]["url"].as_str().unwrap();
+        assert!(data_url.starts_with("data:image/png;base64,"));
+        assert!(data_url.len() > "data:image/png;base64,".len());
     }
 
     // -----------------------------------------------------------------------
@@ -857,6 +880,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             system: String::new(),
+            reasoning: None,
         };
 
         let mut stream = adapter.stream(req).await.expect("stream");
@@ -911,6 +935,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             system: String::new(),
+            reasoning: None,
         };
 
         let mut stream = adapter.stream(req).await.expect("stream");

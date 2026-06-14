@@ -4,10 +4,15 @@ use std::io::Write as _;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+use async_trait::async_trait;
+
+mod config_editor;
+
 use mew_agent::Agent;
 use mew_catalog::Catalog;
-use mew_config::{Config, ProviderConfig};
-use mew_hooks::NopDispatcher;
+use mew_config::Config;
+use mew_hooks::{Dispatcher, NopDispatcher, PluginHost};
+use mew_hooks_runtime::SubprocessDispatcher;
 use mew_mcp::McpClient;
 use mew_message::{Finish, Part, PartId, Role};
 use mew_provider::Provider;
@@ -35,13 +40,17 @@ struct Cli {
 enum Commands {
     /// Run a single prompt non-interactively
     Run {
-        /// Provider ID
-        #[arg(long, default_value = "opencode-zen")]
-        provider: String,
+        /// Provider ID (defaults to last-used or opencode-zen)
+        #[arg(long)]
+        provider: Option<String>,
 
         /// Model ID (overrides provider default)
         #[arg(long)]
         model: Option<String>,
+
+        /// Thinking variant (e.g. "high", "max", "low")
+        #[arg(long)]
+        variant: Option<String>,
 
         /// Dump raw request/response to stderr
         #[arg(long)]
@@ -52,13 +61,17 @@ enum Commands {
     },
     /// Start an interactive session
     Chat {
-        /// Provider ID
-        #[arg(long, default_value = "opencode-zen")]
-        provider: String,
+        /// Provider ID (defaults to last-used or opencode-zen)
+        #[arg(long)]
+        provider: Option<String>,
 
         /// Model ID (overrides provider default)
         #[arg(long)]
         model: Option<String>,
+
+        /// Thinking variant (e.g. "high", "max", "low")
+        #[arg(long)]
+        variant: Option<String>,
 
         /// Dump raw request/response to stderr
         #[arg(long)]
@@ -70,9 +83,9 @@ enum Commands {
     },
     /// Run as an ACP server (exposes agent core over stdio ACP)
     Acp {
-        /// Provider ID
-        #[arg(long, default_value = "opencode-zen")]
-        provider: String,
+        /// Provider ID (defaults to last-used or opencode-zen)
+        #[arg(long)]
+        provider: Option<String>,
 
         /// Model ID
         #[arg(long)]
@@ -82,10 +95,29 @@ enum Commands {
         #[arg(long)]
         raw: bool,
     },
+    /// View or edit configuration
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Print the current configuration to stdout
+    Show,
+    /// Open the config file in $EDITOR (or $VISUAL, or vi)
+    Edit,
+    /// Interactive TUI config editor
+    Editor,
+    /// Print the path to the config file
+    Path,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
@@ -97,74 +129,177 @@ async fn main() -> Result<()> {
         Some(Commands::Run {
             provider,
             model,
+            variant,
             raw,
             prompt,
         }) => {
-            let provider = if provider.is_empty() {
-                if state.last_provider.is_empty() {
-                    "opencode-zen".to_string()
-                } else {
-                    state.last_provider
-                }
-            } else {
-                provider
-            };
-            let model = model.or({
-                if state.last_model.is_empty() {
-                    None
-                } else {
-                    Some(state.last_model)
-                }
-            });
-            run_cmd(provider, model, raw, prompt).await
+            let provider = resolve_provider(provider, &state);
+            let model = resolve_model_opt(model, &state);
+            run_cmd(provider, model, variant, raw, prompt).await
         }
         Some(Commands::Chat {
             provider,
             model,
+            variant,
             raw,
             acp_agent,
         }) => {
             if let Some(agent_cmd) = acp_agent {
                 chat_with_acp(&agent_cmd).await
             } else {
-                let provider = if provider.is_empty() {
-                    if state.last_provider.is_empty() {
-                        "opencode-zen".to_string()
-                    } else {
-                        state.last_provider
-                    }
-                } else {
-                    provider
-                };
-                let model = model.or({
-                    if state.last_model.is_empty() {
-                        None
-                    } else {
-                        Some(state.last_model)
-                    }
-                });
-                chat_cmd(provider, model, raw).await
+                let provider = resolve_provider(provider, &state);
+                let model = resolve_model_opt(model, &state);
+                chat_cmd(provider, model, variant, raw).await
             }
         }
         Some(Commands::Acp {
             provider,
             model,
             raw,
-        }) => run_acp_server(&provider, model, raw).await,
+        }) => {
+            let provider = resolve_provider(provider, &state);
+            let model = resolve_model_opt(model, &state);
+            run_acp_server(&provider, model, raw).await
+        }
         None => {
-            let provider = if state.last_provider.is_empty() {
-                "opencode-zen".to_string()
-            } else {
-                state.last_provider
-            };
-            let model = if state.last_model.is_empty() {
-                None
-            } else {
-                Some(state.last_model)
-            };
-            chat_cmd(provider, model, false).await
+            let provider = resolve_provider(None, &state);
+            let model = resolve_model_opt(None, &state);
+            chat_cmd(provider, model, None, false).await
+        }
+        Some(Commands::Config { command }) => {
+            config_cmd(command)?;
+            Ok(())
         }
     }
+}
+
+fn resolve_provider(cli: Option<String>, state: &mew_config::State) -> String {
+    cli.or_else(|| {
+        if state.last_provider.is_empty() {
+            None
+        } else {
+            Some(state.last_provider.clone())
+        }
+    })
+    .unwrap_or_else(|| "opencode-zen".to_string())
+}
+
+fn resolve_model_opt(cli: Option<String>, state: &mew_config::State) -> Option<String> {
+    cli.or_else(|| {
+        if state.last_model.is_empty() {
+            None
+        } else {
+            Some(state.last_model.clone())
+        }
+    })
+}
+
+async fn load_catalog(cfg: &Config) -> Option<Catalog> {
+    let mut cat = match mew_catalog::load().await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("catalog load failed: {}", e);
+            return None;
+        }
+    };
+    let custom: Vec<mew_catalog::Model> = cfg
+        .models
+        .iter()
+        .map(|cm| mew_catalog::Model {
+            id: cm.id.clone(),
+            provider: cm.provider.clone(),
+            shape: cm.shape.clone(),
+            context_window: cm.context_window,
+            thinking_variants: cm
+                .thinking_variants
+                .iter()
+                .map(|v| mew_catalog::ThinkingVariant {
+                    name: v.name.clone(),
+                    params: v.params.clone(),
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .collect();
+    cat.merge_local(custom);
+    Some(cat)
+}
+
+fn resolve_reasoning(
+    cat: Option<&Catalog>,
+    model_id: &str,
+    variant_name: Option<&str>,
+) -> Option<mew_provider::ReasoningConfig> {
+    let cat = cat?;
+    let variants = cat.thinking_variants(model_id);
+    if variants.is_empty() {
+        return None;
+    }
+    let variant = match variant_name {
+        Some("none") => return None,
+        Some(name) => variants.iter().find(|v| v.name == name)?.clone(),
+        None => cat.default_thinking(model_id)?,
+    };
+    let params = variant.params.as_object().cloned().unwrap_or_default();
+    Some(mew_provider::ReasoningConfig { params })
+}
+
+fn config_cmd(command: ConfigCommands) -> Result<()> {
+    match command {
+        ConfigCommands::Path => {
+            println!("{}", mew_config::config_dir().join("config.toml").display());
+        }
+        ConfigCommands::Show => {
+            let cfg = mew_config::load().context("load config")?;
+            let toml = toml::to_string_pretty(&cfg)
+                .map_err(|e| anyhow::anyhow!("serialize config: {}", e))?;
+            print!("{}", toml);
+        }
+        ConfigCommands::Editor => {
+            config_editor::run_editor()?;
+        }
+        ConfigCommands::Edit => {
+            let config_dir = mew_config::config_dir();
+            let config_path = config_dir.join("config.toml");
+
+            std::fs::create_dir_all(&config_dir).context("create config directory")?;
+
+            if !config_path.exists() {
+                let template = "# mew configuration file\n\
+                    # Docs: https://github.com/anomalyco/mew\n\n\
+                    # default_model = \"deepseek-v4-flash\"\n\n\
+                    # [providers.my-provider]\n\
+                    # shape = \"openai\"\n\
+                    # base_url = \"https://api.example.com/v1\"\n\
+                    # credential_ref = \"my-provider\"\n\n\
+                    # [[permissions.rules]]\n\
+                    # tool = \"bash\"\n\
+                    # decision = \"allow\"\n\
+                    # match.command_prefix = \"git \"\n";
+                std::fs::write(&config_path, template).context("write config template")?;
+                info!("created config template at {}", config_path.display());
+            }
+
+            let editor = std::env::var("VISUAL")
+                .or_else(|_| std::env::var("EDITOR"))
+                .unwrap_or_else(|_| "vi".to_string());
+
+            let mut parts = editor.split_whitespace();
+            let cmd = parts.next().unwrap_or("vi");
+            let extra_args: Vec<&str> = parts.collect();
+
+            let status = std::process::Command::new(cmd)
+                .args(&extra_args)
+                .arg(&config_path)
+                .status()
+                .with_context(|| format!("failed to launch editor '{}'", editor))?;
+
+            if !status.success() {
+                anyhow::bail!("editor exited with non-zero status");
+            }
+        }
+    }
+    Ok(())
 }
 
 fn build_tools(skills: Arc<Vec<mew_skills::Skill>>) -> Vec<Arc<dyn mew_tools::Tool>> {
@@ -184,57 +319,173 @@ fn build_tools(skills: Arc<Vec<mew_skills::Skill>>) -> Vec<Arc<dyn mew_tools::To
 }
 
 fn build_permission_engine(cfg: &Config) -> Arc<mew_config::permissions::PermissionEngine> {
-    Arc::new(mew_config::permissions::PermissionEngine::new_with_skills(
+    Arc::new(mew_config::permissions::PermissionEngine::new(
         cfg.permissions.rules.clone(),
-        cfg.permissions.skills.clone(),
     ))
 }
 
-/// Load MCP server configs from cwd/mcp.json (Claude-Code-compatible format).
-fn load_mcp_configs() -> Vec<mew_mcp::McpServerConfig> {
-    let path = std::env::current_dir().unwrap_or_default().join("mcp.json");
-
-    match std::fs::read_to_string(&path) {
-        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-            Ok(v) => {
-                let servers = v.get("mcpServers").and_then(|s| s.as_object());
-                match servers {
-                    Some(servers) => servers
-                        .iter()
-                        .map(|(name, cfg)| mew_mcp::McpServerConfig {
-                            name: name.clone(),
-                            url: cfg.get("url").and_then(|v| v.as_str()).map(String::from),
-                            command: cfg
-                                .get("command")
-                                .and_then(|v| v.as_str())
-                                .map(String::from),
-                            args: cfg
-                                .get("args")
-                                .and_then(|v| v.as_array())
-                                .map(|a| {
-                                    a.iter()
-                                        .filter_map(|v: &serde_json::Value| {
-                                            v.as_str().map(String::from)
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default(),
-                        })
-                        .collect(),
-                    None => Vec::new(),
+fn plugin_storage_map() -> std::collections::HashMap<String, String> {
+    let dir = plugin_storage_dir();
+    if !dir.exists() {
+        return std::collections::HashMap::new();
+    }
+    let mut map = std::collections::HashMap::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(json_map) =
+                        serde_json::from_str::<std::collections::HashMap<String, String>>(&content)
+                    {
+                        for (k, v) in json_map {
+                            map.insert(format!("{}/{}", name, k), v);
+                        }
+                    }
                 }
             }
-            Err(e) => {
-                tracing::warn!("failed to parse mcp.json: {}", e);
-                Vec::new()
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => {
-            tracing::warn!("failed to read mcp.json: {}", e);
-            Vec::new()
         }
     }
+    map
+}
+
+fn plugin_storage_dir() -> std::path::PathBuf {
+    mew_config::config_dir().join("plugin-storage")
+}
+
+fn write_plugin_storage(
+    map: &mut std::collections::HashMap<String, String>,
+    key: &str,
+    value: &str,
+) {
+    map.insert(key.to_string(), value.to_string());
+    let dir = plugin_storage_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    // Group by plugin name (first segment of key before /)
+    let mut per_plugin: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, String>,
+    > = std::collections::HashMap::new();
+    for (k, v) in map.iter() {
+        if let Some((plugin, subkey)) = k.split_once('/') {
+            per_plugin
+                .entry(plugin.to_string())
+                .or_default()
+                .insert(subkey.to_string(), v.clone());
+        }
+    }
+    for (plugin, data) in &per_plugin {
+        let path = dir.join(format!("{}.json", plugin));
+        let tmp = dir.join(format!("{}.tmp", plugin));
+        if let Ok(json) = serde_json::to_string(data) {
+            if std::fs::write(&tmp, &json).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_dispatcher(
+    notify: impl Fn(String) + Send + Sync + 'static,
+    config_read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    log_fn: impl Fn(String) + Send + Sync + 'static,
+    storage_read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    storage_write: impl Fn(&str, &str) + Send + Sync + 'static,
+    storage_delete: impl Fn(&str) + Send + Sync + 'static,
+    set_ui: impl Fn(&str, &str) + Send + Sync + 'static,
+    disabled_plugins: &[String],
+) -> Arc<dyn Dispatcher> {
+    let host = PluginHost {
+        notify: Arc::new(notify),
+        config_read: Arc::new(config_read),
+        log: Arc::new(log_fn),
+        storage_read: Arc::new(storage_read),
+        storage_write: Arc::new(storage_write),
+        storage_delete: Arc::new(storage_delete),
+        set_ui: Arc::new(set_ui),
+    };
+
+    match SubprocessDispatcher::from_default_dirs_filtered(host.clone(), disabled_plugins).await {
+        Ok(d) => {
+            tracing::info!("plugin runtime loaded");
+            Arc::new(d)
+        }
+        Err(e) => {
+            tracing::warn!("plugin runtime unavailable, using no-op: {}", e);
+            Arc::new(NopDispatcher)
+        }
+    }
+}
+
+/// Load MCP server configs from standard locations.
+///
+/// Searches (in order):
+///   cwd/mcp.json, cwd/.mcp.json, cwd/.mew/mcp.json, cwd/.mew/.mcp.json
+/// Each file uses Claude-Code-compatible format:
+///   { "mcpServers": { "name": { "command": "...", "args": [...], "type": "stdio"|"http" } } }
+fn load_mcp_configs() -> Vec<mew_mcp::McpServerConfig> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let paths = [
+        cwd.join("mcp.json"),
+        cwd.join(".mcp.json"),
+        cwd.join(".mew").join("mcp.json"),
+        cwd.join(".mew").join(".mcp.json"),
+    ];
+
+    let mut configs = Vec::new();
+
+    for path in &paths {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                tracing::warn!("failed to read {}: {}", path.display(), e);
+                continue;
+            }
+        };
+
+        let v: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("failed to parse {}: {}", path.display(), e);
+                continue;
+            }
+        };
+
+        let Some(servers) = v.get("mcpServers").and_then(|s| s.as_object()) else {
+            continue;
+        };
+
+        for (name, cfg) in servers {
+            let command = cfg
+                .get("command")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let url = cfg.get("url").and_then(|v| v.as_str()).map(String::from);
+            let type_ = cfg.get("type").and_then(|v| v.as_str()).map(String::from);
+            let args = cfg
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v: &serde_json::Value| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            configs.push(mew_mcp::McpServerConfig {
+                name: name.clone(),
+                type_,
+                url,
+                command,
+                args,
+            });
+        }
+    }
+
+    configs
 }
 
 async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
@@ -323,6 +574,15 @@ async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
                         mew_tui::events::Action::Clear => {
                             app.clear_messages();
                         }
+                        mew_tui::events::Action::ToggleSidebarContext => {
+                            app.toggle_sidebar_section("context");
+                        }
+                        mew_tui::events::Action::ToggleSidebarTools => {
+                            app.toggle_sidebar_section("tools");
+                        }
+                        mew_tui::events::Action::ToggleSidebarMcp => {
+                            app.toggle_sidebar_section("mcp");
+                        }
                         _ => {}
                     }
                 }
@@ -377,7 +637,8 @@ async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
 
 async fn run_acp_server(provider_flag: &str, model_flag: Option<String>, raw: bool) -> Result<()> {
     let cfg = mew_config::load().context("load config")?;
-    let cat = mew_catalog::load().await.ok();
+    let cat = load_catalog(&cfg).await;
+    let cat_for_resolver = cat.clone();
     let cat_ref = cat.as_ref();
 
     let (provider_id, model_id) = resolve_model(&cfg, cat_ref, provider_flag, model_flag);
@@ -392,8 +653,45 @@ async fn run_acp_server(provider_flag: &str, model_flag: Option<String>, raw: bo
 
     let permission_engine = build_permission_engine(&cfg);
 
-    let mut agent = Agent::new(provider, dispatcher, None, tools, None);
+    let mut agent = Agent::new(provider, dispatcher.clone(), None, tools, None);
     agent.set_permission_engine(permission_engine);
+    if cfg.workspace.roots.is_empty() {
+        agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
+    } else {
+        agent.workspace_roots = cfg.workspace.roots.clone();
+    }
+
+    // Wire up subagent infrastructure.
+    let subagent_defs = {
+        let loader = mew_subagents::Loader::new(std::env::current_dir().unwrap_or_default());
+        Arc::new(loader.load().unwrap_or_default())
+    };
+    if !subagent_defs.is_empty() {
+        let resolver = Arc::new(MainModelResolver {
+            cfg: Arc::new(cfg.clone()),
+            cat: cat_for_resolver.map(Arc::new),
+            default_provider_id: provider_id.clone(),
+            raw,
+        });
+        let runner = mew_agent::runner::SimpleRunner::new(
+            agent.provider.clone(),
+            agent.tools.values().cloned().collect(),
+            dispatcher.clone(),
+        )
+        .with_model_resolver(resolver);
+        agent.subagent_runner = Some(Arc::new(runner));
+        agent.subagent_defs = subagent_defs.to_vec();
+        agent.tools.insert(
+            "subagent_start".into(),
+            Arc::new(mew_tools::tools::subagent_start::SubagentStart::new(
+                subagent_defs.clone(),
+            )),
+        );
+        agent.tools.insert(
+            "subagent_wait".into(),
+            Arc::new(mew_tools::tools::subagent_wait::SubagentWait::new()),
+        );
+    }
 
     // Load project context and skills for system prompt.
     let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());
@@ -445,58 +743,77 @@ fn escape_xml(s: &str) -> String {
 
 async fn connect_mcp_servers(
     configs: &[mew_mcp::McpServerConfig],
-) -> (Vec<Arc<dyn mew_tools::Tool>>, Vec<Arc<mew_mcp::McpClient>>) {
+) -> (
+    Vec<Arc<dyn mew_tools::Tool>>,
+    Vec<Arc<mew_mcp::McpClient>>,
+    Vec<String>,
+) {
     let mut tools: Vec<Arc<dyn mew_tools::Tool>> = Vec::new();
     let mut clients: Vec<Arc<mew_mcp::McpClient>> = Vec::new();
+    let mut status: Vec<String> = Vec::new();
 
     for cfg in configs {
+        info!(server = %cfg.name, "connecting MCP server");
+
         let client = if let Some(ref url) = cfg.url {
             match McpClient::connect_http(&cfg.name, url).await {
-                Ok(client) => client,
+                Ok(client) => {
+                    status.push(format!("{} connected (http)", cfg.name));
+                    client
+                }
                 Err(e) => {
-                    tracing::warn!(server = %cfg.name, error = %e, "failed to connect to MCP server");
+                    status.push(format!("{} connection failed", cfg.name));
+                    warn!(server = %cfg.name, error = %e, "MCP connect failed");
                     continue;
                 }
             }
         } else if let Some(ref command) = cfg.command {
             match McpClient::connect_stdio(&cfg.name, command, &cfg.args).await {
-                Ok(client) => client,
+                Ok(client) => {
+                    status.push(format!("{} connected (stdio)", cfg.name));
+                    client
+                }
                 Err(e) => {
-                    tracing::warn!(server = %cfg.name, error = %e, "failed to connect to MCP server");
+                    status.push(format!("{} connection failed", cfg.name));
+                    warn!(server = %cfg.name, error = %e, "MCP connect failed");
                     continue;
                 }
             }
         } else {
-            tracing::warn!(server = %cfg.name, "MCP server has no url or command");
+            status.push(format!("{} skipped (no url or command)", cfg.name));
+            warn!(server = %cfg.name, "MCP server has no url or command");
             continue;
         };
 
         match client.list_tools().await {
             Ok(mcp_tools) => {
+                let count = mcp_tools.len();
                 let client = Arc::new(client);
                 for def in &mcp_tools {
-                    let name = def.qualified_name(&cfg.name);
                     tools.push(Arc::new(mew_mcp::McpTool::new(
                         &cfg.name,
                         def,
                         client.clone(),
                     )));
-                    tracing::info!(tool = %name, server = %cfg.name, "registered MCP tool");
                 }
                 clients.push(client);
+                status.push(format!("{} ready ({} tools)", cfg.name, count));
+                info!(server = %cfg.name, tool_count = count, "MCP tools registered");
             }
             Err(e) => {
-                tracing::warn!(server = %cfg.name, error = %e, "failed to list MCP tools");
+                status.push(format!("{} tool listing failed", cfg.name));
+                warn!(server = %cfg.name, error = %e, "failed to list MCP tools");
             }
         }
     }
 
-    (tools, clients)
+    (tools, clients, status)
 }
 
 async fn run_cmd(
     provider_flag: String,
     model_flag: Option<String>,
+    variant_flag: Option<String>,
     raw: bool,
     prompt_parts: Vec<String>,
 ) -> Result<()> {
@@ -507,29 +824,68 @@ async fn run_cmd(
 
     let cfg = mew_config::load().context("load config")?;
 
-    let cat = match mew_catalog::load().await {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("catalog load failed, using fallback routing: {}", e);
-            return build_and_run(&cfg, None, &provider_flag, model_flag, raw, prompt).await;
-        }
-    };
+    let cat = load_catalog(&cfg).await;
 
-    build_and_run(&cfg, Some(&cat), &provider_flag, model_flag, raw, prompt).await
+    build_and_run(
+        &cfg,
+        cat.as_ref(),
+        &provider_flag,
+        model_flag,
+        variant_flag,
+        raw,
+        prompt,
+    )
+    .await
 }
 
-async fn chat_cmd(provider_flag: String, model_flag: Option<String>, raw: bool) -> Result<()> {
+async fn chat_cmd(
+    provider_flag: String,
+    model_flag: Option<String>,
+    variant_flag: Option<String>,
+    raw: bool,
+) -> Result<()> {
     let cfg = mew_config::load().context("load config")?;
 
-    let cat = match mew_catalog::load().await {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("catalog load failed, using fallback routing: {}", e);
-            return run_tui(&cfg, None, &provider_flag, model_flag, raw).await;
-        }
-    };
+    let cat = load_catalog(&cfg).await;
 
-    run_tui(&cfg, Some(&cat), &provider_flag, model_flag, raw).await
+    run_tui(
+        &cfg,
+        cat.as_ref(),
+        &provider_flag,
+        model_flag,
+        variant_flag,
+        raw,
+    )
+    .await
+}
+
+/// Resolves a `provider/model` string into a `Provider`. Used by the
+/// subagent runner to honor per-subagent `model:` overrides. Falls back to
+/// the agent's current `provider_id` when the override has no `/`.
+struct MainModelResolver {
+    cfg: Arc<Config>,
+    cat: Option<Arc<Catalog>>,
+    default_provider_id: String,
+    raw: bool,
+}
+
+#[async_trait]
+impl mew_subagents::ModelResolver for MainModelResolver {
+    async fn resolve(&self, model: &str) -> Result<Arc<dyn Provider>, String> {
+        let (provider_id, model_id) = if let Some(idx) = model.find('/') {
+            (&model[..idx], &model[idx + 1..])
+        } else {
+            (self.default_provider_id.as_str(), model)
+        };
+        build_provider(
+            &self.cfg,
+            self.cat.as_deref(),
+            provider_id,
+            model_id,
+            self.raw,
+        )
+        .map_err(|e| e.to_string())
+    }
 }
 
 async fn run_tui(
@@ -537,8 +893,10 @@ async fn run_tui(
     cat: Option<&Catalog>,
     provider_flag: &str,
     model_flag: Option<String>,
+    variant_flag: Option<String>,
     raw: bool,
 ) -> Result<()> {
+    let cat_for_resolver = cat.cloned();
     let (provider_id, model_id) = resolve_model(cfg, cat, provider_flag, model_flag);
 
     let provider =
@@ -562,7 +920,61 @@ async fn run_tui(
         .await
         .context("open session")?;
 
-    let dispatcher = Arc::new(NopDispatcher);
+    // Plugin UI channel: plugins push content, we drain in the main loop.
+    let (plugin_ui_tx, mut plugin_ui_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+
+    let plugin_storage = Arc::new(std::sync::Mutex::new(plugin_storage_map()));
+
+    let disabled_plugins = mew_config::load_state()
+        .unwrap_or_default()
+        .disabled_plugins;
+
+    let dispatcher = build_dispatcher(
+        |msg| {
+            tracing::info!("[plugin-notify] {msg}");
+        },
+        |_key| None,
+        |msg| {
+            tracing::info!(target: "plugin", "{}", msg);
+        },
+        {
+            let storage = plugin_storage.clone();
+            move |key| storage.lock().unwrap().get(key).cloned()
+        },
+        {
+            let storage = plugin_storage.clone();
+            move |key, value| {
+                write_plugin_storage(&mut storage.lock().unwrap(), key, value);
+            }
+        },
+        {
+            let storage = plugin_storage.clone();
+            move |key| {
+                storage.lock().unwrap().remove(key);
+            }
+        },
+        move |key: &str, value: &str| {
+            let _ = plugin_ui_tx.send((key.to_string(), value.to_string()));
+        },
+        &disabled_plugins,
+    )
+    .await;
+
+    {
+        let host = PluginHost {
+            notify: Arc::new(|_| {}),
+            config_read: Arc::new(|_| None),
+            log: Arc::new(|msg| {
+                tracing::info!(target: "plugin", "{}", msg);
+            }),
+            storage_read: Arc::new(|_| None),
+            storage_write: Arc::new(|_, _| {}),
+            storage_delete: Arc::new(|_| {}),
+            set_ui: Arc::new(|_, _| {}),
+        };
+        dispatcher.init(&host).await;
+    }
 
     // Load skills for the skill tool.
     let skills_loader = mew_skills::Loader::new(std::env::current_dir().unwrap_or_default());
@@ -574,8 +986,23 @@ async fn run_tui(
     // Load MCP tools.
     let mcp_configs = load_mcp_configs();
     let mut _mcp_clients: Vec<Arc<McpClient>> = Vec::new();
+    let mut mcp_server_status: Vec<(String, bool, usize)> = Vec::new();
     if !mcp_configs.is_empty() {
-        let (mcp_tools, mcp_cls) = connect_mcp_servers(&mcp_configs).await;
+        let (mcp_tools, mcp_cls, status) = connect_mcp_servers(&mcp_configs).await;
+        for cfg in &mcp_configs {
+            let connected = status
+                .iter()
+                .any(|s| s.starts_with(&cfg.name) && s.contains("ready"));
+            let count = if connected {
+                mcp_tools
+                    .iter()
+                    .filter(|t| t.name().starts_with(&format!("{}__", cfg.name)))
+                    .count()
+            } else {
+                0
+            };
+            mcp_server_status.push((cfg.name.clone(), connected, count));
+        }
         tools.extend(mcp_tools);
         _mcp_clients = mcp_cls;
     }
@@ -589,12 +1016,60 @@ async fn run_tui(
     // Populate sidebar data before moving tools.
     let context_files: Vec<String> = ctx_files
         .iter()
-        .map(|f| f.path.to_string_lossy().to_string())
+        .map(|f| context_display_name(&f.path))
         .collect();
-    let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+    let tool_names: Vec<String> = tools
+        .iter()
+        .map(|t| t.name().to_string())
+        .filter(|n| !n.contains("__"))
+        .collect();
 
-    let mut agent = Agent::new(provider, dispatcher, Some(session_writer), tools, None);
+    let mut agent = Agent::new(
+        provider,
+        dispatcher.clone(),
+        Some(session_writer),
+        tools,
+        None,
+    );
     agent.set_permission_engine(permission_engine);
+    if cfg.workspace.roots.is_empty() {
+        agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
+    } else {
+        agent.workspace_roots = cfg.workspace.roots.clone();
+    }
+
+    // Wire up subagent infrastructure.
+    let subagent_defs = {
+        let loader = mew_subagents::Loader::new(std::env::current_dir().unwrap_or_default());
+        Arc::new(loader.load().unwrap_or_default())
+    };
+    if !subagent_defs.is_empty() {
+        let resolver = Arc::new(MainModelResolver {
+            cfg: Arc::new(cfg.clone()),
+            cat: cat_for_resolver.map(Arc::new),
+            default_provider_id: provider_id.clone(),
+            raw,
+        });
+        let runner = mew_agent::runner::SimpleRunner::new(
+            agent.provider.clone(),
+            agent.tools.values().cloned().collect(),
+            dispatcher.clone(),
+        )
+        .with_model_resolver(resolver);
+        agent.subagent_runner = Some(Arc::new(runner));
+        agent.subagent_defs = subagent_defs.to_vec();
+
+        agent.tools.insert(
+            "subagent_start".into(),
+            Arc::new(mew_tools::tools::subagent_start::SubagentStart::new(
+                subagent_defs.clone(),
+            )),
+        );
+        agent.tools.insert(
+            "subagent_wait".into(),
+            Arc::new(mew_tools::tools::subagent_wait::SubagentWait::new()),
+        );
+    }
 
     // Set vision capability and pricing from catalog.
     if let Some(c) = cat {
@@ -624,7 +1099,27 @@ async fn run_tui(
         agent.set_system(system);
     }
 
+    let reasoning = resolve_reasoning(cat, &model_id, variant_flag.as_deref());
+    if let Some(r) = reasoning {
+        agent.set_reasoning(Some(r));
+        info!(variant = ?variant_flag, model = %model_id, "enabled thinking variant");
+    }
+
     let mut app = mew_tui::App::new();
+
+    // Populate MCP server status in sidebar
+    for (name, ok, count) in &mcp_server_status {
+        if !ok {
+            app.messages
+                .push(synthetic_message(format!("{name} connection failed")));
+        }
+        app.mcp_status.push((name.clone(), *ok, *count));
+    }
+
+    // Restore sidebar collapsed state from previous session.
+    let prev_state = mew_config::load_state().unwrap_or_default();
+    app.sidebar_collapsed = prev_state.sidebar_collapsed.clone();
+
     app.status.model = display_model.clone();
     app.status.provider = display_provider.clone();
     app.status.session_id = session_id.clone();
@@ -636,6 +1131,17 @@ async fn run_tui(
 
     // Populate model list by querying providers and merging with catalog.
     app.models = discover_models(cfg, cat, raw).await;
+
+    // Register dynamic slash commands from plugins.
+    let dynamic_cmds = agent.dispatcher.on_register_slash_commands().await;
+    let dynamic_slash: Vec<mew_tui::app::SlashCommand> = dynamic_cmds
+        .into_iter()
+        .map(|d| mew_tui::app::SlashCommand {
+            name: d.name,
+            description: d.description,
+        })
+        .collect();
+    app.add_dynamic_slash_commands(dynamic_slash);
 
     // Setup terminal.
     crossterm::terminal::enable_raw_mode()?;
@@ -655,9 +1161,23 @@ async fn run_tui(
     let event_loop = Arc::new(event_loop);
 
     // Main loop.
+    let mut settings_editor: Option<config_editor::ConfigEditor> = None;
     let result = loop {
+        // Drain plugin UI updates before each render.
+        while let Ok((key, value)) = plugin_ui_rx.try_recv() {
+            app.plugin_ui.insert(key.clone(), value.clone());
+            if key == "buddy/bubble" {
+                app.touch_companion_bubble();
+            }
+        }
+
         // Render.
-        if let Err(e) = terminal.draw(|f| mew_tui::ui::draw(f, &mut app)) {
+        if let Err(e) = terminal.draw(|f| {
+            mew_tui::ui::draw(f, &mut app);
+            if let Some(ref editor) = settings_editor {
+                editor.draw(f);
+            }
+        }) {
             break Err(anyhow::anyhow!("draw error: {}", e));
         }
 
@@ -671,6 +1191,23 @@ async fn run_tui(
         let mut should_break = false;
         match event {
             mew_tui::Event::Input(crossterm_event) => {
+                // Settings mode: delegate to ConfigEditor
+                if app.mode == mew_tui::app::Mode::Settings {
+                    if let crossterm::event::Event::Key(key) = crossterm_event {
+                        if let Some(ref mut editor) = settings_editor {
+                            if !editor.handle_key(key) {
+                                // Closing settings
+                                if editor.is_dirty() {
+                                    app.set_alert("Settings closed (unsaved changes discarded)");
+                                }
+                                settings_editor = None;
+                                app.mode = mew_tui::app::Mode::Normal;
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 if let Some(action) = mew_tui::events::handle_input_event(&mut app, crossterm_event)
                 {
                     match action {
@@ -686,7 +1223,9 @@ async fn run_tui(
                         }
                         mew_tui::events::Action::SlashCommand(text) => {
                             match app.handle_slash(&text) {
-                                mew_tui::SlashResult::Continue => {}
+                                mew_tui::SlashResult::Continue => {
+                                    continue;
+                                }
                                 mew_tui::SlashResult::Quit => should_break = true,
                                 mew_tui::SlashResult::Clear => {
                                     app.clear_messages();
@@ -732,6 +1271,7 @@ async fn run_tui(
                                             let state = mew_config::State {
                                                 last_model: new_model_id.to_string(),
                                                 last_provider: new_provider_id.to_string(),
+                                                ..Default::default()
                                             };
                                             if let Err(e) = mew_config::save_state(&state) {
                                                 tracing::warn!("failed to save state: {}", e);
@@ -776,6 +1316,23 @@ async fn run_tui(
                                 mew_tui::SlashResult::OpenModelPicker => {
                                     app.open_command_palette();
                                 }
+                                mew_tui::SlashResult::ToggleMouseCapture => {
+                                    toggle_mouse_capture(&mut app, &mut terminal).await;
+                                }
+                                mew_tui::SlashResult::PluginCommand { name, args } => {
+                                    let disp = agent.dispatcher.clone();
+                                    match disp.execute_slash_command(&name, &args).await {
+                                        Some(result) => {
+                                            app.messages.push(synthetic_message(result));
+                                        }
+                                        None => {
+                                            app.messages.push(synthetic_message(format!(
+                                                "unknown command: {}",
+                                                name
+                                            )));
+                                        }
+                                    }
+                                }
                             }
                         }
                         mew_tui::events::Action::Clear => {
@@ -807,6 +1364,8 @@ async fn run_tui(
                                     let state = mew_config::State {
                                         last_model: new_model_id.to_string(),
                                         last_provider: new_provider_id.to_string(),
+                                        sidebar_collapsed: app.sidebar_collapsed.clone(),
+                                        disabled_plugins: Vec::new(),
                                     };
                                     if let Err(e) = mew_config::save_state(&state) {
                                         tracing::warn!("failed to save state: {}", e);
@@ -828,14 +1387,73 @@ async fn run_tui(
                             agent.cancel_token.cancel();
                             app.streaming = false;
                         }
+                        mew_tui::events::Action::CancelMostRecentSubagent(task_id) => {
+                            if agent.cancel_subagent(&task_id).await {
+                                app.set_alert("subagent cancellation requested");
+                            } else {
+                                app.set_alert("subagent already finished");
+                            }
+                        }
                         mew_tui::events::Action::InsertAtMention(mention) => {
                             app.input.push_str(&mention);
                             app.cursor += mention.len();
+                        }
+                        mew_tui::events::Action::InsertSubagentMention(name) => {
+                            let mention = format!("@{} ", name);
+                            app.input.push_str(&mention);
+                            app.cursor += mention.len();
+                        }
+                        mew_tui::events::Action::CopySelection(text) => {
+                            copy_to_clipboard(&text);
+                            app.set_alert(format!("copied {} chars", text.len()));
+                            app.clear_selection();
+                        }
+                        mew_tui::events::Action::ToggleSidebarContext => {
+                            app.toggle_sidebar_section("context");
+                        }
+                        mew_tui::events::Action::ToggleSidebarTools => {
+                            app.toggle_sidebar_section("tools");
+                        }
+                        mew_tui::events::Action::ToggleSidebarMcp => {
+                            app.toggle_sidebar_section("mcp");
+                        }
+                        mew_tui::events::Action::OpenSettings => {
+                            // Create ConfigEditor with discovered plugins
+                            let loader = mew_hooks_runtime::PluginLoader::new(
+                                mew_hooks_runtime::PluginLoader::default_dirs(),
+                            );
+                            let state = mew_config::load_state().unwrap_or_default();
+                            let plugins: Vec<config_editor::PluginEntry> = loader
+                                .discover_executables()
+                                .into_iter()
+                                .map(|path| {
+                                    let name = path
+                                        .file_stem()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string();
+                                    let enabled = !state.disabled_plugins.contains(&name);
+                                    config_editor::PluginEntry {
+                                        name,
+                                        path: path.display().to_string(),
+                                        enabled,
+                                    }
+                                })
+                                .collect();
+                            let cfg = mew_config::load().unwrap_or_default();
+                            settings_editor = Some(config_editor::ConfigEditor::new(cfg, plugins));
+                            app.mode = mew_tui::app::Mode::Settings;
+                        }
+                        mew_tui::events::Action::SaveSettings
+                        | mew_tui::events::Action::SettingsEditStart
+                        | mew_tui::events::Action::SettingsEditComplete => {
+                            // Handled by ConfigEditor in settings mode — ignore here
                         }
                         mew_tui::events::Action::Quit => should_break = true,
                     }
                 }
             }
+
             mew_tui::Event::Agent(event) => {
                 app.handle_agent_event(event);
             }
@@ -861,6 +1479,24 @@ async fn run_tui(
         'drain: while let Ok(event) = event_rx.try_recv() {
             match event {
                 mew_tui::Event::Input(crossterm_event) => {
+                    // Settings mode: delegate to ConfigEditor
+                    if app.mode == mew_tui::app::Mode::Settings {
+                        if let crossterm::event::Event::Key(key) = crossterm_event {
+                            if let Some(ref mut editor) = settings_editor {
+                                if !editor.handle_key(key) {
+                                    if editor.is_dirty() {
+                                        app.set_alert(
+                                            "Settings closed (unsaved changes discarded)",
+                                        );
+                                    }
+                                    settings_editor = None;
+                                    app.mode = mew_tui::app::Mode::Normal;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     if let crossterm::event::Event::Mouse(ref mouse) = crossterm_event {
                         match mouse.kind {
                             crossterm::event::MouseEventKind::ScrollUp => {
@@ -893,9 +1529,35 @@ async fn run_tui(
                             mew_tui::events::Action::Clear => {
                                 app.clear_messages();
                             }
+                            mew_tui::events::Action::ToggleSidebarContext => {
+                                app.toggle_sidebar_section("context");
+                            }
+                            mew_tui::events::Action::ToggleSidebarTools => {
+                                app.toggle_sidebar_section("tools");
+                            }
+                            mew_tui::events::Action::ToggleSidebarMcp => {
+                                app.toggle_sidebar_section("mcp");
+                            }
+                            mew_tui::events::Action::CancelMostRecentSubagent(task_id) => {
+                                if agent.cancel_subagent(&task_id).await {
+                                    app.set_alert("subagent cancellation requested");
+                                } else {
+                                    app.set_alert("subagent already finished");
+                                }
+                            }
                             mew_tui::events::Action::InsertAtMention(mention) => {
                                 app.input.push_str(&mention);
                                 app.cursor += mention.len();
+                            }
+                            mew_tui::events::Action::InsertSubagentMention(name) => {
+                                let mention = format!("@{} ", name);
+                                app.input.push_str(&mention);
+                                app.cursor += mention.len();
+                            }
+                            mew_tui::events::Action::CopySelection(text) => {
+                                copy_to_clipboard(&text);
+                                app.set_alert(format!("copied {} chars", text.len()));
+                                app.clear_selection();
                             }
                             mew_tui::events::Action::SlashCommand(text) => {
                                 match app.handle_slash(&text) {
@@ -925,6 +1587,14 @@ async fn run_tui(
                                     mew_tui::SlashResult::OpenModelPicker => {
                                         // Deferred to main loop; ignored during drain.
                                     }
+                                    mew_tui::SlashResult::ToggleMouseCapture => {
+                                        // Deferred to main loop; ignored during drain.
+                                    }
+                                    mew_tui::SlashResult::PluginCommand { name, args } => {
+                                        // Deferred to main loop; ignored during drain.
+                                        let _ = name;
+                                        let _ = args;
+                                    }
                                 }
                             }
                             mew_tui::events::Action::SwitchModel(_) => {
@@ -932,6 +1602,38 @@ async fn run_tui(
                                 // requires mode=CommandPalette. The palette is never
                                 // open during heavy streaming, so this branch is
                                 // effectively unreachable in the drain path.
+                            }
+                            mew_tui::events::Action::SaveSettings
+                            | mew_tui::events::Action::SettingsEditStart
+                            | mew_tui::events::Action::SettingsEditComplete => {
+                                // Handled by ConfigEditor in settings mode
+                            }
+                            mew_tui::events::Action::OpenSettings => {
+                                let loader = mew_hooks_runtime::PluginLoader::new(
+                                    mew_hooks_runtime::PluginLoader::default_dirs(),
+                                );
+                                let state = mew_config::load_state().unwrap_or_default();
+                                let plugins: Vec<config_editor::PluginEntry> = loader
+                                    .discover_executables()
+                                    .into_iter()
+                                    .map(|path| {
+                                        let name = path
+                                            .file_stem()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .to_string();
+                                        let enabled = !state.disabled_plugins.contains(&name);
+                                        config_editor::PluginEntry {
+                                            name,
+                                            path: path.display().to_string(),
+                                            enabled,
+                                        }
+                                    })
+                                    .collect();
+                                let cfg = mew_config::load().unwrap_or_default();
+                                settings_editor =
+                                    Some(config_editor::ConfigEditor::new(cfg, plugins));
+                                app.mode = mew_tui::app::Mode::Settings;
                             }
                         }
                     }
@@ -973,6 +1675,15 @@ async fn run_tui(
             break Ok(());
         }
     };
+
+    // Save sidebar collapsed state for next session.
+    {
+        let mut save = mew_config::load_state().unwrap_or_default();
+        save.last_model = display_model.clone();
+        save.last_provider = display_provider.clone();
+        save.sidebar_collapsed = app.sidebar_collapsed.clone();
+        let _ = mew_config::save_state(&save);
+    }
 
     // Restore terminal.
     crossterm::terminal::disable_raw_mode()?;
@@ -1197,9 +1908,11 @@ async fn build_and_run(
     cat: Option<&Catalog>,
     provider_flag: &str,
     model_flag: Option<String>,
+    variant_flag: Option<String>,
     raw: bool,
     prompt: String,
 ) -> Result<()> {
+    let cat_for_resolver = cat.cloned();
     let (provider_id, model_id) = resolve_model(cfg, cat, provider_flag, model_flag);
 
     let provider =
@@ -1235,15 +1948,58 @@ async fn build_and_run(
     let mcp_configs = load_mcp_configs();
     let mut _mcp_clients: Vec<Arc<McpClient>> = Vec::new();
     if !mcp_configs.is_empty() {
-        let (mcp_tools, mcp_cls) = connect_mcp_servers(&mcp_configs).await;
+        let (mcp_tools, mcp_cls, _status) = connect_mcp_servers(&mcp_configs).await;
         tools.extend(mcp_tools);
         _mcp_clients = mcp_cls;
     }
 
     let permission_engine = build_permission_engine(cfg);
 
-    let mut agent = Agent::new(provider, dispatcher, Some(session_writer), tools, None);
+    let mut agent = Agent::new(
+        provider,
+        dispatcher.clone(),
+        Some(session_writer),
+        tools,
+        None,
+    );
     agent.set_permission_engine(permission_engine);
+    if cfg.workspace.roots.is_empty() {
+        agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
+    } else {
+        agent.workspace_roots = cfg.workspace.roots.clone();
+    }
+
+    // Wire up subagent infrastructure.
+    let subagent_defs = {
+        let loader = mew_subagents::Loader::new(std::env::current_dir().unwrap_or_default());
+        Arc::new(loader.load().unwrap_or_default())
+    };
+    if !subagent_defs.is_empty() {
+        let resolver = Arc::new(MainModelResolver {
+            cfg: Arc::new(cfg.clone()),
+            cat: cat_for_resolver.map(Arc::new),
+            default_provider_id: provider_id.clone(),
+            raw,
+        });
+        let runner = mew_agent::runner::SimpleRunner::new(
+            agent.provider.clone(),
+            agent.tools.values().cloned().collect(),
+            dispatcher.clone(),
+        )
+        .with_model_resolver(resolver);
+        agent.subagent_runner = Some(Arc::new(runner));
+        agent.subagent_defs = subagent_defs.to_vec();
+        agent.tools.insert(
+            "subagent_start".into(),
+            Arc::new(mew_tools::tools::subagent_start::SubagentStart::new(
+                subagent_defs.clone(),
+            )),
+        );
+        agent.tools.insert(
+            "subagent_wait".into(),
+            Arc::new(mew_tools::tools::subagent_wait::SubagentWait::new()),
+        );
+    }
 
     // Set vision capability and pricing from catalog.
     if let Some(c) = cat {
@@ -1268,6 +2024,12 @@ async fn build_and_run(
         let mut system = agent.system.clone();
         system.push_str(&build_skills_xml(&skills));
         agent.set_system(system);
+    }
+
+    let reasoning = resolve_reasoning(cat, &model_id, variant_flag.as_deref());
+    if let Some(r) = reasoning {
+        agent.set_reasoning(Some(r));
+        info!(variant = ?variant_flag, model = %model_id, "enabled thinking variant");
     }
 
     let mut rx = agent.run(prompt);
@@ -1348,6 +2110,24 @@ async fn build_and_run(
             mew_agent::AgentEvent::Error(msg) => {
                 anyhow::bail!("agent error: {}", msg);
             }
+            mew_agent::AgentEvent::SubagentStart {
+                name: _,
+                child_session_id: _,
+                ..
+            } => {}
+            mew_agent::AgentEvent::SubagentProgress { .. } => {}
+            mew_agent::AgentEvent::SubagentEnd {
+                child_session_id: _,
+                ..
+            } => {}
+            mew_agent::AgentEvent::SubagentPermissionRequest { call, tx, .. } => {
+                let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+                let _ = call;
+            }
+            mew_agent::AgentEvent::WorkspacePermissionRequest { tx, .. } => {
+                // Non-interactive mode: auto-allow workspace access.
+                let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+            }
         }
     }
 
@@ -1393,7 +2173,6 @@ fn resolve_model(
 
 fn is_known_provider(cfg: &Config, provider_id: &str) -> bool {
     cfg.providers.contains_key(provider_id)
-        || matches!(provider_id, "opencode-zen" | "opencode-go" | "z-ai")
 }
 
 fn build_provider(
@@ -1407,41 +2186,6 @@ fn build_provider(
         .providers
         .get(provider_id)
         .cloned()
-        .or_else(|| match provider_id {
-            "opencode-zen" => Some(ProviderConfig {
-                shape: "openai".to_string(),
-                base_url: "https://opencode.ai/zen/v1".to_string(),
-                credential_ref: "opencode-zen".to_string(),
-                kind: "direct".into(),
-                small: String::new(),
-                big: String::new(),
-            }),
-            "opencode-go" => Some(ProviderConfig {
-                shape: "openai".to_string(),
-                base_url: "https://opencode.ai/zen/go/v1".to_string(),
-                credential_ref: "opencode-zen".to_string(),
-                kind: "direct".into(),
-                small: String::new(),
-                big: String::new(),
-            }),
-            "z-ai" => Some(ProviderConfig {
-                shape: "anthropic".to_string(),
-                base_url: "https://api.z.ai/api/anthropic/v1".to_string(),
-                credential_ref: "z-ai".to_string(),
-                kind: "direct".into(),
-                small: String::new(),
-                big: String::new(),
-            }),
-            "deepseek" => Some(ProviderConfig {
-                shape: "deepseek".to_string(),
-                base_url: "https://api.deepseek.ai/v1".to_string(),
-                credential_ref: "deepseek".to_string(),
-                kind: "direct".into(),
-                small: String::new(),
-                big: String::new(),
-            }),
-            _ => None,
-        })
         .with_context(|| format!("unknown provider {}", provider_id))?;
 
     let creds = mew_config::get_credential(&pc.credential_ref).context("get credential")?;
@@ -1518,5 +2262,99 @@ fn build_provider(
             Ok(Arc::new(adapter))
         }
         _ => anyhow::bail!("unsupported shape {} for provider {}", shape, provider_id),
+    }
+}
+
+async fn toggle_mouse_capture(
+    app: &mut mew_tui::App,
+    terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+) {
+    app.mouse_capture = !app.mouse_capture;
+    if app.mouse_capture {
+        let _ = crossterm::execute!(terminal.backend_mut(), crossterm::event::EnableMouseCapture);
+        app.messages.push(synthetic_message(
+            "mouse capture enabled (use /mouse to select text)".into(),
+        ));
+    } else {
+        let _ = crossterm::execute!(
+            terminal.backend_mut(),
+            crossterm::event::DisableMouseCapture,
+        );
+        app.messages.push(synthetic_message(
+            "mouse capture disabled \u{2014} native text selection enabled".into(),
+        ));
+    }
+}
+
+fn copy_to_clipboard(text: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &format!("set the clipboard to \"{}\"", escaped)])
+            .output();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("wl-copy").arg(text).output();
+        let _ = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .arg(text)
+            .output();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let escaped = text.replace('\'', "''");
+        let _ = std::process::Command::new("powershell")
+            .args([
+                "-command",
+                &format!(
+                    "Add-Type -AssemblyName System.Windows.Forms; \
+                     [System.Windows.Forms.Clipboard]::SetText('{}')",
+                    escaped
+                ),
+            ])
+            .output();
+    }
+}
+
+/// Produce a short display label for a context file path.
+fn context_display_name(path: &std::path::Path) -> String {
+    let leaf = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        let config_base = home.join(".config").join("mew");
+        if path.starts_with(&config_base) {
+            return format!("global {leaf}");
+        }
+        let claude_base = home.join(".claude");
+        if path.starts_with(&claude_base) {
+            return format!("global {leaf}");
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        if parent.file_name().is_some_and(|n| n == ".mew") {
+            if let Some(gp) = parent.parent() {
+                let dir = gp.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if dir.is_empty() {
+                    return format!(".mew/{leaf}");
+                }
+                return format!("{dir}/.mew/{leaf}");
+            }
+            return format!(".mew/{leaf}");
+        }
+    }
+
+    let dir = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if dir.is_empty() {
+        leaf.to_string()
+    } else {
+        format!("{leaf} in {dir}/")
     }
 }

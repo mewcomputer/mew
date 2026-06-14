@@ -29,6 +29,34 @@ pub enum AgentEvent {
     ToolProgress { call_id: String, chunk: String },
     /// A terminal error occurred.
     Error(String),
+    /// Request user approval for a path outside the workspace.
+    WorkspacePermissionRequest {
+        path: std::path::PathBuf,
+        tx: oneshot::Sender<PermissionDecision>,
+    },
+    /// A subagent has started executing.
+    SubagentStart {
+        parent_call_id: String,
+        name: String,
+        child_session_id: String,
+    },
+    /// An event from within a running subagent.
+    SubagentProgress {
+        parent_call_id: String,
+        child_event: Box<AgentEvent>,
+    },
+    /// A subagent has finished executing.
+    SubagentEnd {
+        parent_call_id: String,
+        child_session_id: String,
+        outcome: mew_subagents::SubagentOutcome,
+    },
+    /// A permission request from a child subagent.
+    SubagentPermissionRequest {
+        parent_call_id: String,
+        call: HookToolCall,
+        tx: oneshot::Sender<PermissionDecision>,
+    },
 }
 
 impl std::fmt::Debug for AgentEvent {
@@ -59,16 +87,63 @@ impl std::fmt::Debug for AgentEvent {
                 .field("chunk", chunk)
                 .finish(),
             AgentEvent::Error(msg) => f.debug_tuple("Error").field(msg).finish(),
+            AgentEvent::WorkspacePermissionRequest { path, .. } => f
+                .debug_struct("WorkspacePermissionRequest")
+                .field("path", path)
+                .finish(),
+            AgentEvent::SubagentStart {
+                parent_call_id,
+                name,
+                child_session_id,
+            } => f
+                .debug_struct("SubagentStart")
+                .field("parent_call_id", parent_call_id)
+                .field("name", name)
+                .field("child_session_id", child_session_id)
+                .finish(),
+            AgentEvent::SubagentProgress {
+                parent_call_id,
+                child_event,
+            } => f
+                .debug_struct("SubagentProgress")
+                .field("parent_call_id", parent_call_id)
+                .field("child_event", child_event)
+                .finish(),
+            AgentEvent::SubagentEnd {
+                parent_call_id,
+                child_session_id,
+                outcome,
+            } => f
+                .debug_struct("SubagentEnd")
+                .field("parent_call_id", parent_call_id)
+                .field("child_session_id", child_session_id)
+                .field("outcome", outcome)
+                .finish(),
+            AgentEvent::SubagentPermissionRequest {
+                parent_call_id,
+                call,
+                ..
+            } => f
+                .debug_struct("SubagentPermissionRequest")
+                .field("parent_call_id", parent_call_id)
+                .field("call", call)
+                .finish(),
         }
     }
 }
 
 mod agent;
 mod events;
+pub mod runner;
 mod tools;
 mod turn;
+mod workspace;
 
 pub use agent::Agent;
+pub use mew_subagents::SubagentOutcome;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod hooks_tests;

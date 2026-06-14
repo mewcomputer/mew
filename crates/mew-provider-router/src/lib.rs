@@ -131,6 +131,7 @@ mod tests {
             messages: vec![],
             tools: vec![],
             system: String::new(),
+            reasoning: None,
         };
 
         // For an empty conversation, the router should select small.
@@ -168,6 +169,7 @@ mod tests {
             messages: vec![msg],
             tools: vec![],
             system: String::new(),
+            reasoning: None,
         };
 
         let provider = router.select(&req);
@@ -200,6 +202,7 @@ mod tests {
             messages,
             tools: vec![],
             system: String::new(),
+            reasoning: None,
         };
 
         let provider = router.select(&req);

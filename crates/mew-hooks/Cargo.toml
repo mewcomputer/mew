@@ -9,5 +9,9 @@ license.workspace = true
 mew-message = { workspace = true }
 mew-provider = { workspace = true }
 async-trait = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 http = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }

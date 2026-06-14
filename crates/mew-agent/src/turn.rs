@@ -71,7 +71,21 @@ impl Agent {
         &self,
         ev_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut turn_count: u32 = 0;
         loop {
+            if let Some(max) = self.max_turns {
+                if turn_count >= max {
+                    tracing::info!(turn_count, max, "max turns reached");
+                    let _ = ev_tx
+                        .send(AgentEvent::Error(format!(
+                            "max turns exceeded ({} turns)",
+                            turn_count
+                        )))
+                        .await;
+                    return Ok(());
+                }
+            }
+            turn_count += 1;
             let tool_defs: Vec<ToolDef> = self
                 .tools
                 .values()
@@ -141,11 +155,14 @@ impl Agent {
                     .await;
             }
 
+            let system = self.dispatcher.on_system_prompt(self.system.clone()).await;
+
             let req = Request {
                 model: String::new(),
                 messages,
                 tools: tool_defs,
-                system: self.system.clone(),
+                system,
+                reasoning: self.reasoning.clone(),
             };
 
             let _ = self
@@ -246,8 +263,15 @@ impl Agent {
                 return Ok(());
             }
 
-            let pending = self.pending_tool_calls(assistant_msg.as_ref().unwrap());
+            let msg = assistant_msg.as_ref().ok_or_else(|| {
+                Box::<dyn std::error::Error + Send + Sync>::from(
+                    "assistant message missing after stream ended".to_string(),
+                )
+            })?;
+            let pending = self.pending_tool_calls(msg);
             if pending.is_empty() {
+                let messages = self.messages.lock().await.clone();
+                self.dispatcher.on_turn_end(&messages).await;
                 return Ok(());
             }
 
@@ -280,6 +304,12 @@ impl Agent {
                 assistant: None,
             };
             self.append_message(result_msg).await;
+
+            let messages = self.messages.lock().await.clone();
+            let dispatcher = self.dispatcher.clone();
+            tokio::spawn(async move {
+                dispatcher.on_turn_end(&messages).await;
+            });
         }
     }
 }

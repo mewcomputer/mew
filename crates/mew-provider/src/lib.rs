@@ -31,6 +31,24 @@ pub struct Request {
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDef>,
     pub system: String,
+    /// Reasoning/thinking configuration. The `params` are merged into the
+    /// request body by the adapter, so each provider gets the fields it needs.
+    pub reasoning: Option<ReasoningConfig>,
+}
+
+/// Per-provider reasoning/thinking configuration.
+///
+/// Carried on [`Request`]. The `params` map is shallow-merged into the
+/// top-level request body JSON by each adapter.
+///
+/// Examples:
+/// - OpenAI: `{"reasoning_effort": "high"}`
+/// - Anthropic: `{"thinking": {"type": "enabled", "budget_tokens": 16000}}`
+/// - z-ai GLM: `{"thinking": {"type": "enabled"}}`
+#[derive(Debug, Clone, Default)]
+pub struct ReasoningConfig {
+    /// Provider-specific fields to merge into the request body.
+    pub params: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]

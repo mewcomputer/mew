@@ -73,9 +73,17 @@ impl Tool for Edit {
         }
 
         let new_content = content.replacen(old, new, 1);
-        tokio::fs::write(&path, &new_content)
+
+        // Atomic write: write to a temp file in the same directory, then rename.
+        let parent_dir = path.parent().unwrap_or(std::path::Path::new("."));
+        let tmp = parent_dir.join(format!(".mew-tmp-{}", ulid::Ulid::new()));
+        tokio::fs::write(&tmp, &new_content)
             .await
             .map_err(|e| ToolError::Execution(format!("write failed: {}", e)))?;
+        if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(ToolError::Execution(format!("rename failed: {}", e)));
+        }
 
         let diff = make_unified_diff(&content, &new_content, &path);
 

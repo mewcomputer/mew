@@ -58,9 +58,16 @@ impl Tool for Write {
                 .map_err(|e| ToolError::Execution(format!("create dirs failed: {}", e)))?;
         }
 
-        tokio::fs::write(&path, content)
+        // Atomic write: write to a temp file in the same directory, then rename.
+        let parent_dir = path.parent().unwrap_or(std::path::Path::new("."));
+        let tmp = parent_dir.join(format!(".mew-tmp-{}", ulid::Ulid::new()));
+        tokio::fs::write(&tmp, content)
             .await
             .map_err(|e| ToolError::Execution(format!("write failed: {}", e)))?;
+        if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(ToolError::Execution(format!("rename failed: {}", e)));
+        }
 
         let diff = if let Some(ref old) = old_content {
             let old_len = old.len();
