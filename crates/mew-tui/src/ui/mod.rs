@@ -117,6 +117,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
     }
 
+    if app.mode == Mode::UserQuestion {
+        if let Some(ref uq) = app.user_question {
+            overlays::draw_user_question_modal(f, uq, main_area);
+        }
+    }
+
     if app.mode == Mode::CommandPalette {
         if let Some(ref mut picker) = app.picker {
             overlays::draw_picker(f, picker, main_area);

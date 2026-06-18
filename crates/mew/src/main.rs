@@ -19,6 +19,7 @@ use mew_provider::Provider;
 use mew_provider_anthropic::Adapter as AnthropicAdapter;
 use mew_provider_openai::Adapter as OpenAIAdapter;
 use mew_session::Writer as SessionWriter;
+use mew_tools::tools::ask_user::AskUser;
 use mew_tools::tools::bash::Bash;
 use mew_tools::tools::echo::Echo;
 use mew_tools::tools::edit::Edit;
@@ -317,6 +318,7 @@ fn build_tools(skills: Arc<Vec<mew_skills::Skill>>) -> Vec<Arc<dyn mew_tools::To
         Arc::new(Echo),
         Arc::new(ExitTool),
         Arc::new(ProgressUpdate),
+        Arc::new(AskUser),
     ];
     if !skills.is_empty() {
         tools.push(Arc::new(Skill::new(skills)));
@@ -2188,6 +2190,13 @@ async fn build_and_run(
             mew_agent::AgentEvent::WorkspacePermissionRequest { tx, .. } => {
                 // Non-interactive mode: auto-allow workspace access.
                 let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+            }
+            mew_agent::AgentEvent::AskUser { tx, .. } => {
+                // Non-interactive mode: no TUI to answer. Dropping `tx`
+                // cancels the call so the model gets a clear "cancelled"
+                // result instead of hanging.
+                eprintln!("\n[ask_user_question: cancelled — no TUI in non-interactive mode]");
+                drop(tx);
             }
         }
     }

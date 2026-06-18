@@ -166,3 +166,12 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - The agent shares one `Arc<SecretSet>` (built from config via `build_secret_set`) across all tool calls; `tools.rs:319` clones the Arc into each `ToolCtx`.
 - `read` is already covered by the permission guard from the previous commit; bash output is not filtered (it's a different threat surface — running commands, not searching files — and already `Dangerous`-gated).
 - 5 new tests: 3 unit tests on `filter_output` (word redaction, secret-file drop, noop-when-empty) + 1 grep end-to-end + 1 glob end-to-end. Plus 1 config-parsing test for `[[secrets.words]]`. Total: mew-tools 33 → 38, mew-config 30 → 31.
+
+### 2026-06-18: ask_user_question tool
+
+- New `ask_user_question` tool lets the model ask the user 1-4 free-text questions when their answer would change its next step, blocking until the user responds.
+- Agent-intercepted (like `subagent_start`): the tool is a marker whose `execute()` errors; `execute_ask_user` in `mew-agent/src/tools.rs` parses the questions, sends `AgentEvent::AskUser { call_id, questions, tx }` over a oneshot, and awaits the answers. The result text is formatted as `Q: <prompt>\nA: <answer>` pairs. Goes straight to Completed (no Running state — the modal is the waiting indicator).
+- New `AskUserQuestion { prompt, default }` payload type and `AgentEvent::AskUser` variant in `mew-agent/src/lib.rs`.
+- TUI: new `Mode::UserQuestion` + `UserQuestionState` (`app.rs`), modal in `overlays.rs` (`draw_user_question_modal`) showing each prompt with its input field (defaults pre-filled, focused one highlighted, cursor placed), input handler in `events.rs` (type/backspace/tab-or-down to switch/up to reverse/enter to submit/esc to cancel). Submit sends answers through the oneshot; cancel drops it, which the handler turns into a "cancelled" tool result.
+- Non-interactive `mew run` path drops the tx on `AskUser` (no TUI to answer) so the model gets a clear "cancelled" result instead of hanging. ACP server mode has the same behavior; routing `AskUser` through ACP's `session/request_permission` is a follow-up.
+- Tests: 2 mew-tools (metadata + execute-errors-when-not-intercepted) + 3 mew-tui (event stores state + sets mode, submit returns typed answers, cancel drops without sending). Total: mew-tools 38 → 40, mew-tui 21 → 24.

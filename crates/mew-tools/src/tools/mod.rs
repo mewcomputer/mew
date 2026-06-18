@@ -1,3 +1,4 @@
+pub mod ask_user;
 pub mod bash;
 pub mod echo;
 pub mod edit;

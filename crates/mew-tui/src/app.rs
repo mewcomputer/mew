@@ -66,6 +66,8 @@ pub struct App {
     pub status: Status,
     /// Pending permission request, if any.
     pub permission: Option<PermissionState>,
+    /// Pending ask_user_question prompt, if any.
+    pub user_question: Option<UserQuestionState>,
     /// Map of part_id -> display state for tool calls.
     pub tool_states: HashMap<PartId, ToolDisplayState>,
     /// Input history (previous prompts).
@@ -179,6 +181,7 @@ pub enum Mode {
     SlashCommand,
     CommandPalette,
     Settings,
+    UserQuestion,
 }
 
 /// A single item in the command palette.
@@ -267,6 +270,18 @@ pub struct PermissionState {
     pub selected: usize,
 }
 
+/// A pending `ask_user_question` prompt shown to the user as a modal with one
+/// free-text input per question.
+#[derive(Debug)]
+pub struct UserQuestionState {
+    pub call_id: String,
+    pub questions: Vec<String>,
+    pub answers: Vec<String>,
+    /// Index of the question currently accepting input.
+    pub current: usize,
+    pub tx: Option<tokio::sync::oneshot::Sender<Vec<String>>>,
+}
+
 #[derive(Debug, Clone)]
 pub enum ToolDisplayState {
     Running,
@@ -288,6 +303,7 @@ impl App {
             mode: Mode::Normal,
             status: Status::default(),
             permission: None,
+            user_question: None,
             tool_states: HashMap::new(),
             history: Vec::new(),
             history_index: None,
@@ -1259,6 +1275,25 @@ impl App {
                     selected: 0,
                 });
             }
+            AgentEvent::AskUser {
+                call_id,
+                questions,
+                tx,
+            } => {
+                let prompts: Vec<String> = questions.iter().map(|q| q.prompt.clone()).collect();
+                let answers: Vec<String> = questions
+                    .iter()
+                    .map(|q| q.default.clone().unwrap_or_default())
+                    .collect();
+                self.mode = Mode::UserQuestion;
+                self.user_question = Some(UserQuestionState {
+                    call_id,
+                    questions: prompts,
+                    answers,
+                    current: 0,
+                    tx: Some(tx),
+                });
+            }
             AgentEvent::ToolStart { call_id } => {
                 // Find the tool call part and mark as running.
                 for msg in self.messages.iter_mut().rev() {
@@ -1442,6 +1477,64 @@ impl App {
             } else {
                 perm.selected - 1
             };
+        }
+    }
+
+    /// Submit the user's answers and return them to the blocked tool.
+    pub fn submit_user_question(&mut self) {
+        if let Some(uq) = self.user_question.take() {
+            if let Some(tx) = uq.tx {
+                let _ = tx.send(uq.answers);
+            }
+        }
+        self.mode = Mode::Normal;
+    }
+
+    /// Cancel the question prompt. Dropping `tx` without sending makes the
+    /// agent's `rx.await` return `Err`, which the handler turns into a
+    /// cancelled tool result.
+    pub fn cancel_user_question(&mut self) {
+        self.user_question = None;
+        self.mode = Mode::Normal;
+    }
+
+    /// Move focus to the next question (wraps).
+    pub fn user_question_next(&mut self) {
+        if let Some(ref mut uq) = self.user_question {
+            if !uq.questions.is_empty() {
+                uq.current = (uq.current + 1) % uq.questions.len();
+            }
+        }
+    }
+
+    /// Move focus to the previous question (wraps).
+    pub fn user_question_prev(&mut self) {
+        if let Some(ref mut uq) = self.user_question {
+            if !uq.questions.is_empty() {
+                uq.current = if uq.current == 0 {
+                    uq.questions.len() - 1
+                } else {
+                    uq.current - 1
+                };
+            }
+        }
+    }
+
+    /// Append a character to the currently-focused answer.
+    pub fn user_question_type_char(&mut self, c: char) {
+        if let Some(ref mut uq) = self.user_question {
+            if let Some(answer) = uq.answers.get_mut(uq.current) {
+                answer.push(c);
+            }
+        }
+    }
+
+    /// Delete the last character from the currently-focused answer.
+    pub fn user_question_backspace(&mut self) {
+        if let Some(ref mut uq) = self.user_question {
+            if let Some(answer) = uq.answers.get_mut(uq.current) {
+                answer.pop();
+            }
         }
     }
 }
@@ -1772,5 +1865,90 @@ mod tests {
         assert_eq!(app.subagents.len(), 1);
         assert_eq!(app.subagents[0].name, "researcher");
         assert!(app.subagents[0].display_name.is_none());
+    }
+
+    #[test]
+    fn test_ask_user_event_stores_state_and_sets_mode() {
+        use mew_agent::{AgentEvent, AskUserQuestion};
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+        app.handle_agent_event(AgentEvent::AskUser {
+            call_id: "c1".into(),
+            questions: vec![
+                AskUserQuestion {
+                    prompt: "which branch?".into(),
+                    default: Some("main".into()),
+                },
+                AskUserQuestion {
+                    prompt: "confirm?".into(),
+                    default: None,
+                },
+            ],
+            tx,
+        });
+        assert_eq!(app.mode, Mode::UserQuestion);
+        let uq = app.user_question.as_ref().expect("question stored");
+        assert_eq!(uq.questions, vec!["which branch?", "confirm?"]);
+        assert_eq!(
+            uq.answers,
+            vec!["main", ""],
+            "default prefilled, rest empty"
+        );
+        assert_eq!(uq.current, 0);
+    }
+
+    #[test]
+    fn test_submit_user_question_returns_answers() {
+        use mew_agent::{AgentEvent, AskUserQuestion};
+        let mut app = App::new();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+        app.handle_agent_event(AgentEvent::AskUser {
+            call_id: "c1".into(),
+            questions: vec![
+                AskUserQuestion {
+                    prompt: "branch?".into(),
+                    default: Some("main".into()),
+                },
+                AskUserQuestion {
+                    prompt: "scope?".into(),
+                    default: None,
+                },
+            ],
+            tx,
+        });
+        // Append to the first answer, switch, type two chars and delete one.
+        app.user_question_type_char('-');
+        app.user_question_type_char('x');
+        app.user_question_next();
+        app.user_question_type_char('a');
+        app.user_question_type_char('b');
+        app.user_question_backspace();
+        app.submit_user_question();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.user_question.is_none());
+        let answers = rx.try_recv().expect("answers sent");
+        assert_eq!(answers, vec!["main-x", "a"]);
+    }
+
+    #[test]
+    fn test_cancel_user_question_drops_without_sending() {
+        use mew_agent::{AgentEvent, AskUserQuestion};
+        let mut app = App::new();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+        app.handle_agent_event(AgentEvent::AskUser {
+            call_id: "c1".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "q".into(),
+                default: None,
+            }],
+            tx,
+        });
+        assert_eq!(app.mode, Mode::UserQuestion);
+        app.cancel_user_question();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.user_question.is_none());
+        // Sender was dropped without sending → the receiver sees a disconnect,
+        // which the agent handler turns into a "cancelled" tool result.
+        assert!(rx.try_recv().is_err());
     }
 }

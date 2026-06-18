@@ -85,6 +85,12 @@ impl Agent {
                 continue;
             }
 
+            if tc.tool_name == "ask_user_question" {
+                self.execute_ask_user(tc, assistant_msg, ev_tx, &mut result_parts)
+                    .await;
+                continue;
+            }
+
             // Mark as running.
             let running_state = ToolState::Running(ToolStateRunning {
                 input: tc.input().clone(),
@@ -886,6 +892,125 @@ impl Agent {
                 }
             }
             Err(e) => (format!("error: {}", e), false),
+        };
+
+        let final_state = if success {
+            ToolState::Completed(ToolStateCompleted {
+                input: input.clone(),
+                output,
+                metadata: None,
+                diff: None,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        } else {
+            ToolState::Error(ToolStateError {
+                input: input.clone(),
+                error: output,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        };
+
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, final_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: final_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::ToolEnd {
+                call_id: call_id.clone(),
+                success,
+            })
+            .await;
+
+        result_parts.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            call_id: tc.call_id.clone(),
+        }));
+    }
+
+    async fn execute_ask_user(
+        &self,
+        tc: &ToolCallPart,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        result_parts: &mut Vec<Part>,
+    ) {
+        let call_id = tc.call_id.clone();
+        let part_id = tc.base.id;
+        let input = tc.input().clone();
+
+        let assistant_id = match assistant_msg {
+            Some(ref msg) => msg.id,
+            None => return,
+        };
+
+        // Parse questions. The prompts stay here for result formatting; the
+        // AskUserQuestion structs move into the event.
+        let parsed: Vec<String> = input
+            .get("questions")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|q| q.get("prompt").and_then(|v| v.as_str()).map(String::from))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+
+        let (output, success) = if parsed.is_empty() {
+            ("ask_user_question received no questions".to_string(), false)
+        } else {
+            let questions: Vec<crate::AskUserQuestion> = parsed
+                .iter()
+                .map(|prompt| crate::AskUserQuestion {
+                    prompt: prompt.clone(),
+                    default: None,
+                })
+                .collect();
+            let (tx, rx) = oneshot::channel();
+            let _ = ev_tx
+                .send(AgentEvent::AskUser {
+                    call_id: call_id.clone(),
+                    questions,
+                    tx,
+                })
+                .await;
+            match rx.await {
+                Ok(answers) => {
+                    let mut text = String::new();
+                    for (i, prompt) in parsed.iter().enumerate() {
+                        let answer = answers.get(i).map(|s| s.as_str()).unwrap_or("(no answer)");
+                        if !text.is_empty() {
+                            text.push_str("\n\n");
+                        }
+                        text.push_str(&format!("Q: {}\nA: {}", prompt, answer));
+                    }
+                    (text, true)
+                }
+                Err(_) => (
+                    "ask_user_question cancelled (no response received)".to_string(),
+                    false,
+                ),
+            }
         };
 
         let final_state = if success {

@@ -10,6 +10,15 @@ use mew_session::Writer as SessionWriterInner;
 /// Alias for the interior-mutability wrapper required by the async agent loop.
 pub type SessionWriter = Arc<Mutex<SessionWriterInner>>;
 
+/// One question in an `ask_user_question` request. Carried from the tool
+/// through `AgentEvent::AskUser` to the TUI, which renders it as a free-text
+/// input and returns the answer.
+#[derive(Debug, Clone)]
+pub struct AskUserQuestion {
+    pub prompt: String,
+    pub default: Option<String>,
+}
+
 /// Events emitted by the agent core to the TUI.
 pub enum AgentEvent {
     /// A raw provider event.
@@ -68,6 +77,13 @@ pub enum AgentEvent {
         parent_call_id: String,
         call: HookToolCall,
         tx: oneshot::Sender<PermissionDecision>,
+    },
+    /// Ask the user one to four free-text questions. The tool blocks until the
+    /// user answers; the answers become the tool's result text.
+    AskUser {
+        call_id: String,
+        questions: Vec<AskUserQuestion>,
+        tx: oneshot::Sender<Vec<String>>,
     },
 }
 
@@ -151,6 +167,13 @@ impl std::fmt::Debug for AgentEvent {
                 .field("parent_call_id", parent_call_id)
                 .field("tool_name", tool_name)
                 .field("message", message)
+                .finish(),
+            AgentEvent::AskUser {
+                call_id, questions, ..
+            } => f
+                .debug_struct("AskUser")
+                .field("call_id", call_id)
+                .field("questions", questions)
                 .finish(),
         }
     }

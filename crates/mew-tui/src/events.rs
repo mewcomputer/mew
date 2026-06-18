@@ -101,6 +101,7 @@ pub fn handle_input_event(app: &mut crate::app::App, event: CrosstermEvent) -> O
 pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     match app.mode {
         crate::app::Mode::PermissionPrompt => handle_permission_key(app, key),
+        crate::app::Mode::UserQuestion => handle_user_question_key(app, key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
         crate::app::Mode::Normal | crate::app::Mode::SlashCommand => handle_normal_key(app, key),
         // Settings mode key handling is done by ConfigEditor in main.rs
@@ -283,6 +284,36 @@ fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Act
             if let Some(d) = decision {
                 app.send_permission_decision(d);
             }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Enter => {
+            app.submit_user_question();
+            None
+        }
+        KeyCode::Esc => {
+            app.cancel_user_question();
+            None
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            app.user_question_next();
+            None
+        }
+        KeyCode::Up => {
+            app.user_question_prev();
+            None
+        }
+        KeyCode::Backspace => {
+            app.user_question_backspace();
+            None
+        }
+        KeyCode::Char(c) => {
+            app.user_question_type_char(c);
             None
         }
         _ => None,

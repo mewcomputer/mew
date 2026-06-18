@@ -7,7 +7,9 @@ use ratatui::{
 };
 
 use super::{DIVIDER, STATUS_BG};
-use crate::app::{App, PermissionState, PickerState, SlashCommand, PICKER_VISIBLE_ITEMS};
+use crate::app::{
+    App, PermissionState, PickerState, SlashCommand, UserQuestionState, PICKER_VISIBLE_ITEMS,
+};
 
 pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCommand], area: Rect) {
     let bg = Block::default().style(Style::default().bg(STATUS_BG));
@@ -150,6 +152,80 @@ pub(super) fn draw_permission_modal(f: &mut Frame, perm: &PermissionState, area:
         1,
     );
     f.render_widget(Paragraph::new(Line::from(option_lines)), option_area);
+}
+
+pub(super) fn draw_user_question_modal(f: &mut Frame, uq: &UserQuestionState, area: Rect) {
+    // Each question takes 3 lines (prompt, answer, blank) + a hint line.
+    let per_q: u16 = 3;
+    let width = 64u16.min(area.width.saturating_sub(4));
+    let height = (3 + per_q * uq.questions.len() as u16).min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+    let bg = Block::default().style(Style::default().bg(STATUS_BG));
+    f.render_widget(bg, popup);
+
+    let inner = Rect::new(
+        popup.x + 2,
+        popup.y + 1,
+        popup.width.saturating_sub(4),
+        popup.height.saturating_sub(2),
+    );
+
+    let mut text = Text::default();
+    for (i, prompt) in uq.questions.iter().enumerate() {
+        let focused = i == uq.current;
+        let prompt_style = if focused {
+            Style::default()
+                .fg(Color::Cyan)
+                .bg(STATUS_BG)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray).bg(STATUS_BG)
+        };
+        let answer_style = if focused {
+            Style::default().fg(Color::White).bg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::Gray).bg(STATUS_BG)
+        };
+        let answer = uq.answers.get(i).map(|s| s.as_str()).unwrap_or("");
+        text.push_line(Line::from(Span::styled(
+            format!(" {}", prompt),
+            prompt_style,
+        )));
+        text.push_line(Line::from(Span::styled(
+            format!("  {}", answer),
+            answer_style,
+        )));
+        text.push_line(Line::from(""));
+    }
+
+    f.render_widget(Paragraph::new(text), inner);
+
+    // Hint at the bottom.
+    let hint_style = Style::default().fg(Color::DarkGray).bg(STATUS_BG);
+    let hint_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(1),
+        inner.width,
+        1,
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "enter submit · tab next · esc cancel",
+            hint_style,
+        ))),
+        hint_area,
+    );
+
+    // Place the cursor at the end of the focused answer.
+    if let Some(answer) = uq.answers.get(uq.current) {
+        let row = inner.y + (uq.current as u16) * per_q + 1;
+        let col = inner.x + 2 + (answer.chars().count() as u16).min(inner.width.saturating_sub(4));
+        f.set_cursor_position((col, row));
+    }
 }
 
 pub(super) fn draw_picker(f: &mut Frame, picker: &mut PickerState, area: Rect) {
