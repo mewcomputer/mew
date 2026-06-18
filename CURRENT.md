@@ -91,3 +91,42 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - **5. auto-delivery (sync default)**: `subagent_start` gains `async: bool = false`. Default blocks until done, returns final result. `subagent_wait` becomes the opt-in async path.
 - **6. cancel**: per-task `CancellationToken` (child of parent's). Sidebar keybinding (`x`). Cascading on parent cancel. `wait` returns `Cancelled` on mid-wait cancel.
 - **7. per-subagent model override**: `def.model.unwrap_or(parent_model)`. Future session pop-in (`<parent>/subagents/<child>`) unlocks viewing subagent transcripts.
+
+### 2026-06-14: bug fixes + subagent time limit
+
+- **plugin settings persistence** (3 layered bugs): `ConfigEditor::save()` only wrote `config.toml`, not `state.toml` (config_editor.rs:525). Model-switch paths in main.rs:1271 and main.rs:1364 constructed a fresh `State` with `disabled_plugins: Vec::new()` and `save_state`'d it, wiping any prior state. Now: `save()` also writes `disabled_plugins` from `self.plugins` (load + mutate + save, preserving other state fields); model switches load existing state and mutate in place. Added `mew_config::save_state_to` for testable roundtrips; 2 mew-config tests.
+- **config editor toast height** (config_editor.rs:975): `centered_rect` used `Constraint::Percentage` for height — `3%` of a 24-row terminal rounds to 0/1 rows, so the toast's `Borders::ALL` consumed the only available row leaving just the top border visible. Rewrote to `Constraint::Length` for both axes. Also fixed the "New Provider" naming popup, same bug.
+- **streaming tool-call input not persisted** (mew-agent): both providers' `acc.finalize()` parsed `arguments` from streamed deltas into a `Value`, but only into a local copy that was never re-emitted to the agent. `state.input` stayed at `Value::Null` for the entire stream. Effect: every tool call on disk had `"input": null`; `subagent_start` was being called with `prompt = ""` (subagent did nothing). Fix: added `ToolState::set_input()` (mew-message) and `Agent::reconcile_tool_call_input()` hooked into the `PartEnd` event in `mew-agent/src/events.rs`. 4 mew-agent regression tests (3 unit + 1 streaming integration).
+- **subagent wall-clock cap**: existing `max_turns` (15-30 on built-ins) is the wrong primary safeguard — a stuck subagent in a tight tool loop burns tokens forever. Added `max_duration_secs` to `SubagentDef` (frontmatter + `AgentConfigOverride`), `hit_time_limit` to `SubagentResult::Complete`, time check in `SimpleRunner` at each `MessageEnd` (Duration comparison, ms resolution). Built-in defaults: 500 turns / 5 minutes (per request). All three tools.rs call sites destructure the new field and emit a parallel warning. 4 mew-agent runner tests (turn limit trips, time limit trips, neither trips, defaults apply).
+
+### 2026-06-15: subagent persistence surfaced
+
+- **Subagent transcript-loss bug**: when `Writer::open_subagent` failed, the runner logged a `warn!` and proceeded with no `Writer`, leaving the user with a subagent that ran but left no trace. Surfaced via new `session_unavailable: bool` field on `SubagentResult::Complete`; tools.rs dispatches now prefix the result with `warning: subagent transcript could not be written; result is unrecorded` (parallel to the existing time/turn limit warnings).
+- **Testability of the runner**: added `SimpleRunner::with_session_root(root)` so tests can target a tmp dir without env-var mutation (which races across tokio's parallel test threads). Two new tests: `test_subagent_writes_session_and_updates_parent_meta` (happy path) and `test_session_unavailable_when_cannot_open` (failure path).
+- **Bonus**: `MEW_SESSION_DIR` env var now overrides the global session dir (consistent with the project's `MEW_*` env-var pattern, useful for CI / sandboxed runs / multiple instances).
+- Also fixed a clippy `manual_range_contains` warning in the previous turn's time-limit test.
+
+### 2026-06-15: subagent exit_tool + progress_update
+
+- **`exit_tool`** (mew-tools/src/tools/exit_tool.rs): graceful-exit tool for subagents. Takes `final_answer: String`, echoes it as the tool's output, ReadOnly sensitivity. The runner detects the call by name (via `AgentEvent::PartUpdated`) and uses the part's `ToolState::Completed::output` as the subagent's `result_text` before breaking the loop. This lets a subagent say "I'm done, here's my final answer" without burning remaining turn/time budget.
+- **`progress_update`** (mew-tools/src/tools/progress_update.rs): informational status tool for subagents. Takes `message: String`, returns a confirmation. Calling it does not terminate the run. The tool-call event is forwarded as `SubagentEvent::ToolStart`/`ToolEnd` to the parent, so a UI can show what the subagent is doing.
+- **Runner changes** (mew-agent/src/runner.rs): tracks `call_id → tool_name` from `PartStart` events so it can emit `SubagentEvent::ToolStart { call_id, tool_name }` (the previous code only emitted `TextDelta`; `ToolStart`/`ToolEnd` were never sent, leaving a gap in the parent's visibility). Also watches `AgentEvent::PartUpdated` for the `exit_tool` Completed state to short-circuit the loop.
+- **Tests**: 3 new runner tests (`test_exit_tool_short_circuits_with_final_answer`, `test_progress_update_does_not_terminate_run`, `test_subagent_tool_start_end_events_emitted`) + 6 tool unit tests. Total: mew-agent 26 → 29, mew-tools 19 → 25.
+- **Note on UX**: the TUI doesn't yet render the `progress_update` message in a special way — the parent's view will show "subagent called: progress_update" via the existing `SubagentProgress` plumbing, but the message text isn't surfaced separately. That's a UI-side follow-up, not a runtime issue.
+
+### 2026-06-15: progress_update visible in sidebar
+
+- New `SubagentEvent::Progress { call_id, tool_name, message }` and `AgentEvent::SubagentStatus { parent_call_id, tool_name, message }` variants carry the subagent's `progress_update` message up through the runner → parent pump → TUI chain.
+- Runner mirrors the agent's `apply_delta` for `PartDelta { field: "arguments" }` and reconciles the streamed raw input into `state.input` at `PartEnd` time, so it can extract `message` for `progress_update` parts. (The agent's own reconcile also runs at PartEnd, but the runner doesn't share state with the agent's in-memory parts, so the runner has its own minimal copy.)
+- `SubagentState` got a `last_progress: Option<String>` field. `handle_agent_event` stores the latest message; the sidebar renders it under the subagent's row (truncated to fit, with `…`).
+- Fixed a related test-infra issue: `ScriptedProvider` was replaying the entire script on every `stream()` call, which made the runner loop forever for single-turn tests. Now it yields the script once and returns an empty stream for subsequent calls.
+- 1 new runner test (`test_progress_update_emits_subagent_progress_event`) + 1 new TUI test (`test_subagent_status_event_stores_progress`). 10x flake check clean. Total: mew-agent 28 → 29, mew-tui 19 → 20.
+
+### 2026-06-15: subagent personality names
+
+- Just for fun: every subagent run gets a human-friendly name ("Curie", "Turing", "Lovelace", etc.) picked from a 25-name pool. Two `researcher` runs at the same time can now be told apart in the sidebar.
+- New `mew_subagents::DISPLAY_NAMES: &[&str]` (25 names) and `pick_display_name(seed: u128) -> &'static str` (splitmix64-based, deterministic, no `rand` dep).
+- `SubagentEvent::Started` and `AgentEvent::SubagentStart` got `display_name: Option<String>`. Runner picks the name from the subagent's fresh `SessionId`, so different runs naturally get different names.
+- `SubagentState` got `display_name: Option<String>`. Sidebar renders the display name as the primary label, with the def name in parens: `▸ Curie (researcher)  3s`. Falls back to just the def name if no display name was set.
+- 4 new picker tests (deterministic, returns known name, covers full pool of 25 across 1000 ulids, distribution not too skewed) + 1 new runner test (Started event includes a valid display_name) + 1 new TUI test (state stores display_name).
+- Total: mew-agent 29 → 30, mew-tui 20 → 21, mew-subagents 10 → 14.
