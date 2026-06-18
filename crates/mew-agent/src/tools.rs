@@ -323,6 +323,7 @@ impl Agent {
                 progress_tx,
                 cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
                 dispatcher: Some(self.dispatcher.clone()),
+                secrets: self.secrets.clone(),
             };
 
             // Workspace sandbox check for path-based tools (skip bash/echo).

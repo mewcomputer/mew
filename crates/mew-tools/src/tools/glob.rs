@@ -78,6 +78,17 @@ impl Tool for Glob {
         .map_err(|e| ToolError::Execution(format!("glob join error: {}", e)))?;
         let mut files = files?;
 
+        // Drop results touching secret files.
+        if !ctx.secrets.globs.is_empty() {
+            let secret_matchers: Vec<globset::GlobMatcher> = ctx
+                .secrets
+                .globs
+                .iter()
+                .filter_map(|g| globset::Glob::new(g).ok().map(|g| g.compile_matcher()))
+                .collect();
+            files.retain(|f| !secret_matchers.iter().any(|m| m.is_match(f)));
+        }
+
         files.sort();
         Ok(ToolOutput {
             output: files.join("\n"),
@@ -100,6 +111,22 @@ mod tests {
             progress_tx: tokio::sync::mpsc::channel(1).0,
             cwd,
             dispatcher: None,
+            secrets: Default::default(),
+        }
+    }
+
+    fn ctx_with_secret_globs(cwd: PathBuf, globs: Vec<&str>) -> ToolCtx {
+        ToolCtx {
+            session_id: mew_message::SessionId::from(ulid::Ulid::new()),
+            call_id: "test".to_string(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            progress_tx: tokio::sync::mpsc::channel(1).0,
+            cwd,
+            dispatcher: None,
+            secrets: std::sync::Arc::new(crate::SecretSet {
+                words: vec![],
+                globs: globs.iter().map(|s| s.to_string()).collect(),
+            }),
         }
     }
 
@@ -143,5 +170,37 @@ mod tests {
         let result = tool.execute(ctx, input).await.unwrap();
         let files: Vec<&str> = result.output.lines().collect();
         assert_eq!(files.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_glob_drops_secret_files() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("main.rs"), "")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("secrets.toml"), "")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("creds.pem"), "")
+            .await
+            .unwrap();
+
+        let tool = Glob;
+        // Match everything, then confirm secret globs filter them out.
+        let ctx = ctx_with_secret_globs(dir.path().to_path_buf(), vec!["secrets.toml", "*.pem"]);
+        let input = serde_json::json!({"pattern": "*"});
+        let result = tool.execute(ctx, input).await.unwrap();
+        assert!(
+            result.output.contains("main.rs"),
+            "non-secret file passes through"
+        );
+        assert!(
+            !result.output.contains("secrets.toml"),
+            "literal secret file dropped"
+        );
+        assert!(
+            !result.output.contains("creds.pem"),
+            "glob-matched secret file dropped"
+        );
     }
 }

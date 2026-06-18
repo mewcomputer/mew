@@ -121,12 +121,14 @@ pub struct PermissionsConfig {
 
 /// Secrets configuration section. Files listed here are guarded: reads of
 /// matching paths force a permission prompt unless a literal (non-glob)
-/// allow rule explicitly permits that exact path. (Future: secret words get
-/// filtered from search-tool output.)
+/// allow rule explicitly permits that exact path. Words listed here are
+/// redacted from search-tool output before the model or user sees them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SecretsConfig {
     #[serde(default)]
     pub files: Vec<SecretFilesRule>,
+    #[serde(default)]
+    pub words: Vec<SecretWordsRule>,
 }
 
 /// A group of secret-file glob patterns.
@@ -134,6 +136,13 @@ pub struct SecretsConfig {
 pub struct SecretFilesRule {
     #[serde(default)]
     pub paths: Vec<String>,
+}
+
+/// A group of secret-word values to redact from tool output.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecretWordsRule {
+    #[serde(default)]
+    pub values: Vec<String>,
 }
 
 /// Describes a single provider entry.
@@ -430,9 +439,32 @@ paths = ["secrets.toml"]
     }
 
     #[test]
+    fn test_secrets_words_parse() {
+        let toml = r#"
+[[secrets.words]]
+values = ["ghp_abc123", "AKIAIOSFODNN7EXAMPLE"]
+
+[[secrets.words]]
+values = ["sk_test_deadbeef"]
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let all: Vec<&str> = cfg
+            .secrets
+            .words
+            .iter()
+            .flat_map(|w| w.values.iter().map(|s| s.as_str()))
+            .collect();
+        assert_eq!(all.len(), 3);
+        assert!(all.contains(&"ghp_abc123"));
+        assert!(all.contains(&"AKIAIOSFODNN7EXAMPLE"));
+        assert!(all.contains(&"sk_test_deadbeef"));
+    }
+
+    #[test]
     fn test_secrets_defaults_empty() {
         let cfg: Config = toml::from_str("").unwrap();
         assert!(cfg.secrets.files.is_empty());
+        assert!(cfg.secrets.words.is_empty());
     }
 
     #[test]

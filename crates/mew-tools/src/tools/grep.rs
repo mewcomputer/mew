@@ -1,4 +1,4 @@
-use crate::{Sensitivity, Tool, ToolCtx, ToolError, ToolOutput};
+use crate::{SecretSet, Sensitivity, Tool, ToolCtx, ToolError, ToolOutput};
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -75,7 +75,7 @@ impl Tool for Grep {
                 // rg exits 1 when no matches found, which is not an error
                 if output.status.success() || output.status.code() == Some(1) {
                     Ok(ToolOutput {
-                        output: stdout,
+                        output: filter_output(&stdout, &ctx.secrets),
                         error: String::new(),
                         diff: None,
                     })
@@ -102,12 +102,75 @@ impl Tool for Grep {
                     .map_err(|e| ToolError::Execution(format!("grep failed: {}", e)))?;
 
                 Ok(ToolOutput {
-                    output: format_output(&output.stdout, MAX_OUTPUT),
+                    output: filter_output(&format_output(&output.stdout, MAX_OUTPUT), &ctx.secrets),
                     error: String::new(),
                     diff: None,
                 })
             }
         }
+    }
+}
+
+/// Drop results from secret files and redact lines containing secret words.
+/// grep output format is `path:linenum:content`; the path is the segment
+/// before the first colon.
+fn filter_output(output: &str, secrets: &SecretSet) -> String {
+    if secrets.is_empty() {
+        return output.to_string();
+    }
+    let matchers: Vec<globset::GlobMatcher> = secrets
+        .globs
+        .iter()
+        .filter_map(|g| globset::Glob::new(g).ok().map(|g| g.compile_matcher()))
+        .collect();
+    let has_globs = !matchers.is_empty();
+    let has_words = secrets.words.iter().any(|w| !w.is_empty());
+    if !has_globs && !has_words {
+        return output.to_string();
+    }
+
+    let mut kept = Vec::new();
+    let mut redacted = 0usize;
+    let mut dropped = 0usize;
+    for line in output.lines() {
+        if has_globs {
+            let path = line.split(':').next().unwrap_or("");
+            if !path.is_empty() && matchers.iter().any(|m| m.is_match(path)) {
+                dropped += 1;
+                continue;
+            }
+        }
+        if has_words
+            && secrets
+                .words
+                .iter()
+                .any(|w| !w.is_empty() && line.contains(w.as_str()))
+        {
+            redacted += 1;
+            kept.push(redact_line(line));
+            continue;
+        }
+        kept.push(line.to_string());
+    }
+
+    let mut result = kept.join("\n");
+    if redacted > 0 || dropped > 0 {
+        result.push_str(&format!(
+            "\n[{} secret-bearing line(s) redacted, {} result(s) from secret files dropped]",
+            redacted, dropped
+        ));
+    }
+    result
+}
+
+/// Preserve the `path:linenum:` prefix, redact the matched content.
+fn redact_line(line: &str) -> String {
+    let mut parts = line.splitn(3, ':');
+    match (parts.next(), parts.next()) {
+        (Some(path), Some(linenum)) => {
+            format!("{}:{}:[redacted — secret value]", path, linenum)
+        }
+        _ => "[redacted — secret value]".to_string(),
     }
 }
 
@@ -134,6 +197,22 @@ mod tests {
             progress_tx: tokio::sync::mpsc::channel(1).0,
             cwd,
             dispatcher: None,
+            secrets: Default::default(),
+        }
+    }
+
+    fn ctx_with_secrets(cwd: PathBuf, words: Vec<&str>, globs: Vec<&str>) -> ToolCtx {
+        ToolCtx {
+            session_id: mew_message::SessionId::from(ulid::Ulid::new()),
+            call_id: "test".to_string(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            progress_tx: tokio::sync::mpsc::channel(1).0,
+            cwd,
+            dispatcher: None,
+            secrets: std::sync::Arc::new(SecretSet {
+                words: words.iter().map(|s| s.to_string()).collect(),
+                globs: globs.iter().map(|s| s.to_string()).collect(),
+            }),
         }
     }
 
@@ -174,5 +253,72 @@ mod tests {
         let result = tool.execute(ctx, input).await.unwrap();
         assert!(result.output.contains("a.rs"));
         assert!(!result.output.contains("b.txt"));
+    }
+
+    #[test]
+    fn test_filter_output_redacts_secret_words() {
+        let secrets = SecretSet {
+            words: vec!["ghp_supersecret123".to_string()],
+            globs: vec![],
+        };
+        let input = "a.rs:1:api_key: ghp_supersecret123\na.rs:2:fn foo() {}";
+        let out = filter_output(input, &secrets);
+        assert!(!out.contains("ghp_supersecret123"));
+        assert!(out.contains("[redacted"), "redaction marker present");
+        assert!(
+            out.contains("fn foo() {}"),
+            "non-secret line passes through unchanged"
+        );
+    }
+
+    #[test]
+    fn test_filter_output_drops_secret_files() {
+        let secrets = SecretSet {
+            words: vec![],
+            globs: vec![".env".to_string(), "**/credentials.json".to_string()],
+        };
+        let input =
+            ".env:1:SECRET=value\nsrc/credentials.json:5:token\nsrc/main.rs:42:fn main() {}";
+        let out = filter_output(input, &secrets);
+        assert!(!out.contains(".env:1"), "literal secret file dropped");
+        assert!(
+            !out.contains("credentials.json:5"),
+            "glob-matched secret file dropped"
+        );
+        assert!(
+            out.contains("src/main.rs:42"),
+            "non-secret file passes through"
+        );
+    }
+
+    #[test]
+    fn test_filter_output_noop_when_empty() {
+        let secrets = SecretSet::default();
+        let input = "a.rs:1:hello\nb.rs:2:world";
+        let out = filter_output(input, &secrets);
+        assert_eq!(out, input);
+    }
+
+    #[tokio::test]
+    async fn test_grep_applies_secret_filter_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(
+            dir.path().join("config.rs"),
+            "let key = \"ghp_supersecret123\";\nfn ok() {}",
+        )
+        .await
+        .unwrap();
+        let tool = Grep;
+        let ctx = ctx_with_secrets(dir.path().to_path_buf(), vec!["ghp_supersecret123"], vec![]);
+        let input = serde_json::json!({"pattern": "ghp_|fn ok"});
+        let result = tool.execute(ctx, input).await.unwrap();
+        assert!(
+            !result.output.contains("ghp_supersecret123"),
+            "secret word must be redacted in real grep output"
+        );
+        assert!(
+            result.output.contains("[redacted"),
+            "redaction marker present"
+        );
     }
 }

@@ -23,6 +23,25 @@ pub struct ToolCtx {
     pub progress_tx: mpsc::Sender<ToolProgress>,
     pub cwd: PathBuf,
     pub dispatcher: Option<Arc<dyn mew_hooks::Dispatcher>>,
+    /// Secret values and file globs to redact from this tool's output.
+    /// Shared via `Arc` from the agent's startup config; defaults empty in
+    /// tests via `Default::default()`.
+    pub secrets: Arc<SecretSet>,
+}
+
+/// Secret values and file globs that must be redacted from tool output.
+#[derive(Debug, Clone, Default)]
+pub struct SecretSet {
+    /// Substrings to redact from any tool output line that contains them.
+    pub words: Vec<String>,
+    /// Glob patterns for secret files; results touching these are dropped.
+    pub globs: Vec<String>,
+}
+
+impl SecretSet {
+    pub fn is_empty(&self) -> bool {
+        self.words.is_empty() && self.globs.is_empty()
+    }
 }
 
 #[derive(Debug, Clone)]

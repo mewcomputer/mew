@@ -73,6 +73,7 @@ mod tests {
             progress_tx: tokio::sync::mpsc::channel(1).0,
             cwd: PathBuf::from("."),
             dispatcher: None,
+            secrets: Default::default(),
         }
     }
 

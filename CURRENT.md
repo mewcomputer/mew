@@ -156,3 +156,13 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - `PermissionEngine::with_secret_files(globs)` builder compiles the globs; `build_permission_engine` in `main.rs` flattens `cfg.secrets.files[*].paths` and wires them into the engine.
 - Scoped to the `read` tool for v1. `grep`/`glob` take directory inputs (not file paths), so they aren't covered at permission time. Protecting search-tool output needs post-execution result filtering — the same plumbing as secret words — and lands in a follow-up.
 - 9 new tests: 7 in permissions (force-prompt, glob-pattern match, literal-allow escape hatch, glob-allow does NOT escape, non-secret unaffected, non-read tool unaffected, `is_glob_pattern` detection) + 2 config parsing. Total: mew-config 21 → 30.
+
+### 2026-06-18: secret words + search-tool result filtering
+
+- Closes the gap left by the secret-file read guard: `grep`/`glob` output now filters secret content too, and secret *words* get redacted from any line that contains them.
+- New `[[secrets.words]]` config (`values = [...]`) joins the existing `[[secrets.files]]`. Both flow into a new `SecretSet` type (`mew-tools/src/lib.rs`) carried on every `ToolCtx` as `secrets: Arc<SecretSet>`. `Arc<T: Default>` impls `Default`, so all 9 test `dummy_ctx` helpers just add `secrets: Default::default()` with no new imports.
+- `grep` filters results two ways: lines whose file path (before the first colon) matches a secret glob are dropped entirely; lines containing a secret word are redacted to `path:line:[redacted — secret value]` (the prefix is preserved so the model knows where the secret was, without the value). A summary line notes redaction/drop counts.
+- `glob` drops any returned path matching a secret glob.
+- The agent shares one `Arc<SecretSet>` (built from config via `build_secret_set`) across all tool calls; `tools.rs:319` clones the Arc into each `ToolCtx`.
+- `read` is already covered by the permission guard from the previous commit; bash output is not filtered (it's a different threat surface — running commands, not searching files — and already `Dangerous`-gated).
+- 5 new tests: 3 unit tests on `filter_output` (word redaction, secret-file drop, noop-when-empty) + 1 grep end-to-end + 1 glob end-to-end. Plus 1 config-parsing test for `[[secrets.words]]`. Total: mew-tools 33 → 38, mew-config 30 → 31.

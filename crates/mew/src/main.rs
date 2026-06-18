@@ -30,6 +30,7 @@ use mew_tools::tools::progress_update::ProgressUpdate;
 use mew_tools::tools::read::Read;
 use mew_tools::tools::skill::Skill;
 use mew_tools::tools::write::Write;
+use mew_tools::SecretSet;
 
 #[derive(Parser)]
 #[command(name = "mew")]
@@ -334,6 +335,25 @@ fn build_permission_engine(cfg: &Config) -> Arc<mew_config::permissions::Permiss
         mew_config::permissions::PermissionEngine::new(cfg.permissions.rules.clone())
             .with_secret_files(secret_globs),
     )
+}
+
+/// Build the `SecretSet` shared with every tool call: words to redact from
+/// output, and file globs whose results get dropped from search tools.
+fn build_secret_set(cfg: &Config) -> Arc<SecretSet> {
+    Arc::new(SecretSet {
+        words: cfg
+            .secrets
+            .words
+            .iter()
+            .flat_map(|w| w.values.iter().cloned())
+            .collect(),
+        globs: cfg
+            .secrets
+            .files
+            .iter()
+            .flat_map(|f| f.paths.iter().cloned())
+            .collect(),
+    })
 }
 
 fn plugin_storage_map() -> std::collections::HashMap<String, String> {
@@ -672,6 +692,7 @@ async fn run_acp_server(provider_flag: &str, model_flag: Option<String>, raw: bo
 
     let mut agent = Agent::new(provider, dispatcher.clone(), None, tools, None);
     agent.flagged_files = flagged_files;
+    agent.secrets = build_secret_set(&cfg);
     agent.set_permission_engine(permission_engine);
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
@@ -1054,6 +1075,7 @@ async fn run_tui(
         None,
     );
     agent.flagged_files = flagged_files;
+    agent.secrets = build_secret_set(cfg);
     agent.set_permission_engine(permission_engine);
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
@@ -1999,6 +2021,7 @@ async fn build_and_run(
         None,
     );
     agent.flagged_files = flagged_files;
+    agent.secrets = build_secret_set(cfg);
     agent.set_permission_engine(permission_engine);
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];

@@ -10,6 +10,7 @@ use mew_message::{Message, Part, PartBase, Role, SessionId, TextPart, Time};
 use mew_provider::{Provider, ReasoningConfig};
 use mew_subagents::{SubagentDef, SubagentRunner};
 use mew_tools::tools::flag_important::FlaggedFile;
+use mew_tools::SecretSet;
 use mew_tools::Tool;
 use ulid::Ulid;
 
@@ -71,6 +72,9 @@ pub struct Agent {
     /// compaction: `Included` files are re-injected as text, `Referenced`
     /// files get a pointer note. Shared with the `flag_important` tool.
     pub flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>>,
+    /// Secret words and file globs to redact from tool output. Shared (via
+    /// `Arc`) with each `ToolCtx` built for a tool call.
+    pub secrets: Arc<SecretSet>,
     /// Current reasoning/thinking configuration, if any.
     pub reasoning: Option<ReasoningConfig>,
 }
@@ -116,6 +120,7 @@ impl Agent {
             workspace_allowances: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             force_compact: Arc::new(tokio::sync::Mutex::new(false)),
             flagged_files: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            secrets: Arc::new(SecretSet::default()),
             reasoning: None,
         }
     }
