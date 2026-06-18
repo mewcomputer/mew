@@ -8,6 +8,7 @@ use mew_message::{
     AssistantMeta, ErrorKind, Message, MessageError, Part, PartBase, Role, TextPart, Time, Tokens,
 };
 use mew_provider::{ProviderEvent, Request, ToolDef};
+use mew_tools::tools::flag_important::FlagMode;
 
 use crate::agent::Agent;
 use crate::AgentEvent;
@@ -147,6 +148,62 @@ impl Agent {
                 messages = compacted;
                 // Prepend the summary note.
                 messages.insert(0, compact_msg);
+
+                // Re-inject flagged files so they survive compaction. Included
+                // files are inlined as text; referenced files get a pointer.
+                // Iterate in reverse so insert(0, ...) preserves flag order.
+                let flagged = self.flagged_files.lock().await;
+                if !flagged.is_empty() {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    for f in flagged.iter().rev() {
+                        let note_text = match f.mode {
+                            FlagMode::Included => match std::fs::read_to_string(&f.path) {
+                                Ok(content) => format!(
+                                    "Flagged file (preserved across compaction) — {}:\n\n{}",
+                                    f.path.display(),
+                                    content,
+                                ),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        path = %f.path.display(),
+                                        error = %e,
+                                        "could not read flagged file for compaction re-injection",
+                                    );
+                                    continue;
+                                }
+                            },
+                            FlagMode::Referenced => format!(
+                                "Flagged file (referenced — re-read with the read tool when needed): {}",
+                                f.path.display(),
+                            ),
+                        };
+                        let id = Ulid::new();
+                        messages.insert(
+                            0,
+                            Message {
+                                id,
+                                session_id: self.session_id,
+                                role: Role::User,
+                                parts: vec![Part::Text(TextPart {
+                                    base: PartBase {
+                                        id: Ulid::new(),
+                                        message_id: id,
+                                        session_id: self.session_id,
+                                    },
+                                    text: note_text,
+                                    synthetic: true,
+                                })],
+                                time: Time {
+                                    created: now,
+                                    completed: None,
+                                },
+                                assistant: None,
+                            },
+                        );
+                    }
+                }
+                drop(flagged);
+
                 let _ = ev_tx
                     .send(AgentEvent::Error(format!(
                         "context compacted: {} turns removed ({} estimated tokens)",

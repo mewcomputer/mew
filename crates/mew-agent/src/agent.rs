@@ -9,6 +9,7 @@ use mew_hooks::Dispatcher;
 use mew_message::{Message, Part, PartBase, Role, SessionId, TextPart, Time};
 use mew_provider::{Provider, ReasoningConfig};
 use mew_subagents::{SubagentDef, SubagentRunner};
+use mew_tools::tools::flag_important::FlaggedFile;
 use mew_tools::Tool;
 use ulid::Ulid;
 
@@ -66,6 +67,10 @@ pub struct Agent {
     /// Additional directories approved for this session.
     pub workspace_allowances: Arc<tokio::sync::Mutex<HashSet<PathBuf>>>,
     pub(crate) force_compact: Arc<tokio::sync::Mutex<bool>>,
+    /// Files flagged as important for the session. These survive context
+    /// compaction: `Included` files are re-injected as text, `Referenced`
+    /// files get a pointer note. Shared with the `flag_important` tool.
+    pub flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>>,
     /// Current reasoning/thinking configuration, if any.
     pub reasoning: Option<ReasoningConfig>,
 }
@@ -110,6 +115,7 @@ impl Agent {
             workspace_roots: Vec::new(),
             workspace_allowances: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             force_compact: Arc::new(tokio::sync::Mutex::new(false)),
+            flagged_files: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             reasoning: None,
         }
     }

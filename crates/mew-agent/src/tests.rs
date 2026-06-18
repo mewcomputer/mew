@@ -9,6 +9,7 @@ use mew_message::{
 };
 use mew_provider::{EventStream, Provider, ProviderError, ProviderEvent, Request};
 use mew_provider_fake::FakeProvider;
+use mew_tools::tools::flag_important::{FlagMode, FlaggedFile};
 use mew_tools::{Sensitivity, Tool, ToolCtx};
 
 use crate::Agent;
@@ -41,6 +42,26 @@ impl Provider for StatefulFakeProvider {
         let script = self.scripts.lock().unwrap().remove(0);
         let stream = futures::stream::iter(script);
         Ok(Box::pin(stream))
+    }
+}
+
+/// A provider that captures every request's messages and replays a fixed
+/// script. Used to assert what the agent actually sent to the model.
+struct CapturingProvider {
+    captured: StdMutex<Vec<Vec<Message>>>,
+    script: Vec<mew_provider::ProviderEvent>,
+}
+
+#[async_trait]
+impl Provider for CapturingProvider {
+    fn name(&self) -> &str {
+        "capturing"
+    }
+
+    async fn stream(&self, req: Request) -> Result<EventStream, ProviderError> {
+        self.captured.lock().unwrap().push(req.messages.clone());
+        let script = self.script.clone();
+        Ok(Box::pin(futures::stream::iter(script)))
     }
 }
 
@@ -174,6 +195,82 @@ async fn test_clear_context_writes_marker_to_session() {
     assert!(
         is_synthetic_marker,
         "marker should carry a synthetic text part"
+    );
+}
+
+#[tokio::test]
+async fn test_flagged_files_re_injected_after_compaction() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plan_path = tmp.path().join("plan.md");
+    std::fs::write(&plan_path, "# THE PLAN\nstep 1: do the thing").unwrap();
+
+    let script = FakeProvider::text_response("ok");
+    let provider = std::sync::Arc::new(CapturingProvider {
+        captured: StdMutex::new(Vec::new()),
+        script,
+    });
+
+    let mut agent = Agent::new(
+        provider.clone(),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    // Tiny context window so compaction triggers; keep only the most recent
+    // turn so older history is dropped and the flagged file is the surviving
+    // signal.
+    agent.context_window = 10;
+    agent.keep_turns = 1;
+
+    // Pre-populate history so compaction has something to compact away.
+    let old_msg = Message {
+        id: ulid::Ulid::new(),
+        session_id: agent.session_id,
+        role: Role::User,
+        parts: vec![Part::Text(TextPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: ulid::Ulid::new(),
+                session_id: agent.session_id,
+            },
+            text: "old conversation that should be compacted away".into(),
+            synthetic: false,
+        })],
+        time: Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    };
+    agent.load_messages(vec![old_msg]).await;
+
+    // Flag the plan file as important in Included mode.
+    agent.flagged_files.lock().await.push(FlaggedFile {
+        path: plan_path.clone(),
+        mode: FlagMode::Included,
+    });
+
+    agent.force_compact().await;
+
+    let mut rx = agent.run("next prompt".into());
+    while rx.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    assert!(
+        !captured.is_empty(),
+        "provider should have received at least one request"
+    );
+    let request_msgs = &captured[0];
+    let has_flagged_content = request_msgs.iter().any(|m| {
+        m.parts.iter().any(|p| match p {
+            Part::Text(tp) => tp.text.contains("THE PLAN"),
+            _ => false,
+        })
+    });
+    assert!(
+        has_flagged_content,
+        "flagged file content should be re-injected into the request after compaction"
     );
 }
 

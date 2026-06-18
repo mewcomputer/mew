@@ -139,3 +139,12 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - Each clear now pushes a "context cleared" synthetic message so the chat doesn't vanish silently.
 - This lands the first piece of the session/context vocabulary from `POLYTOKEN_PARITY.md`: the session is the immutable event log, context is what the model sees this turn.
 - 2 new mew-agent tests (empty-messages, marker-written-to-session via tempdir). Total: mew-agent 30 → 32.
+
+### 2026-06-18: flag_important tool (files survive compaction)
+
+- New `flag_important` tool (`crates/mew-tools/src/tools/flag_important.rs`): model marks a file as important for the session so it survives context compaction. `included` mode re-injects the file's content into the request after compaction; `referenced` mode records only a pointer. Re-flagging the same path updates the mode rather than duplicating. `ReadOnly` sensitivity (it mutates session state, not the filesystem).
+- `FlaggedFile`/`FlagMode` types live with the tool; shared between tool and agent via `Arc<Mutex<Vec<FlaggedFile>>>`.
+- Agent gains a `flagged_files` field (`crates/mew-agent/src/agent.rs`), the Arc created in `main.rs` and handed to both the tool and the agent so they share one list.
+- Compaction (`crates/mew-agent/src/turn.rs`) re-injects flagged files into the per-request context after compacting: `Included` files inlined as synthetic user messages, `Referenced` files get a pointer note. Iterated in reverse so flag order is preserved after `insert(0, ...)`. Read failures are logged and skipped. Compaction still doesn't mutate `self.messages` (the session log keeps everything); only the per-request clone is affected, consistent with the session/context model `/clear` introduced.
+- Registered in all three agent-construction paths (`run_tui`, `run_acp_server`, `build_and_run`).
+- 8 tool unit tests (modes, defaults, errors, re-flag dedup, metadata) + 1 compaction integration test using a new `CapturingProvider` test fixture that records the request messages sent to the provider. Total: mew-tools 25 → 33, mew-agent 32 → 33.

@@ -23,6 +23,7 @@ use mew_tools::tools::bash::Bash;
 use mew_tools::tools::echo::Echo;
 use mew_tools::tools::edit::Edit;
 use mew_tools::tools::exit_tool::ExitTool;
+use mew_tools::tools::flag_important::{FlagImportant, FlaggedFile};
 use mew_tools::tools::glob::Glob;
 use mew_tools::tools::grep::Grep;
 use mew_tools::tools::progress_update::ProgressUpdate;
@@ -655,9 +656,15 @@ async fn run_acp_server(provider_flag: &str, model_flag: Option<String>, raw: bo
     let skills = Arc::new(skills_loader.load().unwrap_or_default());
     let tools = build_tools(skills.clone());
 
+    let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let mut tools = tools;
+    tools.push(Arc::new(FlagImportant::new(flagged_files.clone())));
+
     let permission_engine = build_permission_engine(&cfg);
 
     let mut agent = Agent::new(provider, dispatcher.clone(), None, tools, None);
+    agent.flagged_files = flagged_files;
     agent.set_permission_engine(permission_engine);
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
@@ -987,6 +994,10 @@ async fn run_tui(
 
     let mut tools = build_tools(skills.clone());
 
+    let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    tools.push(Arc::new(FlagImportant::new(flagged_files.clone())));
+
     // Load MCP tools.
     let mcp_configs = load_mcp_configs();
     let mut _mcp_clients: Vec<Arc<McpClient>> = Vec::new();
@@ -1035,6 +1046,7 @@ async fn run_tui(
         tools,
         None,
     );
+    agent.flagged_files = flagged_files;
     agent.set_permission_engine(permission_engine);
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
@@ -1957,6 +1969,10 @@ async fn build_and_run(
 
     let mut tools = build_tools(skills.clone());
 
+    let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    tools.push(Arc::new(FlagImportant::new(flagged_files.clone())));
+
     // Load MCP tools.
     let mcp_configs = load_mcp_configs();
     let mut _mcp_clients: Vec<Arc<McpClient>> = Vec::new();
@@ -1975,6 +1991,7 @@ async fn build_and_run(
         tools,
         None,
     );
+    agent.flagged_files = flagged_files;
     agent.set_permission_engine(permission_engine);
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
