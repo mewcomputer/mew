@@ -1232,7 +1232,10 @@ async fn run_tui(
                                 }
                                 mew_tui::SlashResult::Quit => should_break = true,
                                 mew_tui::SlashResult::Clear => {
+                                    agent.clear_context().await;
                                     app.clear_messages();
+                                    app.messages
+                                        .push(synthetic_message("context cleared".into()));
                                 }
                                 mew_tui::SlashResult::Message(msg) => {
                                     app.messages.push(synthetic_message(msg));
@@ -1339,7 +1342,10 @@ async fn run_tui(
                             }
                         }
                         mew_tui::events::Action::Clear => {
+                            agent.clear_context().await;
                             app.clear_messages();
+                            app.messages
+                                .push(synthetic_message("context cleared".into()));
                         }
                         mew_tui::events::Action::SwitchModel(new_model) => {
                             let (new_provider_id, new_model_id) =
@@ -1528,7 +1534,10 @@ async fn run_tui(
                                 app.streaming = false;
                             }
                             mew_tui::events::Action::Clear => {
+                                agent.clear_context().await;
                                 app.clear_messages();
+                                app.messages
+                                    .push(synthetic_message("context cleared".into()));
                             }
                             mew_tui::events::Action::ToggleSidebarContext => {
                                 app.toggle_sidebar_section("context");
@@ -1568,7 +1577,10 @@ async fn run_tui(
                                         break 'drain;
                                     }
                                     mew_tui::SlashResult::Clear => {
+                                        agent.clear_context().await;
                                         app.clear_messages();
+                                        app.messages
+                                            .push(synthetic_message("context cleared".into()));
                                     }
                                     mew_tui::SlashResult::Message(msg) => {
                                         app.messages.push(synthetic_message(msg));

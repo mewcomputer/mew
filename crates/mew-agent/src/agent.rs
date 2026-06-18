@@ -6,10 +6,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use mew_hooks::Dispatcher;
-use mew_message::{Message, Part, SessionId};
+use mew_message::{Message, Part, PartBase, Role, SessionId, TextPart, Time};
 use mew_provider::{Provider, ReasoningConfig};
 use mew_subagents::{SubagentDef, SubagentRunner};
 use mew_tools::Tool;
+use ulid::Ulid;
 
 use crate::{AgentEvent, SessionWriter};
 
@@ -134,6 +135,41 @@ impl Agent {
 
     pub async fn force_compact(&self) {
         *self.force_compact.lock().await = true;
+    }
+
+    /// Clear the in-memory conversation context and append a clear marker to
+    /// the session log. The session file is the immutable event log and keeps
+    /// everything; only what the model sees this turn is reset. Resume
+    /// reconstructs forward from the marker.
+    pub async fn clear_context(&self) {
+        self.messages.lock().await.clear();
+
+        if let Some(session) = &self.session {
+            let now = chrono::Utc::now().timestamp_millis();
+            let msg_id = Ulid::new();
+            let marker = Message {
+                id: msg_id,
+                session_id: self.session_id,
+                role: Role::User,
+                parts: vec![Part::Text(TextPart {
+                    base: PartBase {
+                        id: Ulid::new(),
+                        message_id: msg_id,
+                        session_id: self.session_id,
+                    },
+                    text: "Context cleared. The model starts fresh; prior turns are no longer visible to it.".into(),
+                    synthetic: true,
+                })],
+                time: Time {
+                    created: now,
+                    completed: None,
+                },
+                assistant: None,
+            };
+            if let Err(e) = session.lock().await.write_message(&marker).await {
+                tracing::warn!(error = %e, "failed to write clear marker to session");
+            }
+        }
     }
 
     pub(crate) fn estimated_tokens(&self, messages: &[Message]) -> u32 {

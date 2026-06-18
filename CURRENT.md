@@ -130,3 +130,12 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - `SubagentState` got `display_name: Option<String>`. Sidebar renders the display name as the primary label, with the def name in parens: `▸ Curie (researcher)  3s`. Falls back to just the def name if no display name was set.
 - 4 new picker tests (deterministic, returns known name, covers full pool of 25 across 1000 ulids, distribution not too skewed) + 1 new runner test (Started event includes a valid display_name) + 1 new TUI test (state stores display_name).
 - Total: mew-agent 29 → 30, mew-tui 20 → 21, mew-subagents 10 → 14.
+
+### 2026-06-18: /clear clears agent context, not just display
+
+- Previously `/clear` (and the clear keybinding) only wiped the TUI display store via `app.clear_messages()`; the agent's in-memory `messages` (API history) was untouched, so the model still saw the full prior conversation after a "clear."
+- New `Agent::clear_context()` (`crates/mew-agent/src/agent.rs`): empties `self.messages` and appends a synthetic clear-marker `Message` to the session JSONL. The session file keeps everything (immutable event log); only what the model sees this turn is reset. Mirrors the compaction-marker pattern in `turn.rs`. Resume reconstructs forward from the marker.
+- Wired into all four clear entry points in `run_tui` (`main.rs`): primary-loop `Action::Clear`, drain-loop `Action::Clear`, primary-loop `SlashResult::Clear`, drain-loop `SlashResult::Clear`. ACP path (`chat_with_acp`) intentionally unchanged — no local agent, the remote owns its context. `ResumeSession` path unchanged — it clears display before loading resumed messages, so clearing agent context there would wipe what we just loaded.
+- Each clear now pushes a "context cleared" synthetic message so the chat doesn't vanish silently.
+- This lands the first piece of the session/context vocabulary from `POLYTOKEN_PARITY.md`: the session is the immutable event log, context is what the model sees this turn.
+- 2 new mew-agent tests (empty-messages, marker-written-to-session via tempdir). Total: mew-agent 30 → 32.

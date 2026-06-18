@@ -110,6 +110,73 @@ async fn test_set_system() {
     assert_eq!(agent.system, "you are a cat");
 }
 
+#[tokio::test]
+async fn test_clear_context_empties_messages() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let msg = Message {
+        id: ulid::Ulid::new(),
+        session_id: agent.session_id,
+        role: Role::User,
+        parts: vec![Part::Text(TextPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: ulid::Ulid::new(),
+                session_id: agent.session_id,
+            },
+            text: "hello".into(),
+            synthetic: false,
+        })],
+        time: Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    };
+    agent.load_messages(vec![msg]).await;
+    assert_eq!(agent.messages.lock().await.len(), 1);
+
+    agent.clear_context().await;
+    assert_eq!(agent.messages.lock().await.len(), 0);
+}
+
+#[tokio::test]
+async fn test_clear_context_writes_marker_to_session() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let session_id = format!("clear-test-{}", ulid::Ulid::new());
+    let writer = mew_session::Writer::open_at(tmp.path(), &session_id)
+        .await
+        .expect("open session");
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+
+    agent.clear_context().await;
+
+    let msgs = mew_session::Reader::load_from(tmp.path(), &session_id)
+        .await
+        .expect("load session");
+    assert_eq!(msgs.len(), 1, "exactly the clear marker should be on disk");
+    assert_eq!(msgs[0].role, Role::User);
+    let is_synthetic_marker = msgs[0].parts.iter().any(|p| match p {
+        Part::Text(tp) => tp.synthetic,
+        _ => false,
+    });
+    assert!(
+        is_synthetic_marker,
+        "marker should carry a synthetic text part"
+    );
+}
+
 #[test]
 fn test_apply_delta_text() {
     let agent = Agent::new(
