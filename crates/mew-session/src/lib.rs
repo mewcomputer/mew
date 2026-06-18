@@ -292,6 +292,9 @@ impl Meta {
 }
 
 pub fn session_dir() -> PathBuf {
+    if let Some(p) = std::env::var_os("MEW_SESSION_DIR") {
+        return PathBuf::from(p);
+    }
     directories::ProjectDirs::from("ai", "mew", "mew")
         .map(|d| d.config_dir().join("sessions"))
         .unwrap_or_else(|| {

@@ -602,12 +602,16 @@ impl Agent {
 
         while let Some(event) = sa_event_rx.recv().await {
             match event {
-                mew_subagents::SubagentEvent::Started { child_session_id } => {
+                mew_subagents::SubagentEvent::Started {
+                    child_session_id,
+                    display_name,
+                } => {
                     let _ = ev_tx_clone
                         .send(AgentEvent::SubagentStart {
                             parent_call_id: call_id.clone(),
                             name: def_name.clone(),
                             child_session_id,
+                            display_name,
                         })
                         .await;
                 }
@@ -664,6 +668,19 @@ impl Agent {
                         })
                         .await;
                 }
+                mew_subagents::SubagentEvent::Progress {
+                    tool_name: progress_tool_name,
+                    message,
+                    ..
+                } => {
+                    let _ = ev_tx_clone
+                        .send(AgentEvent::SubagentStatus {
+                            parent_call_id: call_id.clone(),
+                            tool_name: progress_tool_name,
+                            message,
+                        })
+                        .await;
+                }
                 mew_subagents::SubagentEvent::PermissionRequest {
                     tool_name: req_tool_name,
                     call_id: req_call_id,
@@ -691,8 +708,10 @@ impl Agent {
                 text,
                 turns_used,
                 hit_turn_limit,
+                hit_time_limit,
+                session_unavailable,
             })) => {
-                tracing::info!(subagent = %name, output_len = text.len(), turns_used, hit_turn_limit, "subagent completed");
+                tracing::info!(subagent = %name, output_len = text.len(), turns_used, hit_turn_limit, hit_time_limit, session_unavailable, "subagent completed");
                 let mut out = text;
                 if hit_turn_limit {
                     out.insert_str(
@@ -701,6 +720,18 @@ impl Agent {
                             "warning: subagent hit max_turns limit ({} turns); result may be incomplete\n\n",
                             turns_used
                         ),
+                    );
+                }
+                if hit_time_limit {
+                    out.insert_str(
+                        0,
+                        "warning: subagent hit max_duration limit; result may be incomplete\n\n",
+                    );
+                }
+                if session_unavailable {
+                    out.insert_str(
+                        0,
+                        "warning: subagent transcript could not be written; result is unrecorded\n\n",
                     );
                 }
                 out
@@ -816,6 +847,8 @@ impl Agent {
                         text,
                         turns_used,
                         hit_turn_limit,
+                        hit_time_limit,
+                        session_unavailable,
                     }) => {
                         let mut out = text;
                         if hit_turn_limit {
@@ -825,6 +858,18 @@ impl Agent {
                                     "warning: subagent hit max_turns limit ({} turns); result may be incomplete\n\n",
                                     turns_used
                                 ),
+                            );
+                        }
+                        if hit_time_limit {
+                            out.insert_str(
+                                0,
+                                "warning: subagent hit max_duration limit; result may be incomplete\n\n",
+                            );
+                        }
+                        if session_unavailable {
+                            out.insert_str(
+                                0,
+                                "warning: subagent transcript could not be written; result is unrecorded\n\n",
                             );
                         }
                         (out, true)
@@ -921,6 +966,8 @@ impl Agent {
                 text,
                 turns_used,
                 hit_turn_limit,
+                hit_time_limit,
+                session_unavailable,
             }) => {
                 let mut out = text;
                 if hit_turn_limit {
@@ -930,6 +977,18 @@ impl Agent {
                             "warning: subagent hit max_turns limit ({} turns); result may be incomplete\n\n",
                             turns_used
                         ),
+                    );
+                }
+                if hit_time_limit {
+                    out.insert_str(
+                        0,
+                        "warning: subagent hit max_duration limit; result may be incomplete\n\n",
+                    );
+                }
+                if session_unavailable {
+                    out.insert_str(
+                        0,
+                        "warning: subagent transcript could not be written; result is unrecorded\n\n",
                     );
                 }
                 (out, true)

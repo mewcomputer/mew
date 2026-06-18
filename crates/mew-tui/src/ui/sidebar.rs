@@ -184,13 +184,38 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             };
             text.push_line(Line::from(vec![
                 Span::styled(format!("  {} ", icon), Style::default().fg(color)),
-                Span::styled(&sa.name, Style::default().fg(Color::Gray)),
+                Span::styled(
+                    sa.display_name.as_deref().unwrap_or(&sa.name).to_string(),
+                    Style::default().fg(Color::Gray),
+                ),
+                Span::styled(
+                    match &sa.display_name {
+                        Some(_) => format!("  ({})", sa.name),
+                        None => "".to_string(),
+                    },
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(
                     format!("  {}", time_str),
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(status_label, Style::default().fg(color)),
             ]));
+            if let Some(progress) = &sa.last_progress {
+                // Truncate to keep the sidebar narrow. The full message
+                // is still in self.messages if the user needs it.
+                let max = area.width.saturating_sub(8) as usize;
+                let truncated: String = progress.chars().take(max).collect();
+                let line = if progress.chars().count() > max {
+                    format!("    ↳ {}…", truncated)
+                } else {
+                    format!("    ↳ {}", truncated)
+                };
+                text.push_line(Line::from(Span::styled(
+                    line,
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
         }
         text.push_line(Line::from(Span::styled(
             "─".repeat(area.width.saturating_sub(2) as usize),

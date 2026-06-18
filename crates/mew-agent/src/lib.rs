@@ -39,11 +39,23 @@ pub enum AgentEvent {
         parent_call_id: String,
         name: String,
         child_session_id: String,
+        /// Human-friendly per-run name picked by the runner. Optional
+        /// for backwards compatibility (older callers may not set it).
+        display_name: Option<String>,
     },
     /// An event from within a running subagent.
     SubagentProgress {
         parent_call_id: String,
         child_event: Box<AgentEvent>,
+    },
+    /// A status update from a running subagent (e.g. it called
+    /// `progress_update`). Distinct from `SubagentProgress { child_event }`
+    /// which wraps a stream event — this is a purpose-built channel for
+    /// "what is the subagent working on right now" messages.
+    SubagentStatus {
+        parent_call_id: String,
+        tool_name: String,
+        message: String,
     },
     /// A subagent has finished executing.
     SubagentEnd {
@@ -95,11 +107,13 @@ impl std::fmt::Debug for AgentEvent {
                 parent_call_id,
                 name,
                 child_session_id,
+                display_name,
             } => f
                 .debug_struct("SubagentStart")
                 .field("parent_call_id", parent_call_id)
                 .field("name", name)
                 .field("child_session_id", child_session_id)
+                .field("display_name", display_name)
                 .finish(),
             AgentEvent::SubagentProgress {
                 parent_call_id,
@@ -127,6 +141,16 @@ impl std::fmt::Debug for AgentEvent {
                 .debug_struct("SubagentPermissionRequest")
                 .field("parent_call_id", parent_call_id)
                 .field("call", call)
+                .finish(),
+            AgentEvent::SubagentStatus {
+                parent_call_id,
+                tool_name,
+                message,
+            } => f
+                .debug_struct("SubagentStatus")
+                .field("parent_call_id", parent_call_id)
+                .field("tool_name", tool_name)
+                .field("message", message)
                 .finish(),
         }
     }

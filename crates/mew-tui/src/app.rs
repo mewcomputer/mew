@@ -156,6 +156,12 @@ pub struct SubagentState {
     pub name: String,
     pub started_at: Instant,
     pub status: SubagentStatus,
+    /// Most recent status message from the subagent (via `progress_update`).
+    /// `None` until the subagent reports its first status.
+    pub last_progress: Option<String>,
+    /// Human-friendly per-run name (e.g. "Curie"), picked by the runner
+    /// at spawn time. `None` if the runner didn't set one.
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1343,6 +1349,7 @@ impl App {
             AgentEvent::SubagentStart {
                 parent_call_id,
                 name,
+                display_name,
                 ..
             } => {
                 self.subagents.push(SubagentState {
@@ -1350,9 +1357,24 @@ impl App {
                     name: name.clone(),
                     started_at: Instant::now(),
                     status: SubagentStatus::Running,
+                    last_progress: None,
+                    display_name: display_name.clone(),
                 });
             }
             AgentEvent::SubagentProgress { .. } => {}
+            AgentEvent::SubagentStatus {
+                parent_call_id,
+                message,
+                ..
+            } => {
+                if let Some(sa) = self
+                    .subagents
+                    .iter_mut()
+                    .find(|s| s.task_id == parent_call_id)
+                {
+                    sa.last_progress = Some(message);
+                }
+            }
             AgentEvent::SubagentEnd {
                 parent_call_id,
                 outcome,
@@ -1680,5 +1702,75 @@ mod tests {
             !names.contains(&"/stats"),
             "/stats should not match /bu prefix"
         );
+    }
+
+    #[test]
+    fn test_subagent_status_event_stores_progress() {
+        use mew_agent::AgentEvent;
+        let mut app = App::new();
+
+        // Subagent starts.
+        app.handle_agent_event(AgentEvent::SubagentStart {
+            parent_call_id: "task-1".into(),
+            name: "researcher".into(),
+            child_session_id: "child-1".into(),
+            display_name: Some("Curie".into()),
+        });
+        assert_eq!(app.subagents.len(), 1);
+        assert_eq!(app.subagents[0].display_name.as_deref(), Some("Curie"));
+        assert!(app.subagents[0].last_progress.is_none());
+
+        // Subagent reports its first status.
+        app.handle_agent_event(AgentEvent::SubagentStatus {
+            parent_call_id: "task-1".into(),
+            tool_name: "progress_update".into(),
+            message: "scanning the repo".into(),
+        });
+        assert_eq!(
+            app.subagents[0].last_progress.as_deref(),
+            Some("scanning the repo")
+        );
+
+        // A second status replaces the first.
+        app.handle_agent_event(AgentEvent::SubagentStatus {
+            parent_call_id: "task-1".into(),
+            tool_name: "progress_update".into(),
+            message: "writing the report".into(),
+        });
+        assert_eq!(
+            app.subagents[0].last_progress.as_deref(),
+            Some("writing the report")
+        );
+
+        // A status for an unknown subagent is ignored.
+        app.handle_agent_event(AgentEvent::SubagentStatus {
+            parent_call_id: "no-such-task".into(),
+            tool_name: "progress_update".into(),
+            message: "ignored".into(),
+        });
+        assert_eq!(
+            app.subagents[0].last_progress.as_deref(),
+            Some("writing the report")
+        );
+    }
+
+    #[test]
+    fn test_subagent_start_without_display_name_falls_back() {
+        use mew_agent::AgentEvent;
+        let mut app = App::new();
+
+        // Older callers (or callers that opt out) may not set a
+        // display_name. The state should still record the entry, with
+        // display_name == None, and the sidebar's "fall back to def
+        // name" path takes over.
+        app.handle_agent_event(AgentEvent::SubagentStart {
+            parent_call_id: "task-1".into(),
+            name: "researcher".into(),
+            child_session_id: "child-1".into(),
+            display_name: None,
+        });
+        assert_eq!(app.subagents.len(), 1);
+        assert_eq!(app.subagents[0].name, "researcher");
+        assert!(app.subagents[0].display_name.is_none());
     }
 }

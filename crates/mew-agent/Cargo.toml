@@ -26,3 +26,4 @@ http = "1"
 
 [dev-dependencies]
 mew-provider-fake = { workspace = true }
+tempfile = "3"

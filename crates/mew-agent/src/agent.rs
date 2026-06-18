@@ -234,12 +234,16 @@ impl Agent {
             let pump = tokio::spawn(async move {
                 while let Some(event) = event_rx.recv().await {
                     let agent_event = match event {
-                        mew_subagents::SubagentEvent::Started { child_session_id } => {
+                        mew_subagents::SubagentEvent::Started {
+                            child_session_id,
+                            display_name,
+                        } => {
                             *pump_child_id.lock().await = Some(child_session_id.clone());
                             AgentEvent::SubagentStart {
                                 parent_call_id: pump_cid.clone(),
                                 name: name_clone.clone(),
                                 child_session_id,
+                                display_name,
                             }
                         }
                         mew_subagents::SubagentEvent::Finished {

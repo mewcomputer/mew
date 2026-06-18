@@ -22,8 +22,10 @@ use mew_session::Writer as SessionWriter;
 use mew_tools::tools::bash::Bash;
 use mew_tools::tools::echo::Echo;
 use mew_tools::tools::edit::Edit;
+use mew_tools::tools::exit_tool::ExitTool;
 use mew_tools::tools::glob::Glob;
 use mew_tools::tools::grep::Grep;
+use mew_tools::tools::progress_update::ProgressUpdate;
 use mew_tools::tools::read::Read;
 use mew_tools::tools::skill::Skill;
 use mew_tools::tools::write::Write;
@@ -311,6 +313,8 @@ fn build_tools(skills: Arc<Vec<mew_skills::Skill>>) -> Vec<Arc<dyn mew_tools::To
         Arc::new(Glob),
         Arc::new(Grep),
         Arc::new(Echo),
+        Arc::new(ExitTool),
+        Arc::new(ProgressUpdate),
     ];
     if !skills.is_empty() {
         tools.push(Arc::new(Skill::new(skills)));
@@ -2113,6 +2117,7 @@ async fn build_and_run(
                 ..
             } => {}
             mew_agent::AgentEvent::SubagentProgress { .. } => {}
+            mew_agent::AgentEvent::SubagentStatus { .. } => {}
             mew_agent::AgentEvent::SubagentEnd {
                 child_session_id: _,
                 ..
