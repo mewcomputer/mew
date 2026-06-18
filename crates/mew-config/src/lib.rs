@@ -22,6 +22,8 @@ pub struct Config {
     #[serde(default)]
     pub permissions: PermissionsConfig,
     #[serde(default)]
+    pub secrets: SecretsConfig,
+    #[serde(default)]
     pub workspace: WorkspaceConfig,
 }
 
@@ -69,6 +71,7 @@ impl Default for Config {
             default_model: String::new(),
             models: Vec::new(),
             permissions: PermissionsConfig::default(),
+            secrets: SecretsConfig::default(),
             workspace: WorkspaceConfig::default(),
         }
     }
@@ -114,6 +117,23 @@ pub struct ThinkingVariantDef {
 pub struct PermissionsConfig {
     #[serde(default)]
     pub rules: Vec<permissions::PermissionRule>,
+}
+
+/// Secrets configuration section. Files listed here are guarded: reads of
+/// matching paths force a permission prompt unless a literal (non-glob)
+/// allow rule explicitly permits that exact path. (Future: secret words get
+/// filtered from search-tool output.)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecretsConfig {
+    #[serde(default)]
+    pub files: Vec<SecretFilesRule>,
+}
+
+/// A group of secret-file glob patterns.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SecretFilesRule {
+    #[serde(default)]
+    pub paths: Vec<String>,
 }
 
 /// Describes a single provider entry.
@@ -385,6 +405,34 @@ provider = "my-provider"
         assert_eq!(cfg.models[0].shape, "anthropic");
         assert_eq!(cfg.models[1].id, "custom-llama");
         assert!(cfg.models[1].shape.is_empty());
+    }
+
+    #[test]
+    fn test_secrets_files_parse() {
+        let toml = r#"
+[[secrets.files]]
+paths = [".env", "**/*.pem", "**/credentials.json"]
+
+[[secrets.files]]
+paths = ["secrets.toml"]
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let all: Vec<&str> = cfg
+            .secrets
+            .files
+            .iter()
+            .flat_map(|f| f.paths.iter().map(|s| s.as_str()))
+            .collect();
+        assert!(all.contains(&".env"));
+        assert!(all.contains(&"**/*.pem"));
+        assert!(all.contains(&"**/credentials.json"));
+        assert!(all.contains(&"secrets.toml"));
+    }
+
+    #[test]
+    fn test_secrets_defaults_empty() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.secrets.files.is_empty());
     }
 
     #[test]

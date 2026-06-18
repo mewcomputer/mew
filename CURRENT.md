@@ -148,3 +148,11 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - Compaction (`crates/mew-agent/src/turn.rs`) re-injects flagged files into the per-request context after compacting: `Included` files inlined as synthetic user messages, `Referenced` files get a pointer note. Iterated in reverse so flag order is preserved after `insert(0, ...)`. Read failures are logged and skipped. Compaction still doesn't mutate `self.messages` (the session log keeps everything); only the per-request clone is affected, consistent with the session/context model `/clear` introduced.
 - Registered in all three agent-construction paths (`run_tui`, `run_acp_server`, `build_and_run`).
 - 8 tool unit tests (modes, defaults, errors, re-flag dedup, metadata) + 1 compaction integration test using a new `CapturingProvider` test fixture that records the request messages sent to the provider. Total: mew-tools 25 → 33, mew-agent 32 → 33.
+
+### 2026-06-18: secret-file read guard (permission pre-check tier)
+
+- New `[secrets]` config section (`mew-config/src/lib.rs`): `[[secrets.files]]` with `paths = [...]` globs mark sensitive files (`.env`, `*.pem`, `credentials.json`, etc.).
+- `PermissionEngine` gains a pre-check tier (`mew-config/src/permissions.rs`) that sits above the deny→allow→ask cascade. Any `read` of a path matching a secret glob forces `Prompt` — overriding `ReadOnly`'s normal auto-allow — unless a literal (non-glob) allow rule explicitly permits that exact path. A broad `**` allow never lifts the guard; you must name the secret file explicitly to auto-allow it. This is the "option 1" pre-check design.
+- `PermissionEngine::with_secret_files(globs)` builder compiles the globs; `build_permission_engine` in `main.rs` flattens `cfg.secrets.files[*].paths` and wires them into the engine.
+- Scoped to the `read` tool for v1. `grep`/`glob` take directory inputs (not file paths), so they aren't covered at permission time. Protecting search-tool output needs post-execution result filtering — the same plumbing as secret words — and lands in a follow-up.
+- 9 new tests: 7 in permissions (force-prompt, glob-pattern match, literal-allow escape hatch, glob-allow does NOT escape, non-secret unaffected, non-read tool unaffected, `is_glob_pattern` detection) + 2 config parsing. Total: mew-config 21 → 30.

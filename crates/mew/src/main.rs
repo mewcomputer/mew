@@ -324,9 +324,16 @@ fn build_tools(skills: Arc<Vec<mew_skills::Skill>>) -> Vec<Arc<dyn mew_tools::To
 }
 
 fn build_permission_engine(cfg: &Config) -> Arc<mew_config::permissions::PermissionEngine> {
-    Arc::new(mew_config::permissions::PermissionEngine::new(
-        cfg.permissions.rules.clone(),
-    ))
+    let secret_globs: Vec<String> = cfg
+        .secrets
+        .files
+        .iter()
+        .flat_map(|f| f.paths.iter().cloned())
+        .collect();
+    Arc::new(
+        mew_config::permissions::PermissionEngine::new(cfg.permissions.rules.clone())
+            .with_secret_files(secret_globs),
+    )
 }
 
 fn plugin_storage_map() -> std::collections::HashMap<String, String> {
