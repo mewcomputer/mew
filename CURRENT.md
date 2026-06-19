@@ -232,3 +232,16 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
   - git: `bg Rgb(75,60,20)` (dark amber), `fg Rgb(245,210,110)`
 - The marquee overflow path stays single-color (dropping per-pill colors) — windowing styled spans is fiddly. Worth a follow-up if you want colored marquee.
 - Tests updated for the new `Pill` shape (2 tests). Total: mew-tui 37.
+
+### 2026-06-19: colored marquee (per-pill colors preserved) + brackets removed
+
+- The pill text no longer carries `[` `]` delimiters — each pill is just its label (e.g. `opencode-go/deepseek-v4-pro`) rendered as a solid bg/fg span. With the background already giving the box, brackets were visual noise.
+- Refactored the pill rendering to be segment-based. `build_segments(pills, trailing_gap)` interleaves pills with 1-cell `STATUS_BG` gaps and optionally appends a trailing gap. The static line and the marquee both render from the same `Vec<PillSegment>`, so the marquee can keep per-pill colors as the window slides. `segments_window(segs, width, offset)` does char-accurate windowing with binary-search segment lookup and coalesces consecutive chars from the same segment into one span. The 3-cell trailing gap in the marquee sequence prevents the end running into the start between cycles.
+- Tradeoff resolved: the marquee is now color-true (was single dim gray).
+- 2 pill_string tests updated (no brackets), 4 new segments tests (interleave, trailing gap, span count, color-preserving window, wrap, cycle). Total: mew-tui 37 → 39.
+
+### 2026-06-19: slash autocomplete visible count scales with terminal height
+
+- The slash picker box used `(items + 2).min(5)`, which capped the list at 3 items no matter the screen. That's fine on a phone screen but buries commands on a full terminal where users might be filtering through 30+ slash commands.
+- Changed `crates/mew-tui/src/ui/mod.rs` to `min(12, area.height / 2)` visible items, so the box grows with the terminal but never eats more than half the screen. With fewer items, the box shrinks to fit (no empty padding). Height: `items.min(max_visible) + 2` (for the border).
+- 39 mew-tui tests pass; clippy clean.

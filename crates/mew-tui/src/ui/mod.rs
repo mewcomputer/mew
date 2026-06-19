@@ -67,8 +67,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let slash_cmds = app.filtered_slash_commands();
     let show_slash = app.mode == Mode::SlashCommand && !slash_cmds.is_empty();
+    // Cap the visible list at min(12, half the terminal height) so a long
+    // command set doesn't eat the whole screen, and tall terminals get more
+    // items. If fewer commands exist than the cap, show them all.
+    let max_visible_items: u16 = (area.height / 2).min(12);
     let slash_height = if show_slash {
-        (slash_cmds.len() as u16 + 2).min(5)
+        (slash_cmds.len() as u16).min(max_visible_items) + 2
     } else {
         0
     };
