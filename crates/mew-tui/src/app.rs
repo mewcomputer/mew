@@ -154,6 +154,14 @@ pub struct App {
     pub dynamic_slash_commands: Vec<SlashCommand>,
     /// When the companion speech bubble was set (for auto-dismiss).
     pub companion_bubble_since: Option<Instant>,
+    /// Marquee offset for the status bar when pills overflow the width.
+    pub status_ticker_offset: usize,
+    pub status_ticker_at: Option<Instant>,
+    /// Cached git branch for the status pill (resolved lazily on first draw).
+    pub git_branch: Option<String>,
+    pub git_branch_resolved: bool,
+    /// Shortened cwd (home → `~`) for the status pill.
+    pub short_cwd: String,
     /// Running subagent tasks for sidebar display.
     pub subagents: Vec<SubagentState>,
 }
@@ -352,6 +360,11 @@ impl App {
             plugin_ui: std::collections::HashMap::new(),
             dynamic_slash_commands: Vec::new(),
             companion_bubble_since: None,
+            status_ticker_offset: 0,
+            status_ticker_at: None,
+            git_branch: None,
+            git_branch_resolved: false,
+            short_cwd: short_cwd(),
             subagents: Vec::new(),
         }
     }
@@ -959,6 +972,15 @@ impl App {
             if since.elapsed() > Duration::from_secs(1) {
                 self.ctrl_c_quit_pending = None;
             }
+        }
+        // Advance the status-bar marquee when pills overflow the width.
+        if let Some(last) = self.status_ticker_at {
+            if last.elapsed() > Duration::from_millis(300) {
+                self.status_ticker_offset = self.status_ticker_offset.wrapping_add(1);
+                self.status_ticker_at = Some(Instant::now());
+            }
+        } else {
+            self.status_ticker_at = Some(Instant::now());
         }
     }
 
@@ -1586,6 +1608,42 @@ fn append_to_part(part: &mut Part, delta: &str) {
         Part::Text(tp) => tp.text.push_str(delta),
         Part::Reasoning(rp) => rp.text.push_str(delta),
         _ => {}
+    }
+}
+
+/// Current dir with `$HOME` collapsed to `~`, for the status pill.
+fn short_cwd() -> String {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p.display().to_string(),
+        Err(_) => return String::new(),
+    };
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = home.to_string_lossy().into_owned();
+        if let Some(rest) = cwd.strip_prefix(&home) {
+            return format!("~{}", rest);
+        }
+    }
+    cwd
+}
+
+/// Walk up from cwd to find a `.git/HEAD` and parse the branch name.
+/// Returns `None` outside a repo. Used for the status pill.
+pub fn current_git_branch() -> Option<String> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let head = dir.join(".git").join("HEAD");
+        if let Ok(content) = std::fs::read_to_string(&head) {
+            let content = content.trim();
+            if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
+                return Some(branch.to_string());
+            }
+            // Detached HEAD: content is a commit hash.
+            if content.len() >= 7 {
+                return Some(content[..7].to_string());
+            }
+            return Some(content.to_string());
+        }
+        dir = dir.parent()?.to_path_buf();
     }
 }
 

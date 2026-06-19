@@ -206,3 +206,11 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - Root cause: `max_scroll` was computed from `text.lines.len()` (raw `Line` entries), but `Paragraph::wrap` splits wide lines across multiple visual rows and `Paragraph::scroll` advances by wrapped rows. So whenever any line wrapped, `max_scroll` underestimated and the last few rows were unreachable — the classic "can't scroll to the very bottom."
 - Fix: new `wrapped_height(text, width)` helper (sum of `ceil(line.width / width)` per line, empty lines count as 1) drives `total_lines` and the scrollbar's content length. `max_scroll` now reflects the real rendered height.
 - 4 new tests in `ui/chat.rs` (no-wrap, long-line wrap, empty-line, zero-width fallback). Total: mew-tui 26 → 30.
+
+### 2026-06-19: status bar as extensible pills (model, cwd, git) + marquee ticker
+
+- The bottom status bar is now a list of `Pill` entries rendered as `[text]` segments (dim brackets, per-pill text color). Concrete pills: `[provider/model]`, `[~/code/mew]` (cwd with `$HOME` collapsed), `[git: main]` (walks up to `.git/HEAD`, parses branch or short hash for detached HEAD, resolved lazily on first draw to avoid per-frame/per-test fs reads). Future pills (persona, permission mode) slot into `build_pills` — no other change needed.
+- Token/cost stays pinned right, the same split layout as before.
+- If the pills don't fit (after reserving the right-side width), the left side marquees: a cycling window of `width` chars, advanced by `app.status_ticker_offset` (incremented every ~300ms in `tick`). A 3-space gap between cycles prevents the end running into the start. Per-pill colors are dropped in the marquee (single dim color) since windowing styled spans is fiddly.
+- Transient statuses (esc-to-cancel, ctrl-c-quit, retry) still override the left side.
+- 7 new tests (`pill_string` join + edge cases, `marquee` width/exact/cycling/zero-width). Total: mew-tui 30 → 37.

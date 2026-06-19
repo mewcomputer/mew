@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::{display_width, DIVIDER, STATUS_BG};
-use crate::app::App;
+use crate::app::{current_git_branch, App};
 
 pub(super) fn draw_divider(f: &mut Frame, area: Rect) {
     let line = Line::from(Span::styled(
@@ -25,12 +25,111 @@ fn fmt_tokens(n: u32) -> String {
     }
 }
 
-pub(super) fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let status = &app.status;
+/// A single bracketed pill in the status bar. Pills render as `[text]` with
+/// dim brackets and `color` text. Collect them in priority order; later pills
+/// (cwd, git, persona, perms) drop first if width is tight, and the whole row
+/// marquees when even the model pill alone overflows.
+struct Pill {
+    text: String,
+    color: Color,
+}
 
+fn build_pills(app: &App) -> Vec<Pill> {
+    let mut pills = Vec::new();
+
+    // [provider/model]
+    let model_label = if !app.status.provider.is_empty() && !app.status.model.is_empty() {
+        format!("{}/{}", app.status.provider, app.status.model)
+    } else if !app.status.model.is_empty() {
+        app.status.model.clone()
+    } else {
+        String::new()
+    };
+    if !model_label.is_empty() {
+        pills.push(Pill {
+            text: model_label,
+            color: Color::White,
+        });
+    }
+
+    // [~/code/mew]
+    if !app.short_cwd.is_empty() {
+        pills.push(Pill {
+            text: app.short_cwd.clone(),
+            color: Color::Cyan,
+        });
+    }
+
+    // [git: main]
+    if let Some(ref branch) = app.git_branch {
+        pills.push(Pill {
+            text: format!("git: {}", branch),
+            color: Color::Magenta,
+        });
+    }
+
+    // Future pills slot in here: persona, perms, plugin-contributed, etc.
+    pills
+}
+
+/// Plain concatenated pill text (`[a] [b] [c]`) for width math and marquee.
+fn pill_string(pills: &[Pill]) -> String {
+    pills
+        .iter()
+        .map(|p| format!("[{}]", p.text))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Styled line of pills for the static (fits) case.
+fn pill_line(pills: &[Pill]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, p) in pills.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" ", Style::default().bg(STATUS_BG)));
+        }
+        spans.push(Span::styled(
+            "[",
+            Style::default().fg(Color::DarkGray).bg(STATUS_BG),
+        ));
+        spans.push(Span::styled(
+            p.text.clone(),
+            Style::default().fg(p.color).bg(STATUS_BG),
+        ));
+        spans.push(Span::styled(
+            "]",
+            Style::default().fg(Color::DarkGray).bg(STATUS_BG),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Scroll a window across `text` (with a gap appended so cycles don't run
+/// together). Used when the pills don't fit and the bar acts as a ticker.
+fn marquee(text: &str, width: usize, offset: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut seq: Vec<char> = text.chars().collect();
+    if seq.is_empty() {
+        return String::new();
+    }
+    seq.extend("   ".chars());
+    let n = seq.len();
+    (0..width).map(|i| seq[(offset + i) % n]).collect()
+}
+
+pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     let bg = Block::default().style(Style::default().bg(STATUS_BG));
     f.render_widget(bg, area);
 
+    // Resolve git branch once, lazily (avoids per-frame and per-test fs reads).
+    if !app.git_branch_resolved {
+        app.git_branch = current_git_branch();
+        app.git_branch_resolved = true;
+    }
+
+    let status = &app.status;
     let total = status.input_tokens + status.output_tokens;
     let right = if status.context_window > 0 {
         format!(
@@ -43,44 +142,115 @@ pub(super) fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         format!("{} tok  ·  ${:.2}", fmt_tokens(total), status.cost)
     };
 
-    let left_spans = if app.esc_cancel_pending.is_some() {
-        vec![Span::styled(
-            "esc again to stop agent",
-            Style::default().fg(Color::Yellow).bg(STATUS_BG),
-        )]
-    } else if app.ctrl_c_quit_pending.is_some() {
-        vec![Span::styled(
-            "ctrl-c again to quit",
-            Style::default().fg(Color::Red).bg(STATUS_BG),
-        )]
-    } else if let Some(ref retry) = app.retry_status {
-        vec![Span::styled(
-            retry.as_str(),
-            Style::default().fg(Color::LightBlue).bg(STATUS_BG),
-        )]
-    } else {
-        vec![
-            Span::styled(
-                &status.model,
-                Style::default().fg(Color::White).bg(STATUS_BG),
-            ),
-            Span::styled("  ", Style::default().bg(STATUS_BG)),
-            Span::styled(
-                &status.provider,
-                Style::default().fg(Color::DarkGray).bg(STATUS_BG),
-            ),
-        ]
-    };
-    let right_width = display_width(&right) as u16;
-    let right_span = Span::styled(right, Style::default().fg(Color::Gray).bg(STATUS_BG));
-    let left_para = Paragraph::new(Line::from(left_spans));
-    let right_para = Paragraph::new(Line::from(right_span)).alignment(Alignment::Right);
     let inner = Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1);
+    let right_width = display_width(&right) as u16;
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(0), Constraint::Length(right_width)])
         .split(inner);
+    let left_area = chunks[0];
 
-    f.render_widget(left_para, chunks[0]);
-    f.render_widget(right_para, chunks[1]);
+    // Render the right side (tokens/cost), always pinned.
+    let right_span = Span::styled(right, Style::default().fg(Color::Gray).bg(STATUS_BG));
+    f.render_widget(
+        Paragraph::new(Line::from(right_span)).alignment(Alignment::Right),
+        chunks[1],
+    );
+
+    // Left side: transient status overrides take precedence, then pills.
+    let left_line: Line<'static> = if app.esc_cancel_pending.is_some() {
+        Line::from(Span::styled(
+            "esc again to stop agent",
+            Style::default().fg(Color::Yellow).bg(STATUS_BG),
+        ))
+    } else if app.ctrl_c_quit_pending.is_some() {
+        Line::from(Span::styled(
+            "ctrl-c again to quit",
+            Style::default().fg(Color::Red).bg(STATUS_BG),
+        ))
+    } else if let Some(ref retry) = app.retry_status {
+        Line::from(Span::styled(
+            retry.clone(),
+            Style::default().fg(Color::LightBlue).bg(STATUS_BG),
+        ))
+    } else {
+        let pills = build_pills(app);
+        let pstr = pill_string(&pills);
+        let pwidth = display_width(&pstr) as u16;
+        if pwidth <= left_area.width {
+            // Fits: render styled pills, reset the ticker.
+            app.status_ticker_offset = 0;
+            pill_line(&pills)
+        } else {
+            // Overflow: marquee. Drop per-pill colors for the scrolled window.
+            let scrolled = marquee(&pstr, left_area.width as usize, app.status_ticker_offset);
+            Line::from(Span::styled(
+                scrolled,
+                Style::default().fg(Color::Gray).bg(STATUS_BG),
+            ))
+        }
+    };
+
+    f.render_widget(Paragraph::new(left_line), left_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pill_string_formats_brackets() {
+        let pills = vec![
+            Pill {
+                text: "a".into(),
+                color: Color::White,
+            },
+            Pill {
+                text: "bb".into(),
+                color: Color::Cyan,
+            },
+        ];
+        assert_eq!(pill_string(&pills), "[a] [bb]");
+    }
+
+    #[test]
+    fn test_pill_string_single() {
+        let pills = vec![Pill {
+            text: "only".into(),
+            color: Color::White,
+        }];
+        assert_eq!(pill_string(&pills), "[only]");
+    }
+
+    #[test]
+    fn test_pill_string_empty() {
+        assert_eq!(pill_string(&[]), "");
+    }
+
+    #[test]
+    fn test_marquee_returns_exact_width() {
+        let out = marquee("hello", 3, 0);
+        assert_eq!(out.chars().count(), 3);
+    }
+
+    #[test]
+    fn test_marquee_advances_with_offset() {
+        // seq = "abc" + "   " = "abc   " (6 chars). offset 0 → first 4 = "abc ".
+        assert_eq!(marquee("abc", 4, 0), "abc ");
+        // offset 1 → chars 1..5 = "bc  ".
+        assert_eq!(marquee("abc", 4, 1), "bc  ");
+    }
+
+    #[test]
+    fn test_marquee_wraps_around() {
+        // offset past the end wraps via modulo.
+        let seq_len = "abc".chars().count() + 3; // 6
+                                                 // offset == seq_len should equal offset 0.
+        assert_eq!(marquee("abc", 4, seq_len), marquee("abc", 4, 0));
+    }
+
+    #[test]
+    fn test_marquee_zero_width_returns_empty() {
+        assert_eq!(marquee("abc", 0, 0), "");
+    }
 }
