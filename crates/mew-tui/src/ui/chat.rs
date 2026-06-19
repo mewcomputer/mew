@@ -137,7 +137,23 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     let mut text = Text::default();
     let tool_bg_style = Style::default().bg(TOOL_BG);
     let msg_count = app.messages.len();
-    let md_width = area.width.saturating_sub(2);
+    // Reserve the rightmost 1 column for the scrollbar so tool blocks (which
+    // paint TOOL_BG across the full paragraph width) can't cover it. The
+    // down-indicator then overlays the last column of the chat (like the
+    // up-indicator at the top-left).
+    let scrollbar_area = Rect {
+        x: area.x + area.width.saturating_sub(1),
+        y: area.y,
+        width: 1.min(area.width),
+        height: area.height,
+    };
+    let chat_inner = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width.saturating_sub(scrollbar_area.width),
+        height: area.height,
+    };
+    let md_width = chat_inner.width;
 
     let mut chat_rows = std::mem::take(&mut app.chat_rows);
     chat_rows.clear();
@@ -468,8 +484,8 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     drop(sel_ctx);
     app.chat_rows = chat_rows;
 
-    let total_lines = wrapped_height(&text, area.width);
-    let max_scroll = total_lines.saturating_sub(area.height);
+    let total_lines = wrapped_height(&text, chat_inner.width);
+    let max_scroll = total_lines.saturating_sub(chat_inner.height);
     app.max_scroll = max_scroll;
 
     if app.auto_scroll {
@@ -481,18 +497,18 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         .wrap(Wrap { trim: false })
         .scroll((scroll_offset, 0));
 
-    f.render_widget(paragraph, area);
+    f.render_widget(paragraph, chat_inner);
 
-    if total_lines > area.height {
+    if total_lines > chat_inner.height {
         let mut scrollbar_state = ScrollbarState::new(total_lines as usize)
-            .viewport_content_length(area.height as usize)
+            .viewport_content_length(chat_inner.height as usize)
             .position(scroll_offset as usize);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
             .track_symbol(Some("│"))
             .thumb_symbol("█");
-        f.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
 
     if app.scroll > 0 {
@@ -502,7 +518,12 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     }
     if app.scroll < max_scroll {
         let indicator = Span::styled("↓", Style::default().fg(Color::Yellow));
-        let indicator_area = Rect::new(area.x + area.width - 2, area.y + area.height - 1, 2, 1);
+        let indicator_area = Rect::new(
+            chat_inner.x + chat_inner.width - 1,
+            area.y + area.height - 1,
+            1,
+            1,
+        );
         f.render_widget(Paragraph::new(Line::from(indicator)), indicator_area);
     }
 }

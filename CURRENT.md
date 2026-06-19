@@ -214,3 +214,10 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - If the pills don't fit (after reserving the right-side width), the left side marquees: a cycling window of `width` chars, advanced by `app.status_ticker_offset` (incremented every ~300ms in `tick`). A 3-space gap between cycles prevents the end running into the start. Per-pill colors are dropped in the marquee (single dim color) since windowing styled spans is fiddly.
 - Transient statuses (esc-to-cancel, ctrl-c-quit, retry) still override the left side.
 - 7 new tests (`pill_string` join + edge cases, `marquee` width/exact/cycling/zero-width). Total: mew-tui 30 → 37.
+
+### 2026-06-19: scrollbar in its own column (no more tool-block overlap)
+
+- The chat paragraph and the scrollbar now render into separate areas: `chat_inner` is the area minus the rightmost 1 column, `scrollbar_area` is that 1 column. Tool blocks paint `TOOL_BG` across the full paragraph width — previously this covered the scrollbar's column, hiding the thumb/track. With the column reserved, the scrollbar lives outside the paragraph so tool blocks can't cover it.
+- `↓` indicator shrank to 1 char and now overlays the last column of `chat_inner` (like `↑` at the top-left).
+- `wrapped_height` and `md_width` use `chat_inner.width` so the scroll math matches the rendered area.
+- "Doesn't scroll to the bottom when at the bottom" — the wrapped-height fix (`max_scroll` now reflects the real rendered height) means `scroll == max_scroll` truly is the bottom, and the scrollbar thumb position (`max_scroll`) sits at the bottom of the track.
