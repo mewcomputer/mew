@@ -182,12 +182,14 @@ impl std::fmt::Debug for AgentEvent {
 mod agent;
 mod events;
 pub mod runner;
+mod todos;
 mod tools;
 mod turn;
 mod workspace;
 
 pub use agent::Agent;
 pub use mew_subagents::SubagentOutcome;
+pub use todos::{Todo, TodoList, TodoStatus};
 
 #[cfg(test)]
 mod tests;

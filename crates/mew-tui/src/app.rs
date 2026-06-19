@@ -41,6 +41,8 @@ pub enum SlashResult {
     ToggleMouseCapture,
     /// Force context compaction.
     Compact,
+    /// Show the session todo list.
+    Todo,
     /// A plugin-registered slash command that needs dispatcher execution.
     PluginCommand {
         name: String,
@@ -948,6 +950,10 @@ impl App {
                 description: "force context compaction".into(),
             },
             SlashCommand {
+                name: "/todo".into(),
+                description: "show the session todo list".into(),
+            },
+            SlashCommand {
                 name: "/cost".into(),
                 description: "show cost breakdown".into(),
             },
@@ -1000,6 +1006,7 @@ impl App {
             "/quit" | "/q" => SlashResult::Quit,
             "/clear" => SlashResult::Clear,
             "/compact" => SlashResult::Compact,
+            "/todo" => SlashResult::Todo,
             "/cost" => SlashResult::Message(self.build_cost_report()),
             "/help" => SlashResult::Message(self.build_help()),
             "/model" => {

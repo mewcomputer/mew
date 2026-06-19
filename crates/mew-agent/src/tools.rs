@@ -91,6 +91,15 @@ impl Agent {
                 continue;
             }
 
+            if matches!(
+                tc.tool_name.as_str(),
+                "todo_create" | "todo_update" | "todo_complete" | "todo_delete" | "todo_list"
+            ) {
+                self.execute_todo(tc, assistant_msg, ev_tx, &mut result_parts)
+                    .await;
+                continue;
+            }
+
             // Mark as running.
             let running_state = ToolState::Running(ToolStateRunning {
                 input: tc.input().clone(),
@@ -1067,6 +1076,100 @@ impl Agent {
         }));
     }
 
+    async fn execute_todo(
+        &self,
+        tc: &ToolCallPart,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        result_parts: &mut Vec<Part>,
+    ) {
+        let call_id = tc.call_id.clone();
+        let part_id = tc.base.id;
+        let input = tc.input().clone();
+
+        let assistant_id = match assistant_msg {
+            Some(ref msg) => msg.id,
+            None => return,
+        };
+
+        // Mutate under the lock, then render + snapshot for persistence.
+        let (output, success, snapshot) = {
+            let mut list = self.todos.lock().await;
+            let op = apply_todo_op(&tc.tool_name, &input, &mut list);
+            let snapshot = list.clone();
+            let (output, success) = match op {
+                Ok(note) => {
+                    let mut text = if note.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{}\n", note)
+                    };
+                    text.push_str(&snapshot.render());
+                    (text, true)
+                }
+                Err(e) => (e, false),
+            };
+            (output, success, snapshot)
+        };
+
+        // Persist on success only — failures don't change state.
+        if success {
+            if let Some(path) = &self.todos_path {
+                if let Err(e) = snapshot.save(path).await {
+                    tracing::warn!(error = %e, "failed to persist todos");
+                }
+            }
+        }
+
+        let final_state = if success {
+            ToolState::Completed(ToolStateCompleted {
+                input,
+                output,
+                metadata: None,
+                diff: None,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        } else {
+            ToolState::Error(ToolStateError {
+                input,
+                error: output,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        };
+
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, final_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: final_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx.send(AgentEvent::ToolEnd { call_id, success }).await;
+
+        result_parts.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            call_id: tc.call_id.clone(),
+        }));
+    }
+
     async fn execute_subagent_wait(
         &self,
         tc: &ToolCallPart,
@@ -1182,4 +1285,92 @@ impl Agent {
             call_id: tc.call_id.clone(),
         }));
     }
+}
+
+/// Apply a `todo_*` tool operation against a list. Pure (no agent state, no
+/// I/O): parses the JSON input, dispatches to the matching `TodoList` method,
+/// returns a short human-readable note on success or an error message. Kept as
+/// a free function so it unit-tests without an `Agent`.
+pub(crate) fn apply_todo_op(
+    tool_name: &str,
+    input: &serde_json::Value,
+    list: &mut crate::TodoList,
+) -> Result<String, String> {
+    match tool_name {
+        "todo_create" => {
+            let arr = input
+                .get("todos")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| "missing or non-array `todos`".to_string())?;
+            if arr.is_empty() {
+                return Err("`todos` must not be empty".to_string());
+            }
+            let items: Vec<(String, Vec<usize>)> = arr
+                .iter()
+                .filter_map(|t| {
+                    let content = t.get("content")?.as_str()?.to_string();
+                    let depends_on = t
+                        .get("depends_on")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_u64().map(|n| n as usize))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some((content, depends_on))
+                })
+                .collect();
+            if items.is_empty() {
+                return Err("no valid items (each needs a `content` string)".to_string());
+            }
+            let (created, dropped) = list.create(items);
+            let ids: Vec<String> = created.iter().map(|t| format!("#{}", t.id)).collect();
+            let total_dropped: usize = dropped.iter().map(|d| d.len()).sum();
+            let mut note = format!("created {}", ids.join(", "));
+            if total_dropped > 0 {
+                note.push_str(&format!(
+                    " ({} dependency reference(s) dropped — no such todo)",
+                    total_dropped
+                ));
+            }
+            Ok(note)
+        }
+        "todo_complete" => {
+            let id = parse_todo_id(input)?;
+            list.complete(id)?;
+            Ok(format!("completed #{}", id))
+        }
+        "todo_delete" => {
+            let id = parse_todo_id(input)?;
+            let removed = list.delete(id)?;
+            Ok(format!("deleted #{} ({})", id, removed.content))
+        }
+        "todo_update" => {
+            let id = parse_todo_id(input)?;
+            let content = input
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let status = input
+                .get("status")
+                .and_then(|v| v.as_str())
+                .and_then(crate::TodoStatus::parse);
+            if content.is_none() && status.is_none() {
+                return Err("nothing to update: pass `content` and/or `status`".to_string());
+            }
+            list.update(id, content, status)?;
+            Ok(format!("updated #{}", id))
+        }
+        "todo_list" => Ok(String::new()),
+        other => Err(format!("unknown todo tool: {}", other)),
+    }
+}
+
+fn parse_todo_id(input: &serde_json::Value) -> Result<usize, String> {
+    input
+        .get("id")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .ok_or_else(|| "missing or non-integer `id`".to_string())
 }

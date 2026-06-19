@@ -75,6 +75,13 @@ pub struct Agent {
     /// Secret words and file globs to redact from tool output. Shared (via
     /// `Arc`) with each `ToolCtx` built for a tool call.
     pub secrets: Arc<SecretSet>,
+    /// Session-lived, dependency-enforced todo list. Survives compaction (it's
+    /// agent state, not message history) and resume (persisted to
+    /// `todos_path`).
+    pub todos: Arc<tokio::sync::Mutex<crate::TodoList>>,
+    /// Where to persist `todos`. `None` when there's no session (tests,
+    /// non-interactive runs that skip the writer).
+    pub todos_path: Option<std::path::PathBuf>,
     /// Current reasoning/thinking configuration, if any.
     pub reasoning: Option<ReasoningConfig>,
 }
@@ -121,6 +128,8 @@ impl Agent {
             force_compact: Arc::new(tokio::sync::Mutex::new(false)),
             flagged_files: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             secrets: Arc::new(SecretSet::default()),
+            todos: Arc::new(tokio::sync::Mutex::new(crate::TodoList::new())),
+            todos_path: None,
             reasoning: None,
         }
     }

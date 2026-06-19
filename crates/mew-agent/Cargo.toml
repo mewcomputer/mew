@@ -16,6 +16,7 @@ mew-config = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 ulid = { workspace = true }
 thiserror = { workspace = true }

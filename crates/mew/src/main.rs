@@ -30,6 +30,7 @@ use mew_tools::tools::grep::Grep;
 use mew_tools::tools::progress_update::ProgressUpdate;
 use mew_tools::tools::read::Read;
 use mew_tools::tools::skill::Skill;
+use mew_tools::tools::todo::{TodoComplete, TodoCreate, TodoDelete, TodoListTool, TodoUpdate};
 use mew_tools::tools::write::Write;
 use mew_tools::SecretSet;
 
@@ -319,6 +320,11 @@ fn build_tools(skills: Arc<Vec<mew_skills::Skill>>) -> Vec<Arc<dyn mew_tools::To
         Arc::new(ExitTool),
         Arc::new(ProgressUpdate),
         Arc::new(AskUser),
+        Arc::new(TodoCreate),
+        Arc::new(TodoUpdate),
+        Arc::new(TodoComplete),
+        Arc::new(TodoDelete),
+        Arc::new(TodoListTool),
     ];
     if !skills.is_empty() {
         tools.push(Arc::new(Skill::new(skills)));
@@ -960,6 +966,7 @@ async fn run_tui(
     let session_writer = SessionWriter::open(&session_id)
         .await
         .context("open session")?;
+    let todos_path = session_writer.path().parent().map(|p| p.join("todos.json"));
 
     // Plugin UI channel: plugins push content, we drain in the main loop.
     let (plugin_ui_tx, mut plugin_ui_rx) =
@@ -1078,6 +1085,12 @@ async fn run_tui(
     );
     agent.flagged_files = flagged_files;
     agent.secrets = build_secret_set(cfg);
+    agent.todos_path = todos_path.clone();
+    if let Some(ref tp) = todos_path {
+        if let Ok(list) = mew_agent::TodoList::load(tp).await {
+            *agent.todos.lock().await = list;
+        }
+    }
     agent.set_permission_engine(permission_engine);
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
@@ -1289,6 +1302,10 @@ async fn run_tui(
                                         "compaction will run on next turn".into(),
                                     ));
                                 }
+                                mew_tui::SlashResult::Todo => {
+                                    let list = agent.todos.lock().await;
+                                    app.messages.push(synthetic_message(list.render()));
+                                }
                                 mew_tui::SlashResult::SwitchModel(new_model) => {
                                     let (new_provider_id, new_model_id) =
                                         if let Some(idx) = new_model.find('/') {
@@ -1342,6 +1359,15 @@ async fn run_tui(
                                     match mew_session::Reader::load(id).await {
                                         Ok(msgs) => {
                                             agent.load_messages(msgs.clone()).await;
+                                            // Carry forward the resumed session's todos.
+                                            let resumed_todos_path = mew_session::session_dir()
+                                                .join(id)
+                                                .join("todos.json");
+                                            if let Ok(list) =
+                                                mew_agent::TodoList::load(&resumed_todos_path).await
+                                            {
+                                                *agent.todos.lock().await = list;
+                                            }
                                             app.clear_messages();
                                             for msg in &msgs {
                                                 app.messages.push(msg.clone());
@@ -1633,6 +1659,10 @@ async fn run_tui(
                                         app.messages.push(synthetic_message(
                                             "compaction will run on next turn".into(),
                                         ));
+                                    }
+                                    mew_tui::SlashResult::Todo => {
+                                        let list = agent.todos.lock().await;
+                                        app.messages.push(synthetic_message(list.render()));
                                     }
                                     mew_tui::SlashResult::SwitchModel(_) => {
                                         // Model switches are deferred; handled in main loop.
@@ -1990,6 +2020,7 @@ async fn build_and_run(
     let session_writer = SessionWriter::open(&session_id)
         .await
         .context("open session")?;
+    let todos_path = session_writer.path().parent().map(|p| p.join("todos.json"));
 
     let dispatcher = Arc::new(NopDispatcher);
 
@@ -2024,6 +2055,12 @@ async fn build_and_run(
     );
     agent.flagged_files = flagged_files;
     agent.secrets = build_secret_set(cfg);
+    agent.todos_path = todos_path.clone();
+    if let Some(ref tp) = todos_path {
+        if let Ok(list) = mew_agent::TodoList::load(tp).await {
+            *agent.todos.lock().await = list;
+        }
+    }
     agent.set_permission_engine(permission_engine);
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];

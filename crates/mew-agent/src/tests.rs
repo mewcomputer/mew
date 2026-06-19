@@ -1179,3 +1179,155 @@ async fn test_streaming_tool_call_appends_with_parsed_input() {
         "raw_input should retain the full streamed payload for debugging"
     );
 }
+
+// ------------------------------------------------------------------
+// apply_todo_op: the tool-handler dispatch layer
+// ------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_todo_create_through_handler() {
+    let mut list = crate::TodoList::new();
+    let note = crate::tools::apply_todo_op(
+        "todo_create",
+        &serde_json::json!({
+            "todos": [
+                { "content": "write tests" },
+                { "content": "ship it", "depends_on": [1] }
+            ]
+        }),
+        &mut list,
+    )
+    .expect("create should succeed");
+    assert!(note.contains("created #1, #2"));
+    assert_eq!(list.items.len(), 2);
+    assert_eq!(list.get(2).unwrap().depends_on, vec![1]);
+}
+
+#[tokio::test]
+async fn test_todo_create_drops_unknown_deps_with_note() {
+    let mut list = crate::TodoList::new();
+    let note = crate::tools::apply_todo_op(
+        "todo_create",
+        &serde_json::json!({ "todos": [{ "content": "x", "depends_on": [99] }] }),
+        &mut list,
+    )
+    .unwrap();
+    assert!(note.contains("dropped"), "{}", note);
+    assert!(list.get(1).unwrap().depends_on.is_empty());
+}
+
+#[tokio::test]
+async fn test_todo_complete_enforces_deps_through_handler() {
+    let mut list = crate::TodoList::new();
+    crate::tools::apply_todo_op(
+        "todo_create",
+        &serde_json::json!({ "todos": [{ "content": "base" }, { "content": "child", "depends_on": [1] }] }),
+        &mut list,
+    )
+    .unwrap();
+    let err =
+        crate::tools::apply_todo_op("todo_complete", &serde_json::json!({ "id": 2 }), &mut list)
+            .unwrap_err();
+    assert!(err.contains("depends on #1"));
+    assert_eq!(list.get(2).unwrap().status, crate::TodoStatus::Pending);
+}
+
+#[tokio::test]
+async fn test_todo_delete_enforces_dependents_through_handler() {
+    let mut list = crate::TodoList::new();
+    crate::tools::apply_todo_op(
+        "todo_create",
+        &serde_json::json!({ "todos": [{ "content": "base" }, { "content": "child", "depends_on": [1] }] }),
+        &mut list,
+    )
+    .unwrap();
+    let err =
+        crate::tools::apply_todo_op("todo_delete", &serde_json::json!({ "id": 1 }), &mut list)
+            .unwrap_err();
+    assert!(err.contains("depend on it"));
+    assert_eq!(list.items.len(), 2);
+}
+
+#[tokio::test]
+async fn test_todo_update_status_change() {
+    let mut list = crate::TodoList::new();
+    crate::tools::apply_todo_op(
+        "todo_create",
+        &serde_json::json!({ "todos": [{ "content": "task" }] }),
+        &mut list,
+    )
+    .unwrap();
+    crate::tools::apply_todo_op(
+        "todo_update",
+        &serde_json::json!({ "id": 1, "status": "in_progress" }),
+        &mut list,
+    )
+    .unwrap();
+    assert_eq!(list.get(1).unwrap().status, crate::TodoStatus::InProgress);
+}
+
+#[tokio::test]
+async fn test_todo_update_to_done_enforces_deps() {
+    let mut list = crate::TodoList::new();
+    crate::tools::apply_todo_op(
+        "todo_create",
+        &serde_json::json!({ "todos": [{ "content": "base" }, { "content": "child", "depends_on": [1] }] }),
+        &mut list,
+    )
+    .unwrap();
+    let err = crate::tools::apply_todo_op(
+        "todo_update",
+        &serde_json::json!({ "id": 2, "status": "done" }),
+        &mut list,
+    )
+    .unwrap_err();
+    assert!(err.contains("depends on #1"));
+}
+
+#[tokio::test]
+async fn test_todo_update_rejects_empty_change() {
+    let mut list = crate::TodoList::new();
+    crate::tools::apply_todo_op(
+        "todo_create",
+        &serde_json::json!({ "todos": [{ "content": "task" }] }),
+        &mut list,
+    )
+    .unwrap();
+    let err =
+        crate::tools::apply_todo_op("todo_update", &serde_json::json!({ "id": 1 }), &mut list)
+            .unwrap_err();
+    assert!(err.contains("nothing to update"));
+}
+
+#[tokio::test]
+async fn test_todo_list_returns_render() {
+    let mut list = crate::TodoList::new();
+    crate::tools::apply_todo_op(
+        "todo_create",
+        &serde_json::json!({ "todos": [{ "content": "only item" }] }),
+        &mut list,
+    )
+    .unwrap();
+    // apply_todo_op returns an empty note for list; the handler appends render.
+    let note = crate::tools::apply_todo_op("todo_list", &serde_json::json!({}), &mut list).unwrap();
+    assert!(
+        note.is_empty(),
+        "list op returns empty note; handler adds the render"
+    );
+}
+
+#[tokio::test]
+async fn test_todo_create_missing_todos_errors() {
+    let mut list = crate::TodoList::new();
+    let err =
+        crate::tools::apply_todo_op("todo_create", &serde_json::json!({}), &mut list).unwrap_err();
+    assert!(err.contains("todos"));
+}
+
+#[tokio::test]
+async fn test_todo_complete_missing_id_errors() {
+    let mut list = crate::TodoList::new();
+    let err = crate::tools::apply_todo_op("todo_complete", &serde_json::json!({}), &mut list)
+        .unwrap_err();
+    assert!(err.contains("id"));
+}
