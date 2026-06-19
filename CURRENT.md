@@ -200,3 +200,9 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - **@-mention picker produced `@@path`.** Root cause: typing `@` inserts it into `app.input` and opens the picker; on pick, the full `@path` was appended without removing the trigger `@` → `@@path`. Fixed via a new `App::insert_mention` helper that pops a trailing `@` before inserting. Both `InsertAtMention` and `InsertSubagentMention` handlers (primary + drain loops, 4 sites) now call it.
 - **@-mentioned file content flooded the chat.** Root cause: `process_mentions` inlined text-file content straight into the `enriched` string that became the user's visible message. Fixed by splitting the return into `(enriched, display, attachments)`: `enriched` (with full content) goes to the model via `agent.run_with_parts`; `display` (with just a `<path added to context>` notification per file) goes to `app.messages`. The three call sites (ACP, run_tui, build_and_run) updated. File content still reaches the model; the user just sees a one-line notification instead of the whole file.
 - 1 new mew-tui test (`insert_mention` replaces the trigger `@`). Total: mew-tui 25 → 26.
+
+### 2026-06-19: chat scroll didn't reach the bottom (wrapped-height bug)
+
+- Root cause: `max_scroll` was computed from `text.lines.len()` (raw `Line` entries), but `Paragraph::wrap` splits wide lines across multiple visual rows and `Paragraph::scroll` advances by wrapped rows. So whenever any line wrapped, `max_scroll` underestimated and the last few rows were unreachable — the classic "can't scroll to the very bottom."
+- Fix: new `wrapped_height(text, width)` helper (sum of `ceil(line.width / width)` per line, empty lines count as 1) drives `total_lines` and the scrollbar's content length. `max_scroll` now reflects the real rendered height.
+- 4 new tests in `ui/chat.rs` (no-wrap, long-line wrap, empty-line, zero-width fallback). Total: mew-tui 26 → 30.

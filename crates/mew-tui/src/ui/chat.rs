@@ -468,7 +468,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     drop(sel_ctx);
     app.chat_rows = chat_rows;
 
-    let total_lines = text.lines.len() as u16;
+    let total_lines = wrapped_height(&text, area.width);
     let max_scroll = total_lines.saturating_sub(area.height);
     app.max_scroll = max_scroll;
 
@@ -515,6 +515,25 @@ fn push_tool_line<'a>(width: u16, spans: Vec<Span<'a>>, pad_style: Style) -> Lin
             .push(Span::styled(" ".repeat((width - used) as usize), pad_style));
     }
     line
+}
+
+/// Count the visual rows `text` occupies when wrapped to `width` columns.
+/// `Paragraph::scroll` advances by wrapped rows, not raw `Line` entries, so
+/// the scroll ceiling must be derived from the wrapped height — otherwise any
+/// line that wraps makes the bottom unreachable (the classic "can't scroll to
+/// the last line" bug).
+fn wrapped_height(text: &ratatui::text::Text, width: u16) -> u16 {
+    if width == 0 {
+        return text.lines.len() as u16;
+    }
+    let w = width as usize;
+    text.lines
+        .iter()
+        .map(|line| {
+            let line_width = line.width();
+            (line_width.div_ceil(w)).max(1) as u16
+        })
+        .sum()
 }
 
 fn fix_em_dashes(lines: Vec<ratatui::text::Line<'static>>) -> Vec<ratatui::text::Line<'static>> {
@@ -626,5 +645,39 @@ fn tool_call_args_summary(tc: &mew_message::ToolCallPart) -> Option<String> {
             }
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wrapped_height_no_wrap_when_lines_fit() {
+        let text = Text::from(vec![Line::from("short"), Line::from("also short")]);
+        assert_eq!(wrapped_height(&text, 80), 2);
+    }
+
+    #[test]
+    fn test_wrapped_height_wraps_long_line() {
+        // 25 chars at width 10 -> ceil(25/10) = 3 rows
+        let text = Text::from(vec![Line::from("a".repeat(25))]);
+        assert_eq!(wrapped_height(&text, 10), 3);
+    }
+
+    #[test]
+    fn test_wrapped_height_empty_line_counts_as_one() {
+        let text = Text::from(vec![
+            Line::from("short"),        // 1 row
+            Line::from("b".repeat(25)), // 3 rows at width 10
+            Line::from(""),             // 1 row
+        ]);
+        assert_eq!(wrapped_height(&text, 10), 5);
+    }
+
+    #[test]
+    fn test_wrapped_height_zero_width_falls_back_to_line_count() {
+        let text = Text::from(vec![Line::from("x"), Line::from("y")]);
+        assert_eq!(wrapped_height(&text, 0), 2);
     }
 }
