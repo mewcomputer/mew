@@ -245,3 +245,10 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - The slash picker box used `(items + 2).min(5)`, which capped the list at 3 items no matter the screen. That's fine on a phone screen but buries commands on a full terminal where users might be filtering through 30+ slash commands.
 - Changed `crates/mew-tui/src/ui/mod.rs` to `min(12, area.height / 2)` visible items, so the box grows with the terminal but never eats more than half the screen. With fewer items, the box shrinks to fit (no empty padding). Height: `items.min(max_visible) + 2` (for the border).
 - 39 mew-tui tests pass; clippy clean.
+
+### 2026-06-19: tool block fill is now clearly visible
+
+- Bumped `TOOL_BG` from `Rgb(34, 34, 38)` to `Rgb(50, 50, 56)` in `crates/mew-tui/src/ui/mod.rs`. The old value was only ~4 units brighter per channel than the sidebar/status bgs, so the body fill blended into the chat background. On a typical dark terminal, the half-block top/bottom edges were the only visible part of a tool block — the body looked empty.
+- New value matches the divider color brightness, so tool blocks read as clearly-elevated cards. The half-block edges still add a 1-row soft transition into the fill (chat bg on the outside half, TOOL_BG on the inside half), which keeps the corners from looking clipped.
+- Also reverted an internal pill padding in `build_segments` (" a " instead of "a") that I'd added in the previous status rewrite — it ate horizontal space and the tests expected the unpadded form. Pills stay as bare labels on their bg.
+- 39 mew-tui tests pass; clippy clean.

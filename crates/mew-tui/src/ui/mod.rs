@@ -19,8 +19,10 @@ mod welcome;
 pub(super) const STATUS_BG: Color = Color::Rgb(30, 30, 33);
 /// Background color for the sidebar surface.
 pub(super) const SIDEBAR_BG: Color = Color::Rgb(28, 28, 31);
-/// Background color for tool call blocks.
-pub(super) const TOOL_BG: Color = Color::Rgb(34, 34, 38);
+/// Background color for tool call blocks. Picked to be clearly lighter than
+/// the surrounding chat surface so the block reads as a filled card; the
+/// half-block top/bottom edges add a 1-row soft transition into the fill.
+pub(super) const TOOL_BG: Color = Color::Rgb(50, 50, 56);
 /// Subtle divider color.
 pub(super) const DIVIDER: Color = Color::Rgb(50, 50, 55);
 /// Max lines of bash output shown when collapsed.
