@@ -728,7 +728,7 @@ impl Agent {
                 session_unavailable,
             })) => {
                 tracing::info!(subagent = %name, output_len = text.len(), turns_used, hit_turn_limit, hit_time_limit, session_unavailable, "subagent completed");
-                let mut out = text;
+                let mut out = text.trim_end_matches('\n').to_string();
                 if hit_turn_limit {
                     out.insert_str(
                         0,
@@ -866,7 +866,7 @@ impl Agent {
                         hit_time_limit,
                         session_unavailable,
                     }) => {
-                        let mut out = text;
+                        let mut out = text.trim_end_matches('\n').to_string();
                         if hit_turn_limit {
                             out.insert_str(
                                 0,
@@ -1204,7 +1204,7 @@ impl Agent {
                 hit_time_limit,
                 session_unavailable,
             }) => {
-                let mut out = text;
+                let mut out = text.trim_end_matches('\n').to_string();
                 if hit_turn_limit {
                     out.insert_str(
                         0,

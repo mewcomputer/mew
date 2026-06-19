@@ -252,3 +252,10 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - New value matches the divider color brightness, so tool blocks read as clearly-elevated cards. The half-block edges still add a 1-row soft transition into the fill (chat bg on the outside half, TOOL_BG on the inside half), which keeps the corners from looking clipped.
 - Also reverted an internal pill padding in `build_segments` (" a " instead of "a") that I'd added in the previous status rewrite — it ate horizontal space and the tests expected the unpadded form. Pills stay as bare labels on their bg.
 - 39 mew-tui tests pass; clippy clean.
+
+### 2026-06-19: trim trailing newlines from subagent tool output
+
+- Reported visual: when a subagent returns, the tool block's output had extra blank lines, leaving the latest message stranded in the middle of the viewport with chat-bg space below it.
+- Root cause: `exit_tool`'s `final_answer` and the accumulated stream text both get returned as-is from the subagent runner. If the subagent's model ends its answer with `\n` (or several), `into_text()` in the chat renderer splits them into blank `Line` entries, each one taking a full visual row. The tool block grows taller than the content justifies, pushing everything after it up.
+- Fix: at all three sites in `crates/mew-agent/src/tools.rs` (sync subagent_start line 731, async subagent_start line 869, subagent_wait line 1207) trim trailing `\n` from `text` before inserting warning prefixes. The warning prefixes (which end in `\n\n`) are preserved exactly, so a hit-turn-limit output still reads as `warning: ...\n\n<answer>`.
+- 39 mew-tui tests pass; clippy clean.
