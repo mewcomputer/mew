@@ -70,6 +70,9 @@ pub struct App {
     pub permission: Option<PermissionState>,
     /// Pending ask_user_question prompt, if any.
     pub user_question: Option<UserQuestionState>,
+    /// Current snapshot of the session todo list, for the sidebar pane.
+    /// Populated on startup and refreshed via `AgentEvent::TodosUpdated`.
+    pub todos: Vec<mew_agent::Todo>,
     /// Map of part_id -> display state for tool calls.
     pub tool_states: HashMap<PartId, ToolDisplayState>,
     /// Input history (previous prompts).
@@ -306,6 +309,7 @@ impl App {
             status: Status::default(),
             permission: None,
             user_question: None,
+            todos: Vec::new(),
             tool_states: HashMap::new(),
             history: Vec::new(),
             history_index: None,
@@ -1301,6 +1305,9 @@ impl App {
                     tx: Some(tx),
                 });
             }
+            AgentEvent::TodosUpdated { todos } => {
+                self.todos = todos;
+            }
             AgentEvent::ToolStart { call_id } => {
                 // Find the tool call part and mark as running.
                 for msg in self.messages.iter_mut().rev() {
@@ -1957,5 +1964,31 @@ mod tests {
         // Sender was dropped without sending → the receiver sees a disconnect,
         // which the agent handler turns into a "cancelled" tool result.
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_todos_updated_event_stores_snapshot() {
+        use mew_agent::{AgentEvent, Todo, TodoStatus};
+        let mut app = App::new();
+        assert!(app.todos.is_empty());
+        app.handle_agent_event(AgentEvent::TodosUpdated {
+            todos: vec![
+                Todo {
+                    id: 1,
+                    content: "write tests".into(),
+                    status: TodoStatus::Done,
+                    depends_on: vec![],
+                },
+                Todo {
+                    id: 2,
+                    content: "ship".into(),
+                    status: TodoStatus::InProgress,
+                    depends_on: vec![1],
+                },
+            ],
+        });
+        assert_eq!(app.todos.len(), 2);
+        assert_eq!(app.todos[0].id, 1);
+        assert_eq!(app.todos[1].status, TodoStatus::InProgress);
     }
 }

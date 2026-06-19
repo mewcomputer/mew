@@ -1119,6 +1119,12 @@ impl Agent {
                     tracing::warn!(error = %e, "failed to persist todos");
                 }
             }
+            // Push the new snapshot to the TUI so the sidebar pane updates.
+            let _ = ev_tx
+                .send(AgentEvent::TodosUpdated {
+                    todos: snapshot.items.clone(),
+                })
+                .await;
         }
 
         let final_state = if success {

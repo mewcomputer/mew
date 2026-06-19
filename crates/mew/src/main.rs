@@ -1167,6 +1167,9 @@ async fn run_tui(
 
     let mut app = mew_tui::App::new();
 
+    // Seed the sidebar's todos pane from whatever was loaded at startup.
+    app.todos = agent.todos.lock().await.items.clone();
+
     // Populate MCP server status in sidebar
     for (name, ok, count) in &mcp_server_status {
         if !ok {
@@ -1368,6 +1371,7 @@ async fn run_tui(
                                             {
                                                 *agent.todos.lock().await = list;
                                             }
+                                            app.todos = agent.todos.lock().await.items.clone();
                                             app.clear_messages();
                                             for msg in &msgs {
                                                 app.messages.push(msg.clone());
@@ -2234,6 +2238,9 @@ async fn build_and_run(
                 // result instead of hanging.
                 eprintln!("\n[ask_user_question: cancelled — no TUI in non-interactive mode]");
                 drop(tx);
+            }
+            mew_agent::AgentEvent::TodosUpdated { .. } => {
+                // No sidebar in non-interactive mode; nothing to update.
             }
         }
     }

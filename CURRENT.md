@@ -185,3 +185,11 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - `/todo` slash command prints the rendered list as a message.
 - Deferred to a follow-up: the sidebar pane + `AgentEvent::TodosUpdated` (live TUI visibility). The list is reachable today via `/todo` and the `todo_list` tool; the sidebar is UI polish.
 - Tests: 14 in todos.rs (id assignment, dep drop, complete blocked/succeeds, delete blocked/succeeds, update content/status, update-to-done enforces deps, render marks/dependencies/empty, persistence roundtrip, load-missing) + 10 handler tests in tests.rs (create through handler, dep-drop note, complete/delete/update enforcement through the tool layer, empty-update rejection, list, missing-input errors) + 2 mew-tools (names + sensitivity). Total: mew-agent 33 → 57, mew-tools 40 → 42.
+
+### 2026-06-18: todos sidebar pane + live sync
+
+- Closes the todos feature: the list is now visible in the sidebar without running `/todo`.
+- New `AgentEvent::TodosUpdated { todos: Vec<Todo> }` emitted by `execute_todo` after every successful mutation, carrying a full snapshot so the TUI doesn't reach into agent state.
+- New Todos pane in the sidebar (`ui/sidebar.rs`), placed right after Context: header shows done/total counts, each item shows status mark (`x` done dim, `~` in_progress yellow, ` ` pending, `!` blocked red) + `#id content` (truncated to sidebar width). Collapsible like the other panes.
+- `app.todos: Vec<mew_agent::Todo>` seeded at startup from the agent (`agent.todos` snapshot in `run_tui`) and re-synced on `/resume`, so the pane is populated before the first mutation event rather than empty until the model acts.
+- 1 new mew-tui test (TodosUpdated event stores snapshot). Total: mew-tui 24 → 25.

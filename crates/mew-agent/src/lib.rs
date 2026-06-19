@@ -85,6 +85,10 @@ pub enum AgentEvent {
         questions: Vec<AskUserQuestion>,
         tx: oneshot::Sender<Vec<String>>,
     },
+    /// The session's todo list changed (or is being reported). Carries the
+    /// full current snapshot so the TUI can render the sidebar pane without
+    /// reaching into agent state.
+    TodosUpdated { todos: Vec<Todo> },
 }
 
 impl std::fmt::Debug for AgentEvent {
@@ -174,6 +178,10 @@ impl std::fmt::Debug for AgentEvent {
                 .debug_struct("AskUser")
                 .field("call_id", call_id)
                 .field("questions", questions)
+                .finish(),
+            AgentEvent::TodosUpdated { todos } => f
+                .debug_struct("TodosUpdated")
+                .field("count", &todos.len())
                 .finish(),
         }
     }

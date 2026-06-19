@@ -59,6 +59,64 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     )));
     visual_row += 1;
 
+    // Todos
+    let todos_collapsed = app.sidebar_collapsed.get("todos").copied().unwrap_or(false);
+    let todos_arrow = if todos_collapsed { "▶" } else { "▼" };
+    app.sidebar_header_rows.push((visual_row, "todos".into()));
+    visual_row += 1;
+    let todo_total = app.todos.len();
+    let todo_done = app
+        .todos
+        .iter()
+        .filter(|t| t.status == mew_agent::TodoStatus::Done)
+        .count();
+    text.push_line(Line::from(vec![
+        Span::styled(todos_arrow, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" Todos ({}/{})", todo_done, todo_total),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    if !todos_collapsed {
+        if app.todos.is_empty() {
+            text.push_line(Line::from(Span::styled(
+                "  no todos yet",
+                Style::default().fg(Color::DarkGray),
+            )));
+            visual_row += 1;
+        } else {
+            let max_width = area.width.saturating_sub(8) as usize;
+            for t in &app.todos {
+                let (mark, color) = match t.status {
+                    mew_agent::TodoStatus::Done => ("x", Color::DarkGray),
+                    mew_agent::TodoStatus::InProgress => ("~", Color::Yellow),
+                    mew_agent::TodoStatus::Pending => (" ", Color::Gray),
+                    mew_agent::TodoStatus::Blocked => ("!", Color::Red),
+                };
+                let content: String = t.content.chars().take(max_width).collect();
+                let label = if t.content.chars().count() > max_width {
+                    format!("{}…", content)
+                } else {
+                    content
+                };
+                text.push_line(Line::from(vec![
+                    Span::styled(format!("  [{}] ", mark), Style::default().fg(color)),
+                    Span::styled(format!("#{} {}", t.id, label), Style::default().fg(color)),
+                ]));
+                visual_row += 1;
+            }
+        }
+    }
+
+    text.push_line(Line::from(Span::styled(
+        "─".repeat(area.width.saturating_sub(2) as usize),
+        Style::default().fg(DIVIDER),
+    )));
+    visual_row += 1;
+
     // Companion (buddy plugin)
     draw_companion_section(&mut text, &mut visual_row, app, area.width);
 
