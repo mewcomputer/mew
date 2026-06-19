@@ -109,6 +109,8 @@ pub struct App {
     pub slash_scroll: usize,
     /// Whether bash output is expanded (shows all lines vs last 10).
     pub bash_expanded: bool,
+    /// Whether reasoning/thinking blocks are expanded in the chat.
+    pub reasoning_expanded: bool,
     /// Message ID pending markdown re-render after streaming completes.
     pub pending_md_rerender: Option<mew_message::MessageId>,
     /// Incremental markdown render state.
@@ -328,6 +330,7 @@ impl App {
             slash_selected: 0,
             slash_scroll: 0,
             bash_expanded: false,
+            reasoning_expanded: false,
             pending_md_rerender: None,
             md_state: mdstream::DocumentState::new(),
             md_stream: None,
@@ -917,6 +920,23 @@ impl App {
         self.bash_expanded = !self.bash_expanded;
     }
 
+    /// Toggle reasoning/thinking block expansion.
+    pub fn toggle_reasoning_expanded(&mut self) {
+        self.reasoning_expanded = !self.reasoning_expanded;
+    }
+
+    /// Insert an @-mention into the input, replacing the trigger `@` that
+    /// opened the picker. Without this, the trigger `@` (already in the
+    /// input) plus the mention's leading `@` produces `@@path`.
+    pub fn insert_mention(&mut self, mention: &str) {
+        if self.input.ends_with('@') {
+            self.input.pop();
+            self.cursor = self.cursor.saturating_sub(1);
+        }
+        self.input.push_str(mention);
+        self.cursor += mention.len();
+    }
+
     /// Return the task id of the most recently started running subagent, if
     /// any. Used by the `x` key to cancel the most recent in-flight subagent.
     pub fn most_recent_running_subagent(&self) -> Option<String> {
@@ -1211,20 +1231,28 @@ impl App {
                 self.md_state = mdstream::DocumentState::new();
             }
             AgentEvent::Provider(ProviderEvent::PartDelta { part_id, delta, .. }) => {
+                let mut is_text_delta = false;
                 if let Some(msg) = self.messages.last_mut() {
                     if msg.role == Role::Assistant {
                         for part in &mut msg.parts {
                             if part.id() == part_id {
                                 append_to_part(part, &delta);
+                                is_text_delta = matches!(part, Part::Text(_));
                                 break;
                             }
                         }
                     }
                 }
-                // Feed delta into the incremental markdown stream.
-                if let Some(ref mut stream) = self.md_stream {
-                    let update = stream.append(&delta);
-                    self.md_state.apply(update);
+                // Feed the delta into the incremental markdown stream only for
+                // the text part it tracks. Reasoning deltas render separately
+                // (dimmed) and must not pollute the stream — otherwise the
+                // reasoning text appears twice: once as normal markdown here,
+                // once via the Part::Reasoning render.
+                if is_text_delta {
+                    if let Some(ref mut stream) = self.md_stream {
+                        let update = stream.append(&delta);
+                        self.md_state.apply(update);
+                    }
                 }
             }
             AgentEvent::Provider(ProviderEvent::PartEnd { .. }) => {}
@@ -1990,5 +2018,23 @@ mod tests {
         assert_eq!(app.todos.len(), 2);
         assert_eq!(app.todos[0].id, 1);
         assert_eq!(app.todos[1].status, TodoStatus::InProgress);
+    }
+
+    #[test]
+    fn test_insert_mention_replaces_trigger_at() {
+        // The '@' that opens the picker is already in the input; the picked
+        // mention carries its own '@'. Without replacement you get '@@path'.
+        let mut app = App::new();
+        app.input = "@".to_string();
+        app.cursor = 1;
+        app.insert_mention("@src/main.rs");
+        assert_eq!(app.input, "@src/main.rs");
+        assert_eq!(app.cursor, "@src/main.rs".len());
+
+        // Mid-sentence: the trigger '@' is still the last char when picked.
+        app.input = "see @".to_string();
+        app.cursor = app.input.len();
+        app.insert_mention("@lib.rs ");
+        assert_eq!(app.input, "see @lib.rs ");
     }
 }

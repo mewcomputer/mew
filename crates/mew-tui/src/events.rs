@@ -394,6 +394,10 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.toggle_bash_expanded();
             return None;
         }
+        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.toggle_reasoning_expanded();
+            return None;
+        }
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.auto_scroll = true;
             app.scroll = app.max_scroll;

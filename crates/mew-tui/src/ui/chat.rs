@@ -262,11 +262,25 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                     message_had_content = true;
                 }
                 Part::Reasoning(rp) => {
-                    for line in rp.text.lines() {
-                        sel_ctx.push_line(Line::from(vec![
-                            Span::raw("  "),
-                            Span::styled(line, Style::default().fg(Color::DarkGray)),
-                        ]));
+                    let line_count = rp.text.lines().count();
+                    sel_ctx.push_line(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            if app.reasoning_expanded {
+                                format!("[thinking — Ctrl+T to collapse] ({} lines)", line_count)
+                            } else {
+                                format!("[thinking — Ctrl+T to expand] ({} lines)", line_count)
+                            },
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                    if app.reasoning_expanded {
+                        for line in rp.text.lines() {
+                            sel_ctx.push_line(Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled(line, Style::default().fg(Color::DarkGray)),
+                            ]));
+                        }
                     }
                     message_had_content = true;
                 }
