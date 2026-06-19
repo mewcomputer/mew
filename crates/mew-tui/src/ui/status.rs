@@ -25,19 +25,21 @@ fn fmt_tokens(n: u32) -> String {
     }
 }
 
-/// A single bracketed pill in the status bar. Pills render as `[text]` with
-/// dim brackets and `color` text. Collect them in priority order; later pills
-/// (cwd, git, persona, perms) drop first if width is tight, and the whole row
-/// marquees when even the model pill alone overflows.
+/// A single bracketed pill in the status bar. Each pill renders as `[text]`
+/// on its own background color, so they read as separate "boxes" against the
+/// status bar. Collect them in priority order; later pills (cwd, git, persona,
+/// perms) drop first if width is tight, and the whole row marquees when even
+/// the model pill alone overflows.
 struct Pill {
     text: String,
-    color: Color,
+    fg: Color,
+    bg: Color,
 }
 
 fn build_pills(app: &App) -> Vec<Pill> {
     let mut pills = Vec::new();
 
-    // [provider/model]
+    // [provider/model] — dark green background, light green text.
     let model_label = if !app.status.provider.is_empty() && !app.status.model.is_empty() {
         format!("{}/{}", app.status.provider, app.status.model)
     } else if !app.status.model.is_empty() {
@@ -48,23 +50,26 @@ fn build_pills(app: &App) -> Vec<Pill> {
     if !model_label.is_empty() {
         pills.push(Pill {
             text: model_label,
-            color: Color::White,
+            fg: Color::Rgb(150, 230, 160),
+            bg: Color::Rgb(25, 70, 35),
         });
     }
 
-    // [~/code/mew]
+    // [~/code/mew] — dark blue background, light blue text.
     if !app.short_cwd.is_empty() {
         pills.push(Pill {
             text: app.short_cwd.clone(),
-            color: Color::Cyan,
+            fg: Color::Rgb(150, 190, 240),
+            bg: Color::Rgb(30, 55, 90),
         });
     }
 
-    // [git: main]
+    // [git: main] — dark yellow/amber background, light yellow text.
     if let Some(ref branch) = app.git_branch {
         pills.push(Pill {
             text: format!("git: {}", branch),
-            color: Color::Magenta,
+            fg: Color::Rgb(245, 210, 110),
+            bg: Color::Rgb(75, 60, 20),
         });
     }
 
@@ -81,24 +86,19 @@ fn pill_string(pills: &[Pill]) -> String {
         .join(" ")
 }
 
-/// Styled line of pills for the static (fits) case.
+/// Styled line of pills for the static (fits) case. Each pill is one span
+/// with its own bg/fg, and gaps between pills are 1 cell of the status bar
+/// background so they read as separate boxes.
 fn pill_line(pills: &[Pill]) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, p) in pills.iter().enumerate() {
         if i > 0 {
+            // 1-cell gap: status bar background showing through.
             spans.push(Span::styled(" ", Style::default().bg(STATUS_BG)));
         }
         spans.push(Span::styled(
-            "[",
-            Style::default().fg(Color::DarkGray).bg(STATUS_BG),
-        ));
-        spans.push(Span::styled(
-            p.text.clone(),
-            Style::default().fg(p.color).bg(STATUS_BG),
-        ));
-        spans.push(Span::styled(
-            "]",
-            Style::default().fg(Color::DarkGray).bg(STATUS_BG),
+            format!("[{}]", p.text),
+            Style::default().fg(p.fg).bg(p.bg),
         ));
     }
     Line::from(spans)
@@ -203,11 +203,13 @@ mod tests {
         let pills = vec![
             Pill {
                 text: "a".into(),
-                color: Color::White,
+                fg: Color::White,
+                bg: Color::Rgb(0, 0, 0),
             },
             Pill {
                 text: "bb".into(),
-                color: Color::Cyan,
+                fg: Color::Cyan,
+                bg: Color::Rgb(0, 0, 0),
             },
         ];
         assert_eq!(pill_string(&pills), "[a] [bb]");
@@ -217,7 +219,8 @@ mod tests {
     fn test_pill_string_single() {
         let pills = vec![Pill {
             text: "only".into(),
-            color: Color::White,
+            fg: Color::White,
+            bg: Color::Rgb(0, 0, 0),
         }];
         assert_eq!(pill_string(&pills), "[only]");
     }

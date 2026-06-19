@@ -221,3 +221,14 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - `↓` indicator shrank to 1 char and now overlays the last column of `chat_inner` (like `↑` at the top-left).
 - `wrapped_height` and `md_width` use `chat_inner.width` so the scroll math matches the rendered area.
 - "Doesn't scroll to the bottom when at the bottom" — the wrapped-height fix (`max_scroll` now reflects the real rendered height) means `scroll == max_scroll` truly is the bottom, and the scrollbar thumb position (`max_scroll`) sits at the bottom of the track.
+
+### 2026-06-19: status pills get their own background colors (boxes with 1u gaps)
+
+- Each pill is now a solid colored "box" on the status bar: `[text]` rendered as a single span with `fg(pill.fg).bg(pill.bg)`, so it reads as a distinct badge against the bar. The `Pill` struct gained a `bg` field alongside `fg`.
+- Between pills: 1-cell gap (a space span with the status bar background), so they read as separate boxes with real whitespace between them.
+- Colors (dark bg, light fg for readability):
+  - model: `bg Rgb(25,70,35)` (dark green), `fg Rgb(150,230,160)`
+  - cwd: `bg Rgb(30,55,90)` (dark blue), `fg Rgb(150,190,240)`
+  - git: `bg Rgb(75,60,20)` (dark amber), `fg Rgb(245,210,110)`
+- The marquee overflow path stays single-color (dropping per-pill colors) — windowing styled spans is fiddly. Worth a follow-up if you want colored marquee.
+- Tests updated for the new `Pill` shape (2 tests). Total: mew-tui 37.
