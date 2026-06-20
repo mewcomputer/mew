@@ -283,3 +283,11 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - Root cause: `push_ansi_line` set `line.style = bg(tool_bg)` and the indent span had `bg(tool_bg)`, but the content spans came from `into_text()` with their ANSI-parsed styles (no bg). When the paragraph wrapped a long line, the wrapped continuation row used the content spans' styles, which had no bg, so the chat bg showed through. Same issue in `push_tool_line` for any non-pad spans.
 - Fix: in both `push_ansi_line` and `push_tool_line`, iterate over all spans and force `bg(tool_bg)` on each. `Style::bg()` is additive — it preserves existing fg colors. The wrapped continuation row now inherits the tool fill.
 - 2 new tests: `test_push_ansi_line_forces_tool_bg_on_all_spans` and `test_push_ansi_line_preserves_fg_colors`. 50 mew-tui tests pass; clippy clean.
+
+### 2026-06-19: chat text wrapping accounts for the 2-space left indent
+
+- Reported: chat text wrapping was off — long lines in the agent's response wrapped at the wrong column, with the continuation row showing the chat bg peeking through (same symptom as the tool output bug, but for text parts).
+- Root cause: the chat prepends a 2-space indent to every markdown line for the left margin. The markdown renderer was given `md_width = chat_inner.width` and produced lines of that width. After prepending the indent, every line was `chat_inner.width + 2` — 2 cols wider than the paragraph's render area. The paragraph's `.wrap(Wrap { trim: false })` then wrapped each line a second time at render, creating a continuation row that overflowed or showed the wrong bg.
+- Fix: `md_width = chat_inner.width.saturating_sub(2)` so the markdown renderer produces lines that, after the indent, are exactly `chat_inner.width` wide — fits the render area exactly, no second wrap, no bg leak.
+- Same effect on `wrapped_height`: the total visual row count is unchanged because lines are still 1 row each (they just shifted left by 2 cols).
+- 50 mew-tui tests pass; clippy clean.

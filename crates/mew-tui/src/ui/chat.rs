@@ -153,7 +153,13 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         width: area.width.saturating_sub(scrollbar_area.width),
         height: area.height,
     };
-    let md_width = chat_inner.width;
+    // The chat indents every text part by 2 spaces ("  ") for a left
+    // margin. The markdown renderer should produce lines that, after
+    // prepending that indent, are exactly `chat_inner.width` wide —
+    // otherwise the paragraph's `.wrap(Wrap { trim: false })` wraps the
+    // line a second time at render and the continuation row spills past
+    // the right edge (or, with the old off-by-one, got cut off entirely).
+    let md_width = chat_inner.width.saturating_sub(2);
     // Tool lines pad to this width so the bg fill matches the paragraph
     // render area. Using `area.width` here would make each line 1 col wider
     // than the render area, and `wrapped_height` (which uses
