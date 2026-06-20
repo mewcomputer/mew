@@ -9,6 +9,8 @@ use ratatui::{
 use ratatui_mdstream::Theme as MdTheme;
 use std::rc::Rc;
 
+use super::display_width;
+
 use super::{
     BASH_LINES_COLLAPSED, BASH_LINES_EXPANDED, DIFF_LINES_MAX, TOOL_BG, TOOL_LINES_LIVE,
     TOOL_LINES_MAX,
@@ -629,15 +631,19 @@ fn push_ansi_line<'a>(width: u16, mut line: Line<'a>, indent: &str, tool_bg: Col
     )];
     spans.extend(line.spans);
     line.spans = spans;
-    // Force the tool bg on every span so wrapped continuation rows inherit
-    // the fill. Without this, content spans carry their ANSI-parsed style
-    // (which has no bg) and the paragraph's `line.style` only applies where
-    // a span is missing — the wrapped second row shows the chat bg peeking
-    // through.
+    // Force the tool bg on every span so the line fill is consistent.
     for span in &mut line.spans {
         span.style = span.style.bg(tool_bg);
     }
     line.style = Style::default().bg(tool_bg);
+    // Truncate to `width` so the paragraph never needs to wrap a tool
+    // line. Wrapping at the paragraph level leaks the chat bg on the
+    // continuation row (the paragraph's default style fills the gap
+    // after the content). Truncation is the simpler fix and matches
+    // the current bash/read behavior of showing the first N chars.
+    let indent_w = display_width(indent) as u16;
+    let content_w = width.saturating_sub(indent_w);
+    truncate_line_to_width(&mut line, content_w);
     let used = line.width() as u16;
     if used < width {
         line.spans.push(Span::styled(
@@ -646,6 +652,44 @@ fn push_ansi_line<'a>(width: u16, mut line: Line<'a>, indent: &str, tool_bg: Col
         ));
     }
     line
+}
+
+/// Truncate a line's spans so the total display width is at most
+/// `max_width`. Operates on display columns (unicode-width), so wide
+/// characters (CJK, emoji) count as 2.
+fn truncate_line_to_width(line: &mut Line<'_>, max_width: u16) {
+    if max_width == 0 {
+        line.spans.clear();
+        return;
+    }
+    let mut remaining = max_width as usize;
+    let mut new_spans: Vec<Span<'_>> = Vec::with_capacity(line.spans.len());
+    for span in line.spans.drain(..) {
+        if remaining == 0 {
+            break;
+        }
+        let w = display_width(span.content.as_ref());
+        if w <= remaining {
+            remaining -= w;
+            new_spans.push(span);
+        } else {
+            // Take only `remaining` display columns from this span.
+            let mut taken = 0;
+            let mut end_byte = 0;
+            for (i, ch) in span.content.char_indices() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if taken + cw > remaining {
+                    break;
+                }
+                taken += cw;
+                end_byte = i + ch.len_utf8();
+            }
+            let truncated = span.content[..end_byte].to_string();
+            new_spans.push(Span::styled(truncated, span.style));
+            remaining = 0;
+        }
+    }
+    line.spans = new_spans;
 }
 
 fn tool_call_label_and_color(app: &App, tc: &mew_message::ToolCallPart) -> (&'static str, Color) {
@@ -774,5 +818,39 @@ mod tests {
         let ok_span = &line.spans[1];
         assert_eq!(ok_span.style.fg, Some(Color::Green));
         assert_eq!(ok_span.style.bg, Some(tool_bg));
+    }
+
+    #[test]
+    fn test_truncate_line_to_width_short_unchanged() {
+        let mut line = Line::from("hello");
+        truncate_line_to_width(&mut line, 10);
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].content, "hello");
+    }
+
+    #[test]
+    fn test_truncate_line_to_width_truncates() {
+        let mut line = Line::from("hello world");
+        truncate_line_to_width(&mut line, 5);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn test_truncate_line_to_width_zero_clears() {
+        let mut line = Line::from("hello");
+        truncate_line_to_width(&mut line, 0);
+        assert!(line.spans.is_empty());
+    }
+
+    #[test]
+    fn test_truncate_line_to_width_preserves_style() {
+        let mut line = Line::from(vec![Span::styled(
+            "hello world",
+            Style::default().fg(Color::Red),
+        )]);
+        truncate_line_to_width(&mut line, 3);
+        assert_eq!(line.spans[0].style.fg, Some(Color::Red));
+        assert_eq!(line.spans[0].content, "hel");
     }
 }

@@ -291,3 +291,10 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - Fix: `md_width = chat_inner.width.saturating_sub(2)` so the markdown renderer produces lines that, after the indent, are exactly `chat_inner.width` wide — fits the render area exactly, no second wrap, no bg leak.
 - Same effect on `wrapped_height`: the total visual row count is unchanged because lines are still 1 row each (they just shifted left by 2 cols).
 - 50 mew-tui tests pass; clippy clean.
+
+### 2026-06-19: tool output lines truncated to fit (avoids paragraph-wrap bg leak)
+
+- Reported: even after the bg-on-every-span fix, long tool output lines (e.g. `read` of a wide file) still showed the chat bg between wrapped rows. The continuation row's content had the tool bg, but the gap *after* the content (the rest of the visual row up to the right edge) was filled by the paragraph's default style, which has no bg.
+- Root cause: when `push_ansi_line` produces a line wider than `tool_width`, the paragraph's `.wrap(Wrap { trim: false })` wraps it. The wrapped continuation row is shorter than `tool_width` (only the overflow content, no padding), and the paragraph fills the trailing cells with its default style (no bg → chat bg shows through).
+- Fix: truncate the content to `tool_width - indent_width` display columns inside `push_ansi_line` before the existing padding step. Now every tool output line is exactly `tool_width` wide, the paragraph never wraps a tool line, and the tool bg fills the full width consistently. The `read`/`grep` tools already showed the first N chars of each line — this just makes the truncation happen at a known, consistent column.
+- Added `truncate_line_to_width` helper (display-column aware, preserves span styles) and 4 tests. 54 mew-tui tests pass; clippy clean.
