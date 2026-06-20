@@ -1436,6 +1436,31 @@ async fn run_tui(
                                         )));
                                     }
                                 }
+                                mew_tui::SlashResult::Rewind(n) => {
+                                    if app.streaming {
+                                        app.messages.push(synthetic_message(
+                                            "cannot rewind while streaming".into(),
+                                        ));
+                                    } else if n > app.messages.len() {
+                                        app.messages.push(synthetic_message(format!(
+                                            "only {} messages exist",
+                                            app.messages.len()
+                                        )));
+                                    } else {
+                                        let removed = app.messages.len() - n;
+                                        app.rewind_to(n);
+                                        {
+                                            let mut msgs = agent.messages.lock().await;
+                                            if n < msgs.len() {
+                                                msgs.truncate(n);
+                                            }
+                                        }
+                                        app.messages.push(synthetic_message(format!(
+                                            "rewound to message {} (removed {})",
+                                            n, removed
+                                        )));
+                                    }
+                                }
                                 mew_tui::SlashResult::ResumeSession(ref id) => {
                                     match mew_session::Reader::load(id).await {
                                         Ok(msgs) => {
@@ -1747,6 +1772,9 @@ async fn run_tui(
                                         // Deferred; handled in main loop.
                                     }
                                     mew_tui::SlashResult::ResumeSession(_) => {
+                                        // Deferred; handled in main loop when not streaming.
+                                    }
+                                    mew_tui::SlashResult::Rewind(_) => {
                                         // Deferred; handled in main loop when not streaming.
                                     }
                                     mew_tui::SlashResult::OpenModelPicker => {

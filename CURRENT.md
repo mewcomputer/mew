@@ -331,3 +331,20 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - Status bar: purple pill (`#37234b` bg, `#c8aaf0` fg) showing the active persona name. Slotted between model and cwd pills.
 - TUI: `App.personas: Vec<(String, String)>` populated from loaded personas, `App.active_persona: Option<String>` updated on switch. `SlashResult::SwitchPersona(String)` variant.
 - Tests: 3 agent tests (apply sets prompt + tool filter, model pin returns, clear resets), 3 TUI tests (slash with name, slash no-arg lists, slash empty personas). 9 persona loader tests. Total: mew-personas 9, mew-agent 63, mew-tui 58.
+
+### 2026-06-19: /rewind — truncate conversation to an earlier point
+
+- `/rewind` with no arg shows the last 15 messages with indices, role, and a text snippet. `/rewind <n>` keeps messages `0..n` in both the display store (`app.messages`) and the API history (`agent.messages`), discarding the rest.
+- Non-destructive: the session JSONL is untouched. A synthetic message notes the rewind point ("rewound to message N (removed M)"). If you later `/resume` the session, you get the full timeline.
+- `App::rewind_to(n)` handles the display-side cleanup: truncates `messages`, retains only `rendered_md_cache` entries for surviving message IDs, clears `pending_md_rerender`. Mirrors `clear_messages` but surgical.
+- Refused mid-stream (like `/resume`): if `app.streaming` is true, pushes a "cannot rewind while streaming" message and does nothing.
+- 6 TUI tests: slash returns `Rewind(n)`, invalid arg shows usage, no-arg lists messages, empty messages shows "no messages", `rewind_to` truncates messages + cache, `rewind_to` noop when n >= len. Total: mew-tui 64.
+
+### 2026-06-20: CapabilitiesSection animations
+
+- `site/src/components/CapabilitiesSection.tsx` was broken: `animate-in fade-in slide-in-from-bottom-2` classes referenced the `tailwindcss-animate` plugin which isn't installed, so the entrance animation was a no-op. Terminal content was fully static — no typewriter, no cursor.
+- `CapabilitiesSection.css` was orphaned — class names (`.scroll-grid`, `.terminal-pane`, etc.) didn't match the component's Tailwind classes.
+- Rewrote both files. The component now has a real typewriter (`useTypewriter` hook: ~14ms/char, 55ms line gap, 160ms start delay) with a blinking block cursor that follows the current line. Terminal card has a 4s pulsing glow using the brand primary color and a faint grid overlay for CRT texture. Lines of type `add`/`rem`/`warn`/`action` get a one-shot purple flash on completion. Section title + paragraphs (index 1+) get a scroll-reveal via IntersectionObserver; index 0 is left visible to avoid a flash-of-hidden on page load.
+- Desktop sticky terminal re-types on every section change (extracted `DesktopTerminal` with `key={section.id}` so the hook re-initializes cleanly). Mobile fallback terminals each run their own typewriter, triggered once on first intersection, then stay typed.
+- `prefers-reduced-motion` disables all animations and reveals content fully.
+- `npx astro check` clean, `npx astro build` clean.

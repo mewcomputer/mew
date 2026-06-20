@@ -45,6 +45,8 @@ pub enum SlashResult {
     Compact,
     /// Show the session todo list.
     Todo,
+    /// Rewind to keep only the first N messages.
+    Rewind(usize),
     /// A plugin-registered slash command that needs dispatcher execution.
     PluginCommand {
         name: String,
@@ -1005,6 +1007,18 @@ impl App {
         self.pending_md_rerender = None;
     }
 
+    /// Rewind the display to keep only the first `n` messages. Cleans up
+    /// tool states and markdown cache for removed messages.
+    pub fn rewind_to(&mut self, n: usize) {
+        if n >= self.messages.len() {
+            return;
+        }
+        self.messages.truncate(n);
+        self.rendered_md_cache
+            .retain(|id, _| self.messages.iter().any(|m| m.id == *id));
+        self.pending_md_rerender = None;
+    }
+
     /// Toggle bash output expansion.
     pub fn toggle_bash_expanded(&mut self) {
         self.bash_expanded = !self.bash_expanded;
@@ -1112,6 +1126,10 @@ impl App {
                 description: "resume a session (e.g. /resume <id>)".into(),
             },
             SlashCommand {
+                name: "/rewind".into(),
+                description: "rewind to an earlier point (e.g. /rewind 3)".into(),
+            },
+            SlashCommand {
                 name: "/mouse".into(),
                 description: "toggle mouse capture for text selection".into(),
             },
@@ -1179,6 +1197,18 @@ impl App {
                     SlashResult::Message("usage: /resume <session-id>".into())
                 }
             }
+            "/rewind" => {
+                if let Some(n_str) = arg {
+                    match n_str.parse::<usize>() {
+                        Ok(n) => SlashResult::Rewind(n),
+                        Err(_) => SlashResult::Message(
+                            "usage: /rewind <n> — n is the number of messages to keep".into(),
+                        ),
+                    }
+                } else {
+                    SlashResult::Message(self.build_rewind_list())
+                }
+            }
             _ => {
                 // Check dynamic/plugin commands.
                 if let Some(dyn_cmd) = self.dynamic_slash_commands.iter().find(|c| c.name == cmd) {
@@ -1223,6 +1253,38 @@ impl App {
             out.push_str(&format!("  {:12}  {}\n", cmd.name, cmd.description));
         }
         out.trim_end().to_string()
+    }
+
+    fn build_rewind_list(&self) -> String {
+        if self.messages.is_empty() {
+            return "no messages to rewind.".into();
+        }
+        let mut out = String::from("messages (keep 0..n with /rewind <n>):\n");
+        let total = self.messages.len();
+        let start = total.saturating_sub(15);
+        for (i, msg) in self.messages.iter().enumerate() {
+            if i < start {
+                continue;
+            }
+            let role = match msg.role {
+                mew_message::Role::User => "user",
+                mew_message::Role::Assistant => "asst",
+            };
+            let snippet = msg
+                .parts
+                .iter()
+                .find_map(|p| match p {
+                    mew_message::Part::Text(tp) => Some(tp.text.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("(no text)")
+                .chars()
+                .take(60)
+                .collect::<String>();
+            out.push_str(&format!("  [{}] {} {:<60}\n", i, role, snippet));
+        }
+        out.push_str(&format!("\ntotal: {} messages", total));
+        out
     }
 
     fn build_sessions_list(&self) -> String {
@@ -2306,5 +2368,120 @@ mod tests {
             }
             _ => panic!("expected Message"),
         }
+    }
+
+    #[test]
+    fn test_rewind_slash_command_returns_rewind() {
+        let mut app = App::new();
+        let result = app.handle_slash("/rewind 2");
+        assert!(matches!(result, SlashResult::Rewind(2)));
+    }
+
+    #[test]
+    fn test_rewind_slash_command_invalid_arg() {
+        let mut app = App::new();
+        let result = app.handle_slash("/rewind abc");
+        match result {
+            SlashResult::Message(msg) => assert!(msg.contains("usage")),
+            _ => panic!("expected Message"),
+        }
+    }
+
+    #[test]
+    fn test_rewind_slash_command_no_arg_lists() {
+        let mut app = App::new();
+        // Add a message so the list isn't empty.
+        let msg = mew_message::Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: mew_message::Role::User,
+            parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                text: "hello world".into(),
+                synthetic: false,
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        app.messages.push(msg);
+        let result = app.handle_slash("/rewind");
+        match result {
+            SlashResult::Message(msg) => {
+                assert!(msg.contains("hello world"));
+                assert!(msg.contains("total: 1"));
+            }
+            _ => panic!("expected Message"),
+        }
+    }
+
+    #[test]
+    fn test_rewind_slash_empty_messages() {
+        let app = App::new();
+        let result = app.handle_slash("/rewind");
+        match result {
+            SlashResult::Message(msg) => assert!(msg.contains("no messages")),
+            _ => panic!("expected Message"),
+        }
+    }
+
+    #[test]
+    fn test_rewind_to_truncates_messages() {
+        let mut app = App::new();
+        for i in 0..5 {
+            let id = ulid::Ulid::new();
+            let msg = mew_message::Message {
+                id,
+                session_id: ulid::Ulid::new(),
+                role: mew_message::Role::User,
+                parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                    base: mew_message::PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: id,
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: format!("msg {}", i),
+                    synthetic: false,
+                })],
+                time: mew_message::Time {
+                    created: 0,
+                    completed: None,
+                },
+                assistant: None,
+            };
+            app.messages.push(msg);
+            app.rendered_md_cache
+                .insert(id, (80, format!("msg {}", i), std::rc::Rc::new(vec![])));
+        }
+        assert_eq!(app.messages.len(), 5);
+        assert_eq!(app.rendered_md_cache.len(), 5);
+
+        app.rewind_to(2);
+        assert_eq!(app.messages.len(), 2);
+        assert_eq!(app.rendered_md_cache.len(), 2);
+    }
+
+    #[test]
+    fn test_rewind_to_noop_when_n_too_large() {
+        let mut app = App::new();
+        app.messages.push(mew_message::Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: mew_message::Role::User,
+            parts: vec![],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        });
+        app.rewind_to(10);
+        assert_eq!(app.messages.len(), 1);
     }
 }
