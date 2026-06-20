@@ -314,3 +314,10 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - `spinner::spinner_frames()` exposes the braille frame sequence as a `&'static str` so the input renderer can index into it by character without allocating.
 - Re-added `mod spinner;` in `crates/mew-tui/src/ui/mod.rs` and `rand.workspace = true` in `crates/mew-tui/Cargo.toml` (needed by the existing `Spinner::next_frame` random branch; the deterministic path we use doesn't actually call `rand` at runtime, but the dep is there for the API).
 - 55 mew-tui tests pass; clippy clean.
+
+### 2026-06-19: wrapped tool output lines keep the indent on continuation rows
+
+- Reported: after the word-aware wrapping fix, wrapped continuation rows started flush left at the chat edge, while the first row of each tool output line had the 6-space indent. The wrapped text was misaligned with the first row's content — it looked like a ragged left margin.
+- Fix: `wrap_tool_line` now applies the `indent` to every row (first and continuations), not just the first. `content_w` (the wrap width) already accounted for the indent, so no other math changed — the wrapped text fills the same content column on every row.
+- Updated `test_wrap_tool_line_continuation_rows_have_indent` (was previously `..._have_no_indent`).
+- 55 mew-tui tests pass; clippy clean.

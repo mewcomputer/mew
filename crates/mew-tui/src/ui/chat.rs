@@ -660,10 +660,11 @@ fn wrap_tool_line<'a>(width: u16, line: Line<'a>, indent: &str, tool_bg: Color) 
 
     chunks
         .into_iter()
-        .enumerate()
-        .map(|(i, chunk)| {
-            let prefix = if i == 0 { indent } else { "" };
-            build_tool_row(width, prefix, &chunk, base_style, tool_bg)
+        .map(|chunk| {
+            // Every row (including wrapped continuations) carries the
+            // indent so wrapped text aligns with the first row's content
+            // rather than flush left.
+            build_tool_row(width, indent, &chunk, base_style, tool_bg)
         })
         .collect()
 }
@@ -901,19 +902,17 @@ mod tests {
     }
 
     #[test]
-    fn test_wrap_tool_line_continuation_rows_have_no_indent() {
+    fn test_wrap_tool_line_continuation_rows_have_indent() {
         let tool_bg = Color::Rgb(50, 50, 56);
         // Indent is 6, width 16, content_w 10. "one two three" is 14
-        // chars — wraps to "one two " (8) and "three" (5). First row
-        // starts with the indent; continuation row doesn't.
+        // chars — wraps to "one two " (8) and "three" (5). Both rows
+        // start with the indent so wrapped text aligns with the first
+        // row's content rather than flush left.
         let content = Line::from("one two three");
         let rows = wrap_tool_line(16, content, "      ", tool_bg);
         assert!(rows.len() >= 2);
-        // First row's first span is the indent.
-        assert_eq!(rows[0].spans[0].content, "      ");
-        // Continuation row's first span is content (no indent).
-        if rows.len() > 1 {
-            assert_ne!(rows[1].spans[0].content, "      ");
+        for row in &rows {
+            assert_eq!(row.spans[0].content, "      ");
         }
     }
 
