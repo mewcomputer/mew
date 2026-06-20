@@ -259,3 +259,11 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - Root cause: `exit_tool`'s `final_answer` and the accumulated stream text both get returned as-is from the subagent runner. If the subagent's model ends its answer with `\n` (or several), `into_text()` in the chat renderer splits them into blank `Line` entries, each one taking a full visual row. The tool block grows taller than the content justifies, pushing everything after it up.
 - Fix: at all three sites in `crates/mew-agent/src/tools.rs` (sync subagent_start line 731, async subagent_start line 869, subagent_wait line 1207) trim trailing `\n` from `text` before inserting warning prefixes. The warning prefixes (which end in `\n\n`) are preserved exactly, so a hit-turn-limit output still reads as `warning: ...\n\n<answer>`.
 - 39 mew-tui tests pass; clippy clean.
+
+### 2026-06-19: tool block height was doubled by off-by-one padding
+
+- Reported visual: every tool line had a row of bg-only empty space below it. Long tool blocks (`read` of a 234-line file followed by several `edit` calls) stacked these into huge gaps, leaving the latest message stranded high in the viewport. The half-block borders were visible but the body fill looked half-empty.
+- Root cause: `draw_chat` reserved the rightmost 1 column for the scrollbar, so the paragraph renders into `chat_inner` (width = area.width - 1). But the tool line builders (`push_tool_line`, `push_ansi_line`, `push_tool_edge`) were padding every line to `area.width` — 1 col wider than the render area. `wrapped_height` measures each line's visual rows via `ceil(line.width / chat_inner.width)`, so a line padded to `area.width` was `ceil(width / (width-1)) = 2` rows. Every tool line took 2 visual rows: one with content, one with bg-only "empty space."
+- Fix: introduce `let tool_width = chat_inner.width;` in `draw_chat` and use it everywhere tool lines are padded (15 sites in `crates/mew-tui/src/ui/chat.rs`). The scrollbar and `chat_inner` themselves still derive from `area.width` since they need the full width to position correctly.
+- Added `test_wrapped_height_exact_width_line_is_one_row` regression test: a line exactly `width` wide must count as 1 row, `width + 1` must count as 2. The old off-by-one would have failed this.
+- 40 mew-tui tests pass; clippy clean.

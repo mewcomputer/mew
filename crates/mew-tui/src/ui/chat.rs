@@ -154,6 +154,13 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         height: area.height,
     };
     let md_width = chat_inner.width;
+    // Tool lines pad to this width so the bg fill matches the paragraph
+    // render area. Using `area.width` here would make each line 1 col wider
+    // than the render area, and `wrapped_height` (which uses
+    // `chat_inner.width`) would count every tool line as 2 visual rows —
+    // doubling the tool block's height and leaving a row of bg-only "empty
+    // space" under every line.
+    let tool_width = chat_inner.width;
 
     let mut chat_rows = std::mem::take(&mut app.chat_rows);
     chat_rows.clear();
@@ -303,12 +310,12 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                 Part::ToolCall(tc) => {
                     let (state_label, state_color) = tool_call_label_and_color(app, tc);
 
-                    if let Some(line) = push_tool_edge(area.width, true, TOOL_BG) {
+                    if let Some(line) = push_tool_edge(tool_width, true, TOOL_BG) {
                         sel_ctx.push_line(line);
                     }
 
                     sel_ctx.push_line(push_tool_line(
-                        area.width,
+                        tool_width,
                         vec![
                             Span::styled("  ", tool_bg_style),
                             Span::styled(
@@ -324,7 +331,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
 
                     if let Some(args) = tool_call_args_summary(tc) {
                         sel_ctx.push_line(push_tool_line(
-                            area.width,
+                            tool_width,
                             vec![
                                 Span::styled("      ", tool_bg_style),
                                 Span::styled(
@@ -344,7 +351,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                             let skip = lines.len().saturating_sub(TOOL_LINES_LIVE);
                             for line in lines.into_iter().skip(skip) {
                                 sel_ctx
-                                    .push_line(push_ansi_line(area.width, line, "      ", TOOL_BG));
+                                    .push_line(push_ansi_line(tool_width, line, "      ", TOOL_BG));
                             }
                         }
                     }
@@ -367,7 +374,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                 let skip = line_count.saturating_sub(limit);
                                 if skip > 0 {
                                     sel_ctx.push_line(push_tool_line(
-                                        area.width,
+                                        tool_width,
                                         vec![
                                             Span::styled("      ", tool_bg_style),
                                             Span::styled(
@@ -380,18 +387,18 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                 }
                                 for line in lines.into_iter().skip(skip) {
                                     sel_ctx.push_line(push_ansi_line(
-                                        area.width, line, "      ", TOOL_BG,
+                                        tool_width, line, "      ", TOOL_BG,
                                     ));
                                 }
                             } else {
                                 for line in lines.into_iter().take(TOOL_LINES_MAX) {
                                     sel_ctx.push_line(push_ansi_line(
-                                        area.width, line, "      ", TOOL_BG,
+                                        tool_width, line, "      ", TOOL_BG,
                                     ));
                                 }
                                 if line_count > TOOL_LINES_MAX {
                                     sel_ctx.push_line(push_tool_line(
-                                        area.width,
+                                        tool_width,
                                         vec![
                                             Span::styled("      ", tool_bg_style),
                                             Span::styled(
@@ -417,7 +424,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                     Style::default().fg(Color::DarkGray).bg(TOOL_BG)
                                 };
                                 sel_ctx.push_line(push_tool_line(
-                                    area.width,
+                                    tool_width,
                                     vec![
                                         Span::styled("      ", tool_bg_style),
                                         Span::styled(line, style),
@@ -428,7 +435,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                             let diff_lines = diff.lines().count();
                             if diff_lines > DIFF_LINES_MAX {
                                 sel_ctx.push_line(push_tool_line(
-                                    area.width,
+                                    tool_width,
                                     vec![
                                         Span::styled("      ", tool_bg_style),
                                         Span::styled(
@@ -449,12 +456,12 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                             let parsed = err.as_str().into_text().unwrap_or_default();
                             for line in parsed.lines {
                                 sel_ctx
-                                    .push_line(push_ansi_line(area.width, line, "      ", TOOL_BG));
+                                    .push_line(push_ansi_line(tool_width, line, "      ", TOOL_BG));
                             }
                         }
                     }
 
-                    if let Some(line) = push_tool_edge(area.width, false, TOOL_BG) {
+                    if let Some(line) = push_tool_edge(tool_width, false, TOOL_BG) {
                         sel_ctx.push_line(line);
                     }
                 }
@@ -700,5 +707,18 @@ mod tests {
     fn test_wrapped_height_zero_width_falls_back_to_line_count() {
         let text = Text::from(vec![Line::from("x"), Line::from("y")]);
         assert_eq!(wrapped_height(&text, 0), 2);
+    }
+
+    #[test]
+    fn test_wrapped_height_exact_width_line_is_one_row() {
+        // A line exactly `width` cols wide must count as 1 row. A line
+        // `width + 1` cols wide must count as 2 rows. Tool blocks pad
+        // their lines to the render area width — if they pad to a width
+        // that's 1 col wider than the render area, every tool line
+        // becomes 2 rows and the tool block's height doubles.
+        let text_exact = Text::from(vec![Line::from("a".repeat(10))]);
+        assert_eq!(wrapped_height(&text_exact, 10), 1);
+        let text_over = Text::from(vec![Line::from("a".repeat(11))]);
+        assert_eq!(wrapped_height(&text_over, 10), 2);
     }
 }
