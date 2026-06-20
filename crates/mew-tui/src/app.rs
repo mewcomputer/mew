@@ -758,6 +758,71 @@ impl App {
         self.input.lines().count()
     }
 
+    /// Visual row count for the input when wrapped to `content_width`
+    /// columns (the width available for text, after the border and any
+    /// prefix). Each logical line contributes `ceil(display_width / width)`
+    /// rows, minimum 1.
+    pub fn input_visual_line_count(&self, content_width: u16) -> usize {
+        let w = content_width.max(1) as usize;
+        self.input
+            .split('\n')
+            .map(|line| {
+                let dw = unicode_width::UnicodeWidthStr::width(line);
+                dw.div_ceil(w).max(1)
+            })
+            .sum()
+    }
+
+    /// Return (visual_row, visual_col) for the cursor when the input is
+    /// wrapped to `content_width` columns. `visual_row` is the index into
+    /// the wrapped visual grid; `visual_col` is the column within that row.
+    pub fn cursor_visual_row_col(&self, content_width: u16) -> (usize, usize) {
+        let w = content_width.max(1) as usize;
+        let (logical_line, col_in_line) = self.cursor_line_col();
+        let mut visual_row = 0;
+        for (li, line) in self.input.split('\n').enumerate() {
+            if li == logical_line {
+                let dw = unicode_width::UnicodeWidthStr::width(line);
+                let col_clamped = col_in_line.min(dw);
+                let row_in_line = if w == 0 { 0 } else { col_clamped / w };
+                return (visual_row + row_in_line, col_clamped - row_in_line * w);
+            }
+            let dw = unicode_width::UnicodeWidthStr::width(line);
+            let rows = if w == 0 { 1 } else { dw.div_ceil(w).max(1) };
+            visual_row += rows;
+        }
+        (visual_row, 0)
+    }
+
+    /// Map a (visual_row, visual_col) in the wrapped input grid to a byte
+    /// offset in `self.input`. Used by mouse click handling to position the
+    /// cursor at the clicked cell.
+    pub fn visual_to_byte_offset(
+        &self,
+        visual_row: usize,
+        visual_col: usize,
+        content_width: u16,
+    ) -> usize {
+        let w = content_width.max(1) as usize;
+        let mut current_visual_row = 0usize;
+        let mut byte_offset = 0usize;
+        for line in self.input.split('\n') {
+            let dw = unicode_width::UnicodeWidthStr::width(line);
+            let rows = if w == 0 { 1 } else { dw.div_ceil(w).max(1) };
+            if visual_row < current_visual_row + rows {
+                let row_in_line = visual_row - current_visual_row;
+                let start_col = row_in_line * w;
+                let col_clamped = visual_col.min(dw.saturating_sub(start_col));
+                let target_col = start_col + col_clamped;
+                let target_byte = byte_at_display_offset(line, target_col);
+                return byte_offset + target_byte;
+            }
+            current_visual_row += rows;
+            byte_offset += line.len() + 1; // +1 for the '\n'
+        }
+        self.input.len()
+    }
+
     /// Return (line index, byte offset within that line) for the cursor.
     pub fn cursor_line_col(&self) -> (usize, usize) {
         let before = &self.input[..self.cursor];
@@ -2094,5 +2159,68 @@ mod tests {
         app.cursor = app.input.len();
         app.insert_mention("@lib.rs ");
         assert_eq!(app.input, "see @lib.rs ");
+    }
+
+    #[test]
+    fn test_input_visual_line_count_no_wrap() {
+        let mut app = App::new();
+        app.input = "short\nlines".to_string();
+        assert_eq!(app.input_visual_line_count(80), 2);
+    }
+
+    #[test]
+    fn test_input_visual_line_count_wraps_long_line() {
+        let mut app = App::new();
+        app.input = "a".repeat(25);
+        // 25 chars at width 10 -> ceil(25/10) = 3 rows
+        assert_eq!(app.input_visual_line_count(10), 3);
+    }
+
+    #[test]
+    fn test_input_visual_line_count_empty_line_counts_as_one() {
+        let mut app = App::new();
+        app.input = "short\n\n".to_string() + &"a".repeat(25);
+        // 1 + 1 + 3 = 5 rows at width 10
+        assert_eq!(app.input_visual_line_count(10), 5);
+    }
+
+    #[test]
+    fn test_cursor_visual_row_col_no_wrap() {
+        let mut app = App::new();
+        app.input = "hello\nworld".to_string();
+        app.cursor = 8; // byte 8 is 'r' in "world" -> line 1, col 2
+        assert_eq!(app.cursor_visual_row_col(80), (1, 2));
+    }
+
+    #[test]
+    fn test_cursor_visual_row_col_wraps() {
+        let mut app = App::new();
+        app.input = "a".repeat(25);
+        app.cursor = 22; // char 22, which is on visual row 2 (chars 20-29), col 2
+        assert_eq!(app.cursor_visual_row_col(10), (2, 2));
+    }
+
+    #[test]
+    fn test_visual_to_byte_offset_first_row() {
+        let mut app = App::new();
+        app.input = "hello world".to_string();
+        // visual row 0, visual col 6 -> byte offset 6 (the 'w')
+        assert_eq!(app.visual_to_byte_offset(0, 6, 80), 6);
+    }
+
+    #[test]
+    fn test_visual_to_byte_offset_wrapped_row() {
+        let mut app = App::new();
+        app.input = "a".repeat(25);
+        // visual row 1, visual col 5 -> char 15 -> byte 15
+        assert_eq!(app.visual_to_byte_offset(1, 5, 10), 15);
+    }
+
+    #[test]
+    fn test_visual_to_byte_offset_past_end() {
+        let mut app = App::new();
+        app.input = "hi".to_string();
+        // visual row 5 is past the end -> return input.len()
+        assert_eq!(app.visual_to_byte_offset(5, 0, 80), 2);
     }
 }

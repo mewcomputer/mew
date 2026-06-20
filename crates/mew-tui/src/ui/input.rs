@@ -16,8 +16,9 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         _ => Style::default().fg(Color::White).bg(STATUS_BG),
     };
 
-    let line_count = app.input_line_count().max(1);
-    let input_height = line_count.min(12) as u16 + 2;
+    let content_width = area.width.saturating_sub(2);
+    let visual_line_count = app.input_visual_line_count(content_width).max(1);
+    let input_height = (visual_line_count as u16).min(12) + 2;
     let input_area = Rect::new(area.x, area.y, area.width, input_height.min(area.height));
 
     let bg_block = Block::default().style(Style::default().bg(STATUS_BG));
@@ -30,41 +31,52 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         input_area.height.saturating_sub(2),
     );
 
+    let prefix = if app.streaming {
+        Span::styled("… ", Style::default().fg(Color::Yellow).bg(STATUS_BG))
+    } else {
+        Span::styled("> ", Style::default().fg(Color::Cyan).bg(STATUS_BG))
+    };
+    let indent = Span::styled("  ", Style::default().bg(STATUS_BG));
+
+    let (cursor_visual_row, cursor_visual_col) = app.cursor_visual_row_col(content_width);
     let prefix_width = 2usize;
-    let (cursor_line, cursor_col) = app.cursor_line_col();
+    let wrap_w = content_width.max(1) as usize;
 
-    let lines: Vec<&str> = app.input.split('\n').collect();
-    for (li, line) in lines.iter().enumerate() {
-        let y = content_area.y + li as u16;
-        if y >= content_area.y + content_area.height {
-            break;
-        }
-
-        let available = content_area.width as usize;
-        let (visible, _col) = if display_width(line) <= available {
-            (*line, cursor_col.min(available))
+    let mut visual_row = 0usize;
+    for line in app.input.split('\n') {
+        let dw = display_width(line);
+        let rows = if content_width == 0 {
+            1
         } else {
-            let cursor_col_in_text = if li == cursor_line { cursor_col } else { 0 };
-            let start_col = cursor_col_in_text.saturating_sub(available / 2);
+            dw.div_ceil(wrap_w).max(1)
+        };
+        for r in 0..rows {
+            let y = content_area.y + visual_row as u16;
+            if y >= content_area.y + content_area.height {
+                break;
+            }
+            let start_col = r * wrap_w;
+            let end_col = ((r + 1) * wrap_w).min(dw);
             let start_byte = byte_at_display_offset(line, start_col);
-            let end_byte = byte_at_display_offset(line, start_col + available);
-            (&line[start_byte..end_byte], cursor_col_in_text - start_col)
-        };
+            let end_byte = byte_at_display_offset(line, end_col);
+            let visible = &line[start_byte..end_byte];
 
-        let prefix = if app.streaming {
-            Span::styled("… ", Style::default().fg(Color::Yellow).bg(STATUS_BG))
-        } else {
-            Span::styled("> ", Style::default().fg(Color::Cyan).bg(STATUS_BG))
-        };
-
-        let text = Text::from(Line::from(vec![prefix, Span::styled(visible, style)]));
-        let row = Rect::new(content_area.x, y, content_area.width, 1);
-        f.render_widget(Paragraph::new(text), row);
+            let spans = if r == 0 {
+                vec![prefix.clone(), Span::styled(visible, style)]
+            } else {
+                vec![indent.clone(), Span::styled(visible, style)]
+            };
+            let text = Text::from(Line::from(spans));
+            let row = Rect::new(content_area.x, y, content_area.width, 1);
+            f.render_widget(Paragraph::new(text), row);
+            visual_row += 1;
+        }
     }
 
-    let cursor_x =
-        content_area.x + prefix_width as u16 + cursor_col.min(content_area.width as usize) as u16;
-    let cursor_y = content_area.y + cursor_line.min(content_area.height as usize) as u16;
+    let cursor_x = content_area.x
+        + prefix_width as u16
+        + cursor_visual_col.min(content_area.width as usize) as u16;
+    let cursor_y = content_area.y + cursor_visual_row.min(content_area.height as usize) as u16;
     f.set_cursor_position((cursor_x, cursor_y));
 }
 

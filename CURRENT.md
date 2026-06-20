@@ -267,3 +267,12 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - Fix: introduce `let tool_width = chat_inner.width;` in `draw_chat` and use it everywhere tool lines are padded (15 sites in `crates/mew-tui/src/ui/chat.rs`). The scrollbar and `chat_inner` themselves still derive from `area.width` since they need the full width to position correctly.
 - Added `test_wrapped_height_exact_width_line_is_one_row` regression test: a line exactly `width` wide must count as 1 row, `width + 1` must count as 2. The old off-by-one would have failed this.
 - 40 mew-tui tests pass; clippy clean.
+
+### 2026-06-19: text input wraps long lines instead of horizontally scrolling
+
+- Reported: pasting a long line into the input scrolled horizontally (old behavior used a centered window around the cursor) and the input stayed 1 row tall no matter how long the text got.
+- Fix: the input now wraps. Each logical line contributes `ceil(display_width / content_width)` visual rows (minimum 1), the input area grows to fit up to 12 rows, and the cursor maps to a (visual_row, visual_col) cell in the wrapped grid. Continuation rows indent with 2 spaces so wrapped text aligns with the first row's content. Mouse clicks map a (rel_y, rel_x) cell back to a byte offset in the input.
+- `App` gained three methods: `input_visual_line_count(content_width)`, `cursor_visual_row_col(content_width)`, `visual_to_byte_offset(visual_row, visual_col, content_width)`. The old `input_line_count()` and `cursor_line_col()` are unchanged for callers that still need the logical (unwrapped) position.
+- Layout: `crates/mew-tui/src/ui/mod.rs` now uses `input_visual_line_count` with the slot's estimated content width so the vertical constraint reserves enough room for wrapped lines before `draw_input` runs.
+- 8 new unit tests cover no-wrap, wrap, empty-line-1-row, cursor visual position, and click-to-byte-offset mapping. 48 mew-tui tests pass; clippy clean.
+- Also removed an untracked WIP `spinner.rs` module that had been left in the tree (with a `mod spinner;` line in `mod.rs` and a `rand` dep in `Cargo.toml`) — it was triggering dead-code / non-snake-case clippy errors and blocking CI. The module was incomplete and not wired anywhere; can be re-added when finished.

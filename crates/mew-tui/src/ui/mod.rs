@@ -79,7 +79,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         0
     };
 
-    let input_height = (app.input_line_count().clamp(1, 12) + 2) as u16;
+    // Estimate the input's content width (the slot minus the 1-cell border
+    // on each side) so the layout reserves enough vertical space for wrapped
+    // lines. The exact width is computed again in `draw_input` once the slot
+    // is laid out.
+    let input_content_width = main_area.width.saturating_sub(2);
+    let input_height = (app
+        .input_visual_line_count(input_content_width)
+        .clamp(1, 12)
+        + 2) as u16;
 
     let vert = Layout::default()
         .direction(Direction::Vertical)

@@ -177,28 +177,19 @@ fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Ac
             if app.input_area.contains((col, row).into()) {
                 app.clear_selection();
                 let rel_x = col.saturating_sub(app.input_area.x) as usize;
-                let line_count = app.input_line_count();
-                let input_lines: Vec<&str> = app.input.split('\n').collect();
                 let rel_y = row.saturating_sub(app.input_area.y) as usize;
-
-                if rel_y < line_count && rel_y < input_lines.len() {
-                    let line = input_lines[rel_y];
-                    let col_in_line = rel_x.saturating_sub(2).min(line.len());
-                    let mut buf_offset = 0;
-                    for (i, l) in input_lines.iter().enumerate() {
-                        if i == rel_y {
-                            let byte_offset = line
-                                .char_indices()
-                                .take(col_in_line)
-                                .last()
-                                .map(|(i, _)| i)
-                                .unwrap_or(0);
-                            buf_offset += byte_offset;
-                            break;
-                        }
-                        buf_offset += l.len() + 1;
-                    }
-                    app.cursor = buf_offset.min(app.input.len());
+                // The input has a 1-cell border on each side and a 2-cell
+                // prefix (`> `) on the first visual row of each logical
+                // line. Convert the mouse cell to a (visual_row, visual_col)
+                // pair in the wrapped content grid.
+                let content_width = app.input_area.width.saturating_sub(2);
+                let visual_row = rel_y.saturating_sub(1);
+                let visual_col = rel_x.saturating_sub(1).saturating_sub(2);
+                let total = app.input_visual_line_count(content_width);
+                if visual_row < total {
+                    app.cursor = app
+                        .visual_to_byte_offset(visual_row, visual_col, content_width)
+                        .min(app.input.len());
                 }
                 return None;
             }
