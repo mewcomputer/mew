@@ -298,3 +298,11 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - Root cause: when `push_ansi_line` produces a line wider than `tool_width`, the paragraph's `.wrap(Wrap { trim: false })` wraps it. The wrapped continuation row is shorter than `tool_width` (only the overflow content, no padding), and the paragraph fills the trailing cells with its default style (no bg → chat bg shows through).
 - Fix: truncate the content to `tool_width - indent_width` display columns inside `push_ansi_line` before the existing padding step. Now every tool output line is exactly `tool_width` wide, the paragraph never wraps a tool line, and the tool bg fills the full width consistently. The `read`/`grep` tools already showed the first N chars of each line — this just makes the truncation happen at a known, consistent column.
 - Added `truncate_line_to_width` helper (display-column aware, preserves span styles) and 4 tests. 54 mew-tui tests pass; clippy clean.
+
+### 2026-06-19: word-aware wrapping for tool output
+
+- User feedback: truncation was too aggressive — long lines in `read` / `grep` output were being cut off mid-word, hiding useful content.
+- Replaced the truncation approach with proper word-aware wrapping. `wrap_tool_line(width, line, indent, tool_bg)` splits a line at whitespace boundaries, falling back to hard-breaking if a single word is wider than the available content width. Returns one `Line` per visual row, each padded to exactly `width` with `bg(tool_bg)` so the paragraph never wraps (and the chat bg can't leak through the trailing cells of a wrapped row).
+- Continuation rows don't carry the indent (only the first row does), so wrapped text is left-aligned to the content.
+- Tool output is usually monochrome, so all wrapped rows use the first span's style with `bg(tool_bg)` forced on. Multi-color ANSI output loses per-word color but keeps the fill, which was the visible bug.
+- 5 new tests cover short/long/oversized-word cases, continuation row indent, and tool bg on every span. 55 mew-tui tests pass; clippy clean.

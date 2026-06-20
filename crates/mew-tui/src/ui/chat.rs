@@ -358,8 +358,9 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                             let lines = parsed.lines;
                             let skip = lines.len().saturating_sub(TOOL_LINES_LIVE);
                             for line in lines.into_iter().skip(skip) {
-                                sel_ctx
-                                    .push_line(push_ansi_line(tool_width, line, "      ", TOOL_BG));
+                                for wrapped in wrap_tool_line(tool_width, line, "      ", TOOL_BG) {
+                                    sel_ctx.push_line(wrapped);
+                                }
                             }
                         }
                     }
@@ -394,15 +395,19 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                     ));
                                 }
                                 for line in lines.into_iter().skip(skip) {
-                                    sel_ctx.push_line(push_ansi_line(
-                                        tool_width, line, "      ", TOOL_BG,
-                                    ));
+                                    for wrapped in
+                                        wrap_tool_line(tool_width, line, "      ", TOOL_BG)
+                                    {
+                                        sel_ctx.push_line(wrapped);
+                                    }
                                 }
                             } else {
                                 for line in lines.into_iter().take(TOOL_LINES_MAX) {
-                                    sel_ctx.push_line(push_ansi_line(
-                                        tool_width, line, "      ", TOOL_BG,
-                                    ));
+                                    for wrapped in
+                                        wrap_tool_line(tool_width, line, "      ", TOOL_BG)
+                                    {
+                                        sel_ctx.push_line(wrapped);
+                                    }
                                 }
                                 if line_count > TOOL_LINES_MAX {
                                     sel_ctx.push_line(push_tool_line(
@@ -463,8 +468,9 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                         if !err.is_empty() {
                             let parsed = err.as_str().into_text().unwrap_or_default();
                             for line in parsed.lines {
-                                sel_ctx
-                                    .push_line(push_ansi_line(tool_width, line, "      ", TOOL_BG));
+                                for wrapped in wrap_tool_line(tool_width, line, "      ", TOOL_BG) {
+                                    sel_ctx.push_line(wrapped);
+                                }
                             }
                         }
                     }
@@ -624,72 +630,139 @@ fn push_tool_edge(width: u16, is_top: bool, tool_bg: Color) -> Option<Line<'stat
     )]))
 }
 
-fn push_ansi_line<'a>(width: u16, mut line: Line<'a>, indent: &str, tool_bg: Color) -> Line<'a> {
-    let mut spans = vec![Span::styled(
-        indent.to_string(),
-        Style::default().bg(tool_bg),
-    )];
-    spans.extend(line.spans);
-    line.spans = spans;
-    // Force the tool bg on every span so the line fill is consistent.
-    for span in &mut line.spans {
-        span.style = span.style.bg(tool_bg);
-    }
-    line.style = Style::default().bg(tool_bg);
-    // Truncate to `width` so the paragraph never needs to wrap a tool
-    // line. Wrapping at the paragraph level leaks the chat bg on the
-    // continuation row (the paragraph's default style fills the gap
-    // after the content). Truncation is the simpler fix and matches
-    // the current bash/read behavior of showing the first N chars.
+/// Wrap a tool output line to `width` columns with the given indent and
+/// tool bg. Word-aware: prefers breaking at whitespace, falls back to
+/// hard-breaking if a single word is wider than the available content
+/// width. Returns one `Line` per visual row, each padded to exactly
+/// `width` so the paragraph never wraps a tool line (which would leak
+/// the chat bg on the continuation row's trailing cells).
+fn wrap_tool_line<'a>(width: u16, line: Line<'a>, indent: &str, tool_bg: Color) -> Vec<Line<'a>> {
     let indent_w = display_width(indent) as u16;
     let content_w = width.saturating_sub(indent_w);
-    truncate_line_to_width(&mut line, content_w);
-    let used = line.width() as u16;
+    if content_w == 0 {
+        return vec![blank_tool_line(width, indent, tool_bg)];
+    }
+
+    // Collect the full text and remember the first span's style (tool
+    // output is usually monochrome; for multi-color ANSI output we lose
+    // the per-word color but keep the fill, which is the visible bug).
+    let full: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let base_style = line
+        .spans
+        .first()
+        .map(|s| s.style.bg(tool_bg))
+        .unwrap_or_else(|| Style::default().bg(tool_bg));
+
+    let chunks = wrap_text_to_width(&full, content_w);
+    if chunks.is_empty() {
+        return vec![blank_tool_line(width, indent, tool_bg)];
+    }
+
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            let prefix = if i == 0 { indent } else { "" };
+            build_tool_row(width, prefix, &chunk, base_style, tool_bg)
+        })
+        .collect()
+}
+
+fn blank_tool_line(width: u16, indent: &str, tool_bg: Color) -> Line<'static> {
+    build_tool_row(width, indent, "", Style::default().bg(tool_bg), tool_bg)
+}
+
+fn build_tool_row(
+    width: u16,
+    prefix: &str,
+    content: &str,
+    content_style: Style,
+    tool_bg: Color,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if !prefix.is_empty() {
+        spans.push(Span::styled(
+            prefix.to_string(),
+            Style::default().bg(tool_bg),
+        ));
+    }
+    if !content.is_empty() {
+        spans.push(Span::styled(content.to_string(), content_style));
+    }
+    let used: u16 = spans
+        .iter()
+        .map(|s| display_width(s.content.as_ref()) as u16)
+        .sum();
     if used < width {
-        line.spans.push(Span::styled(
+        spans.push(Span::styled(
             " ".repeat((width - used) as usize),
             Style::default().bg(tool_bg),
         ));
     }
-    line
+    Line::from(spans)
 }
 
-/// Truncate a line's spans so the total display width is at most
-/// `max_width`. Operates on display columns (unicode-width), so wide
-/// characters (CJK, emoji) count as 2.
-fn truncate_line_to_width(line: &mut Line<'_>, max_width: u16) {
+/// Word-aware wrap `text` into chunks of at most `max_width` display
+/// columns each. Prefers breaking at whitespace; hard-breaks a single
+/// oversized word across chunks.
+fn wrap_text_to_width(text: &str, max_width: u16) -> Vec<String> {
     if max_width == 0 {
-        line.spans.clear();
-        return;
+        return vec![text.to_string()];
     }
-    let mut remaining = max_width as usize;
-    let mut new_spans: Vec<Span<'_>> = Vec::with_capacity(line.spans.len());
-    for span in line.spans.drain(..) {
-        if remaining == 0 {
-            break;
-        }
-        let w = display_width(span.content.as_ref());
-        if w <= remaining {
-            remaining -= w;
-            new_spans.push(span);
-        } else {
-            // Take only `remaining` display columns from this span.
-            let mut taken = 0;
-            let mut end_byte = 0;
-            for (i, ch) in span.content.char_indices() {
-                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                if taken + cw > remaining {
-                    break;
-                }
-                taken += cw;
-                end_byte = i + ch.len_utf8();
+    let max = max_width as usize;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+
+    for word in text.split_inclusive(' ') {
+        let word_w = display_width(word);
+
+        // If the word alone overflows, flush current and hard-break.
+        if word_w > max {
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+                current_w = 0;
             }
-            let truncated = span.content[..end_byte].to_string();
-            new_spans.push(Span::styled(truncated, span.style));
-            remaining = 0;
+            let mut buf = String::new();
+            let mut buf_w = 0;
+            for ch in word.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if buf_w + cw > max {
+                    chunks.push(std::mem::take(&mut buf));
+                    buf_w = 0;
+                }
+                buf.push(ch);
+                buf_w += cw;
+            }
+            if !buf.is_empty() {
+                current.push_str(&buf);
+                current_w = buf_w;
+            }
+            continue;
+        }
+
+        // If adding the word (plus a space if not first) overflows, flush.
+        let needed = if current.is_empty() {
+            word_w
+        } else {
+            current_w + word_w
+        };
+        if needed > max {
+            chunks.push(std::mem::take(&mut current));
+            current.push_str(word);
+            current_w = word_w;
+        } else {
+            current.push_str(word);
+            current_w += word_w;
         }
     }
-    line.spans = new_spans;
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+    chunks
 }
 
 fn tool_call_label_and_color(app: &App, tc: &mew_message::ToolCallPart) -> (&'static str, Color) {
@@ -789,68 +862,88 @@ mod tests {
     }
 
     #[test]
-    fn test_push_ansi_line_forces_tool_bg_on_all_spans() {
-        // Regression: when a tool output line is longer than `width`, the
-        // paragraph wraps it. The wrapped continuation row must inherit
-        // the tool bg, otherwise the chat bg peeks through. This test
-        // confirms every span in the produced line has the tool bg.
+    fn test_wrap_tool_line_short_returns_one_row() {
         let tool_bg = Color::Rgb(50, 50, 56);
         let content = Line::from("hello world");
-        let line = push_ansi_line(80, content, "      ", tool_bg);
-        for span in &line.spans {
-            assert_eq!(
-                span.style.bg,
-                Some(tool_bg),
-                "span missing tool bg: {:?}",
-                span.content
-            );
+        let rows = wrap_tool_line(80, content, "      ", tool_bg);
+        assert_eq!(rows.len(), 1);
+        // Every row is exactly `width` wide so the paragraph never wraps.
+        assert_eq!(rows[0].width(), 80);
+    }
+
+    #[test]
+    fn test_wrap_tool_line_long_wraps_at_word_boundary() {
+        let tool_bg = Color::Rgb(50, 50, 56);
+        // "hello world foo bar" is 19 chars; with indent 6 and width 16,
+        // content_w = 10. Should wrap to: "hello " (6) + "world " (6) +
+        // "foo bar" (7) → fits in chunks of ≤10. "hello world " is 12 > 10
+        // so it breaks to "hello " (6) then "world foo " (10) then "bar".
+        let content = Line::from("hello world foo bar");
+        let rows = wrap_tool_line(16, content, "      ", tool_bg);
+        // Every row exactly `width` wide, with the first row carrying the
+        // indent and continuation rows left-aligned to the content.
+        assert!(rows.len() >= 2);
+        for row in &rows {
+            assert_eq!(row.width(), 16);
         }
     }
 
     #[test]
-    fn test_push_ansi_line_preserves_fg_colors() {
-        // Setting bg on a span must not clobber its existing fg.
+    fn test_wrap_tool_line_hard_breaks_oversized_word() {
         let tool_bg = Color::Rgb(50, 50, 56);
-        let content = Line::from(vec![Span::styled("ok", Style::default().fg(Color::Green))]);
-        let line = push_ansi_line(80, content, "      ", tool_bg);
-        // The "ok" span (second in the line: first is the indent) should
-        // have both fg=Green and bg=tool_bg.
-        let ok_span = &line.spans[1];
-        assert_eq!(ok_span.style.fg, Some(Color::Green));
-        assert_eq!(ok_span.style.bg, Some(tool_bg));
+        // A 20-char word at width 10 must hard-break into chunks of 10.
+        let content = Line::from("a".repeat(20));
+        let rows = wrap_tool_line(10, content, "", tool_bg);
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(row.width(), 10);
+        }
     }
 
     #[test]
-    fn test_truncate_line_to_width_short_unchanged() {
-        let mut line = Line::from("hello");
-        truncate_line_to_width(&mut line, 10);
-        assert_eq!(line.spans.len(), 1);
-        assert_eq!(line.spans[0].content, "hello");
+    fn test_wrap_tool_line_continuation_rows_have_no_indent() {
+        let tool_bg = Color::Rgb(50, 50, 56);
+        // Indent is 6, width 16, content_w 10. "one two three" is 14
+        // chars — wraps to "one two " (8) and "three" (5). First row
+        // starts with the indent; continuation row doesn't.
+        let content = Line::from("one two three");
+        let rows = wrap_tool_line(16, content, "      ", tool_bg);
+        assert!(rows.len() >= 2);
+        // First row's first span is the indent.
+        assert_eq!(rows[0].spans[0].content, "      ");
+        // Continuation row's first span is content (no indent).
+        if rows.len() > 1 {
+            assert_ne!(rows[1].spans[0].content, "      ");
+        }
     }
 
     #[test]
-    fn test_truncate_line_to_width_truncates() {
-        let mut line = Line::from("hello world");
-        truncate_line_to_width(&mut line, 5);
-        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
-        assert_eq!(text, "hello");
+    fn test_wrap_tool_line_every_row_has_tool_bg() {
+        let tool_bg = Color::Rgb(50, 50, 56);
+        let content = Line::from("hello world foo bar baz qux");
+        let rows = wrap_tool_line(14, content, "      ", tool_bg);
+        for row in &rows {
+            for span in &row.spans {
+                assert_eq!(
+                    span.style.bg,
+                    Some(tool_bg),
+                    "span missing tool bg: {:?}",
+                    span.content
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_truncate_line_to_width_zero_clears() {
-        let mut line = Line::from("hello");
-        truncate_line_to_width(&mut line, 0);
-        assert!(line.spans.is_empty());
+    fn test_wrap_text_to_width_basic() {
+        let chunks = wrap_text_to_width("the quick brown fox", 10);
+        // "the quick " is 10 → fits. "brown fox" is 9 → fits.
+        assert_eq!(chunks, vec!["the quick ", "brown fox"]);
     }
 
     #[test]
-    fn test_truncate_line_to_width_preserves_style() {
-        let mut line = Line::from(vec![Span::styled(
-            "hello world",
-            Style::default().fg(Color::Red),
-        )]);
-        truncate_line_to_width(&mut line, 3);
-        assert_eq!(line.spans[0].style.fg, Some(Color::Red));
-        assert_eq!(line.spans[0].content, "hel");
+    fn test_wrap_text_to_width_hard_break() {
+        let chunks = wrap_text_to_width("aaaaaaaaaa", 5);
+        assert_eq!(chunks, vec!["aaaaa", "aaaaa"]);
     }
 }
