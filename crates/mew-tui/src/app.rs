@@ -33,6 +33,8 @@ pub enum SlashResult {
     Message(String),
     /// Switch to a different model.
     SwitchModel(String),
+    /// Switch to a persona by name, or clear with "default".
+    SwitchPersona(String),
     /// Open the model picker.
     OpenModelPicker,
     /// Resume a previous session by ID.
@@ -92,6 +94,10 @@ pub struct App {
     pub context_files: Vec<String>,
     /// Available tool names.
     pub tools: Vec<String>,
+    /// Available personas (name, description).
+    pub personas: Vec<(String, String)>,
+    /// Active persona name, if any.
+    pub active_persona: Option<String>,
     /// MCP server status: (name, connected, tool_count)
     pub mcp_status: Vec<(String, bool, usize)>,
     /// Available subagent names and descriptions for @-mention.
@@ -332,6 +338,8 @@ impl App {
             should_quit: false,
             context_files: Vec::new(),
             tools: Vec::new(),
+            personas: Vec::new(),
+            active_persona: None,
             mcp_status: Vec::new(),
             subagent_names: Vec::new(),
             sidebar_collapsed: std::collections::HashMap::new(),
@@ -1088,6 +1096,10 @@ impl App {
                 description: "switch model (e.g. /model deepseek-v4-flash)".into(),
             },
             SlashCommand {
+                name: "/persona".into(),
+                description: "switch persona (e.g. /persona researcher)".into(),
+            },
+            SlashCommand {
                 name: "/quit".into(),
                 description: "exit mew".into(),
             },
@@ -1136,6 +1148,26 @@ impl App {
                     SlashResult::SwitchModel(id.to_string())
                 } else {
                     SlashResult::OpenModelPicker
+                }
+            }
+            "/persona" => {
+                if let Some(name) = arg {
+                    SlashResult::SwitchPersona(name.to_string())
+                } else {
+                    let mut out = String::from("available personas:\n");
+                    if self.personas.is_empty() {
+                        out.push_str("  (none — create .mew/personas/<name>/PERSONA.md)");
+                    } else {
+                        for (name, desc) in &self.personas {
+                            let active = if self.active_persona.as_deref() == Some(name.as_str()) {
+                                " *"
+                            } else {
+                                ""
+                            };
+                            out.push_str(&format!("  {} — {}{}\n", name, desc, active));
+                        }
+                    }
+                    SlashResult::Message(out)
                 }
             }
             "/sessions" => SlashResult::Message(self.build_sessions_list()),
@@ -2233,5 +2265,46 @@ mod tests {
         app.input = "hi".to_string();
         // visual row 5 is past the end -> return input.len()
         assert_eq!(app.visual_to_byte_offset(5, 0, 80), 2);
+    }
+
+    #[test]
+    fn test_persona_slash_command_with_name_returns_switch() {
+        let mut app = App::new();
+        app.personas = vec![("researcher".into(), "read-only".into())];
+        let result = app.handle_slash("/persona researcher");
+        assert!(
+            matches!(result, crate::app::SlashResult::SwitchPersona(ref n) if n == "researcher")
+        );
+    }
+
+    #[test]
+    fn test_persona_slash_command_no_arg_lists() {
+        let mut app = App::new();
+        app.personas = vec![
+            ("researcher".into(), "read-only".into()),
+            ("executor".into(), "writes code".into()),
+        ];
+        app.active_persona = Some("researcher".into());
+        let result = app.handle_slash("/persona");
+        match result {
+            crate::app::SlashResult::Message(msg) => {
+                assert!(msg.contains("researcher"));
+                assert!(msg.contains("executor"));
+                assert!(msg.contains("read-only"));
+            }
+            _ => panic!("expected Message"),
+        }
+    }
+
+    #[test]
+    fn test_persona_slash_command_empty_personas() {
+        let app = App::new();
+        let result = app.handle_slash("/persona");
+        match result {
+            crate::app::SlashResult::Message(msg) => {
+                assert!(msg.contains("none"));
+            }
+            _ => panic!("expected Message"),
+        }
     }
 }

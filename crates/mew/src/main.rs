@@ -1029,6 +1029,10 @@ async fn run_tui(
     let loaded_skills = skills_loader.load().unwrap_or_default();
     let skills = Arc::new(loaded_skills);
 
+    // Load personas.
+    let persona_loader = mew_personas::Loader::new(std::env::current_dir().unwrap_or_default());
+    let loaded_personas = persona_loader.load().unwrap_or_default();
+
     let mut tools = build_tools(skills.clone());
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
@@ -1191,6 +1195,10 @@ async fn run_tui(
     }
     app.context_files = context_files;
     app.tools = tool_names;
+    app.personas = loaded_personas
+        .iter()
+        .map(|p| (p.name.clone(), p.description.clone()))
+        .collect();
 
     // Populate model list by querying providers and merging with catalog.
     app.models = discover_models(cfg, cat, raw).await;
@@ -1356,6 +1364,76 @@ async fn run_tui(
                                                 e
                                             )));
                                         }
+                                    }
+                                }
+                                mew_tui::SlashResult::SwitchPersona(ref name) => {
+                                    if name == "default" || name == "none" {
+                                        agent.clear_persona();
+                                        app.active_persona = None;
+                                        app.messages.push(synthetic_message(
+                                            "persona cleared (default)".into(),
+                                        ));
+                                    } else if let Some(persona) =
+                                        loaded_personas.iter().find(|p| p.name == *name)
+                                    {
+                                        let pinned_model = agent.apply_persona(persona);
+                                        app.active_persona = Some(persona.name.clone());
+                                        if let Some(ref model_str) = pinned_model {
+                                            let (new_provider_id, new_model_id) =
+                                                if let Some(idx) = model_str.find('/') {
+                                                    (&model_str[..idx], &model_str[idx + 1..])
+                                                } else {
+                                                    (provider_id.as_str(), model_str.as_str())
+                                                };
+                                            match build_provider(
+                                                cfg,
+                                                cat,
+                                                new_provider_id,
+                                                new_model_id,
+                                                raw,
+                                            ) {
+                                                Ok(new_provider) => {
+                                                    agent.provider = new_provider;
+                                                    app.status.model = new_model_id.to_string();
+                                                    app.status.provider =
+                                                        new_provider_id.to_string();
+                                                    if let Some(c) = cat {
+                                                        app.status.context_window =
+                                                            c.context_window(new_model_id) as u32;
+                                                        if let Some(m) = c.lookup(new_model_id) {
+                                                            agent.input_price = m.pricing.input;
+                                                            agent.output_price = m.pricing.output;
+                                                            agent.cache_read_price =
+                                                                m.pricing.cache_read;
+                                                            agent.cache_write_price =
+                                                                m.pricing.cache_write;
+                                                            agent.reasoning_price =
+                                                                m.pricing.reasoning;
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        "persona model pin failed: {}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        app.messages.push(synthetic_message(format!(
+                                            "switched to persona: {}{}",
+                                            persona.name,
+                                            if let Some(ref m) = pinned_model {
+                                                format!(" (model: {})", m)
+                                            } else {
+                                                String::new()
+                                            }
+                                        )));
+                                    } else {
+                                        app.messages.push(synthetic_message(format!(
+                                            "unknown persona: {}. use /persona to list available.",
+                                            name
+                                        )));
                                     }
                                 }
                                 mew_tui::SlashResult::ResumeSession(ref id) => {
@@ -1664,6 +1742,9 @@ async fn run_tui(
                                     }
                                     mew_tui::SlashResult::SwitchModel(_) => {
                                         // Model switches are deferred; handled in main loop.
+                                    }
+                                    mew_tui::SlashResult::SwitchPersona(_) => {
+                                        // Deferred; handled in main loop.
                                     }
                                     mew_tui::SlashResult::ResumeSession(_) => {
                                         // Deferred; handled in main loop when not streaming.

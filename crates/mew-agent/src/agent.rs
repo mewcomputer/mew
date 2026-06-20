@@ -84,6 +84,14 @@ pub struct Agent {
     pub todos_path: Option<std::path::PathBuf>,
     /// Current reasoning/thinking configuration, if any.
     pub reasoning: Option<ReasoningConfig>,
+    /// Active persona's system-prompt body. Prepended to `self.system` in
+    /// the turn loop. `None` when no persona is active (default behavior).
+    pub persona_prompt: Option<String>,
+    /// Active persona's tool allow-list. `None` = all tools; `Some(set)` =
+    /// only tools whose name is in the set are sent to the provider.
+    pub active_tool_names: Option<HashSet<String>>,
+    /// Active persona name (for display/status). `None` = no persona.
+    pub persona_name: Option<String>,
 }
 
 impl Agent {
@@ -131,6 +139,9 @@ impl Agent {
             todos: Arc::new(tokio::sync::Mutex::new(crate::TodoList::new())),
             todos_path: None,
             reasoning: None,
+            persona_prompt: None,
+            active_tool_names: None,
+            persona_name: None,
         }
     }
 
@@ -143,6 +154,35 @@ impl Agent {
 
     pub fn set_system(&mut self, system: String) {
         self.system = system;
+    }
+
+    /// Activate a persona. Sets the persona prompt (prepended to `self.system`
+    /// in the turn loop), filters the tool set if the persona specifies
+    /// `mew.tools`, and records the persona name for display.
+    ///
+    /// Returns the persona's pinned model (if any) so the caller can rebuild
+    /// the provider.
+    pub fn apply_persona(&mut self, persona: &mew_personas::Persona) -> Option<String> {
+        self.persona_name = Some(persona.name.clone());
+        self.persona_prompt = if persona.body.is_empty() {
+            None
+        } else {
+            Some(persona.body.clone())
+        };
+        self.active_tool_names = persona
+            .config
+            .tools
+            .as_ref()
+            .map(|tools| tools.iter().cloned().collect::<HashSet<_>>());
+        persona.config.model.clone()
+    }
+
+    /// Clear the active persona, restoring full tool access and no persona
+    /// prompt.
+    pub fn clear_persona(&mut self) {
+        self.persona_name = None;
+        self.persona_prompt = None;
+        self.active_tool_names = None;
     }
 
     pub fn set_reasoning(&mut self, config: Option<ReasoningConfig>) {

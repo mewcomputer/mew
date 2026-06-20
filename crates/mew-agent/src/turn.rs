@@ -90,6 +90,11 @@ impl Agent {
             let tool_defs: Vec<ToolDef> = self
                 .tools
                 .values()
+                .filter(|t| {
+                    self.active_tool_names
+                        .as_ref()
+                        .is_none_or(|names| names.contains(t.name()))
+                })
                 .map(|t| ToolDef {
                     name: t.name().to_string(),
                     description: t.description().to_string(),
@@ -212,7 +217,11 @@ impl Agent {
                     .await;
             }
 
-            let system = self.dispatcher.on_system_prompt(self.system.clone()).await;
+            let base_system = match &self.persona_prompt {
+                Some(persona) => format!("{}\n\n{}", persona, self.system),
+                None => self.system.clone(),
+            };
+            let system = self.dispatcher.on_system_prompt(base_system).await;
 
             let req = Request {
                 model: String::new(),

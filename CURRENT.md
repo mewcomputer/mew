@@ -321,3 +321,13 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - Fix: `wrap_tool_line` now applies the `indent` to every row (first and continuations), not just the first. `content_w` (the wrap width) already accounted for the indent, so no other math changed — the wrapped text fills the same content column on every row.
 - Updated `test_wrap_tool_line_continuation_rows_have_indent` (was previously `..._have_no_indent`).
 - 55 mew-tui tests pass; clippy clean.
+
+### 2026-06-19: personas v1 — switchable system prompt + tool filtering + model pin
+
+- New crate `mew-personas` mirrors the `mew-skills` loader (discovery walk, frontmatter parsing, name validation). Discovers `PERSONA.md` files from `.mew/personas/`, `.opencode/personas/`, `.claude/personas/`, `.agents/personas/` (project + global). 9 loader tests.
+- Frontmatter: `name`, `description`, optional `mew:` block with `model` (pin) and `tools` (allow-list). Skipping for v1: transitions, skills_allow, color, tools_deny, templating.
+- Agent state: `Agent` gained `persona_prompt: Option<String>`, `active_tool_names: Option<HashSet<String>>`, `persona_name: Option<String>`. `apply_persona(&Persona)` sets all three and returns the pinned model (if any). `clear_persona()` resets them. The turn loop (`turn.rs:90`) filters `self.tools` by `active_tool_names` and prepends `persona_prompt` to the system prompt before the dispatcher hook.
+- `/persona` slash command: `/persona` lists available personas (with `*` on active), `/persona <name>` switches, `/persona default` clears. Mirrors the `SwitchModel` plumbing for model pin: rebuilds the provider via `build_provider` if the persona specifies `mew.model`.
+- Status bar: purple pill (`#37234b` bg, `#c8aaf0` fg) showing the active persona name. Slotted between model and cwd pills.
+- TUI: `App.personas: Vec<(String, String)>` populated from loaded personas, `App.active_persona: Option<String>` updated on switch. `SlashResult::SwitchPersona(String)` variant.
+- Tests: 3 agent tests (apply sets prompt + tool filter, model pin returns, clear resets), 3 TUI tests (slash with name, slash no-arg lists, slash empty personas). 9 persona loader tests. Total: mew-personas 9, mew-agent 63, mew-tui 58.

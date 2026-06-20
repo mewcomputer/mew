@@ -13,6 +13,7 @@ mew-tools = { workspace = true }
 mew-subagents = { workspace = true }
 mew-session = { workspace = true }
 mew-config = { workspace = true }
+mew-personas = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

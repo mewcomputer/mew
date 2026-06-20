@@ -72,6 +72,15 @@ fn build_pills(app: &App) -> Vec<Pill> {
         });
     }
 
+    // persona — dark purple background, light purple text.
+    if let Some(ref name) = app.active_persona {
+        pills.push(Pill {
+            text: name.clone(),
+            fg: Color::Rgb(200, 170, 240),
+            bg: Color::Rgb(55, 35, 75),
+        });
+    }
+
     // cwd — dark blue background, light blue text.
     if !app.short_cwd.is_empty() {
         pills.push(Pill {

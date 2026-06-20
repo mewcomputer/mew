@@ -1331,3 +1331,94 @@ async fn test_todo_complete_missing_id_errors() {
         .unwrap_err();
     assert!(err.contains("id"));
 }
+
+// ------------------------------------------------------------------
+// Persona tests
+// ------------------------------------------------------------------
+
+#[test]
+fn test_apply_persona_sets_prompt_and_tool_filter() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let mut agent = agent;
+    let persona = mew_personas::Persona {
+        name: "researcher".into(),
+        description: "read-only".into(),
+        body: "You are a researcher.".into(),
+        path: std::path::PathBuf::new(),
+        config: mew_personas::PersonaConfig {
+            model: None,
+            tools: Some(vec!["read".into(), "grep".into(), "glob".into()]),
+        },
+    };
+    agent.apply_persona(&persona);
+    assert_eq!(agent.persona_name.as_deref(), Some("researcher"));
+    assert_eq!(
+        agent.persona_prompt.as_deref(),
+        Some("You are a researcher.")
+    );
+    let active = agent.active_tool_names.as_ref().unwrap();
+    assert!(active.contains("read"));
+    assert!(active.contains("grep"));
+    assert!(!active.contains("bash"));
+}
+
+#[test]
+fn test_apply_persona_with_model_pin_returns_model() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let mut agent = agent;
+    let persona = mew_personas::Persona {
+        name: "executor".into(),
+        description: "writes code".into(),
+        body: "You execute.".into(),
+        path: std::path::PathBuf::new(),
+        config: mew_personas::PersonaConfig {
+            model: Some("z-ai/glm-4.5-air".into()),
+            tools: None,
+        },
+    };
+    let pinned = agent.apply_persona(&persona);
+    assert_eq!(pinned.as_deref(), Some("z-ai/glm-4.5-air"));
+    assert!(agent.active_tool_names.is_none());
+}
+
+#[test]
+fn test_clear_persona_resets_state() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let mut agent = agent;
+    let persona = mew_personas::Persona {
+        name: "researcher".into(),
+        description: "".into(),
+        body: "body".into(),
+        path: std::path::PathBuf::new(),
+        config: mew_personas::PersonaConfig {
+            model: None,
+            tools: Some(vec!["read".into()]),
+        },
+    };
+    agent.apply_persona(&persona);
+    assert!(agent.persona_name.is_some());
+    assert!(agent.active_tool_names.is_some());
+
+    agent.clear_persona();
+    assert!(agent.persona_name.is_none());
+    assert!(agent.persona_prompt.is_none());
+    assert!(agent.active_tool_names.is_none());
+}
