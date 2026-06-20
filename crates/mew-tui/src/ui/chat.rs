@@ -535,7 +535,15 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn push_tool_line<'a>(width: u16, spans: Vec<Span<'a>>, pad_style: Style) -> Line<'a> {
+fn push_tool_line<'a>(width: u16, mut spans: Vec<Span<'a>>, pad_style: Style) -> Line<'a> {
+    // Force pad_style's bg on every span so wrapped continuation rows
+    // inherit the tool fill (see `push_ansi_line` for the full rationale).
+    let tool_bg = pad_style.bg;
+    for span in &mut spans {
+        if let Some(bg) = tool_bg {
+            span.style = span.style.bg(bg);
+        }
+    }
     let mut line = Line::from(spans);
     let used = line.width() as u16;
     if used < width {
@@ -615,6 +623,14 @@ fn push_ansi_line<'a>(width: u16, mut line: Line<'a>, indent: &str, tool_bg: Col
     )];
     spans.extend(line.spans);
     line.spans = spans;
+    // Force the tool bg on every span so wrapped continuation rows inherit
+    // the fill. Without this, content spans carry their ANSI-parsed style
+    // (which has no bg) and the paragraph's `line.style` only applies where
+    // a span is missing — the wrapped second row shows the chat bg peeking
+    // through.
+    for span in &mut line.spans {
+        span.style = span.style.bg(tool_bg);
+    }
     line.style = Style::default().bg(tool_bg);
     let used = line.width() as u16;
     if used < width {
@@ -720,5 +736,37 @@ mod tests {
         assert_eq!(wrapped_height(&text_exact, 10), 1);
         let text_over = Text::from(vec![Line::from("a".repeat(11))]);
         assert_eq!(wrapped_height(&text_over, 10), 2);
+    }
+
+    #[test]
+    fn test_push_ansi_line_forces_tool_bg_on_all_spans() {
+        // Regression: when a tool output line is longer than `width`, the
+        // paragraph wraps it. The wrapped continuation row must inherit
+        // the tool bg, otherwise the chat bg peeks through. This test
+        // confirms every span in the produced line has the tool bg.
+        let tool_bg = Color::Rgb(50, 50, 56);
+        let content = Line::from("hello world");
+        let line = push_ansi_line(80, content, "      ", tool_bg);
+        for span in &line.spans {
+            assert_eq!(
+                span.style.bg,
+                Some(tool_bg),
+                "span missing tool bg: {:?}",
+                span.content
+            );
+        }
+    }
+
+    #[test]
+    fn test_push_ansi_line_preserves_fg_colors() {
+        // Setting bg on a span must not clobber its existing fg.
+        let tool_bg = Color::Rgb(50, 50, 56);
+        let content = Line::from(vec![Span::styled("ok", Style::default().fg(Color::Green))]);
+        let line = push_ansi_line(80, content, "      ", tool_bg);
+        // The "ok" span (second in the line: first is the indent) should
+        // have both fg=Green and bg=tool_bg.
+        let ok_span = &line.spans[1];
+        assert_eq!(ok_span.style.fg, Some(Color::Green));
+        assert_eq!(ok_span.style.bg, Some(tool_bg));
     }
 }

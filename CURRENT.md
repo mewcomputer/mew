@@ -276,3 +276,10 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - Layout: `crates/mew-tui/src/ui/mod.rs` now uses `input_visual_line_count` with the slot's estimated content width so the vertical constraint reserves enough room for wrapped lines before `draw_input` runs.
 - 8 new unit tests cover no-wrap, wrap, empty-line-1-row, cursor visual position, and click-to-byte-offset mapping. 48 mew-tui tests pass; clippy clean.
 - Also removed an untracked WIP `spinner.rs` module that had been left in the tree (with a `mod spinner;` line in `mod.rs` and a `rand` dep in `Cargo.toml`) — it was triggering dead-code / non-snake-case clippy errors and blocking CI. The module was incomplete and not wired anywhere; can be re-added when finished.
+
+### 2026-06-19: tool output wrapping now keeps the tool bg on continuation rows
+
+- Reported: long tool output lines (e.g. `read` of a wide file) wrapped to a second visual row, but the wrapped continuation showed the chat bg instead of the tool bg — the card looked like it had a gap where text wrapped.
+- Root cause: `push_ansi_line` set `line.style = bg(tool_bg)` and the indent span had `bg(tool_bg)`, but the content spans came from `into_text()` with their ANSI-parsed styles (no bg). When the paragraph wrapped a long line, the wrapped continuation row used the content spans' styles, which had no bg, so the chat bg showed through. Same issue in `push_tool_line` for any non-pad spans.
+- Fix: in both `push_ansi_line` and `push_tool_line`, iterate over all spans and force `bg(tool_bg)` on each. `Style::bg()` is additive — it preserves existing fg colors. The wrapped continuation row now inherits the tool fill.
+- 2 new tests: `test_push_ansi_line_forces_tool_bg_on_all_spans` and `test_push_ansi_line_preserves_fg_colors`. 50 mew-tui tests pass; clippy clean.
