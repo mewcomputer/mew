@@ -32,7 +32,15 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     );
 
     let prefix = if app.streaming {
-        Span::styled("… ", Style::default().fg(Color::Yellow).bg(STATUS_BG))
+        let frames = crate::ui::spinner::spinner_frames();
+        let frame = frames
+            .chars()
+            .nth(app.spinner_frame % frames.chars().count())
+            .unwrap_or(' ');
+        Span::styled(
+            format!("{} ", frame),
+            Style::default().fg(Color::Yellow).bg(STATUS_BG),
+        )
     } else {
         Span::styled("> ", Style::default().fg(Color::Cyan).bg(STATUS_BG))
     };

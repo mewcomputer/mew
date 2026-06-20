@@ -24,3 +24,4 @@ ratatui-mdstream = { workspace = true }
 mdstream = { workspace = true }
 ignore = { workspace = true }
 unicode-width = "0.2"
+rand.workspace = true

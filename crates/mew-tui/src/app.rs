@@ -83,6 +83,9 @@ pub struct App {
     pub history_draft: Option<String>,
     /// Whether the agent is currently streaming.
     pub streaming: bool,
+    /// Spinner frame index for the "thinking" indicator. Advances on each
+    /// `tick()` while `streaming` is true.
+    pub spinner_frame: usize,
     /// Whether to exit the application.
     pub should_quit: bool,
     /// Context files loaded for this session.
@@ -325,6 +328,7 @@ impl App {
             history_index: None,
             history_draft: None,
             streaming: false,
+            spinner_frame: 0,
             should_quit: false,
             context_files: Vec::new(),
             tools: Vec::new(),
@@ -1046,6 +1050,13 @@ impl App {
             }
         } else {
             self.status_ticker_at = Some(Instant::now());
+        }
+        // Advance the thinking spinner only while the agent is streaming.
+        // The tick fires every ~50ms (the main event loop's tick rate);
+        // the spinner itself renders 1 frame per tick, which lands around
+        // 20fps — fast enough to feel alive, slow enough to read.
+        if self.streaming {
+            self.spinner_frame = self.spinner_frame.wrapping_add(1);
         }
     }
 

@@ -12,6 +12,7 @@ mod companion;
 mod input;
 mod overlays;
 mod sidebar;
+mod spinner;
 mod status;
 mod welcome;
 

@@ -306,3 +306,11 @@ Re-framing: `subagent_start`/`subagent_wait` are model-visible tools, but each i
 - Continuation rows don't carry the indent (only the first row does), so wrapped text is left-aligned to the content.
 - Tool output is usually monochrome, so all wrapped rows use the first span's style with `bg(tool_bg)` forced on. Multi-color ANSI output loses per-word color but keeps the fill, which was the visible bug.
 - 5 new tests cover short/long/oversized-word cases, continuation row indent, and tool bg on every span. 55 mew-tui tests pass; clippy clean.
+
+### 2026-06-19: spinner as the streaming "thinking" indicator
+
+- The input prefix used to show a static `… ` when `app.streaming` was true. Replaced it with the braille spinner from `crates/mew-tui/src/ui/spinner.rs` — the spinner advances one frame per `tick()` while streaming, so it actually animates.
+- `App` gained a `spinner_frame: usize` field. `tick()` bumps it (wraps via `wrapping_add`) only while `streaming` is true, so the spinner freezes on the last frame when the agent finishes rather than ticking on forever.
+- `spinner::spinner_frames()` exposes the braille frame sequence as a `&'static str` so the input renderer can index into it by character without allocating.
+- Re-added `mod spinner;` in `crates/mew-tui/src/ui/mod.rs` and `rand.workspace = true` in `crates/mew-tui/Cargo.toml` (needed by the existing `Spinner::next_frame` random branch; the deterministic path we use doesn't actually call `rand` at runtime, but the dep is there for the API).
+- 55 mew-tui tests pass; clippy clean.
