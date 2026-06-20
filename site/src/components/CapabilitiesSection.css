@@ -1,0 +1,63 @@
+/* CapabilitiesSection animations */
+
+@keyframes mew-cursor-blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+}
+
+.mew-cursor {
+    display: inline-block;
+    width: 0.55em;
+    height: 1em;
+    vertical-align: text-bottom;
+    background: currentColor;
+    margin-left: 1px;
+    animation: mew-cursor-blink 1s step-end infinite;
+}
+
+@keyframes mew-enter {
+    from { opacity: 0; transform: translateY(0.5rem) scale(0.985); filter: blur(4px); }
+    to { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+}
+
+.mew-enter {
+    animation: mew-enter 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+::view-transition-old(terminal-card) {
+    filter: blur(4px);
+    animation: terminal-old 300ms ease-out forwards;
+}
+
+::view-transition-new(terminal-card) {
+    animation: terminal-new 300ms ease-out;
+}
+
+@keyframes terminal-old {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
+@keyframes terminal-new {
+    from { opacity: 0; filter: blur(4px); }
+    to { opacity: 1; filter: blur(0); }
+}
+
+.mew-reveal {
+    opacity: 0;
+    transform: translateY(0.75rem);
+    transition:
+        opacity 0.7s cubic-bezier(0.2, 0.8, 0.2, 1),
+        transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1);
+    will-change: opacity, transform;
+}
+
+.mew-reveal.mew-reveal-in {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mew-cursor, .mew-enter { animation: none; }
+    .mew-reveal { opacity: 1; transform: none; transition: none; }
+}

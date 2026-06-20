@@ -1,0 +1,12 @@
+@font-face {
+    font-family: "Banga";
+    src: url("/fonts/Banga-VF.ttf") format("truetype");
+    font-weight: 100 900;
+    font-style: normal;
+}
+@font-face {
+    font-family: "Banga";
+    src: url("/fonts/Banga-Italic-VF.ttf") format("truetype");
+    font-weight: 100 900;
+    font-style: italic;
+}

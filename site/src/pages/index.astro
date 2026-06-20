@@ -1,0 +1,94 @@
+---
+import Base from "../layouts/Base.astro";
+import CapabilitiesSection from "../components/CapabilitiesSection.tsx";
+import "../styles/global.css";
+---
+
+<Base>
+    <main class="mx-auto px-6 py-16 pt-64 max-w-7xl">
+        <section id="top" class="mb-28 max-w-3xl">
+            <pre
+                class="font-mono leading-tight mb-4"
+                aria-hidden="true">{`
+ ╱|、
+(˚。7
+|、˜〵
+じしˍ,)ノ`}</pre>
+
+            <p class="font-display text-5xl lg:text-7xl mt-1 mb-8 max-w-2xl">
+                mew is the coding agent you can take apart.
+            </p>
+            <p class="text-lg">
+                Give it a task and it does the work. It finds the code, makes
+                the change, runs the tests. <br />And every part of it is a
+                plugin away from being yours.
+            </p>
+        </section>
+
+        <div><CapabilitiesSection client:visible /></div>
+
+        <section id="why" class="md:mt-96 mt-32 max-w-3xl">
+            <h2 class="font-display text-5xl tracking-tight mb-8">
+                Yours to take apart.
+            </h2>
+            <p class="text-lg text-foreground/80 leading-relaxed">
+                mew is a tool you install, not a service you subscribe to. It
+                doesn't know your name, it doesn't cache your code, and it works
+                the same offline as online. Every provider, tool, and prompt is
+                a plugin you can replace. Sessions are plain JSONL on your disk,
+                readable end to end. MIT licensed and free. The bus factor is
+                you.
+            </p>
+        </section>
+
+        <section id="install" class="md:mt-64 mt-32 max-w-3xl">
+            <h2 class="text-2xl font-semibold tracking-tight mb-8">
+                Get it running.
+            </h2>
+            <div
+                class="bg-card border border-border rounded-lg p-8 font-mono text-sm leading-relaxed shadow-sm relative"
+            >
+                <div class="text-foreground font-medium">
+                    $ curl get.mew.computer | bash
+                </div>
+                <div class="text-muted-foreground">
+                    $ export MEW_MODEL_PROVIDER="openai"
+                </div>
+                <div class="text-muted-foreground">
+                    $ export MEW_API_KEY="sk-..."
+                </div>
+                <div class="text-foreground font-medium">
+                    $ mew "add a test for the rate limiter"
+                </div>
+                <button
+                    type="button"
+                    data-copy="curl get.mew.computer | bash"
+                    class="absolute top-4 right-4 text-xs font-mono text-muted-foreground hover:text-foreground transition-colors"
+                    aria-label="Copy install command">copy</button
+                >
+            </div>
+            <p class="text-sm text-muted-foreground mt-4">
+                Works with opencode-zen, z-ai, deepseek, anthropic, openai, or
+                anything with an HTTP endpoint and a compatible API shape.
+            </p>
+        </section>
+    </main>
+
+    <script>
+        document.querySelectorAll("[data-copy]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const cmd = btn.getAttribute("data-copy") || "";
+                navigator.clipboard
+                    ?.writeText(cmd)
+                    .then(() => {
+                        const prev = btn.textContent;
+                        btn.textContent = "copied";
+                        setTimeout(() => {
+                            btn.textContent = prev;
+                        }, 1200);
+                    })
+                    .catch(() => {});
+            });
+        });
+    </script>
+</Base>
