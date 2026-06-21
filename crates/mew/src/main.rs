@@ -27,6 +27,7 @@ use mew_tools::tools::exit_tool::ExitTool;
 use mew_tools::tools::flag_important::{FlagImportant, FlaggedFile};
 use mew_tools::tools::glob::Glob;
 use mew_tools::tools::grep::Grep;
+use mew_tools::tools::jobs::{JobBlock, JobCancel, JobStatus, ShellBackground};
 use mew_tools::tools::progress_update::ProgressUpdate;
 use mew_tools::tools::read::Read;
 use mew_tools::tools::skill::Skill;
@@ -326,6 +327,10 @@ fn build_tools(
         Arc::new(ExitTool),
         Arc::new(ProgressUpdate),
         Arc::new(AskUser),
+        Arc::new(ShellBackground),
+        Arc::new(JobStatus),
+        Arc::new(JobBlock),
+        Arc::new(JobCancel),
         Arc::new(TodoCreate),
         Arc::new(TodoUpdate),
         Arc::new(TodoComplete),

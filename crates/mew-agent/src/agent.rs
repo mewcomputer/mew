@@ -34,6 +34,48 @@ pub struct SubagentTask {
     pub child_session_id: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
+/// Lifecycle state of a background shell job.
+#[derive(Debug, Clone)]
+pub enum ShellJobState {
+    Running,
+    Completed { exit_code: i32 },
+    Failed { reason: String },
+    Cancelled,
+}
+
+impl ShellJobState {
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, Self::Running)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed { .. } => "completed",
+            Self::Failed { .. } => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// A background shell command tracked as a job. The process runs in a
+/// background task that reads stdout/stderr into `output` and updates
+/// `state` on exit. Callers use `done` to wait for completion.
+pub struct ShellJob {
+    pub id: String,
+    pub command: String,
+    pub started_at: i64,
+    pub cancel: tokio_util::sync::CancellationToken,
+    /// Accumulated stdout + stderr (interleaved). Updated by the
+    /// background reader task.
+    pub output: Arc<tokio::sync::Mutex<String>>,
+    /// Current state. `Running` until the process exits or is cancelled.
+    pub state: Arc<tokio::sync::Mutex<ShellJobState>>,
+    /// Notified once when the job reaches a terminal state. Used by
+    /// `job_block` to wait without polling.
+    pub done: Arc<tokio::sync::Notify>,
+}
+
 #[derive(Clone)]
 pub struct Agent {
     pub provider: Arc<dyn Provider>,
@@ -63,6 +105,9 @@ pub struct Agent {
     pub subagent_runner: Option<Arc<dyn SubagentRunner>>,
     /// Background subagent tasks: task_id → task.
     pub subagent_tasks: Arc<tokio::sync::Mutex<HashMap<String, SubagentTask>>>,
+    /// Background shell jobs: job_id → job. Populated by `shell_background`,
+    /// drained by `job_block` / `job_cancel`.
+    pub shell_jobs: Arc<tokio::sync::Mutex<HashMap<String, ShellJob>>>,
     /// Directories the agent is allowed to read/write within.
     pub workspace_roots: Vec<PathBuf>,
     /// Additional directories approved for this session.
@@ -160,6 +205,7 @@ impl Agent {
             subagent_defs: Vec::new(),
             subagent_runner: None,
             subagent_tasks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            shell_jobs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             workspace_roots: Vec::new(),
             workspace_allowances: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             force_compact: Arc::new(tokio::sync::Mutex::new(false)),
@@ -563,6 +609,176 @@ impl Agent {
             .map(|(id, t)| (t.name.clone(), id.clone(), now - t.started_at))
             .collect()
     }
+
+    // -----------------------------------------------------------------
+    // Background shell jobs
+    // -----------------------------------------------------------------
+
+    /// Launch a shell command in the background. Returns a job_id that can
+    /// be used with `shell_job_status`, `shell_job_block`, and
+    /// `cancel_shell_job`.
+    pub async fn start_shell_job(&self, command: &str, cwd: &std::path::Path) -> String {
+        let id = ulid::Ulid::new().to_string();
+        let cancel = self.cancel_token.child_token();
+        let output = Arc::new(tokio::sync::Mutex::new(String::new()));
+        let state = Arc::new(tokio::sync::Mutex::new(ShellJobState::Running));
+        let done = Arc::new(tokio::sync::Notify::new());
+
+        let job = ShellJob {
+            id: id.clone(),
+            command: command.to_string(),
+            started_at: chrono::Utc::now().timestamp_millis(),
+            cancel: cancel.clone(),
+            output: output.clone(),
+            state: state.clone(),
+            done: done.clone(),
+        };
+
+        // Spawn the background runner.
+        let _job_id = id.clone();
+        let cmd = command.to_string();
+        let cwd = cwd.to_path_buf();
+        tokio::spawn(async move {
+            run_shell_job(&cmd, &cwd, &output, &state, &done, &cancel).await;
+        });
+
+        self.shell_jobs.lock().await.insert(id.clone(), job);
+        id
+    }
+
+    /// Get the current state and accumulated output of a shell job.
+    pub async fn shell_job_status(&self, job_id: &str) -> Option<(ShellJobState, String)> {
+        let jobs = self.shell_jobs.lock().await;
+        let job = jobs.get(job_id)?;
+        let state = job.state.lock().await.clone();
+        let output = job.output.lock().await.clone();
+        Some((state, output))
+    }
+
+    /// Wait for a shell job to reach a terminal state (up to `timeout_secs`).
+    /// Returns the final state and full output, or `None` if the job doesn't
+    /// exist. If the timeout fires while still running, returns the current
+    /// state (Running) and partial output.
+    pub async fn shell_job_block(
+        &self,
+        job_id: &str,
+        timeout_secs: u64,
+    ) -> Option<(ShellJobState, String)> {
+        let done = {
+            let jobs = self.shell_jobs.lock().await;
+            jobs.get(job_id)?.done.clone()
+        };
+
+        // Wait for the done signal or timeout.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            done.notified(),
+        )
+        .await;
+
+        // Return whatever state we're in.
+        self.shell_job_status(job_id).await
+    }
+
+    /// Cancel a running shell job by killing the process. Returns true if
+    /// the job existed and was running.
+    pub async fn cancel_shell_job(&self, job_id: &str) -> bool {
+        let jobs = self.shell_jobs.lock().await;
+        let Some(job) = jobs.get(job_id) else {
+            return false;
+        };
+        let state = job.state.lock().await;
+        if state.is_terminal() {
+            return false;
+        }
+        drop(state);
+        job.cancel.cancel();
+        true
+    }
+}
+
+/// Background runner for a shell job. Reads stdout/stderr into `output`,
+/// updates `state` on exit, and notifies `done`.
+async fn run_shell_job(
+    command: &str,
+    cwd: &std::path::Path,
+    output: &Arc<tokio::sync::Mutex<String>>,
+    state: &Arc<tokio::sync::Mutex<ShellJobState>>,
+    done: &Arc<tokio::sync::Notify>,
+    cancel: &tokio_util::sync::CancellationToken,
+) {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
+
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(command);
+    cmd.current_dir(cwd);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.kill_on_drop(true);
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            *state.lock().await = ShellJobState::Failed {
+                reason: format!("spawn failed: {}", e),
+            };
+            done.notify_waiters();
+            return;
+        }
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    // Reader tasks for stdout and stderr.
+    if let Some(stdout) = stdout {
+        let output = output.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let mut out = output.lock().await;
+                out.push_str(&line);
+                out.push('\n');
+            }
+        });
+    }
+    if let Some(stderr) = stderr {
+        let output = output.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let mut out = output.lock().await;
+                out.push_str(&line);
+                out.push('\n');
+            }
+        });
+    }
+
+    // Wait for exit or cancellation.
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            let _ = child.kill().await;
+            *state.lock().await = ShellJobState::Cancelled;
+        }
+        status = child.wait() => {
+            match status {
+                Ok(s) => {
+                    *state.lock().await = ShellJobState::Completed {
+                        exit_code: s.code().unwrap_or(-1),
+                    };
+                }
+                Err(e) => {
+                    *state.lock().await = ShellJobState::Failed {
+                        reason: format!("wait failed: {}", e),
+                    };
+                }
+            }
+        }
+    }
+
+    done.notify_waiters();
 }
 
 /// Render a persona body as a minijinja template, exposing the agent's

@@ -93,6 +93,15 @@ impl Agent {
 
             if matches!(
                 tc.tool_name.as_str(),
+                "shell_background" | "job_status" | "job_block" | "job_cancel"
+            ) {
+                self.execute_job_tool(tc, assistant_msg, ev_tx, &mut result_parts)
+                    .await;
+                continue;
+            }
+
+            if matches!(
+                tc.tool_name.as_str(),
                 "todo_create" | "todo_update" | "todo_complete" | "todo_delete" | "todo_list"
             ) {
                 self.execute_todo(tc, assistant_msg, ev_tx, &mut result_parts)
@@ -1080,6 +1089,150 @@ impl Agent {
             })
             .await;
 
+        result_parts.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            call_id: tc.call_id.clone(),
+        }));
+    }
+
+    async fn execute_job_tool(
+        &self,
+        tc: &ToolCallPart,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        result_parts: &mut Vec<Part>,
+    ) {
+        let call_id = tc.call_id.clone();
+        let part_id = tc.base.id;
+        let input = tc.input().clone();
+
+        let assistant_id = match assistant_msg {
+            Some(ref msg) => msg.id,
+            None => return,
+        };
+
+        let (output, success) = match tc.tool_name.as_str() {
+            "shell_background" => {
+                let command = input
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if command.is_empty() {
+                    ("shell_background: 'command' is required".into(), false)
+                } else {
+                    let cwd_str = input.get("cwd").and_then(|v| v.as_str());
+                    let cwd = cwd_str
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                    let job_id = self.start_shell_job(command, &cwd).await;
+                    (format!("started job: {}", job_id), true)
+                }
+            }
+            "job_status" => {
+                let job_id = input
+                    .get("job_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match self.shell_job_status(job_id).await {
+                    Some((state, output)) => {
+                        let out = format!("state: {}\n\n{}", state.as_str(), output);
+                        (out, true)
+                    }
+                    None => (format!("job '{}' not found", job_id), false),
+                }
+            }
+            "job_block" => {
+                let job_id = input
+                    .get("job_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let timeout = input
+                    .get("timeout_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(300);
+                match self.shell_job_block(job_id, timeout).await {
+                    Some((state, output)) => {
+                        let out = format!("state: {}\n\n{}", state.as_str(), output);
+                        (out, state.as_str() != "running" || state.is_terminal())
+                    }
+                    None => (format!("job '{}' not found", job_id), false),
+                }
+            }
+            "job_cancel" => {
+                let job_id = input
+                    .get("job_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if self.cancel_shell_job(job_id).await {
+                    (format!("cancelled job: {}", job_id), true)
+                } else {
+                    (
+                        format!("job '{}' not found or already finished", job_id),
+                        false,
+                    )
+                }
+            }
+            _ => (format!("unknown job tool: {}", tc.tool_name), false),
+        };
+
+        let final_state = if success {
+            ToolState::Completed(ToolStateCompleted {
+                input: input.clone(),
+                output: output.clone(),
+                metadata: None,
+                diff: None,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        } else {
+            ToolState::Error(ToolStateError {
+                input: input.clone(),
+                error: output.clone(),
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        };
+        let error_for_hook = if success { String::new() } else { output };
+
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, final_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: final_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::ToolEnd {
+                call_id: call_id.clone(),
+                success,
+            })
+            .await;
+        self.dispatcher
+            .on_tool_error(
+                &mew_hooks::ToolCall {
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    input: input.clone(),
+                },
+                if success { "" } else { &error_for_hook },
+            )
+            .await;
         result_parts.push(Part::ToolResult(ToolResultPart {
             base: PartBase {
                 id: ulid::Ulid::new(),
