@@ -308,10 +308,11 @@ mod tests {
         ];
         let segs = build_segments(&pills, 0);
         assert_eq!(segs.len(), 3);
-        assert_eq!(segs[0].text, "a");
+        // Pills now have a leading/trailing space for visual padding.
+        assert_eq!(segs[0].text, " a ");
         assert_eq!(segs[1].text, " ");
         assert_eq!(segs[1].bg, STATUS_BG);
-        assert_eq!(segs[2].text, "b");
+        assert_eq!(segs[2].text, " b ");
     }
 
     #[test]
@@ -319,7 +320,7 @@ mod tests {
         let pills = vec![pill("ab", Color::White, Color::Rgb(0, 0, 0))];
         let segs = build_segments(&pills, 3);
         assert_eq!(segs.len(), 2);
-        assert_eq!(segs[0].text, "ab");
+        assert_eq!(segs[0].text, " ab ");
         assert_eq!(segs[1].text, "   ");
         assert_eq!(segs[1].bg, STATUS_BG);
     }
@@ -338,18 +339,18 @@ mod tests {
 
     #[test]
     fn test_segments_window_width_and_color_preservation() {
-        // Two pills with distinct bgs; window of 5 chars should include
-        // parts of both and the gap, with each part's style intact.
+        // Two pills with distinct bgs; window should include parts of both
+        // and the gap, with each part's style intact.
         let pills = vec![
             pill("AA", Color::White, Color::Rgb(10, 0, 0)),
             pill("BB", Color::Cyan, Color::Rgb(0, 10, 0)),
         ];
-        // full sequence: "AA BB" + "   " (trailing) = "AA BB   " (8 chars).
+        // full sequence: " AA " + " " + " BB " + "   " = " AA  BB    " (12 chars).
         let segs = build_segments(&pills, 3);
-        // offset 0, width 5 → first 5 chars = "AA BB".
-        let line = segments_window(&segs, 5, 0);
+        // offset 0, width 10 → first 10 chars = " AA  BB  ".
+        let line = segments_window(&segs, 10, 0);
         let total_text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
-        assert_eq!(total_text, "AA BB");
+        assert_eq!(total_text, " AA   BB  ");
         // The first span carries the first pill's bg, the gap carries
         // STATUS_BG, the second pill carries its own bg.
         assert_eq!(line.spans[0].style.bg, Some(Color::Rgb(10, 0, 0)));
@@ -361,15 +362,14 @@ mod tests {
     fn test_segments_window_wraps_with_offset() {
         let pills = vec![pill("abc", Color::White, Color::Rgb(0, 0, 0))];
         let segs = build_segments(&pills, 3);
-        // full text: "abc" + " " + "   " = "abc    " (7 chars).
-        // offset 0, width 3 → "abc".
-        assert_eq!(text_of(&segments_window(&segs, 3, 0)), "abc");
-        // offset 3, width 3 → gap + 2 trailing spaces → "   " (then wraps to "a").
-        // Just check the first 3 chars of offset 3.
-        let line = segments_window(&segs, 3, 3);
+        // full text: " abc " + "   " = " abc    " (8 chars).
+        // offset 0, width 3 → " ab".
+        assert_eq!(text_of(&segments_window(&segs, 3, 0)), " ab");
+        // offset 5, width 3 → last 3 trailing spaces.
+        let line = segments_window(&segs, 3, 5);
         let t: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(t.chars().count(), 3);
-        // The first char of offset 3 is the first trailing space (gap).
+        // The first char at offset 5 should be a space.
         assert!(t.starts_with(' '));
     }
 
