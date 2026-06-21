@@ -125,6 +125,88 @@ fn handle(method: &str, params: &serde_json::Value) -> serde_json::Value {
             serde_json::json!("ok")
         }
 
+        // -- New hooks demonstrating the extended API --
+
+        "on-model-finish" => {
+            let finish = params["finish"].as_str().unwrap_or("?");
+            let input = params["input_tokens"].as_u64().unwrap_or(0);
+            let output = params["output_tokens"].as_u64().unwrap_or(0);
+            let cost = params["cost"].as_f64().unwrap_or(0.0);
+            eprintln!(
+                "sample-plugin: model finished — {} (in:{}, out:{}, cost:${:.4})",
+                finish, input, output, cost
+            );
+            serde_json::json!("ok")
+        }
+
+        "on-user-input" => {
+            let input = params["value"].as_str().unwrap_or("");
+            eprintln!("sample-plugin: user input received ({} chars)", input.len());
+            // Pass through unchanged — plugins CAN rewrite but we don't.
+            serde_json::json!(input)
+        }
+
+        "on-persona-change" => {
+            let old = params["old_persona"].as_str().unwrap_or("(none)");
+            let new = params["new_persona"].as_str().unwrap_or("(none)");
+            eprintln!("sample-plugin: persona changed: {} → {}", old, new);
+            serde_json::json!("ok")
+        }
+
+        "on-pre-model-turn" => {
+            // Demonstrate querying session info from the host.
+            // In a real plugin, you'd use send_host_request to call
+            // host-config-read with keys like "model" or "session_id".
+            eprintln!("sample-plugin: pre-model-turn (about to call the LLM)");
+            serde_json::json!("ok")
+        }
+
+        "on-provider-event" => {
+            // This fires for every stream delta. We just count them.
+            eprintln!("sample-plugin: provider event received");
+            serde_json::json!("ok")
+        }
+
+        "on-tool-error" => {
+            let tool = params["tool_name"].as_str().unwrap_or("?");
+            let error = params["error"].as_str().unwrap_or("?");
+            eprintln!("sample-plugin: tool '{}' failed: {}", tool, error);
+            serde_json::json!("ok")
+        }
+
+        "on-subagent-start" => {
+            let name = params["name"].as_str().unwrap_or("?");
+            eprintln!("sample-plugin: subagent started: {}", name);
+            serde_json::json!("ok")
+        }
+
+        "on-subagent-end" => {
+            let name = params["name"].as_str().unwrap_or("?");
+            let outcome = params["outcome"].as_str().unwrap_or("?");
+            eprintln!("sample-plugin: subagent finished: {} ({})", name, outcome);
+            serde_json::json!("ok")
+        }
+
+        "on-pre-compaction" => {
+            eprintln!("sample-plugin: about to compact context");
+            serde_json::json!("ok")
+        }
+
+        "on-post-compaction" => {
+            eprintln!("sample-plugin: context compacted");
+            serde_json::json!("ok")
+        }
+
+        "on-stop" => {
+            eprintln!("sample-plugin: session stopping");
+            serde_json::json!("ok")
+        }
+
+        "on-session-save" => {
+            eprintln!("sample-plugin: session saving — flushing plugin state");
+            serde_json::json!("ok")
+        }
+
         "on-register-slash-commands" => {
             serde_json::json!([{
                 "name": "/sample-plugin",
