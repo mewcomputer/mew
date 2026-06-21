@@ -8,7 +8,8 @@ use ratatui::{
 
 use super::{DIVIDER, STATUS_BG};
 use crate::app::{
-    App, PermissionState, PickerState, SlashCommand, UserQuestionState, PICKER_VISIBLE_ITEMS,
+    App, PermissionState, PersonaSummary, PersonaSwitchConfirmState, PickerState, SlashCommand,
+    UserQuestionState, PICKER_VISIBLE_ITEMS,
 };
 
 pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCommand], area: Rect) {
@@ -342,5 +343,191 @@ pub(super) fn draw_picker(f: &mut Frame, picker: &mut PickerState, area: Rect) {
             .track_symbol(Some("│"))
             .thumb_symbol("█");
         f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
+}
+
+/// Draw the persona-switch confirm modal. Renders a centered box with the
+/// diff between the current and target persona, plus [Confirm] [Cancel]
+/// buttons that the user navigates with ←/→/Tab and Enter (or y/n for
+/// shortcuts).
+pub(super) fn draw_persona_confirm_modal(
+    f: &mut Frame,
+    state: &PersonaSwitchConfirmState,
+    area: Rect,
+) {
+    let width = 64u16.min(area.width.saturating_sub(4));
+    let height = 18u16.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::bordered()
+        .title(Span::styled(
+            " Switch persona ",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(Color::Magenta));
+    f.render_widget(block, popup);
+
+    let inner = popup.inner(Margin::new(2, 1));
+    let mut text = Text::default();
+
+    // From → To
+    let from = state
+        .current
+        .as_ref()
+        .map(|p| p.name.as_str())
+        .unwrap_or("(none)");
+    text.push_line(Line::from(vec![
+        Span::styled("  from  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(from, Style::default().fg(Color::Gray)),
+        Span::styled(" → ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            state.target.name.clone(),
+            Style::default()
+                .fg(Color::Rgb(200, 170, 240))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    if !state.target.description.is_empty() {
+        let max = inner.width.saturating_sub(4) as usize;
+        let desc: String = state.target.description.chars().take(max).collect();
+        text.push_line(Line::from(vec![
+            Span::styled("  desc  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(desc, Style::default().fg(Color::Gray)),
+        ]));
+    }
+
+    text.push_line(Line::from(""));
+
+    // Model
+    let model_str = state
+        .target
+        .model
+        .clone()
+        .unwrap_or_else(|| "(inherit active)".into());
+    let model_changed =
+        state.current.as_ref().and_then(|c| c.model.as_ref()) != state.target.model.as_ref();
+    text.push_line(Line::from(vec![
+        Span::styled("  model ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            model_str,
+            if model_changed {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ),
+    ]));
+
+    // Tools
+    text.push_line(Line::from(vec![
+        Span::styled("  tools ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format_tools(&state.target.tools),
+            tools_style(&state.target, &state.current, false),
+        ),
+    ]));
+    text.push_line(Line::from(vec![
+        Span::styled("  deny  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format_tools(&state.target.tools_deny),
+            tools_style(&state.target, &state.current, true),
+        ),
+    ]));
+
+    // Skills
+    text.push_line(Line::from(vec![
+        Span::styled("  skills", Style::default().fg(Color::DarkGray)),
+        Span::styled(" ".to_string(), Style::default()),
+        Span::styled(
+            format_tools(&state.target.skills),
+            skills_style(&state.target, &state.current),
+        ),
+    ]));
+
+    text.push_line(Line::from(""));
+
+    // Buttons
+    let confirm_label = "[ Confirm ]";
+    let cancel_label = "[ Cancel ]";
+    let confirm_style = if state.selected == 0 {
+        Style::default()
+            .bg(Color::Rgb(35, 90, 50))
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let cancel_style = if state.selected == 1 {
+        Style::default()
+            .bg(Color::Rgb(90, 35, 35))
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let mut buttons = Text::default();
+    buttons.push_line(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(confirm_label, confirm_style),
+        Span::styled("   ", Style::default()),
+        Span::styled(cancel_label, cancel_style),
+    ]));
+    let para = Paragraph::new(text).wrap(Wrap { trim: true });
+    f.render_widget(para, inner);
+    let buttons_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(2),
+        inner.width,
+        1,
+    );
+    f.render_widget(Paragraph::new(buttons), buttons_area);
+}
+
+fn format_tools(list: &Option<Vec<String>>) -> String {
+    match list {
+        None => "all".into(),
+        Some(v) if v.is_empty() => "(none)".into(),
+        Some(v) => v.join(", "),
+    }
+}
+
+fn tools_style(target: &PersonaSummary, current: &Option<PersonaSummary>, deny: bool) -> Style {
+    let target_v = if deny {
+        target.tools_deny.as_ref()
+    } else {
+        target.tools.as_ref()
+    };
+    let current_v = current.as_ref().and_then(|c| {
+        if deny {
+            c.tools_deny.as_ref()
+        } else {
+            c.tools.as_ref()
+        }
+    });
+    if target_v != current_v {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
+}
+
+fn skills_style(target: &PersonaSummary, current: &Option<PersonaSummary>) -> Style {
+    if target.skills != current.as_ref().and_then(|c| c.skills.clone()) {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
     }
 }

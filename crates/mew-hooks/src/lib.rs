@@ -2,8 +2,10 @@ use async_trait::async_trait;
 use mew_message::Message;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::any::Any;
 use std::collections::HashMap;
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 // Type aliases for PluginHost callbacks to keep clippy's type_complexity happy.
@@ -14,6 +16,122 @@ type StorageReadFn = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 type StorageWriteFn = Arc<dyn Fn(&str, &str) + Send + Sync>;
 type StorageDeleteFn = Arc<dyn Fn(&str) + Send + Sync>;
 type SetUiFn = Arc<dyn Fn(&str, &str) + Send + Sync>;
+pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+
+/// All hook points in the dispatcher, as a single source of truth.
+///
+/// Eliminates the three places hook names used to live as separate string
+/// literals (Rust method names, JSON-RPC wire names, and config keys).
+/// Each variant knows its wire name and config name; the `as_config()`
+/// value matches what plugins put in `disabled_hooks` and `matchers`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HookId {
+    PreModelTurn,
+    Stop,
+    PreCompaction,
+    PostCompaction,
+    TurnEnd,
+    SystemPrompt,
+    ChatMessage,
+    ChatParams,
+    ChatHeaders,
+    ToolExecuteBefore,
+    ToolExecuteAfter,
+    PermissionAsk,
+    ShellEnv,
+    ProviderEvent,
+    ToolError,
+    SubagentStart,
+    SubagentEnd,
+    UserInput,
+    PersonaChange,
+    SessionSave,
+    ModelFinish,
+}
+
+impl HookId {
+    /// All variants, for iteration in validation.
+    pub const ALL: &'static [HookId] = &[
+        Self::PreModelTurn,
+        Self::Stop,
+        Self::PreCompaction,
+        Self::PostCompaction,
+        Self::TurnEnd,
+        Self::SystemPrompt,
+        Self::ChatMessage,
+        Self::ChatParams,
+        Self::ChatHeaders,
+        Self::ToolExecuteBefore,
+        Self::ToolExecuteAfter,
+        Self::PermissionAsk,
+        Self::ShellEnv,
+        Self::ProviderEvent,
+        Self::ToolError,
+        Self::SubagentStart,
+        Self::SubagentEnd,
+    ];
+
+    /// The JSON-RPC method name sent to subprocess plugins.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::PreModelTurn => "on-pre-model-turn",
+            Self::Stop => "on-stop",
+            Self::PreCompaction => "on-pre-compaction",
+            Self::PostCompaction => "on-post-compaction",
+            Self::TurnEnd => "on-turn-end",
+            Self::SystemPrompt => "on-system-prompt",
+            Self::ChatMessage => "on-chat-message",
+            Self::ChatParams => "on-chat-params",
+            Self::ChatHeaders => "on-chat-headers",
+            Self::ToolExecuteBefore => "on-tool-execute-before",
+            Self::ToolExecuteAfter => "on-tool-execute-after",
+            Self::PermissionAsk => "on-permission-ask",
+            Self::ShellEnv => "on-shell-env",
+            Self::ProviderEvent => "on-provider-event",
+            Self::ToolError => "on-tool-error",
+            Self::SubagentStart => "on-subagent-start",
+            Self::SubagentEnd => "on-subagent-end",
+            Self::UserInput => "on-user-input",
+            Self::PersonaChange => "on-persona-change",
+            Self::SessionSave => "on-session-save",
+            Self::ModelFinish => "on-model-finish",
+        }
+    }
+
+    /// The config key used in `disabled_hooks` and `matchers`. Matches
+    /// the Rust method name on the Dispatcher trait.
+    pub fn as_config(self) -> &'static str {
+        match self {
+            Self::PreModelTurn => "on_pre_model_turn",
+            Self::Stop => "on_stop",
+            Self::PreCompaction => "on_pre_compaction",
+            Self::PostCompaction => "on_post_compaction",
+            Self::TurnEnd => "on_turn_end",
+            Self::SystemPrompt => "on_system_prompt",
+            Self::ChatMessage => "on_chat_message",
+            Self::ChatParams => "on_chat_params",
+            Self::ChatHeaders => "on_chat_headers",
+            Self::ToolExecuteBefore => "on_tool_execute_before",
+            Self::ToolExecuteAfter => "on_tool_execute_after",
+            Self::PermissionAsk => "on_permission_ask",
+            Self::ShellEnv => "on_shell_env",
+            Self::ProviderEvent => "on_provider_event",
+            Self::ToolError => "on_tool_error",
+            Self::SubagentStart => "on_subagent_start",
+            Self::SubagentEnd => "on_subagent_end",
+            Self::UserInput => "on_user_input",
+            Self::PersonaChange => "on_persona_change",
+            Self::SessionSave => "on_session_save",
+            Self::ModelFinish => "on_model_finish",
+        }
+    }
+}
+
+impl fmt::Display for HookId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_config())
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatParams {
@@ -44,6 +162,83 @@ pub enum PermissionDecision {
     Prompt,
 }
 
+/// Per-plugin hook configuration. Allows scoping which hooks fire, what
+/// they match against, and how long they can run — without disabling the
+/// plugin entirely.
+///
+/// In config.toml:
+/// ```toml
+/// [plugins.my-plugin]
+/// disabled_hooks = ["on_turn_end"]
+/// timeout_ms = 10000
+///
+/// [plugins.my-plugin.matchers]
+/// on_tool_execute_before = "bash|write|edit"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginHookConfig {
+    /// Hooks to skip for this plugin. Hook names use the snake_case form
+    /// (`on_turn_end`, `on_system_prompt`, etc.) or `*` to disable all.
+    #[serde(default)]
+    pub disabled_hooks: Vec<String>,
+    /// Per-plugin timeout override in milliseconds. Falls back to the
+    /// global `MEW_PLUGIN_TIMEOUT_MS` or 5s default when unset.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// Per-hook matchers. Keyed by hook name. The value is a pipe-separated
+    /// list matched against the hook's subject:
+    /// - Tool hooks (`on_tool_execute_before`, `on_tool_execute_after`,
+    ///   `on_permission_ask`): matched against the tool name.
+    /// - Other hooks: no subject; matcher is ignored.
+    ///
+    /// Example: `"bash|write|edit"` fires only for those three tools.
+    #[serde(default)]
+    pub matchers: HashMap<String, String>,
+}
+
+impl PluginHookConfig {
+    /// True if `hook` is disabled for this plugin.
+    pub fn is_hook_disabled(&self, hook: &str) -> bool {
+        self.disabled_hooks.iter().any(|h| h == hook || h == "*")
+    }
+
+    /// True if `hook` should fire for the given `subject` (e.g. tool name).
+    /// Returns `true` when no matcher is configured for the hook (fire by
+    /// default) or the subject matches the pipe-separated pattern.
+    pub fn matches(&self, hook: &str, subject: &str) -> bool {
+        match self.matchers.get(hook) {
+            None => true,
+            Some(pattern) => pattern
+                .split('|')
+                .any(|p| p.trim() == subject || p.trim() == "*"),
+        }
+    }
+
+    /// Warn about unknown hook names in the config. Called once at startup
+    /// after loading config.toml to help users catch typos.
+    pub fn validate(&self, plugin_name: &str) {
+        let known: Vec<&str> = HookId::ALL.iter().map(|h| h.as_config()).collect();
+        for h in &self.disabled_hooks {
+            if h != "*" && !known.contains(&h.as_str()) {
+                tracing::warn!(
+                    plugin = plugin_name,
+                    hook = %h,
+                    "unknown hook in disabled_hooks — possible typo"
+                );
+            }
+        }
+        for h in self.matchers.keys() {
+            if !known.contains(&h.as_str()) {
+                tracing::warn!(
+                    plugin = plugin_name,
+                    hook = %h,
+                    "unknown hook in matchers — possible typo"
+                );
+            }
+        }
+    }
+}
+
 /// A dynamically registered tool from a plugin.
 pub struct ToolRegistration {
     pub name: String,
@@ -51,8 +246,9 @@ pub struct ToolRegistration {
     /// JSON Schema for the tool's input parameters.
     pub input_schema: Value,
     /// Called when the model invokes this tool. Returns the tool's output text.
-    /// The boxed closure is Send + Sync so it can be shared across threads.
-    pub execute: Box<dyn Fn(Value) -> String + Send + Sync>,
+    /// Async so both in-process plugins (wrap in async block) and subprocess
+    /// plugins (JSON-RPC call) can implement it.
+    pub execute: Box<dyn Fn(Value) -> BoxFuture<String> + Send + Sync>,
 }
 
 /// A dynamically registered slash command from a plugin (m10).
@@ -106,13 +302,51 @@ pub trait Dispatcher: Send + Sync {
     /// result text to display, or None to fall through to the model.
     async fn execute_slash_command(&self, command: &str, args: &str) -> Option<String>;
 
-    /// Observe-only hook. Errors are logged, never propagated.
-    async fn on_event(&self, ev: &dyn Any);
+    /// Forward a provider stream event to plugins. Replaces the old
+    /// `on_event(&dyn Any)` (broken for subprocess dispatch). Plugins can
+    /// observe the stream — useful for logging, metrics, or "what is the
+    /// model doing right now" UIs.
+    async fn on_provider_event(&self, ev: &mew_provider::ProviderEvent);
+
+    /// Called when a tool call terminates with an error. Distinct from
+    /// `on_tool_execute_after` (which fires for both success and failure)
+    /// so plugins can react specifically to failures — log them, update a
+    /// metrics counter, or surface a notification.
+    async fn on_tool_error(&self, call: &ToolCall, error: &str);
+
+    /// Called when a subagent starts. `display_name` is the human-friendly
+    /// name picked by the runner (e.g. "Curie (researcher)"), if any.
+    async fn on_subagent_start(&self, name: &str, parent_call_id: &str, display_name: Option<&str>);
+
+    /// Called when a subagent finishes. `outcome` is a short string
+    /// describing the result ("completed", "failed: <reason>",
+    /// "cancelled").
+    async fn on_subagent_end(&self, name: &str, parent_call_id: &str, outcome: &str);
 
     /// Turn-grain observer: fires after each assistant turn completes
     /// (tool results pushed, about to loop back or terminate). Errors logged,
     /// never propagated. Fire-and-forget — must not block the turn loop.
     async fn on_turn_end(&self, messages: &[Message]);
+
+    /// Called before each model turn (LLM request). Fire-and-forget —
+    /// plugins can observe what's about to be sent to the model but must
+    /// not block the turn loop. Maps to polytoken's `pre_model_turn`.
+    async fn on_pre_model_turn(&self, messages: &[Message], system: &str);
+
+    /// Called when the session is about to stop (user quit, max turns
+    /// reached, or the agent loop exits). Fire-and-forget. Maps to
+    /// polytoken's `stop`.
+    async fn on_stop(&self);
+
+    /// Called before context compaction runs. Receives the full message
+    /// list that's about to be compacted. Fire-and-forget — lets plugins
+    /// save important context or prepare for the compaction. Maps to
+    /// polytoken's `pre_compaction`.
+    async fn on_pre_compaction(&self, messages: &[Message]);
+
+    /// Called after context compaction completes. Receives the compacted
+    /// messages. Fire-and-forget. Maps to polytoken's `post_compaction`.
+    async fn on_post_compaction(&self, messages: &[Message]);
 
     /// Mutation hooks. Each returns the (possibly modified) value.
     /// Errors fall back to the input unchanged and are logged.
@@ -131,6 +365,31 @@ pub trait Dispatcher: Send + Sync {
         current: PermissionDecision,
     ) -> PermissionDecision;
     async fn on_shell_env(&self, env: HashMap<String, String>) -> HashMap<String, String>;
+
+    /// Called when the user submits a prompt, before it reaches the agent.
+    /// Mutation hook: plugins can rewrite or annotate the input (e.g.
+    /// prepend context, expand @mentions, inject git status). The
+    /// returned string is what the agent receives.
+    async fn on_user_input(&self, prompt: String) -> String;
+
+    /// Called when the active persona changes. `old_persona` is the
+    /// previous persona name (or `None` if there was none). `new_persona`
+    /// is the name of the persona being activated (or `"default"` /
+    /// `"none"` when clearing). Fire-and-forget.
+    async fn on_persona_change(&self, old_persona: Option<&str>, new_persona: &str);
+
+    /// Called when the session is being saved (on quit or manual save).
+    /// Plugins can flush any in-memory state to their persistent storage
+    /// (via the PluginHost storage callbacks) before the session file is
+    /// finalized. Fire-and-forget.
+    async fn on_session_save(&self);
+
+    /// Called when the model finishes a response. More specific than
+    /// `on_provider_event` (which fires for every stream delta) — this
+    /// fires once per response with the finish reason, token usage, and
+    /// cost. Perfect for metrics/telemetry plugins (OpenTelemetry,
+    /// Prometheus, etc.). Fire-and-forget.
+    async fn on_model_finish(&self, finish: &str, input_tokens: u32, output_tokens: u32, cost: f64);
 }
 
 pub struct NopDispatcher;
@@ -148,8 +407,21 @@ impl Dispatcher for NopDispatcher {
     async fn execute_slash_command(&self, _command: &str, _args: &str) -> Option<String> {
         None
     }
-    async fn on_event(&self, _ev: &dyn Any) {}
+    async fn on_provider_event(&self, _ev: &mew_provider::ProviderEvent) {}
+    async fn on_tool_error(&self, _call: &ToolCall, _error: &str) {}
+    async fn on_subagent_start(
+        &self,
+        _name: &str,
+        _parent_call_id: &str,
+        _display_name: Option<&str>,
+    ) {
+    }
+    async fn on_subagent_end(&self, _name: &str, _parent_call_id: &str, _outcome: &str) {}
     async fn on_turn_end(&self, _messages: &[Message]) {}
+    async fn on_pre_model_turn(&self, _messages: &[Message], _system: &str) {}
+    async fn on_stop(&self) {}
+    async fn on_pre_compaction(&self, _messages: &[Message]) {}
+    async fn on_post_compaction(&self, _messages: &[Message]) {}
     async fn on_chat_message(&self, msg: Message) -> Message {
         msg
     }
@@ -177,6 +449,19 @@ impl Dispatcher for NopDispatcher {
     }
     async fn on_shell_env(&self, env: HashMap<String, String>) -> HashMap<String, String> {
         env
+    }
+    async fn on_user_input(&self, prompt: String) -> String {
+        prompt
+    }
+    async fn on_persona_change(&self, _old_persona: Option<&str>, _new_persona: &str) {}
+    async fn on_session_save(&self) {}
+    async fn on_model_finish(
+        &self,
+        _finish: &str,
+        _input_tokens: u32,
+        _output_tokens: u32,
+        _cost: f64,
+    ) {
     }
 }
 
@@ -226,8 +511,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_nop_on_event_does_not_panic() {
-        NopDispatcher.on_event(&"event").await;
+    async fn test_nop_on_pre_model_turn_passthrough() {
+        // Fire-and-forget; just verify it doesn't panic.
+        NopDispatcher.on_pre_model_turn(&[], "system prompt").await;
+    }
+
+    #[tokio::test]
+    async fn test_nop_on_stop_does_not_panic() {
+        NopDispatcher.on_stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_nop_on_compaction_hooks_do_not_panic() {
+        NopDispatcher.on_pre_compaction(&[]).await;
+        NopDispatcher.on_post_compaction(&[]).await;
+    }
+
+    #[test]
+    fn test_plugin_hook_config_disabled() {
+        let cfg = PluginHookConfig {
+            disabled_hooks: vec!["on_turn_end".into()],
+            ..Default::default()
+        };
+        assert!(cfg.is_hook_disabled("on_turn_end"));
+        assert!(!cfg.is_hook_disabled("on_system_prompt"));
+    }
+
+    #[test]
+    fn test_plugin_hook_config_disable_all() {
+        let cfg = PluginHookConfig {
+            disabled_hooks: vec!["*".into()],
+            ..Default::default()
+        };
+        assert!(cfg.is_hook_disabled("on_turn_end"));
+        assert!(cfg.is_hook_disabled("on_system_prompt"));
+        assert!(cfg.is_hook_disabled("anything"));
+    }
+
+    #[test]
+    fn test_plugin_hook_config_matcher_fires_by_default() {
+        let cfg = PluginHookConfig::default();
+        // No matcher → fires for everything.
+        assert!(cfg.matches("on_tool_execute_before", "bash"));
+        assert!(cfg.matches("on_tool_execute_before", "read"));
+    }
+
+    #[test]
+    fn test_plugin_hook_config_matcher_filters() {
+        let mut matchers = HashMap::new();
+        matchers.insert("on_tool_execute_before".into(), "bash|write|edit".into());
+        let cfg = PluginHookConfig {
+            matchers,
+            ..Default::default()
+        };
+        assert!(cfg.matches("on_tool_execute_before", "bash"));
+        assert!(cfg.matches("on_tool_execute_before", "write"));
+        assert!(!cfg.matches("on_tool_execute_before", "read"));
+        // Other hooks are unaffected.
+        assert!(cfg.matches("on_system_prompt", "anything"));
+    }
+
+    #[test]
+    fn test_plugin_hook_config_matcher_wildcard() {
+        let mut matchers = HashMap::new();
+        matchers.insert("on_permission_ask".into(), "*".into());
+        let cfg = PluginHookConfig {
+            matchers,
+            ..Default::default()
+        };
+        assert!(cfg.matches("on_permission_ask", "bash"));
+        assert!(cfg.matches("on_permission_ask", "anything"));
+    }
+
+    #[test]
+    fn test_plugin_hook_config_serde() {
+        let json = serde_json::json!({
+            "disabled_hooks": ["on_turn_end", "on_event"],
+            "timeout_ms": 15000,
+            "matchers": {
+                "on_tool_execute_before": "bash|write"
+            }
+        });
+        let cfg: PluginHookConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.disabled_hooks, vec!["on_turn_end", "on_event"]);
+        assert_eq!(cfg.timeout_ms, Some(15000));
+        assert!(cfg.matches("on_tool_execute_before", "bash"));
+        assert!(!cfg.matches("on_tool_execute_before", "read"));
+        assert!(cfg.is_hook_disabled("on_turn_end"));
     }
 
     #[tokio::test]

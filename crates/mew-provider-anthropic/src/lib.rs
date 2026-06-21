@@ -1031,6 +1031,8 @@ mod tests {
             tools: vec![],
             system: String::new(),
             reasoning: None,
+            params: None,
+            headers: Default::default(),
         };
 
         let mut stream = adapter.stream(req).await.expect("stream");
@@ -1084,6 +1086,8 @@ mod tests {
             tools: vec![],
             system: String::new(),
             reasoning: None,
+            params: None,
+            headers: Default::default(),
         };
 
         let mut stream = adapter.stream(req).await.expect("stream");

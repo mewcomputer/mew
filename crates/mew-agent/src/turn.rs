@@ -91,9 +91,13 @@ impl Agent {
                 .tools
                 .values()
                 .filter(|t| {
-                    self.active_tool_names
+                    let name = t.name();
+                    let allowed = self
+                        .active_tool_names
                         .as_ref()
-                        .is_none_or(|names| names.contains(t.name()))
+                        .is_none_or(|names| names.contains(name));
+                    let not_denied = !self.denied_tool_names.contains(name);
+                    allowed && not_denied
                 })
                 .map(|t| ToolDef {
                     name: t.name().to_string(),
@@ -127,6 +131,9 @@ impl Agent {
                     force,
                     "compacting context"
                 );
+                // Notify plugins before compaction so they can capture any
+                // context they want to preserve.
+                self.dispatcher.on_pre_compaction(&messages).await;
                 let keep_count = self.keep_turns.min(messages.len());
                 let compacted = messages.split_off(messages.len() - keep_count);
                 let compact_msg = Message {
@@ -215,6 +222,10 @@ impl Agent {
                         len_before, estimated
                     )))
                     .await;
+
+                // Notify plugins that compaction finished with the
+                // resulting (compacted) message list.
+                self.dispatcher.on_post_compaction(&messages).await;
             }
 
             let base_system = match &self.persona_prompt {
@@ -223,15 +234,14 @@ impl Agent {
             };
             let system = self.dispatcher.on_system_prompt(base_system).await;
 
-            let req = Request {
-                model: String::new(),
-                messages,
-                tools: tool_defs,
-                system,
-                reasoning: self.reasoning.clone(),
-            };
+            // Notify plugins that a model turn is about to start.
+            self.dispatcher.on_pre_model_turn(&messages, &system).await;
 
-            let _ = self
+            // Chat params / headers: give plugins a chance to modify them
+            // before the request goes out. Defaults are "use the provider's
+            // own defaults" — plugins can set specific values when they
+            // know what works.
+            let params = self
                 .dispatcher
                 .on_chat_params(ChatParams {
                     temperature: None,
@@ -239,10 +249,24 @@ impl Agent {
                     max_tokens: None,
                 })
                 .await;
-            let _ = self
+            let headers = self
                 .dispatcher
                 .on_chat_headers(http::HeaderMap::new())
                 .await;
+
+            let req = Request {
+                model: String::new(),
+                messages,
+                tools: tool_defs,
+                system,
+                reasoning: self.reasoning.clone(),
+                params: Some(mew_provider::ChatParams {
+                    temperature: params.temperature,
+                    top_p: params.top_p,
+                    max_tokens: params.max_tokens,
+                }),
+                headers,
+            };
 
             let mut stream = match self.provider.stream(req).await {
                 Ok(s) => s,
@@ -289,8 +313,27 @@ impl Agent {
                                     &mut assistant_msg,
                                     &ev_tx,
                                 ).await;
-                                let agent_ev = AgentEvent::Provider(ev.clone());
-                                self.dispatcher.on_event(&agent_ev).await;
+                                // Specific typed hook for subprocess plugins.
+                                self.dispatcher.on_provider_event(&ev).await;
+                                // Dedicated telemetry hook for metrics/OTEL
+                                // plugins that only care about the final
+                                // response, not every stream delta.
+                                if let ProviderEvent::MessageEnd {
+                                    ref finish,
+                                    ref usage,
+                                    cost,
+                                } = ev
+                                {
+                                    let finish_str = format!("{:?}", finish);
+                                    self.dispatcher
+                                        .on_model_finish(
+                                            &finish_str,
+                                            usage.input,
+                                            usage.output,
+                                            cost,
+                                        )
+                                        .await;
+                                }
                                 if matches!(ev, ProviderEvent::Error(_)) {
                                     return Ok(());
                                 }
@@ -336,6 +379,24 @@ impl Agent {
             })?;
             let pending = self.pending_tool_calls(msg);
             if pending.is_empty() {
+                // End of turn. If the model called `switch_persona` during
+                // this turn, drain the pending slot and emit the event the
+                // main loop uses to apply the change. Done at end of turn
+                // (not mid-turn) so the user sees the full response before
+                // the model swap happens, and so the model can chain
+                // switch_persona with one final text response.
+                if let Some(name) = self.pending_persona_switch.lock().await.take() {
+                    if self.personas.iter().any(|p| p.name == name) {
+                        let _ = ev_tx
+                            .send(AgentEvent::PersonaSwitchRequested { name })
+                            .await;
+                    } else {
+                        tracing::warn!(
+                            name = %name,
+                            "switch_persona queued an unknown persona; dropping"
+                        );
+                    }
+                }
                 let messages = self.messages.lock().await.clone();
                 self.dispatcher.on_turn_end(&messages).await;
                 return Ok(());

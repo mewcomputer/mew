@@ -160,6 +160,69 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     )));
     visual_row += 1;
 
+    // Personas
+    let personas_collapsed = app
+        .sidebar_collapsed
+        .get("personas")
+        .copied()
+        .unwrap_or(false);
+    let personas_arrow = if personas_collapsed { "▶" } else { "▼" };
+    app.sidebar_header_rows
+        .push((visual_row, "personas".into()));
+    visual_row += 1;
+    text.push_line(Line::from(vec![
+        Span::styled(personas_arrow, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            " Personas",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    if !personas_collapsed {
+        if app.personas.is_empty() {
+            text.push_line(Line::from(Span::styled(
+                "  No personas loaded",
+                Style::default().fg(Color::DarkGray),
+            )));
+            visual_row += 1;
+        } else {
+            // Active persona gets a "*" marker and the same purple as the
+            // status bar pill so the two surfaces stay in visual sync.
+            let active = app.active_persona.as_deref();
+            let personas = app.personas.clone();
+            for (name, desc) in &personas {
+                let is_active = Some(name.as_str()) == active;
+                let marker = if is_active { "* " } else { "  " };
+                let max_desc = area.width.saturating_sub(8 + name.chars().count() as u16) as usize;
+                let desc_clipped: String = desc.chars().take(max_desc).collect();
+                let desc_str = if desc.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", desc_clipped)
+                };
+                let (name_color, marker_color) = if is_active {
+                    (Color::Rgb(200, 170, 240), Color::Rgb(200, 170, 240))
+                } else {
+                    (Color::Gray, Color::DarkGray)
+                };
+                text.push_line(Line::from(vec![
+                    Span::styled(marker, Style::default().fg(marker_color)),
+                    Span::styled(name.clone(), Style::default().fg(name_color)),
+                    Span::styled(desc_str, Style::default().fg(Color::DarkGray)),
+                ]));
+                visual_row += 1;
+            }
+        }
+    }
+
+    text.push_line(Line::from(Span::styled(
+        "─".repeat(area.width.saturating_sub(2) as usize),
+        Style::default().fg(DIVIDER),
+    )));
+    visual_row += 1;
+
     // MCP Servers
     let mcp_collapsed = app.sidebar_collapsed.get("mcp").copied().unwrap_or(false);
     let mcp_arrow = if mcp_collapsed { "▶" } else { "▼" };

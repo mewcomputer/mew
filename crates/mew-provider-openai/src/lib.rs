@@ -212,6 +212,24 @@ impl Adapter {
             }
         }
 
+        // Sampling params from the `on_chat_params` hook. Each field is
+        // optional; only set keys are added so the provider defaults
+        // (which the model was trained against) win when the plugin
+        // doesn't override.
+        if let Some(ref params) = req.params {
+            if let Some(body_obj) = body.as_object_mut() {
+                if let Some(t) = params.temperature {
+                    body_obj.insert("temperature".into(), json!(t));
+                }
+                if let Some(p) = params.top_p {
+                    body_obj.insert("top_p".into(), json!(p));
+                }
+                if let Some(m) = params.max_tokens {
+                    body_obj.insert("max_tokens".into(), json!(m));
+                }
+            }
+        }
+
         serde_json::to_vec(&body).map_err(ProviderError::Json)
     }
 
@@ -881,6 +899,7 @@ mod tests {
             tools: vec![],
             system: String::new(),
             reasoning: None,
+            ..Default::default()
         };
 
         let mut stream = adapter.stream(req).await.expect("stream");
@@ -936,6 +955,7 @@ mod tests {
             tools: vec![],
             system: String::new(),
             reasoning: None,
+            ..Default::default()
         };
 
         let mut stream = adapter.stream(req).await.expect("stream");

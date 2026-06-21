@@ -159,6 +159,12 @@ impl Tool for Bash {
             })?
             .map_err(|e| ToolError::Execution(format!("wait failed: {}", e)))?;
 
+        // Redact configured secret words before truncation so a value
+        // straddling the truncation boundary cannot leak its tail. The
+        // truncation count then refers to the redacted length.
+        let (full_output, redacted) =
+            crate::secrets::redact_secret_words(&full_output, &ctx.secrets);
+
         let truncated = if full_output.len() > OUTPUT_TRUNCATE_AT {
             format!(
                 "{}...[truncated {} chars]",
@@ -168,6 +174,7 @@ impl Tool for Bash {
         } else {
             full_output
         };
+        let truncated = crate::secrets::annotate_redaction(truncated, redacted);
 
         if status.success() {
             Ok(ToolOutput {

@@ -130,11 +130,6 @@ impl Agent {
                     call_id: call_id.clone(),
                 })
                 .await;
-            self.dispatcher
-                .on_event(&AgentEvent::ToolStart {
-                    call_id: call_id.clone(),
-                })
-                .await;
 
             let hook_call = HookToolCall {
                 tool_name: tc.tool_name.clone(),
@@ -259,10 +254,7 @@ impl Agent {
                         })
                         .await;
                     self.dispatcher
-                        .on_event(&AgentEvent::ToolEnd {
-                            call_id: call_id.clone(),
-                            success: false,
-                        })
+                        .on_tool_error(&hook_call, "unknown tool")
                         .await;
                     result_parts.push(Part::ToolResult(ToolResultPart {
                         base: PartBase {
@@ -346,6 +338,7 @@ impl Agent {
             if let Some(arg_path) = self.workspace_path_for_tool(&tc.tool_name, &input) {
                 let resolved = tool_cwd.join(&arg_path);
                 if let Err(msg) = self.ensure_workspace_path(&resolved, ev_tx).await {
+                    let error_msg = msg.clone();
                     let error_state = ToolState::Error(ToolStateError {
                         input: input.clone(),
                         error: msg,
@@ -375,12 +368,7 @@ impl Agent {
                             success: false,
                         })
                         .await;
-                    self.dispatcher
-                        .on_event(&AgentEvent::ToolEnd {
-                            call_id: call_id.clone(),
-                            success: false,
-                        })
-                        .await;
+                    self.dispatcher.on_tool_error(&hook_call, &error_msg).await;
                     result_parts.push(Part::ToolResult(ToolResultPart {
                         base: PartBase {
                             id: ulid::Ulid::new(),
@@ -472,13 +460,6 @@ impl Agent {
                     success,
                 })
                 .await;
-            self.dispatcher
-                .on_event(&AgentEvent::ToolEnd {
-                    call_id: call_id.clone(),
-                    success,
-                })
-                .await;
-
             result_parts.push(Part::ToolResult(ToolResultPart {
                 base: PartBase {
                     id: ulid::Ulid::new(),
@@ -599,6 +580,7 @@ impl Agent {
         let call_id_clone = call_id.clone();
         let ev_tx_clone = ev_tx.clone();
         let cancel = self.cancel_token.child_token();
+        let dispatcher = self.dispatcher.clone();
 
         let (sa_event_tx, mut sa_event_rx) = mpsc::channel(256);
 
@@ -622,6 +604,9 @@ impl Agent {
                     child_session_id,
                     display_name,
                 } => {
+                    dispatcher
+                        .on_subagent_start(&def_name, &call_id, display_name.as_deref())
+                        .await;
                     let _ = ev_tx_clone
                         .send(AgentEvent::SubagentStart {
                             parent_call_id: call_id.clone(),
@@ -635,6 +620,35 @@ impl Agent {
                     child_session_id,
                     outcome,
                 } => {
+                    let outcome_str = match &outcome {
+                        mew_subagents::SubagentOutcome::Completed => "completed",
+                        mew_subagents::SubagentOutcome::Failed { reason } => {
+                            // Need to own the string for the hook call.
+                            // We call the hook before sending the event,
+                            // while we still have the outcome.
+                            let r = reason.clone();
+                            let r_one_line = r.lines().next().unwrap_or("unknown").to_string();
+                            let _ = dispatcher
+                                .on_subagent_end(
+                                    &def_name,
+                                    &call_id,
+                                    &format!("failed: {}", r_one_line),
+                                )
+                                .await;
+                            let _ = ev_tx_clone
+                                .send(AgentEvent::SubagentEnd {
+                                    parent_call_id: call_id.clone(),
+                                    child_session_id,
+                                    outcome,
+                                })
+                                .await;
+                            continue;
+                        }
+                        mew_subagents::SubagentOutcome::Cancelled => "cancelled",
+                    };
+                    let _ = dispatcher
+                        .on_subagent_end(&def_name, &call_id, outcome_str)
+                        .await;
                     let _ = ev_tx_clone
                         .send(AgentEvent::SubagentEnd {
                             parent_call_id: call_id.clone(),

@@ -89,6 +89,15 @@ impl Tool for Read {
             content
         };
 
+        // Strip configured secret words from the returned content. This is
+        // a second line of defense behind the permission-engine pre-check:
+        // even when the user approves reading a file, individual secret
+        // values (API keys, tokens) are still scrubbed so they do not land
+        // in the model's context. The structure (variable names, line
+        // shape) is preserved so the model can still reason about the file.
+        let (content, redacted) = crate::secrets::redact_secret_words(&content, &ctx.secrets);
+        let content = crate::secrets::annotate_redaction(content, redacted);
+
         Ok(ToolOutput {
             output: content,
             error: String::new(),
@@ -111,6 +120,21 @@ mod tests {
             cwd,
             dispatcher: None,
             secrets: Default::default(),
+        }
+    }
+
+    fn ctx_with_secret_words(cwd: PathBuf, words: Vec<&str>) -> ToolCtx {
+        ToolCtx {
+            session_id: mew_message::SessionId::from(ulid::Ulid::new()),
+            call_id: "test".to_string(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            progress_tx: tokio::sync::mpsc::channel(1).0,
+            cwd,
+            dispatcher: None,
+            secrets: std::sync::Arc::new(crate::SecretSet {
+                words: words.iter().map(|s| s.to_string()).collect(),
+                globs: vec![],
+            }),
         }
     }
 
@@ -151,5 +175,39 @@ mod tests {
         let input = serde_json::json!({"path": "missing.txt"});
         let result = tool.execute(ctx, input).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_read_redacts_secret_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.txt");
+        tokio::fs::write(&path, "API_KEY=AKIAIOSFODNN7EXAMPLE\nPORT=3000")
+            .await
+            .unwrap();
+
+        let tool = Read;
+        let ctx = ctx_with_secret_words(dir.path().to_path_buf(), vec!["AKIAIOSFODNN7EXAMPLE"]);
+        let input = serde_json::json!({"path": "config.txt"});
+        let result = tool.execute(ctx, input).await.unwrap();
+        // The secret value is gone; the variable name and surrounding
+        // structure survive so the model can still reason about the file.
+        assert!(!result.output.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(result.output.contains("API_KEY=[REDACTED]"));
+        assert!(result.output.contains("PORT=3000"));
+        assert!(result.output.contains("redacted"));
+    }
+
+    #[tokio::test]
+    async fn test_read_no_redaction_without_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.txt");
+        tokio::fs::write(&path, "just text").await.unwrap();
+
+        let tool = Read;
+        let ctx = dummy_ctx(dir.path().to_path_buf());
+        let input = serde_json::json!({"path": "plain.txt"});
+        let result = tool.execute(ctx, input).await.unwrap();
+        assert_eq!(result.output, "just text");
+        assert!(!result.output.contains("redacted"));
     }
 }

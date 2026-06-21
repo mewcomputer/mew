@@ -1354,6 +1354,7 @@ fn test_apply_persona_sets_prompt_and_tool_filter() {
         config: mew_personas::PersonaConfig {
             model: None,
             tools: Some(vec!["read".into(), "grep".into(), "glob".into()]),
+            ..Default::default()
         },
     };
     agent.apply_persona(&persona);
@@ -1386,6 +1387,7 @@ fn test_apply_persona_with_model_pin_returns_model() {
         config: mew_personas::PersonaConfig {
             model: Some("z-ai/glm-4.5-air".into()),
             tools: None,
+            ..Default::default()
         },
     };
     let pinned = agent.apply_persona(&persona);
@@ -1411,6 +1413,7 @@ fn test_clear_persona_resets_state() {
         config: mew_personas::PersonaConfig {
             model: None,
             tools: Some(vec!["read".into()]),
+            ..Default::default()
         },
     };
     agent.apply_persona(&persona);
@@ -1421,4 +1424,189 @@ fn test_clear_persona_resets_state() {
     assert!(agent.persona_name.is_none());
     assert!(agent.persona_prompt.is_none());
     assert!(agent.active_tool_names.is_none());
+}
+
+#[test]
+fn test_apply_persona_with_tools_deny() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let mut agent = agent;
+    let persona = mew_personas::Persona {
+        name: "researcher".into(),
+        description: "read-only".into(),
+        body: "body".into(),
+        path: std::path::PathBuf::new(),
+        config: mew_personas::PersonaConfig {
+            model: None,
+            tools: None, // allowlist is None = all tools
+            tools_deny: Some(vec!["bash".into(), "write".into()]),
+            skills: None,
+            ..Default::default()
+        },
+    };
+    agent.apply_persona(&persona);
+    // Denylist is populated even though the allowlist is None.
+    assert!(agent.active_tool_names.is_none());
+    assert!(agent.denied_tool_names.contains("bash"));
+    assert!(agent.denied_tool_names.contains("write"));
+    assert!(!agent.denied_tool_names.contains("read"));
+}
+
+#[test]
+fn test_clear_persona_resets_denylist() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let mut agent = agent;
+    let persona = mew_personas::Persona {
+        name: "p".into(),
+        description: "".into(),
+        body: "".into(),
+        path: std::path::PathBuf::new(),
+        config: mew_personas::PersonaConfig {
+            model: None,
+            tools: None,
+            tools_deny: Some(vec!["bash".into()]),
+            skills: None,
+            ..Default::default()
+        },
+    };
+    agent.apply_persona(&persona);
+    assert!(!agent.denied_tool_names.is_empty());
+    agent.clear_persona();
+    assert!(agent.denied_tool_names.is_empty());
+}
+
+#[tokio::test]
+async fn test_apply_persona_with_skills_filter_updates_shared_arc() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let mut agent = agent;
+    let persona = mew_personas::Persona {
+        name: "reviewer".into(),
+        description: "code review".into(),
+        body: "".into(),
+        path: std::path::PathBuf::new(),
+        config: mew_personas::PersonaConfig {
+            model: None,
+            tools: None,
+            tools_deny: None,
+            skills: Some(vec!["git-release".into(), "code-review".into()]),
+            ..Default::default()
+        },
+    };
+    agent.apply_persona(&persona);
+    // The shared filter Arc reflects the persona's allowlist.
+    let guard = agent.skill_filter.read().await;
+    let set = guard.as_ref().expect("filter should be set");
+    assert!(set.contains("git-release"));
+    assert!(set.contains("code-review"));
+    assert!(!set.contains("unrelated-skill"));
+}
+
+#[test]
+fn test_set_skills_rebuilds_system_with_filter() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let mut agent = agent;
+    agent.set_system("base prompt.".into());
+    let skills = vec![
+        mew_skills::Skill {
+            name: "git-release".into(),
+            description: "Create a release".into(),
+            body: "...".into(),
+            path: std::path::PathBuf::new(),
+        },
+        mew_skills::Skill {
+            name: "code-review".into(),
+            description: "Review code".into(),
+            path: std::path::PathBuf::new(),
+            body: "...".into(),
+        },
+    ];
+    agent.set_skills(skills);
+    // No filter yet — both skills appear in the system prompt.
+    assert!(agent.system.contains("git-release"));
+    assert!(agent.system.contains("code-review"));
+}
+
+#[test]
+fn test_apply_persona_template_renders() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let mut agent = agent;
+    agent.supports_vision = true;
+
+    let persona = mew_personas::Persona {
+        name: "templated".into(),
+        description: "uses template vars".into(),
+        body: "You are {{ persona_name }}. {% if supports_vision %}You can see images.{% else %}No vision.{% endif %}".into(),
+        path: std::path::PathBuf::new(),
+        config: mew_personas::PersonaConfig {
+            model: None,
+            tools: None,
+            tools_deny: None,
+            skills: None,
+            template: Some(true),
+        },
+    };
+    agent.apply_persona(&persona);
+    let prompt = agent.persona_prompt.expect("prompt should be set");
+    assert!(prompt.contains("You are templated."));
+    assert!(prompt.contains("You can see images."));
+    assert!(!prompt.contains("supports_vision"));
+    assert!(!prompt.contains("{%"));
+}
+
+#[test]
+fn test_apply_persona_without_template_is_verbatim() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let mut agent = agent;
+    let persona = mew_personas::Persona {
+        name: "plain".into(),
+        description: "".into(),
+        body: "Hello {{ name }}".into(),
+        path: std::path::PathBuf::new(),
+        config: mew_personas::PersonaConfig {
+            model: None,
+            tools: None,
+            tools_deny: None,
+            skills: None,
+            template: None, // verbatim — no rendering
+        },
+    };
+    agent.apply_persona(&persona);
+    let prompt = agent.persona_prompt.expect("prompt should be set");
+    // Template syntax is preserved literally when template is not enabled.
+    assert_eq!(prompt, "Hello {{ name }}");
 }

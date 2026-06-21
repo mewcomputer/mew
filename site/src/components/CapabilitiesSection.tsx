@@ -492,11 +492,10 @@ const TerminalContent = ({
             );
           case "tool-top":
             return (
-              <div
-                key={i}
-                className="h-2 bg-gradient-to-b from-tui-chat to-tui-tool"
-                aria-hidden="true"
-              />
+              <div>
+                <div key={i} className="h-1 bg-tui-chat" aria-hidden="true" />
+                <div key={i} className="h-1 bg-tui-tool" aria-hidden="true" />
+              </div>
             );
           case "tool-header": {
             const colorClass =
@@ -548,11 +547,10 @@ const TerminalContent = ({
             );
           case "tool-bottom":
             return (
-              <div
-                key={i}
-                className="h-2 bg-gradient-to-b from-tui-tool to-tui-chat"
-                aria-hidden="true"
-              />
+              <div>
+                <div key={i} className="h-1 bg-tui-tool" aria-hidden="true" />
+                <div key={i} className="h-1 bg-tui-chat" aria-hidden="true" />
+              </div>
             );
           case "blank":
             return <div key={i}>&nbsp;</div>;
@@ -659,8 +657,19 @@ const DesktopTerminal = ({ section }: { section: Section }) => {
         <TerminalContent lines={section.terminal} progress={progress} />
       </div>
     );
+  if (innerWidth > 768) {
+    return (
+      <div
+        className="mew-enter rounded-lg overflow-hidden font-mono text-zinc-100 bg-tui-chat shadow-sm"
+        style={{ viewTransitionName: "terminal-card" }}
+      >
+        {body}
+        <TuiChrome />
+      </div>
+    );
+  }
   return (
-    <div className="mew-enter rounded-lg overflow-hidden font-mono text-zinc-100 bg-tui-chat shadow-sm" style={{ viewTransitionName: "terminal-card" }}>
+    <div className="mew-enter rounded-lg overflow-hidden font-mono text-zinc-100 bg-tui-chat shadow-sm">
       {body}
       <TuiChrome />
     </div>
@@ -761,8 +770,7 @@ export default function CapabilitiesSection() {
   const sectionRefs = useRef<(HTMLElement | null)[]>([]);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
-  const activeSection =
-    sections.find((s) => s.id === activeId) || sections[0];
+  const activeSection = sections.find((s) => s.id === activeId) || sections[0];
 
   const HAS_VIEW_TRANSITION =
     typeof document !== "undefined" && "startViewTransition" in document;
@@ -772,7 +780,7 @@ export default function CapabilitiesSection() {
       (entries) => {
         entries.forEach((entry) => {
           if (entry.isIntersecting) {
-            if (HAS_VIEW_TRANSITION) {
+            if (HAS_VIEW_TRANSITION && innerWidth > 768) {
               (document as any).startViewTransition(() => {
                 setActiveId(entry.target.id);
               });

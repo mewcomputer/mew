@@ -112,7 +112,7 @@ fn build_segments(pills: &[Pill], trailing_gap: usize) -> Vec<PillSegment> {
             segs.push(gap_segment(1));
         }
         segs.push(PillSegment {
-            text: p.text.clone(),
+            text: " ".to_string() + &p.text + " ",
             fg: p.fg,
             bg: p.bg,
         });

@@ -35,6 +35,11 @@ pub enum SlashResult {
     SwitchModel(String),
     /// Switch to a persona by name, or clear with "default".
     SwitchPersona(String),
+    /// Open a confirm modal for switching to the named persona. The actual
+    /// switch only happens after the user confirms. Used by `/persona
+    /// <name>` when the target differs from the currently active persona.
+    /// Clearing the persona (via "default" / "none") bypasses the modal.
+    PersonaSwitchConfirm(String),
     /// Open the model picker.
     OpenModelPicker,
     /// Resume a previous session by ID.
@@ -74,6 +79,17 @@ pub struct App {
     pub permission: Option<PermissionState>,
     /// Pending ask_user_question prompt, if any.
     pub user_question: Option<UserQuestionState>,
+    /// Pending persona switch awaiting user confirmation. Set by the
+    /// `/persona <name>` slash command when the target differs from the
+    /// currently active persona; consumed by the confirm modal.
+    pub persona_switch_confirm: Option<PersonaSwitchConfirmState>,
+    /// Persona switch queued by the `switch_persona` tool and drained at
+    /// end of turn. The TUI receives `AgentEvent::PersonaSwitchRequested`
+    /// and stashes the name here; the main loop polls and applies the
+    /// switch. We use a side-channel instead of returning an Action from
+    /// `handle_agent_event` because that signature is shared with several
+    /// other call sites that don't need to return.
+    pub pending_persona_switch_apply: Option<String>,
     /// Current snapshot of the session todo list, for the sidebar pane.
     /// Populated on startup and refreshed via `AgentEvent::TodosUpdated`.
     pub todos: Vec<mew_agent::Todo>,
@@ -122,6 +138,10 @@ pub struct App {
     pub bash_expanded: bool,
     /// Whether reasoning/thinking blocks are expanded in the chat.
     pub reasoning_expanded: bool,
+    /// When the current reasoning block started, for elapsed display.
+    pub reasoning_started_at: Option<std::time::Instant>,
+    /// Elapsed time of the last completed reasoning block.
+    pub reasoning_elapsed: Option<std::time::Duration>,
     /// Message ID pending markdown re-render after streaming completes.
     pub pending_md_rerender: Option<mew_message::MessageId>,
     /// Incremental markdown render state.
@@ -208,6 +228,9 @@ pub enum Mode {
     CommandPalette,
     Settings,
     UserQuestion,
+    /// Modal showing the diff between the active persona and a target
+    /// persona. The user must confirm or cancel before any switch happens.
+    PersonaSwitchConfirm,
 }
 
 /// A single item in the command palette.
@@ -296,6 +319,36 @@ pub struct PermissionState {
     pub selected: usize,
 }
 
+/// A pending persona switch awaiting user confirmation. Populated by the
+/// `/persona <name>` slash command when the target differs from the active
+/// persona, and consumed (applied or discarded) by the confirm modal.
+#[derive(Debug, Clone)]
+pub struct PersonaSwitchConfirmState {
+    /// Snapshot of the persona the user requested.
+    pub target: PersonaSummary,
+    /// Snapshot of the currently active persona, if any.
+    pub current: Option<PersonaSummary>,
+    /// Index of the focused button (0 = confirm, 1 = cancel).
+    pub selected: usize,
+}
+
+/// Display-friendly snapshot of a persona's identity + restrictions. Built
+/// by the main loop when a `/persona` switch is requested, and rendered by
+/// the confirm modal. Decoupled from `mew_personas::Persona` so the tui
+/// crate doesn't need to depend on the full persona type.
+#[derive(Debug, Clone, Default)]
+pub struct PersonaSummary {
+    pub name: String,
+    pub description: String,
+    pub model: Option<String>,
+    /// Allowlist of tool names. `None` = all tools (subject to deny).
+    pub tools: Option<Vec<String>>,
+    /// Denylist of tool names. `None` or empty = no denials.
+    pub tools_deny: Option<Vec<String>>,
+    /// Allowlist of skill names. `None` = all skills.
+    pub skills: Option<Vec<String>>,
+}
+
 /// A pending `ask_user_question` prompt shown to the user as a modal with one
 /// free-text input per question.
 #[derive(Debug)]
@@ -330,6 +383,8 @@ impl App {
             status: Status::default(),
             permission: None,
             user_question: None,
+            persona_switch_confirm: None,
+            pending_persona_switch_apply: None,
             todos: Vec::new(),
             tool_states: HashMap::new(),
             history: Vec::new(),
@@ -353,6 +408,8 @@ impl App {
             slash_scroll: 0,
             bash_expanded: false,
             reasoning_expanded: false,
+            reasoning_started_at: None,
+            reasoning_elapsed: None,
             pending_md_rerender: None,
             md_state: mdstream::DocumentState::new(),
             md_stream: None,
@@ -556,6 +613,45 @@ impl App {
             .entry(section.to_string())
             .or_insert(false);
         *collapsed = !*collapsed;
+    }
+
+    /// Open the persona-switch confirm modal for the given target. The caller
+    /// is responsible for actually applying the switch after the user
+    /// confirms (see `take_confirmed_persona_switch`).
+    pub fn request_persona_switch_confirm(
+        &mut self,
+        target: PersonaSummary,
+        current: Option<PersonaSummary>,
+    ) {
+        self.persona_switch_confirm = Some(PersonaSwitchConfirmState {
+            target,
+            current,
+            selected: 0, // default focus is the confirm button
+        });
+        self.mode = Mode::PersonaSwitchConfirm;
+    }
+
+    /// If the user confirmed a persona switch, return the target name and
+    /// clear the confirm state. Returns `None` if there is no pending switch
+    /// or the user picked cancel.
+    pub fn take_confirmed_persona_switch(&mut self) -> Option<String> {
+        let state = self.persona_switch_confirm.take()?;
+        self.mode = Mode::Normal;
+        if state.selected == 0 {
+            Some(state.target.name)
+        } else {
+            None
+        }
+    }
+
+    /// Move the focus between the two buttons in the confirm modal.
+    pub fn persona_confirm_focus(&mut self, delta: i32) {
+        if let Some(ref mut state) = self.persona_switch_confirm {
+            let n = 2; // 0 = confirm, 1 = cancel
+            let cur = state.selected as i32;
+            let next = (cur + delta).rem_euclid(n) as usize;
+            state.selected = next;
+        }
     }
 
     /// Insert a character into the picker filter.
@@ -1170,7 +1266,17 @@ impl App {
             }
             "/persona" => {
                 if let Some(name) = arg {
-                    SlashResult::SwitchPersona(name.to_string())
+                    // Clearing the persona is idempotent and unambiguous; do
+                    // it directly. Switching to the currently active persona
+                    // is a no-op. Any other switch goes through the confirm
+                    // modal so the user sees the model/toolset diff.
+                    if name == "default" || name == "none" {
+                        SlashResult::SwitchPersona(name.to_string())
+                    } else if self.active_persona.as_deref() == Some(name) {
+                        SlashResult::Message(format!("persona '{name}' is already active"))
+                    } else {
+                        SlashResult::PersonaSwitchConfirm(name.to_string())
+                    }
                 } else {
                     let mut out = String::from("available personas:\n");
                     if self.personas.is_empty() {
@@ -1391,6 +1497,24 @@ impl App {
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::Provider(ProviderEvent::PartStart { part }) => {
+                // Auto-expand reasoning while streaming, auto-collapse when
+                // the model moves on to text or a tool call.
+                match &part {
+                    Part::Reasoning(_) => {
+                        self.reasoning_started_at = Some(std::time::Instant::now());
+                        self.reasoning_elapsed = None;
+                        self.reasoning_expanded = true;
+                    }
+                    Part::Text(_) | Part::ToolCall(_) => {
+                        if self.reasoning_expanded {
+                            if let Some(start) = self.reasoning_started_at.take() {
+                                self.reasoning_elapsed = Some(start.elapsed());
+                            }
+                            self.reasoning_expanded = false;
+                        }
+                    }
+                    _ => {}
+                }
                 // Append part to the last assistant message, or create one.
                 if let Some(msg) = self.messages.last_mut() {
                     if msg.role == Role::Assistant {
@@ -1527,6 +1651,13 @@ impl App {
             }
             AgentEvent::TodosUpdated { todos } => {
                 self.todos = todos;
+            }
+            AgentEvent::PersonaSwitchRequested { name } => {
+                // Stash the requested name so the main loop can pick it up
+                // and apply the switch. The main loop owns the agent
+                // reference and the provider-builder plumbing, so it has
+                // to be the one to do the actual swap.
+                self.pending_persona_switch_apply = Some(name);
             }
             AgentEvent::ToolStart { call_id } => {
                 // Find the tool call part and mark as running.
@@ -2330,13 +2461,35 @@ mod tests {
     }
 
     #[test]
-    fn test_persona_slash_command_with_name_returns_switch() {
+    fn test_persona_slash_command_with_name_returns_confirm() {
         let mut app = App::new();
         app.personas = vec![("researcher".into(), "read-only".into())];
         let result = app.handle_slash("/persona researcher");
-        assert!(
-            matches!(result, crate::app::SlashResult::SwitchPersona(ref n) if n == "researcher")
-        );
+        // Real switches go through the confirm modal so the user sees
+        // the model/toolset diff before applying.
+        assert!(matches!(
+            result,
+            crate::app::SlashResult::PersonaSwitchConfirm(ref n) if n == "researcher"
+        ));
+    }
+
+    #[test]
+    fn test_persona_slash_command_default_returns_direct_clear() {
+        let mut app = App::new();
+        // "default" / "none" bypass the confirm modal — they're idempotent.
+        let result = app.handle_slash("/persona default");
+        assert!(matches!(result, crate::app::SlashResult::SwitchPersona(ref n) if n == "default"));
+    }
+
+    #[test]
+    fn test_persona_slash_command_same_as_active_returns_message() {
+        let mut app = App::new();
+        app.personas = vec![("researcher".into(), "read-only".into())];
+        app.active_persona = Some("researcher".into());
+        let result = app.handle_slash("/persona researcher");
+        // Switching to the active persona is a no-op; the slash handler
+        // returns an info message rather than opening the confirm modal.
+        assert!(matches!(result, crate::app::SlashResult::Message(_)));
     }
 
     #[test]

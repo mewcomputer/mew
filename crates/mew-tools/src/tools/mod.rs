@@ -12,5 +12,6 @@ pub mod skill;
 pub mod subagent;
 pub mod subagent_start;
 pub mod subagent_wait;
+pub mod switch_persona;
 pub mod todo;
 pub mod write;

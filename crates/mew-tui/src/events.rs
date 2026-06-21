@@ -103,9 +103,60 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
         crate::app::Mode::PermissionPrompt => handle_permission_key(app, key),
         crate::app::Mode::UserQuestion => handle_user_question_key(app, key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
+        crate::app::Mode::PersonaSwitchConfirm => handle_persona_confirm_key(app, key),
         crate::app::Mode::Normal | crate::app::Mode::SlashCommand => handle_normal_key(app, key),
         // Settings mode key handling is done by ConfigEditor in main.rs
         crate::app::Mode::Settings => None,
+    }
+}
+
+/// Handle keys while the persona-switch confirm modal is open. The modal
+/// owns its own mode and dispatches the confirmed name back to the main
+/// event loop via `Action::PersonaSwitchConfirmed`.
+fn handle_persona_confirm_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+            app.persona_switch_confirm = None;
+            app.mode = crate::app::Mode::Normal;
+            None
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            // Enter confirms whichever button is focused; Y is unambiguous
+            // confirmation regardless of focus.
+            if key.code == KeyCode::Enter {
+                let name = app.take_confirmed_persona_switch();
+                if let Some(name) = name {
+                    return Some(Action::PersonaSwitchConfirmed(name));
+                }
+            } else {
+                // y/Y forces the confirm path even if "Cancel" is focused.
+                if let Some(state) = app.persona_switch_confirm.take() {
+                    app.mode = crate::app::Mode::Normal;
+                    return Some(Action::PersonaSwitchConfirmed(state.target.name));
+                }
+            }
+            None
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            app.persona_confirm_focus(-1);
+            None
+        }
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+            app.persona_confirm_focus(1);
+            None
+        }
+        KeyCode::BackTab => {
+            app.persona_confirm_focus(-1);
+            None
+        }
+        _ if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') => {
+            // Ctrl-C cancels, matching the rest of the app.
+            app.persona_switch_confirm = None;
+            app.mode = crate::app::Mode::Normal;
+            None
+        }
+        _ => None,
     }
 }
 
@@ -701,4 +752,7 @@ pub enum Action {
     /// task id so the main loop can resolve which task to cancel without
     /// re-deriving it from app state.
     CancelMostRecentSubagent(String),
+    /// User confirmed a persona switch from the confirm modal. The string
+    /// is the target persona name.
+    PersonaSwitchConfirmed(String),
 }

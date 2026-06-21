@@ -45,15 +45,26 @@ impl Dispatcher for RecordingDispatcher {
         None
     }
 
-    async fn on_event(&self, _ev: &dyn std::any::Any) {
-        // No-op: &dyn Any is !Send and cannot be forwarded through
-        // #[async_trait]'s Send-bound future.
+    async fn on_provider_event(&self, _ev: &mew_provider::ProviderEvent) {}
+    async fn on_tool_error(&self, _call: &mew_hooks::ToolCall, _error: &str) {}
+    async fn on_subagent_start(
+        &self,
+        _name: &str,
+        _parent_call_id: &str,
+        _display_name: Option<&str>,
+    ) {
     }
+    async fn on_subagent_end(&self, _name: &str, _parent_call_id: &str, _outcome: &str) {}
 
     async fn on_turn_end(&self, messages: &[Message]) {
         *self.turn_end_calls.lock().unwrap() += 1;
         let _ = messages.len();
     }
+
+    async fn on_pre_model_turn(&self, _messages: &[Message], _system: &str) {}
+    async fn on_stop(&self) {}
+    async fn on_pre_compaction(&self, _messages: &[Message]) {}
+    async fn on_post_compaction(&self, _messages: &[Message]) {}
 
     async fn on_chat_message(&self, msg: Message) -> Message {
         msg
@@ -95,6 +106,19 @@ impl Dispatcher for RecordingDispatcher {
         env: std::collections::HashMap<String, String>,
     ) -> std::collections::HashMap<String, String> {
         env
+    }
+    async fn on_user_input(&self, prompt: String) -> String {
+        prompt
+    }
+    async fn on_persona_change(&self, _old_persona: Option<&str>, _new_persona: &str) {}
+    async fn on_session_save(&self) {}
+    async fn on_model_finish(
+        &self,
+        _finish: &str,
+        _input_tokens: u32,
+        _output_tokens: u32,
+        _cost: f64,
+    ) {
     }
 }
 
@@ -195,8 +219,15 @@ async fn test_on_system_prompt_transforms_output() {
         async fn execute_slash_command(&self, _: &str, _: &str) -> Option<String> {
             None
         }
-        async fn on_event(&self, _: &dyn std::any::Any) {}
+        async fn on_provider_event(&self, _: &mew_provider::ProviderEvent) {}
+        async fn on_tool_error(&self, _: &mew_hooks::ToolCall, _: &str) {}
+        async fn on_subagent_start(&self, _: &str, _: &str, _: Option<&str>) {}
+        async fn on_subagent_end(&self, _: &str, _: &str, _: &str) {}
         async fn on_turn_end(&self, _: &[Message]) {}
+        async fn on_pre_model_turn(&self, _: &[Message], _: &str) {}
+        async fn on_stop(&self) {}
+        async fn on_pre_compaction(&self, _: &[Message]) {}
+        async fn on_post_compaction(&self, _: &[Message]) {}
         async fn on_chat_message(&self, msg: Message) -> Message {
             msg
         }
@@ -233,6 +264,12 @@ async fn test_on_system_prompt_transforms_output() {
         ) -> std::collections::HashMap<String, String> {
             env
         }
+        async fn on_user_input(&self, prompt: String) -> String {
+            prompt
+        }
+        async fn on_persona_change(&self, _: Option<&str>, _: &str) {}
+        async fn on_session_save(&self) {}
+        async fn on_model_finish(&self, _: &str, _: u32, _: u32, _: f64) {}
     }
 
     let dispatcher = Arc::new(PrefixDispatcher {

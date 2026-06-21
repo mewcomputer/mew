@@ -189,10 +189,9 @@ async fn test_plugin_register_tools() {
         .expect("dispatcher creation");
 
     let tools = dispatcher.on_register_tools().await;
-    assert!(
-        tools.is_empty(),
-        "subprocess plugins return empty for on_register_tools"
-    );
+    assert_eq!(tools.len(), 1, "sample-plugin registers one tool");
+    assert_eq!(tools[0].name, "sample-echo");
+    assert!(!tools[0].description.is_empty());
 }
 
 #[tokio::test]

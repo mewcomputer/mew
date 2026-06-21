@@ -89,6 +89,13 @@ pub enum AgentEvent {
     /// full current snapshot so the TUI can render the sidebar pane without
     /// reaching into agent state.
     TodosUpdated { todos: Vec<Todo> },
+    /// A `switch_persona` tool call was queued and the current turn has
+    /// ended. The caller (main loop) is responsible for looking up the
+    /// persona, applying the agent-state change, and rebuilding the
+    /// provider if the persona pins a model. Emitted at end of turn only
+    /// — never mid-turn — so the user sees the full response before the
+    /// model swap happens.
+    PersonaSwitchRequested { name: String },
 }
 
 impl std::fmt::Debug for AgentEvent {
@@ -182,6 +189,10 @@ impl std::fmt::Debug for AgentEvent {
             AgentEvent::TodosUpdated { todos } => f
                 .debug_struct("TodosUpdated")
                 .field("count", &todos.len())
+                .finish(),
+            AgentEvent::PersonaSwitchRequested { name } => f
+                .debug_struct("PersonaSwitchRequested")
+                .field("name", name)
                 .finish(),
         }
     }

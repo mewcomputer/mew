@@ -1,64 +1,91 @@
-# mew landing page prompt
+# mew landing page
 
-design a single-page landing site for mew, a terminal-native AI coding agent written in Rust.
+single-page site. dark background, one accent color (amber/rust/gold range — pick one and stick to it). monospace only where it makes sense (code blocks, terminal frame, labels). system font stack everywhere else. no webfonts, no cdn dependencies, no tracking, no cookies.
 
-## vibe
+the page should feel like it loads before your finger leaves the key. target: under 50kb uncompressed, html + css in one file.
 
-spare, confident, a little playful. think: the aesthetic of a well-maintained open-source tool that doesn't need to convince you it's serious. monospace where it counts, not everywhere. dark background. one accent color (something warm — amber, rust, or gold). no gradients, no glassmorphism, no animations that exist just to animate. the page should feel like it loads in 50ms and respects the user's time.
+## structure
 
-## structure (top to bottom, single scroll)
+### hero
 
-**hero**
-- the word "mew" in large type. under it, one line: "a terminal agent. fast, local, yours."
-- a short paragraph (2-3 sentences max) that says what it does without buzzwords. mention: streams LLM responses, runs tools, edits code, respects your permissions.
-- two buttons: "get started" (links to install/docs) and "view source" (links to github). the "get started" button has the accent color. "view source" is a ghost button.
-- a subtle terminal-cursor blink after the hero text. not a full fake terminal. just a cursor.
+large type: **mew**
 
-**what it looks like**
-- not a screenshot in a browser mockup. show a clean terminal window frame with a real-looking session: a user prompt, a streaming assistant response mid-sentence, a tool call with a spinner, a permission dialog. caption under it: "same terminal you already live in. no web app, no electron, no telemetry."
-- the terminal frame should have a subtle shadow or border but feel lightweight.
+one line under it: "a terminal agent. fast, local, yours."
 
-**three-column grid: principles**
+paragraph (2-3 sentences): describe what it does without adjectives that need air quotes. it streams llm responses in your terminal, runs bash commands, edits files, searches code. every dangerous action hits a permission prompt you control. sessions live on your disk as jsonl. nothing leaves your machine unless you point it at a model.
 
-each column has a small monospace icon or label, a title, and one sentence.
+below the paragraph, a small code block showing the install command:
 
-column 1 — **provider-agnostic**. "bring your own keys. openai-shape, anthropic-shape, or auto-route between them. the model catalog stays fresh."
+```
+curl get.mew.computer | bash
+```
 
-column 2 — **tools with guardrails**. "bash, file editing, code search. every dangerous action hits a permission gate you control. declarative rules in toml."
+two buttons: **get started** (filled, accent color, links to docs/install) and **view source** (outline/ghost, links to github).
 
-column 3 — **local & yours**. "sessions are jsonl on your disk. no analytics, no cloud, no phoning home. grep your own agent history."
+after the hero text, a single blinking cursor. css animation, no js. not a fake terminal — just a cursor at the end of the last line, like the page is still listening.
 
-**feature highlights (alternating horizontal sections)**
+### what it looks like
 
-section a — "subagents that work in parallel"
-- left: a small ascii-style diagram showing parent agent → two child agents running simultaneously
-- right: text explaining subagents get their own sessions, restricted toolsets, wall-clock caps. mention the `exit_tool` pattern. don't over-explain.
+a terminal window frame rendered as a styled div (not an image). inside it, a real-looking session:
 
-section b — "plugins and hooks"
-- right: a tiny code snippet showing a hook definition (3-4 lines of toml or rust)
-- left: text about the plugin system — intercept turns, rewrite tool args, inject system prompts, register slash commands. mention wasm runtime.
+- a prompt line: `~ mew "refactor the auth module to use argon2"`
+- a streaming assistant response, cut mid-sentence: `Thought for a second… the current bcrypt implementation lives in`
+- a tool call with a spinner: `◌ grep "bcrypt" src/auth/`
+- a permission dialog: `allow grep src/auth/*.rs? [y/n/a] y`
 
-section c — "acp: drive it from anywhere"
-- left: a simple two-node diagram (laptop ↔ server) with "ACP" in the middle
-- right: "mew talks ACP natively. use it as a client to external agents, or expose your agent as a server for zed, neovim, or whatever speaks jsonrpc."
+caption: "the terminal you already live in. no electron, no web app, no telemetry."
 
-**pricing / cta**
-- no pricing table. it's open source. just a centered line: "mit licensed. free. always."
-- below it: "works with opencode zen, z.ai, deepseek, anthropic, openai, or anything with an http endpoint."
-- a final "get started" button.
+the terminal frame needs enough css detail to feel alive — correct line-height, letter-spacing, and a font that actually ships on the system (sf mono / consolas / dejavu sans mono). not uncanny-valley crisp.
 
-**footer**
-- minimal: project name, link to github, link to docs, link to discord or whatever community channel exists. no copyright line in giant text.
+### three principles
 
-## technical notes for implementation
+three columns. each has a small monospace label, a title, and one sentence.
 
-- one html file, minimal css. no javascript unless the cursor blink needs it (and even then, a css animation is better).
-- system font stack. no webfonts.
-- the terminal screenshot should be actual text rendered in a styled div, not an image, so it stays sharp on any display and loads instantly.
-- the ascii diagrams should be `<pre>` blocks with the mono accent color on key parts.
-- responsive but mobile-second. the primary layout target is a laptop/desktop screen. on mobile the three-column grid stacks. the alternating sections stack image-above-text.
-- total page weight target: under 50kb uncompressed including all css. no images. no tracking. nothing from a cdn.
+**column 1** — label: `any model`. title: "bring your own keys." "openai-shape, anthropic-shape, or auto-route between them. model catalog stays fresh from models.dev."
 
-## anti-brief
+**column 2** — label: `tools`. title: "gated, not neutered." "bash, file editing, code search — all available, all permission-gated. declare rules in toml. prompt-once or prompt-always."
 
-do not: use the words "revolutionize," "empower," "next-generation," "seamless," "unleash," or "supercharge." do not use emoji. do not put a "trusted by" section with made-up company logos. do not animate scroll reveals. do not use a cookie banner (there are no cookies). do not write "in conclusion" or "to sum up." do not use three words where one will do.
+**column 3** — label: `local`. title: "yours, full stop." "sessions stored as jsonl on your disk. grep your own agent history. no analytics, no cloud, no phoning home."
+
+### what makes it different
+
+a short centered section between principles and features. one or two sentences that answer "why not just use claude code / cursor / copilot":
+
+"mew is a tool you install, not a service you subscribe to. it doesn't know your name, doesn't cache your code, and works the same offline as online. the bus factor is you."
+
+### features (alternating horizontal)
+
+**subagents that work in parallel** — left: ascii diagram showing parent agent → two children running simultaneously. right: text. "spawn subagents with restricted toolsets and wall-clock caps. each gets its own session. they report back via the `exit_tool` pattern. run a researcher and a reviewer in parallel while you work on something else." the diagram must be legible in under two seconds or it's not earning its space.
+
+**plugins and hooks** — right: a 3-4 line code snippet showing a hook definition (toml or rust). left: text. "intercept turns, rewrite tool arguments, inject system prompts, register slash commands. plugins run in a wasm runtime with defined interfaces. nothing escapes the sandbox unless you let it."
+
+**acp: drive it from anywhere** — left: two-node diagram (laptop ↔ server) with "acp" between them. right: text. "mew speaks acp natively. use it as a client to external agents, or expose your agent as a server. zed, neovim, custom tooling — if it speaks jsonrpc, it can drive mew."
+
+### bottom
+
+centered. no pricing table, no tiers, no "contact sales."
+
+"mit licensed. free. always."
+
+"works with opencode zen, z.ai, deepseek, anthropic, openai, or anything with an http endpoint and a compatible api shape."
+
+a final **get started** button.
+
+### footer
+
+project name, link to github, link to docs, link to discord (or whatever community channel exists). no copyright novel. no "all rights reserved" in 14pt. just the links.
+
+## technical constraints
+
+- one html file, embedded css. no javascript unless the cursor blink can't be done with css (it can: `@keyframes blink` on a border or pseudo-element).
+- system font stack: `-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, sans-serif` for body; `"SF Mono", "Cascadia Code", "Consolas", "DejaVu Sans Mono", monospace` for code.
+- the terminal frame is styled html, not an image. real text stays sharp at any resolution.
+- ascii diagrams in `<pre>` blocks. key parts get the accent color via inline spans or css classes.
+- responsive but not mobile-first. desktop is the primary target. on mobile: three columns stack, alternating sections stack image-above-text. don't break a sweat over mobile — the audience is on a laptop.
+- all sections have id attributes so fragment links work (`#features`, `#acp`, etc).
+- no scroll-reveal animations, no hover effects that exist just to hover, no transitions longer than 150ms.
+- no cookie banner. there are no cookies.
+- do not use the words: revolutionize, empower, next-generation, seamless, unleash, supercharge, game-changer, enterprise-grade, robust, cutting-edge, leverage, utilize.
+- no emoji anywhere on the page.
+- no "trusted by" logos. no fake testimonial quotes.
+- no "in conclusion" or "to sum up." the page ends when the content ends.

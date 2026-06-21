@@ -33,8 +33,24 @@ pub struct PersonaConfig {
     /// Pin a specific `provider/model`. None = inherit active model.
     pub model: Option<String>,
     /// If set, only these tools are available while this persona is active.
-    /// Empty vec = no tools. None = all tools.
+    /// Empty vec = no tools. None = all tools (subject to `tools_deny`).
     pub tools: Option<Vec<String>>,
+    /// Tools to remove from the available set, regardless of `tools`. Applied
+    /// after the allowlist, so an entry here is always excluded. Use this when
+    /// you want "all tools except X" without enumerating the safe set.
+    /// `None` and empty vec both mean "no denials".
+    pub tools_deny: Option<Vec<String>>,
+    /// Skill names this persona can load via the `skill` tool, and the names
+    /// that appear in the system prompt's `<available_skills>` list.
+    /// `None` = all discovered skills; `Some(vec)` = only those listed.
+    /// An empty vec hides all skills.
+    pub skills: Option<Vec<String>>,
+    /// When `true`, render the persona body as a minijinja template before
+    /// using it as the system prompt. Exposes `supports_vision`, `tools`,
+    /// `has_tool(name)`, and `persona_name`. `None` or `false` = verbatim
+    /// body (the default, and the safe choice for personas that don't need
+    /// dynamic content).
+    pub template: Option<bool>,
 }
 
 /// Frontmatter parsed from a PERSONA.md file.
@@ -53,6 +69,12 @@ struct MewFrontmatter {
     model: Option<String>,
     #[serde(default)]
     tools: Option<Vec<String>>,
+    #[serde(default)]
+    tools_deny: Option<Vec<String>>,
+    #[serde(default)]
+    skills: Option<Vec<String>>,
+    #[serde(default)]
+    template: Option<bool>,
 }
 
 static NAME_RE: LazyLock<Regex> =
@@ -197,6 +219,9 @@ fn load_persona_file(path: &Path) -> Result<Persona, PersonaError> {
                 Some(mew) => PersonaConfig {
                     model: mew.model,
                     tools: mew.tools,
+                    tools_deny: mew.tools_deny,
+                    skills: mew.skills,
+                    template: mew.template,
                 },
                 None => PersonaConfig::default(),
             };
@@ -456,5 +481,58 @@ mod tests {
         assert_eq!(personas.len(), 1);
         let tools = personas[0].config.tools.as_ref().unwrap();
         assert!(tools.is_empty());
+    }
+
+    #[test]
+    fn test_persona_tools_deny() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        write_persona_with_mew(
+            cwd,
+            "researcher",
+            "No mutating tools",
+            "body",
+            "  tools_deny:\n    - bash\n    - write\n",
+        );
+
+        let loader = Loader::new(cwd);
+        let personas = loader.load().unwrap();
+        assert_eq!(personas.len(), 1);
+        let deny = personas[0].config.tools_deny.as_ref().unwrap();
+        assert_eq!(deny, &vec!["bash".to_string(), "write".to_string()]);
+    }
+
+    #[test]
+    fn test_persona_skills_allowlist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        write_persona_with_mew(
+            cwd,
+            "reviewer",
+            "Code review",
+            "body",
+            "  skills:\n    - git-release\n    - code-review\n",
+        );
+
+        let loader = Loader::new(cwd);
+        let personas = loader.load().unwrap();
+        assert_eq!(personas.len(), 1);
+        let skills = personas[0].config.skills.as_ref().unwrap();
+        assert_eq!(
+            skills,
+            &vec!["git-release".to_string(), "code-review".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_persona_skills_empty_vec_hides_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        write_persona_with_mew(cwd, "minimal", "No skills", "body", "  skills: []\n");
+
+        let loader = Loader::new(cwd);
+        let personas = loader.load().unwrap();
+        let skills = personas[0].config.skills.as_ref().unwrap();
+        assert!(skills.is_empty());
     }
 }

@@ -138,6 +138,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
     }
 
+    if app.mode == Mode::PersonaSwitchConfirm {
+        if let Some(ref state) = app.persona_switch_confirm {
+            overlays::draw_persona_confirm_modal(f, state, main_area);
+        }
+    }
+
     if app.mode == Mode::CommandPalette {
         if let Some(ref mut picker) = app.picker {
             overlays::draw_picker(f, picker, main_area);

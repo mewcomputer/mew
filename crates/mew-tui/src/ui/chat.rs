@@ -294,16 +294,24 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                 }
                 Part::Reasoning(rp) => {
                     let line_count = rp.text.lines().count();
+                    let dur_text = app.reasoning_elapsed.map(|d| {
+                        let secs = d.as_secs_f64();
+                        if secs < 0.1 {
+                            format!("{}ms", d.as_millis())
+                        } else {
+                            format!("{:.1}s", secs)
+                        }
+                    });
+                    let header = if app.reasoning_expanded {
+                        format!("\u{25bc} thinking  [Ctrl-T to collapse]")
+                    } else if let Some(dur) = dur_text {
+                        format!("\u{25b8} thought for {} \u{00b7} {} lines", dur, line_count)
+                    } else {
+                        format!("\u{25b8} thinking \u{00b7} {} lines", line_count)
+                    };
                     sel_ctx.push_line(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled(
-                            if app.reasoning_expanded {
-                                format!("[thinking — Ctrl+T to collapse] ({} lines)", line_count)
-                            } else {
-                                format!("[thinking — Ctrl+T to expand] ({} lines)", line_count)
-                            },
-                            Style::default().fg(Color::DarkGray),
-                        ),
+                        Span::styled(header, Style::default().fg(Color::DarkGray)),
                     ]));
                     if app.reasoning_expanded {
                         for line in rp.text.lines() {

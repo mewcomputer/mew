@@ -1,16 +1,25 @@
 use crate::{Sensitivity, Tool, ToolCtx, ToolError, ToolOutput};
 use async_trait::async_trait;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// A tool that returns skill bodies on demand.
 pub struct Skill {
     skills: Arc<Vec<mew_skills::Skill>>,
+    /// Active persona's skill allow-list. `None` = all discovered skills
+    /// (default); `Some(set)` = only skills whose name is in the set.
+    /// Shared with the owning `Agent` via `Arc` so the agent can update it on
+    /// `apply_persona`.
+    filter: Arc<tokio::sync::RwLock<Option<HashSet<String>>>>,
 }
 
 impl Skill {
-    pub fn new(skills: Arc<Vec<mew_skills::Skill>>) -> Self {
-        Self { skills }
+    pub fn new(
+        skills: Arc<Vec<mew_skills::Skill>>,
+        filter: Arc<tokio::sync::RwLock<Option<HashSet<String>>>>,
+    ) -> Self {
+        Self { skills, filter }
     }
 }
 
@@ -49,6 +58,17 @@ impl Tool for Skill {
             .get("name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing 'name' field".into()))?;
+
+        // Check the persona's skill allow-list. An empty set is a valid
+        // "no skills" filter, not a "no filter" signal.
+        let filter = self.filter.read().await;
+        if let Some(ref allowed) = *filter {
+            if !allowed.contains(name) {
+                return Err(ToolError::InvalidInput(format!(
+                    "skill '{name}' is not available in the current persona"
+                )));
+            }
+        }
 
         let skill = self
             .skills

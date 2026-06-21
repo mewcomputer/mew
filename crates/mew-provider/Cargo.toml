@@ -13,6 +13,7 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
+http = "1"
 tokio = { workspace = true }
 anyhow = { workspace = true }
 base64 = "0.22"

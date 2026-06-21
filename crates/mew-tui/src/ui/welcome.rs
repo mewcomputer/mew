@@ -6,20 +6,19 @@ use ratatui::{
     Frame,
 };
 
+const CAT: &str = r"
+ ╱|、
+(˚。7
+|、˜〵
+じしˍ,)ノ";
+
 pub(super) fn draw_welcome(f: &mut Frame, area: Rect) {
-    let logo = vec![
-        Line::from(Span::styled(
-            "mew",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "terminal agent harness",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+    let logo = vec![Line::from(Span::styled(
+        "mew",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))];
 
     let prompts = vec![
         Line::from(Span::styled(

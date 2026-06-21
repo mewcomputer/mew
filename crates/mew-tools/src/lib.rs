@@ -1,3 +1,4 @@
+pub mod secrets;
 pub mod tools;
 
 use async_trait::async_trait;

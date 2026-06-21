@@ -30,6 +30,7 @@ use mew_tools::tools::grep::Grep;
 use mew_tools::tools::progress_update::ProgressUpdate;
 use mew_tools::tools::read::Read;
 use mew_tools::tools::skill::Skill;
+use mew_tools::tools::switch_persona::SwitchPersona as SwitchPersonaTool;
 use mew_tools::tools::todo::{TodoComplete, TodoCreate, TodoDelete, TodoListTool, TodoUpdate};
 use mew_tools::tools::write::Write;
 use mew_tools::SecretSet;
@@ -308,7 +309,12 @@ fn config_cmd(command: ConfigCommands) -> Result<()> {
     Ok(())
 }
 
-fn build_tools(skills: Arc<Vec<mew_skills::Skill>>) -> Vec<Arc<dyn mew_tools::Tool>> {
+fn build_tools(
+    skills: Arc<Vec<mew_skills::Skill>>,
+    skill_filter: Arc<tokio::sync::RwLock<Option<std::collections::HashSet<String>>>>,
+    personas: Arc<Vec<mew_personas::Persona>>,
+    pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
+) -> Vec<Arc<dyn mew_tools::Tool>> {
     let mut tools: Vec<Arc<dyn mew_tools::Tool>> = vec![
         Arc::new(Read),
         Arc::new(Write),
@@ -327,9 +333,127 @@ fn build_tools(skills: Arc<Vec<mew_skills::Skill>>) -> Vec<Arc<dyn mew_tools::To
         Arc::new(TodoListTool),
     ];
     if !skills.is_empty() {
-        tools.push(Arc::new(Skill::new(skills)));
+        tools.push(Arc::new(Skill::new(skills, skill_filter)));
+    }
+    // The switch_persona tool is only useful when there's at least one
+    // persona to switch to. With zero discovered personas the tool would
+    // be a permanent dead-end for the model.
+    if !personas.is_empty() {
+        tools.push(Arc::new(SwitchPersonaTool::new(
+            personas,
+            pending_persona_switch,
+        )));
     }
     tools
+}
+
+/// Session-level info exposed to plugins via the `config_read` callback.
+/// Plugins can query `session_id`, `model`, `provider`, `workspace`, and
+/// `active_persona`. Updated when persona/model changes.
+struct PluginInfo {
+    session_id: String,
+    model: String,
+    provider: String,
+    workspace: String,
+    active_persona: Option<String>,
+}
+
+/// Build a display-only summary of a persona for the confirm modal.
+fn persona_summary(p: &mew_personas::Persona) -> mew_tui::app::PersonaSummary {
+    mew_tui::app::PersonaSummary {
+        name: p.name.clone(),
+        description: p.description.clone(),
+        model: p.config.model.clone(),
+        tools: p.config.tools.clone(),
+        tools_deny: p.config.tools_deny.clone(),
+        skills: p.config.skills.clone(),
+    }
+}
+
+/// Apply a persona switch: set the agent's persona state, swap the
+/// provider/model if the persona pins one, and push a synthetic message
+/// describing what changed. Factored out of the slash-command handler so
+/// the confirm modal can reuse it after the user accepts the diff.
+fn apply_persona_switch(
+    agent: &mut mew_agent::Agent,
+    app: &mut mew_tui::App,
+    cfg: &Config,
+    cat: Option<&mew_catalog::Catalog>,
+    provider_id: &str,
+    raw: bool,
+    persona: &mew_personas::Persona,
+) {
+    let pinned_model = agent.apply_persona(persona);
+    app.active_persona = Some(persona.name.clone());
+    if let Some(ref model_str) = pinned_model {
+        let (new_provider_id, new_model_id) = if let Some(idx) = model_str.find('/') {
+            (&model_str[..idx], &model_str[idx + 1..])
+        } else {
+            (provider_id, model_str.as_str())
+        };
+        match build_provider(cfg, cat, new_provider_id, new_model_id, raw) {
+            Ok(new_provider) => {
+                agent.provider = new_provider;
+                app.status.model = new_model_id.to_string();
+                app.status.provider = new_provider_id.to_string();
+                if let Some(c) = cat {
+                    app.status.context_window = c.context_window(new_model_id) as u32;
+                    if let Some(m) = c.lookup(new_model_id) {
+                        agent.input_price = m.pricing.input;
+                        agent.output_price = m.pricing.output;
+                        agent.cache_read_price = m.pricing.cache_read;
+                        agent.cache_write_price = m.pricing.cache_write;
+                        agent.reasoning_price = m.pricing.reasoning;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("persona model pin failed: {}", e);
+            }
+        }
+    }
+    app.messages.push(synthetic_message(format!(
+        "switched to persona: {}{}",
+        persona.name,
+        if let Some(ref m) = pinned_model {
+            format!(" (model: {})", m)
+        } else {
+            String::new()
+        }
+    )));
+}
+
+/// If the agent's `switch_persona` tool queued a switch and the turn has
+/// ended, the TUI receives `AgentEvent::PersonaSwitchRequested` and
+/// stashes the name in `app.pending_persona_switch_apply`. This helper
+/// drains that field and applies the switch using the same path as the
+/// slash-command confirm modal. Called from the main event loop after
+/// every agent event.
+async fn drain_pending_persona_switch(
+    agent: &mut mew_agent::Agent,
+    app: &mut mew_tui::App,
+    personas: &[mew_personas::Persona],
+    cfg: &Config,
+    cat: Option<&mew_catalog::Catalog>,
+    provider_id: &str,
+    raw: bool,
+) {
+    let Some(name) = app.pending_persona_switch_apply.take() else {
+        return;
+    };
+    if let Some(persona) = personas.iter().find(|p| p.name == name) {
+        let old = app.active_persona.clone();
+        apply_persona_switch(agent, app, cfg, cat, provider_id, raw, persona);
+        agent
+            .dispatcher
+            .on_persona_change(old.as_deref(), &name)
+            .await;
+    } else {
+        tracing::warn!(
+            name = %name,
+            "PersonaSwitchRequested for unknown persona; ignoring"
+        );
+    }
 }
 
 fn build_permission_engine(cfg: &Config) -> Arc<mew_config::permissions::PermissionEngine> {
@@ -436,6 +560,7 @@ async fn build_dispatcher(
     storage_delete: impl Fn(&str) + Send + Sync + 'static,
     set_ui: impl Fn(&str, &str) + Send + Sync + 'static,
     disabled_plugins: &[String],
+    plugin_configs: std::collections::HashMap<String, mew_hooks::PluginHookConfig>,
 ) -> Arc<dyn Dispatcher> {
     let host = PluginHost {
         notify: Arc::new(notify),
@@ -447,7 +572,16 @@ async fn build_dispatcher(
         set_ui: Arc::new(set_ui),
     };
 
-    match SubprocessDispatcher::from_default_dirs_filtered(host.clone(), disabled_plugins).await {
+    let dirs = mew_hooks_runtime::PluginLoader::default_dirs();
+    match SubprocessDispatcher::from_dirs_filtered_with_config(
+        dirs,
+        host.clone(),
+        disabled_plugins,
+        plugin_configs,
+        SubprocessDispatcher::default_timeout(),
+    )
+    .await
+    {
         Ok(d) => {
             tracing::info!("plugin runtime loaded");
             Arc::new(d)
@@ -628,6 +762,7 @@ async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
                 }
             }
             mew_tui::Event::Agent(event) => {
+                // No local agent in the ACP client path; nothing to drain.
                 app.handle_agent_event(event);
             }
             mew_tui::Event::Tick => {
@@ -640,6 +775,8 @@ async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
         loop {
             let ok = match event_rx.try_recv() {
                 Ok(mew_tui::Event::Agent(event)) => {
+                    // No local agent in the ACP client path; nothing to
+                    // drain.
                     app.handle_agent_event(event);
                     true
                 }
@@ -689,7 +826,19 @@ async fn run_acp_server(provider_flag: &str, model_flag: Option<String>, raw: bo
     let dispatcher = Arc::new(NopDispatcher);
     let skills_loader = mew_skills::Loader::new(std::env::current_dir().unwrap_or_default());
     let skills = Arc::new(skills_loader.load().unwrap_or_default());
-    let tools = build_tools(skills.clone());
+    let skill_filter = Arc::new(tokio::sync::RwLock::new(None));
+    // The ACP server has no inline persona UI, so we still load personas
+    // for the switch_persona tool but no `loaded_personas` is needed
+    // beyond that.
+    let persona_loader = mew_personas::Loader::new(std::env::current_dir().unwrap_or_default());
+    let personas_arc = Arc::new(persona_loader.load().unwrap_or_default());
+    let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
+    let tools = build_tools(
+        skills.clone(),
+        skill_filter.clone(),
+        personas_arc.clone(),
+        pending_persona_switch.clone(),
+    );
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -702,6 +851,9 @@ async fn run_acp_server(provider_flag: &str, model_flag: Option<String>, raw: bo
     agent.flagged_files = flagged_files;
     agent.secrets = build_secret_set(&cfg);
     agent.set_permission_engine(permission_engine);
+    agent.set_personas((*personas_arc).clone());
+    agent.set_pending_persona_switch(pending_persona_switch.clone());
+    agent.register_plugin_tools().await;
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
     } else {
@@ -746,10 +898,11 @@ async fn run_acp_server(provider_flag: &str, model_flag: Option<String>, raw: bo
     if !ctx_files.is_empty() {
         agent.set_system(mew_context::build_system_prompt(&ctx_files));
     }
+    // set_skills appends the filtered skills XML to the system prompt via
+    // rebuild_system. The filter is None here, so all discovered skills are
+    // visible until a persona narrows the list.
     if !skills.is_empty() {
-        let mut system = agent.system.clone();
-        system.push_str(&build_skills_xml(&skills));
-        agent.set_system(system);
+        agent.set_skills((*skills).clone());
     }
 
     if let Some(c) = cat_ref {
@@ -766,26 +919,6 @@ async fn run_acp_server(provider_flag: &str, model_flag: Option<String>, raw: bo
 
     info!("mew acp server starting, model={model_id}");
     mew_acp::run_server(agent).await
-}
-
-fn build_skills_xml(skills: &[mew_skills::Skill]) -> String {
-    let mut buf = String::from("<available_skills>\n");
-    for skill in skills {
-        buf.push_str(&format!(
-            "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n  </skill>\n",
-            escape_xml(&skill.name),
-            escape_xml(&skill.description),
-        ));
-    }
-    buf.push_str("</available_skills>\n");
-    buf
-}
-
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 async fn connect_mcp_servers(
@@ -978,11 +1111,36 @@ async fn run_tui(
         .unwrap_or_default()
         .disabled_plugins;
 
+    // Shared session info that plugins can query via config_read.
+    // Updated when persona/model changes; static values are set once.
+    let plugin_info: Arc<std::sync::Mutex<PluginInfo>> =
+        Arc::new(std::sync::Mutex::new(PluginInfo {
+            session_id: session_id.clone(),
+            model: model_id.clone(),
+            provider: provider_id.clone(),
+            workspace: std::env::current_dir()
+                .unwrap_or_default()
+                .display()
+                .to_string(),
+            active_persona: None,
+        }));
+
+    let info_for_config = plugin_info.clone();
     let dispatcher = build_dispatcher(
         |msg| {
             tracing::info!("[plugin-notify] {msg}");
         },
-        |_key| None,
+        move |key: &str| -> Option<String> {
+            let info = info_for_config.lock().unwrap();
+            match key {
+                "session_id" => Some(info.session_id.clone()),
+                "model" => Some(info.model.clone()),
+                "provider" => Some(info.provider.clone()),
+                "workspace" => Some(info.workspace.clone()),
+                "active_persona" => info.active_persona.clone(),
+                _ => None,
+            }
+        },
         |msg| {
             tracing::info!(target: "plugin", "{}", msg);
         },
@@ -1006,6 +1164,7 @@ async fn run_tui(
             let _ = plugin_ui_tx.send((key.to_string(), value.to_string()));
         },
         &disabled_plugins,
+        cfg.plugins.clone(),
     )
     .await;
 
@@ -1032,8 +1191,16 @@ async fn run_tui(
     // Load personas.
     let persona_loader = mew_personas::Loader::new(std::env::current_dir().unwrap_or_default());
     let loaded_personas = persona_loader.load().unwrap_or_default();
+    let personas_arc = Arc::new(loaded_personas.clone());
 
-    let mut tools = build_tools(skills.clone());
+    let skill_filter = Arc::new(tokio::sync::RwLock::new(None));
+    let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
+    let mut tools = build_tools(
+        skills.clone(),
+        skill_filter.clone(),
+        personas_arc.clone(),
+        pending_persona_switch.clone(),
+    );
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -1088,6 +1255,9 @@ async fn run_tui(
         None,
     );
     agent.flagged_files = flagged_files;
+    agent.set_pending_persona_switch(pending_persona_switch.clone());
+    agent.set_personas(loaded_personas.clone());
+    agent.set_pending_persona_switch(pending_persona_switch.clone());
     agent.secrets = build_secret_set(cfg);
     agent.todos_path = todos_path.clone();
     if let Some(ref tp) = todos_path {
@@ -1096,6 +1266,7 @@ async fn run_tui(
         }
     }
     agent.set_permission_engine(permission_engine);
+    agent.register_plugin_tools().await;
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
     } else {
@@ -1152,15 +1323,10 @@ async fn run_tui(
         agent.set_system(mew_context::build_system_prompt(&ctx_files));
     }
 
-    // If skills are loaded, append the skill listing to the system prompt.
+    // If skills are loaded, push them to the agent. The agent rebuilds its
+    // system prompt so the skills XML reflects the active persona's filter.
     if !skills.is_empty() {
-        let mut system = if ctx_files.is_empty() {
-            String::new()
-        } else {
-            mew_context::build_system_prompt(&ctx_files)
-        };
-        system.push_str(&build_skills_xml(&skills));
-        agent.set_system(system);
+        agent.set_skills((*skills).clone());
     }
 
     let reasoning = resolve_reasoning(cat, &model_id, variant_flag.as_deref());
@@ -1283,6 +1449,7 @@ async fn run_tui(
                 {
                     match action {
                         mew_tui::events::Action::Submit(text) => {
+                            let text = agent.dispatcher.on_user_input(text).await;
                             let cwd = std::env::current_dir().unwrap_or_default();
                             let (enriched, display, attachments) =
                                 process_mentions(&text, &cwd, &mut app.context_files).await;
@@ -1368,67 +1535,49 @@ async fn run_tui(
                                 }
                                 mew_tui::SlashResult::SwitchPersona(ref name) => {
                                     if name == "default" || name == "none" {
+                                        let old = app.active_persona.clone();
                                         agent.clear_persona();
                                         app.active_persona = None;
+                                        plugin_info.lock().unwrap().active_persona = None;
                                         app.messages.push(synthetic_message(
                                             "persona cleared (default)".into(),
                                         ));
+                                        agent
+                                            .dispatcher
+                                            .on_persona_change(old.as_deref(), "default")
+                                            .await;
                                     } else if let Some(persona) =
                                         loaded_personas.iter().find(|p| p.name == *name)
                                     {
-                                        let pinned_model = agent.apply_persona(persona);
-                                        app.active_persona = Some(persona.name.clone());
-                                        if let Some(ref model_str) = pinned_model {
-                                            let (new_provider_id, new_model_id) =
-                                                if let Some(idx) = model_str.find('/') {
-                                                    (&model_str[..idx], &model_str[idx + 1..])
-                                                } else {
-                                                    (provider_id.as_str(), model_str.as_str())
-                                                };
-                                            match build_provider(
-                                                cfg,
-                                                cat,
-                                                new_provider_id,
-                                                new_model_id,
-                                                raw,
-                                            ) {
-                                                Ok(new_provider) => {
-                                                    agent.provider = new_provider;
-                                                    app.status.model = new_model_id.to_string();
-                                                    app.status.provider =
-                                                        new_provider_id.to_string();
-                                                    if let Some(c) = cat {
-                                                        app.status.context_window =
-                                                            c.context_window(new_model_id) as u32;
-                                                        if let Some(m) = c.lookup(new_model_id) {
-                                                            agent.input_price = m.pricing.input;
-                                                            agent.output_price = m.pricing.output;
-                                                            agent.cache_read_price =
-                                                                m.pricing.cache_read;
-                                                            agent.cache_write_price =
-                                                                m.pricing.cache_write;
-                                                            agent.reasoning_price =
-                                                                m.pricing.reasoning;
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!(
-                                                        "persona model pin failed: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                        }
+                                        apply_persona_switch(
+                                            &mut agent,
+                                            &mut app,
+                                            cfg,
+                                            cat,
+                                            provider_id.as_str(),
+                                            raw,
+                                            persona,
+                                        );
+                                    } else {
                                         app.messages.push(synthetic_message(format!(
-                                            "switched to persona: {}{}",
-                                            persona.name,
-                                            if let Some(ref m) = pinned_model {
-                                                format!(" (model: {})", m)
-                                            } else {
-                                                String::new()
-                                            }
+                                            "unknown persona: {}. use /persona to list available.",
+                                            name
                                         )));
+                                    }
+                                }
+                                mew_tui::SlashResult::PersonaSwitchConfirm(ref name) => {
+                                    if let Some(persona) =
+                                        loaded_personas.iter().find(|p| p.name == *name)
+                                    {
+                                        let target = persona_summary(persona);
+                                        let current = app
+                                            .active_persona
+                                            .as_ref()
+                                            .and_then(|cur_name| {
+                                                loaded_personas.iter().find(|p| &p.name == cur_name)
+                                            })
+                                            .map(persona_summary);
+                                        app.request_persona_switch_confirm(target, current);
                                     } else {
                                         app.messages.push(synthetic_message(format!(
                                             "unknown persona: {}. use /persona to list available.",
@@ -1577,6 +1726,25 @@ async fn run_tui(
                                 app.set_alert("subagent already finished");
                             }
                         }
+                        mew_tui::events::Action::PersonaSwitchConfirmed(name) => {
+                            if let Some(persona) = loaded_personas.iter().find(|p| p.name == name) {
+                                let old = app.active_persona.clone();
+                                apply_persona_switch(
+                                    &mut agent,
+                                    &mut app,
+                                    cfg,
+                                    cat,
+                                    provider_id.as_str(),
+                                    raw,
+                                    persona,
+                                );
+                                plugin_info.lock().unwrap().active_persona = Some(name.clone());
+                                agent
+                                    .dispatcher
+                                    .on_persona_change(old.as_deref(), &name)
+                                    .await;
+                            }
+                        }
                         mew_tui::events::Action::InsertAtMention(mention) => {
                             app.insert_mention(&mention);
                         }
@@ -1636,6 +1804,17 @@ async fn run_tui(
 
             mew_tui::Event::Agent(event) => {
                 app.handle_agent_event(event);
+                drain_pending_persona_switch(
+                    &mut agent,
+                    &mut app,
+                    &loaded_personas,
+                    cfg,
+                    cat,
+                    provider_id.as_str(),
+                    raw,
+                )
+                .await;
+                plugin_info.lock().unwrap().active_persona = app.active_persona.clone();
             }
             mew_tui::Event::Tick => {
                 app.tick();
@@ -1728,6 +1907,21 @@ async fn run_tui(
                                     app.set_alert("subagent already finished");
                                 }
                             }
+                            mew_tui::events::Action::PersonaSwitchConfirmed(name) => {
+                                if let Some(persona) =
+                                    loaded_personas.iter().find(|p| p.name == name)
+                                {
+                                    apply_persona_switch(
+                                        &mut agent,
+                                        &mut app,
+                                        cfg,
+                                        cat,
+                                        provider_id.as_str(),
+                                        raw,
+                                        persona,
+                                    );
+                                }
+                            }
                             mew_tui::events::Action::InsertAtMention(mention) => {
                                 app.insert_mention(&mention);
                             }
@@ -1769,7 +1963,11 @@ async fn run_tui(
                                         // Model switches are deferred; handled in main loop.
                                     }
                                     mew_tui::SlashResult::SwitchPersona(_) => {
-                                        // Deferred; handled in main loop.
+                                        // Handled inline above (direct clear).
+                                    }
+                                    mew_tui::SlashResult::PersonaSwitchConfirm(_) => {
+                                        // Deferred; opens the confirm modal
+                                        // in the main loop.
                                     }
                                     mew_tui::SlashResult::ResumeSession(_) => {
                                         // Deferred; handled in main loop when not streaming.
@@ -1833,6 +2031,17 @@ async fn run_tui(
                 }
                 mew_tui::Event::Agent(event) => {
                     app.handle_agent_event(event);
+                    drain_pending_persona_switch(
+                        &mut agent,
+                        &mut app,
+                        &loaded_personas,
+                        cfg,
+                        cat,
+                        provider_id.as_str(),
+                        raw,
+                    )
+                    .await;
+                    plugin_info.lock().unwrap().active_persona = app.active_persona.clone();
                     agent_drain_count += 1;
                     if app.streaming && agent_drain_count >= STREAMING_DRAIN_LIMIT {
                         break 'drain;
@@ -1869,6 +2078,9 @@ async fn run_tui(
         }
     };
 
+    // Notify plugins the session is saving so they can flush state.
+    agent.dispatcher.on_session_save().await;
+
     // Save sidebar collapsed state for next session.
     {
         let mut save = mew_config::load_state().unwrap_or_default();
@@ -1877,6 +2089,9 @@ async fn run_tui(
         save.sidebar_collapsed = app.sidebar_collapsed.clone();
         let _ = mew_config::save_state(&save);
     }
+
+    // Notify plugins the session is stopping before tearing down.
+    agent.dispatcher.on_stop().await;
 
     // Restore terminal.
     crossterm::terminal::disable_raw_mode()?;
@@ -2148,7 +2363,19 @@ async fn build_and_run(
     let loaded_skills = skills_loader.load().unwrap_or_default();
     let skills = Arc::new(loaded_skills);
 
-    let mut tools = build_tools(skills.clone());
+    // Load personas for the switch_persona tool.
+    let persona_loader = mew_personas::Loader::new(std::env::current_dir().unwrap_or_default());
+    let loaded_personas = persona_loader.load().unwrap_or_default();
+    let personas_arc = Arc::new(loaded_personas.clone());
+
+    let skill_filter = Arc::new(tokio::sync::RwLock::new(None));
+    let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
+    let mut tools = build_tools(
+        skills.clone(),
+        skill_filter.clone(),
+        personas_arc.clone(),
+        pending_persona_switch.clone(),
+    );
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -2172,6 +2399,9 @@ async fn build_and_run(
         tools,
         None,
     );
+    agent.set_pending_persona_switch(pending_persona_switch.clone());
+    agent.set_personas(loaded_personas.clone());
+    agent.set_pending_persona_switch(pending_persona_switch.clone());
     agent.flagged_files = flagged_files;
     agent.secrets = build_secret_set(cfg);
     agent.todos_path = todos_path.clone();
@@ -2180,6 +2410,7 @@ async fn build_and_run(
             *agent.todos.lock().await = list;
         }
     }
+    agent.register_plugin_tools().await;
     agent.set_permission_engine(permission_engine);
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
@@ -2239,9 +2470,7 @@ async fn build_and_run(
         agent.set_system(mew_context::build_system_prompt(&ctx_files));
     }
     if !skills.is_empty() {
-        let mut system = agent.system.clone();
-        system.push_str(&build_skills_xml(&skills));
-        agent.set_system(system);
+        agent.set_skills((*skills).clone());
     }
 
     let reasoning = resolve_reasoning(cat, &model_id, variant_flag.as_deref());
@@ -2357,9 +2586,17 @@ async fn build_and_run(
             mew_agent::AgentEvent::TodosUpdated { .. } => {
                 // No sidebar in non-interactive mode; nothing to update.
             }
+            mew_agent::AgentEvent::PersonaSwitchRequested { .. } => {
+                // Non-interactive mode: no TUI to confirm. The tool layer
+                // already gates switch_persona via the permission engine,
+                // and the switch is harmless on its own (no model pin
+                // means just a system prompt + tool allowlist change), so
+                // we silently drop the apply.
+            }
         }
     }
 
+    agent.dispatcher.on_stop().await;
     Ok(())
 }
 

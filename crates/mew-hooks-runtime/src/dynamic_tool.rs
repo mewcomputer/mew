@@ -41,7 +41,7 @@ impl mew_tools::Tool for DynamicTool {
         _ctx: mew_tools::ToolCtx,
         input: Value,
     ) -> Result<mew_hooks::ToolOutput, mew_tools::ToolError> {
-        let result = (self.reg.execute)(input);
+        let result = (self.reg.execute)(input).await;
         Ok(mew_hooks::ToolOutput {
             output: result,
             error: String::new(),

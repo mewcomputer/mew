@@ -17,6 +17,8 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 http = "1"
 directories = { workspace = true }
+mew-provider = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 mew-provider-fake = { workspace = true }

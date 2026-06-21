@@ -25,7 +25,20 @@ pub trait Provider: Send + Sync {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Provider-side sampling parameters. Mirrors `mew_hooks::ChatParams` —
+/// they live in separate crates to avoid a circular dep (mew-hooks depends
+/// on mew-provider). The agent converts between them at the boundary.
+#[derive(Debug, Clone, Default)]
+pub struct ChatParams {
+    /// Sampling temperature. `None` = provider default.
+    pub temperature: Option<f64>,
+    /// Top-p (nucleus) sampling. `None` = provider default.
+    pub top_p: Option<f64>,
+    /// Max tokens for the response. `None` = provider default.
+    pub max_tokens: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct Request {
     pub model: String,
     pub messages: Vec<Message>,
@@ -34,6 +47,13 @@ pub struct Request {
     /// Reasoning/thinking configuration. The `params` are merged into the
     /// request body by the adapter, so each provider gets the fields it needs.
     pub reasoning: Option<ReasoningConfig>,
+    /// Sampling parameters. Providers that support them (OpenAI, Anthropic)
+    /// read these and merge into the request body. `None` = use provider
+    /// defaults. Set by the `on_chat_params` hook in the host.
+    pub params: Option<ChatParams>,
+    /// HTTP headers to add to the request. Set by the `on_chat_headers`
+    /// hook in the host. Providers that don't use them can ignore.
+    pub headers: http::HeaderMap,
 }
 
 /// Per-provider reasoning/thinking configuration.
@@ -58,7 +78,12 @@ pub struct ToolDef {
     pub schema: serde_json::Value,
 }
 
-#[derive(Debug, Clone)]
+/// Serialize is needed for the `on_provider_event` hook (host → plugin).
+/// Deserialize is derived for symmetry but note: `PartDelta::field` is
+/// `&'static str`, so deserialization only works from `'static` input
+/// (e.g. `include_str!()`). Plugins in Rust should define their own
+/// types with `field: String` and convert.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ProviderEvent {
     PartStart {
         part: Part,

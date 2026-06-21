@@ -27,6 +27,15 @@ pub struct PermissionRule {
 pub struct MatchConditions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_prefix: Option<String>,
+    /// Match the program name of a shell command. For `git push` this is
+    /// `"git"`. Checked against each program in a compound command (e.g.
+    /// `git log | grep fix` has programs `git` and `grep`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_program: Option<String>,
+    /// Match the subcommand (first non-flag argument). For `git push` this
+    /// is `"push"`. Only meaningful alongside `command_program`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_subcommand: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path_glob: Option<String>,
 }
@@ -83,6 +92,27 @@ impl PermissionEngine {
                 if self.is_secret_path(path) && !self.has_literal_allow(tool_name, path) {
                     return mew_hooks::PermissionDecision::Prompt;
                 }
+            }
+        }
+
+        // 0.5. Bash command decomposition. Compound commands (pipes, &&, ;)
+        // and opaque constructs ($(…), eval, bash -c, | sh) cannot be safely
+        // checked with prefix matching alone. Decompose and require every
+        // program to be explicitly allowed.
+        if tool_name == "bash" {
+            if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
+                let parsed = crate::shell::parse_command(cmd);
+                if parsed.has_opaque {
+                    // The engine cannot see what the opaque construct will
+                    // run. Force a prompt regardless of rules.
+                    return mew_hooks::PermissionDecision::Prompt;
+                }
+                if parsed.programs.len() > 1 {
+                    return self
+                        .check_compound_bash(&parsed.programs, sensitivity)
+                        .await;
+                }
+                // Single program — fall through to normal rule matching.
             }
         }
 
@@ -145,6 +175,94 @@ impl PermissionEngine {
             .lock()
             .await
             .insert(tool_name.to_string());
+    }
+
+    /// Check a compound bash command (pipe, &&, ;) where every program must
+    /// be explicitly allowed for the whole command to auto-allow. Any deny
+    /// hit on any program short-circuits to Deny. Any program without a
+    /// matching allow rule falls through to the default (Prompt for
+    /// Dangerous tools like bash).
+    async fn check_compound_bash(
+        &self,
+        programs: &[crate::shell::ProgramInvocation],
+        sensitivity: mew_tools::Sensitivity,
+    ) -> mew_hooks::PermissionDecision {
+        // 1. Deny: if any program is denied, the whole command is denied.
+        for prog in programs {
+            for rule in &self.rules {
+                if rule.decision != RuleDecision::Deny || !self.rule_applies(rule, "bash") {
+                    continue;
+                }
+                if self.program_matches_rule(prog, &rule.r#match) {
+                    return mew_hooks::PermissionDecision::Deny;
+                }
+            }
+        }
+
+        // 2. Allow: every program must have a matching allow rule.
+        let all_allowed = programs.iter().all(|prog| {
+            self.rules.iter().any(|rule| {
+                rule.decision == RuleDecision::Allow
+                    && self.rule_applies(rule, "bash")
+                    && self.program_matches_rule(prog, &rule.r#match)
+            })
+        });
+        if all_allowed {
+            return mew_hooks::PermissionDecision::AllowOnce;
+        }
+
+        // 3. Session allow cache.
+        let session = self.session_allows.lock().await;
+        if session.contains("bash") {
+            return mew_hooks::PermissionDecision::AllowOnce;
+        }
+        drop(session);
+
+        // 4. Default based on sensitivity.
+        match sensitivity {
+            mew_tools::Sensitivity::ReadOnly => mew_hooks::PermissionDecision::AllowOnce,
+            _ => mew_hooks::PermissionDecision::Prompt,
+        }
+    }
+
+    /// True if a parsed program invocation matches a rule's conditions.
+    /// Checks `command_program` and `command_subcommand` against the
+    /// invocation, falling back to `command_prefix` for backward compat
+    /// (only meaningful for single-program commands that reached the
+    /// compound path by accident — rare but harmless).
+    fn program_matches_rule(
+        &self,
+        prog: &crate::shell::ProgramInvocation,
+        conditions: &MatchConditions,
+    ) -> bool {
+        // No conditions = matches everything (existing semantics).
+        if conditions.command_prefix.is_none()
+            && conditions.command_program.is_none()
+            && conditions.command_subcommand.is_none()
+            && conditions.path_glob.is_none()
+        {
+            return true;
+        }
+
+        // Program-level matching.
+        if let Some(ref expected) = conditions.command_program {
+            if &prog.program != expected {
+                return false;
+            }
+            if let Some(ref expected_sub) = conditions.command_subcommand {
+                if prog.subcommand.as_deref() != Some(expected_sub.as_str()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Subcommand-only matching (program wildcard).
+        if let Some(ref expected_sub) = conditions.command_subcommand {
+            return prog.subcommand.as_deref() == Some(expected_sub.as_str());
+        }
+
+        false
     }
 
     fn rule_applies(&self, rule: &PermissionRule, tool_name: &str) -> bool {
@@ -579,5 +697,168 @@ mod tests {
         assert!(!PermissionEngine::is_glob_pattern(".env"));
         assert!(!PermissionEngine::is_glob_pattern("/abs/path/.env"));
         assert!(!PermissionEngine::is_glob_pattern("plain_name.txt"));
+    }
+
+    // ------------------------------------------------------------------
+    // Shell decomposition tests
+    // ------------------------------------------------------------------
+
+    fn make_rule(
+        tool: &str,
+        decision: RuleDecision,
+        program: &str,
+        subcommand: Option<&str>,
+    ) -> PermissionRule {
+        PermissionRule {
+            tool: tool.to_string(),
+            decision,
+            r#match: MatchConditions {
+                command_program: Some(program.to_string()),
+                command_subcommand: subcommand.map(String::from),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_compound_all_allowed() {
+        // Both git and grep have allow rules → auto-allow.
+        let engine = PermissionEngine::new(vec![
+            make_rule("bash", RuleDecision::Allow, "git", None),
+            make_rule("bash", RuleDecision::Allow, "grep", None),
+        ]);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("git log | grep fix"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce);
+    }
+
+    #[tokio::test]
+    async fn test_compound_one_uncovered_prompts() {
+        // git is allowed, grep is not → prompt.
+        let engine =
+            PermissionEngine::new(vec![make_rule("bash", RuleDecision::Allow, "git", None)]);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("git log | grep fix"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::Prompt);
+    }
+
+    #[tokio::test]
+    async fn test_compound_deny_short_circuits() {
+        // git allowed, rm denied → deny wins.
+        let engine = PermissionEngine::new(vec![
+            make_rule("bash", RuleDecision::Allow, "git", None),
+            make_rule("bash", RuleDecision::Deny, "rm", None),
+        ]);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("git log && rm -rf /"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::Deny);
+    }
+
+    #[tokio::test]
+    async fn test_subcommand_level_allow() {
+        // Allow only `git push`, deny other git subcommands in compound.
+        let engine = PermissionEngine::new(vec![make_rule(
+            "bash",
+            RuleDecision::Allow,
+            "git",
+            Some("push"),
+        )]);
+        // `git push && echo done` — echo is not covered → prompt.
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("git push && echo done"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::Prompt);
+    }
+
+    #[tokio::test]
+    async fn test_opaque_forces_prompt() {
+        // No rules — opaque construct should force prompt regardless.
+        let engine =
+            PermissionEngine::new(vec![make_rule("bash", RuleDecision::Allow, "echo", None)]);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("echo $(cat .env)"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        // Opaque detection overrides even a matching allow rule.
+        assert_eq!(decision, mew_hooks::PermissionDecision::Prompt);
+    }
+
+    #[tokio::test]
+    async fn test_single_command_uses_prefix_fallback() {
+        // Single-program commands should still use prefix matching for
+        // backward compat with existing command_prefix rules.
+        let engine = PermissionEngine::new(vec![PermissionRule {
+            tool: "bash".to_string(),
+            decision: RuleDecision::Allow,
+            r#match: MatchConditions {
+                command_prefix: Some("git status".to_string()),
+                ..Default::default()
+            },
+        }]);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("git status"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce);
+    }
+
+    #[tokio::test]
+    async fn test_single_command_program_rule() {
+        // Single-program command matched by a program-level rule.
+        let engine = PermissionEngine::new(vec![make_rule(
+            "bash",
+            RuleDecision::Allow,
+            "git",
+            Some("status"),
+        )]);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("git status"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce);
+    }
+
+    #[tokio::test]
+    async fn test_compound_session_allow() {
+        // Even if programs aren't individually allowed, a session-allow
+        // for bash should cover the compound command.
+        let engine = PermissionEngine::new(vec![]);
+        engine.add_session_allow("bash").await;
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("git log | grep fix"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce);
     }
 }

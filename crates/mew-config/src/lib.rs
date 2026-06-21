@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 pub type SidebarState = HashMap<String, bool>;
 
 pub mod permissions;
+pub mod shell;
 
 /// Top-level user configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +24,8 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     #[serde(default)]
     pub secrets: SecretsConfig,
+    #[serde(default)]
+    pub plugins: HashMap<String, mew_hooks::PluginHookConfig>,
     #[serde(default)]
     pub workspace: WorkspaceConfig,
 }
@@ -72,6 +75,7 @@ impl Default for Config {
             models: Vec::new(),
             permissions: PermissionsConfig::default(),
             secrets: SecretsConfig::default(),
+            plugins: HashMap::new(),
             workspace: WorkspaceConfig::default(),
         }
     }
