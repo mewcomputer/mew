@@ -146,3 +146,21 @@ body {
     background-color: var(--color-accent);
     color: var(--color-bg);
 }
+
+.mew-reveal {
+    opacity: 0;
+    transition:
+        opacity 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.mew-reveal.mew-reveal-in {
+    opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mew-reveal {
+        opacity: 1;
+        transform: none;
+        transition: none;
+    }
+}

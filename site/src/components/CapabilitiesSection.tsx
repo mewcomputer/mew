@@ -147,7 +147,7 @@ const sections: Section[] = [
     title: "It speaks your model.",
     paragraphs: [
       "mew supports OpenAI-shape and Anthropic-shape API adapters out of the box. It comes with defaults for opencode-zen, opencode-go, z-ai, and deepseek, pulling model catalogs dynamically.",
-      "You can point it at any compatible endpoint, local or remote. Whether you want the intelligence of today's frontier models or the locality of LM Studio, mew can adapt.",
+      "You can point it at any compatible endpoint, local or remote. Whether you want the intelligence of today's frontier models or the locality of LM Studio or Ollama, mew can adapt.",
     ],
     terminal: [
       { type: "user", text: "/model anthropic/claude-3-5-sonnet" },
@@ -658,7 +658,9 @@ const DesktopTerminal = ({ section }: { section: Section }) => {
   };
   const body = (
     <>
-      <div className="absolute inset-0 p-8 pointer-events-none lg:pointer-events-auto">
+      <div
+        className={`absolute inset-0 p-8 pointer-events-none lg:pointer-events-auto ${section.graphic === "picker" && "bg-muted/50"}`}
+      >
         {section.graphic === "picker" && <ModelPicker />}
       </div>
       <div className="p-8 min-h-[320px] text-[13px] leading-snug">
@@ -683,7 +685,13 @@ const SectionItem = ({
   const ref = useRef<HTMLElement | null>(null);
   const [visible, setVisible] = useState(false);
   const [hasStarted, setHasStarted] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const progress = useTypewriter(section.id, section.terminal, hasStarted);
+
+  useEffect(() => {
+    const t = setTimeout(() => setMounted(true), 200);
+    return () => clearTimeout(t);
+  }, []);
 
   useEffect(() => {
     if (visible && !hasStarted) setHasStarted(true);
@@ -717,38 +725,49 @@ const SectionItem = ({
         ref.current = el;
       }}
     >
-      <h2 className={titleClass}>{section.title}</h2>
+      <div
+        className={`opacity-0 transition-opacity duration-500 ease-out ${
+          (isFirst ? mounted : visible) ? "!opacity-100" : ""
+        }`}
+      >
+        <h2 className={titleClass}>{section.title}</h2>
 
-      <div className="space-y-6">
-        {section.paragraphs.map((p, i) => {
-          const paragraphClass = isFirst
-            ? "text-lg text-foreground/80 leading-relaxed"
-            : `text-lg text-foreground/80 leading-relaxed mew-reveal ${
-                visible ? "mew-reveal-in" : ""
-              }`;
-          return (
-            <p
-              key={i}
-              className={paragraphClass}
-              style={
-                isFirst ? undefined : { transitionDelay: `${(i + 1) * 90}ms` }
-              }
-            >
-              {p}
-            </p>
-          );
-        })}
-      </div>
+        <div className="space-y-6">
+          {section.paragraphs.map((p, i) => {
+            const paragraphClass = isFirst
+              ? "text-lg text-foreground/80 leading-relaxed"
+              : `text-lg text-foreground/80 leading-relaxed mew-reveal ${
+                  visible ? "mew-reveal-in" : ""
+                }`;
+            return (
+              <p
+                key={i}
+                className={paragraphClass}
+                style={
+                  isFirst ? undefined : { transitionDelay: `${(i + 1) * 90}ms` }
+                }
+              >
+                {p}
+              </p>
+            );
+          })}
+        </div>
 
-      <div className="lg:hidden mt-8 rounded-lg overflow-hidden font-mono text-zinc-100 bg-tui-chat shadow-sm">
-        {section.graphic === "picker" ? (
-          <ModelPicker />
-        ) : (
-          <div className="p-6 text-xs leading-snug min-h-[200px]">
-            <TerminalContent lines={section.terminal} progress={progress} />
-          </div>
-        )}
-        <TuiChrome />
+        <div
+          className={`lg:hidden mt-8 rounded-lg overflow-hidden font-mono text-zinc-100 bg-tui-chat shadow-sm ${
+            isFirst ? "" : `mew-reveal ${visible ? "mew-reveal-in" : ""}`
+          }`}
+          style={isFirst ? undefined : { transitionDelay: "180ms" }}
+        >
+          {section.graphic === "picker" ? (
+            <ModelPicker />
+          ) : (
+            <div className="p-6 text-xs leading-snug min-h-[200px]">
+              <TerminalContent lines={section.terminal} progress={progress} />
+            </div>
+          )}
+          <TuiChrome />
+        </div>
       </div>
     </section>
   );
@@ -822,7 +841,8 @@ export default function CapabilitiesSection() {
     <div>
       <div
         ref={gridRef}
-        className="grid grid-cols-1 lg:grid-cols-2 gap-16 lg:gap-32 items-start"
+        className="grid grid-cols-1 lg:grid-cols-2 gap-16 lg:gap-32 items-start mew-reveal"
+        style={{ transitionDelay: "1000ms" }}
       >
         <div className="hidden lg:block" aria-hidden="true" />
 
@@ -842,30 +862,37 @@ export default function CapabilitiesSection() {
 
       <div
         ref={overlayRef}
-        className={`hidden lg:block fixed inset-x-0 z-10 pointer-events-none transition-opacity duration-300 ${
-          shown ? "opacity-100" : "opacity-0"
+        className={`hidden lg:block fixed inset-x-0 z-10 pointer-events-none ${
+          shown ? "" : "opacity-0"
         }`}
-        style={overlayTop !== null ? { top: `${overlayTop}px` } : undefined}
+        style={{
+          top: overlayTop !== null ? `${overlayTop}px` : undefined,
+        }}
       >
         <AnimatePresence mode="sync">
-          <div className="mx-auto max-w-7xl px-6">
+          <div
+            className="mx-auto max-w-7xl px-6 mew-reveal"
+            style={{ transitionDelay: "750ms" }}
+          >
             <div className="grid grid-cols-2 gap-32">
               <motion.div
-                layoutId={"terminal-overlay"}
+                animate={{ opacity: shown ? 1 : 0 }}
+                layoutId="terminal"
                 transition={{
                   type: "tween",
-                  duration: 0.15,
+                  duration: 0.45,
                   ease: "easeInOut",
                 }}
                 className="rounded-lg overflow-hidden font-mono text-zinc-100 bg-tui-chat shadow-sm"
               >
                 <motion.div
+                  layoutId={`terminal-content-${activeSection.id}`}
                   key={activeSection.id}
-                  layoutId={`terminal-content`}
-                  initial={{ opacity: 0, filter: "blur(2px)" }}
-                  animate={{ opacity: 1, filter: "blur(0px)" }}
-                  exit={{ opacity: 0, filter: "blur(2px)" }}
-                  transition={{ duration: 0.65, ease: "easeOut" }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.45, ease: "easeInOut" }}
+                  className="relative"
                 >
                   <DesktopTerminal section={activeSection} />
                 </motion.div>

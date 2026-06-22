@@ -8,30 +8,42 @@ import "../styles/global.css";
     <main class="mx-auto px-6 py-16 pt-64 max-w-7xl">
         <section id="top" class="mb-28 max-w-3xl">
             <pre
-                class="font-mono leading-tight mb-4"
-                aria-hidden="true">{`
+                class="font-mono leading-tight mb-4 mew-reveal"
+                aria-hidden="true"
+                style="transition-delay: 0ms">{`
  ╱|、
 (˚。7
 |、˜〵
 じしˍ,)ノ`}</pre>
 
-            <p class="font-display text-5xl lg:text-7xl mt-1 mb-8 max-w-3xl">
+            <p
+                class="font-display text-5xl lg:text-7xl mt-1 mb-8 max-w-3xl mew-reveal"
+                style="transition-delay: 300ms"
+            >
                 mew is the coding harness you can take apart.
             </p>
-            <p class="text-lg">
+            <p class="text-lg mew-reveal" style="transition-delay: 600ms">
                 Give it a task and it does the work. It finds the code, makes
                 the change, runs the tests. <br />And every part of it is a
                 plugin away from being yours.
             </p>
         </section>
 
-        <div><CapabilitiesSection client:visible /></div>
+        <div>
+            <CapabilitiesSection client:visible />
+        </div>
 
         <section id="why" class="md:mt-96 mt-32 max-w-3xl">
-            <h2 class="font-display text-5xl tracking-tight mb-8">
+            <h2
+                class="font-display text-5xl tracking-tight mb-8 mew-reveal"
+                style="transition-delay: 0ms"
+            >
                 Yours to take apart.
             </h2>
-            <p class="text-lg text-foreground/80 leading-relaxed">
+            <p
+                class="text-lg text-foreground/80 leading-relaxed mew-reveal"
+                style="transition-delay: 400ms"
+            >
                 mew is a tool you install, not a service you subscribe to. It
                 doesn't know your name, it doesn't cache your code, and it works
                 the same offline as online. Every provider, tool, and prompt is
@@ -42,11 +54,15 @@ import "../styles/global.css";
         </section>
 
         <section id="install" class="md:mt-64 mt-32 max-w-3xl">
-            <h2 class="text-2xl font-semibold tracking-tight mb-8">
+            <h2
+                class="text-2xl font-semibold tracking-tight mb-8 mew-reveal"
+                style="transition-delay: 0ms"
+            >
                 Get it running.
             </h2>
             <div
-                class="bg-card border border-border rounded-lg p-8 font-mono text-sm leading-relaxed shadow-sm relative"
+                class="bg-card border border-border rounded-lg p-8 font-mono text-sm leading-relaxed shadow-sm relative mew-reveal"
+                style="transition-delay: 400ms"
             >
                 <div class="text-foreground font-medium">
                     $ curl get.mew.computer | bash
@@ -67,13 +83,33 @@ import "../styles/global.css";
                     aria-label="Copy install command">copy</button
                 >
             </div>
-            <p class="text-sm text-muted-foreground mt-4">
+            <p
+                class="text-sm text-muted-foreground mt-4 mew-reveal"
+                style="transition-delay: 700ms"
+            >
                 Works with opencode-zen, z-ai, deepseek, anthropic, openai, or
                 anything with an HTTP endpoint and a compatible API shape.
             </p>
         </section>
     </main>
 
+    <script>
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+                if (entry.isIntersecting) {
+                    requestAnimationFrame(() => {
+                        requestAnimationFrame(() => {
+                            entry.target.classList.add("mew-reveal-in");
+                        });
+                    });
+                    observer.unobserve(entry.target);
+                }
+            });
+        });
+        document.querySelectorAll(".mew-reveal").forEach((el) => {
+            observer.observe(el);
+        });
+    </script>
     <script>
         document.querySelectorAll("[data-copy]").forEach((btn) => {
             btn.addEventListener("click", () => {
