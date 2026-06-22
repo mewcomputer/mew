@@ -18,6 +18,7 @@ members = [
     "crates/mew-context",
     "crates/mew-skills",
     "crates/mew-personas",
+    "crates/mew-prompts",
     "crates/mew-subagents",
     "crates/mew-hooks",
     "crates/mew-hooks-runtime",
@@ -121,6 +122,7 @@ mew-catalog = { path = "crates/mew-catalog" }
 mew-context = { path = "crates/mew-context" }
 mew-skills = { path = "crates/mew-skills" }
 mew-personas = { path = "crates/mew-personas" }
+mew-prompts = { path = "crates/mew-prompts" }
 mew-subagents = { path = "crates/mew-subagents" }
 mew-agent = { path = "crates/mew-agent" }
 mew-tui = { path = "crates/mew-tui" }

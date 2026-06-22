@@ -15,7 +15,7 @@ mew-session = { workspace = true }
 mew-config = { workspace = true }
 mew-personas = { workspace = true }
 mew-skills = { workspace = true }
-minijinja = { workspace = true }
+mew-prompts = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

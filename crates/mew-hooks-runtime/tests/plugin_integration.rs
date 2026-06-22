@@ -130,7 +130,7 @@ async fn test_plugin_denies_permission() {
         .await;
     assert_eq!(
         decision,
-        PermissionDecision::Deny,
+        mew_hooks::HookOutcome::Proceed(PermissionDecision::Deny),
         "plugin should deny AllowOnce"
     );
 
@@ -139,7 +139,7 @@ async fn test_plugin_denies_permission() {
         .await;
     assert_eq!(
         decision2,
-        PermissionDecision::AllowSession,
+        mew_hooks::HookOutcome::Proceed(PermissionDecision::AllowSession),
         "AllowSession should pass through"
     );
 

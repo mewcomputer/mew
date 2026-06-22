@@ -88,8 +88,8 @@ impl Dispatcher for RecordingDispatcher {
         &self,
         _call: &ToolCall,
         input: serde_json::Value,
-    ) -> serde_json::Value {
-        input
+    ) -> mew_hooks::HookOutcome<serde_json::Value> {
+        mew_hooks::HookOutcome::Proceed(input)
     }
     async fn on_tool_execute_after(&self, _call: &ToolCall, output: ToolOutput) -> ToolOutput {
         output
@@ -98,8 +98,8 @@ impl Dispatcher for RecordingDispatcher {
         &self,
         _call: &ToolCall,
         current: PermissionDecision,
-    ) -> PermissionDecision {
-        current
+    ) -> mew_hooks::HookOutcome<PermissionDecision> {
+        mew_hooks::HookOutcome::Proceed(current)
     }
     async fn on_shell_env(
         &self,
@@ -245,8 +245,8 @@ async fn test_on_system_prompt_transforms_output() {
             &self,
             _: &ToolCall,
             input: serde_json::Value,
-        ) -> serde_json::Value {
-            input
+        ) -> mew_hooks::HookOutcome<serde_json::Value> {
+            mew_hooks::HookOutcome::Proceed(input)
         }
         async fn on_tool_execute_after(&self, _: &ToolCall, output: ToolOutput) -> ToolOutput {
             output
@@ -255,8 +255,8 @@ async fn test_on_system_prompt_transforms_output() {
             &self,
             _: &ToolCall,
             current: PermissionDecision,
-        ) -> PermissionDecision {
-            current
+        ) -> mew_hooks::HookOutcome<PermissionDecision> {
+            mew_hooks::HookOutcome::Proceed(current)
         }
         async fn on_shell_env(
             &self,

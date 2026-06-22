@@ -75,13 +75,17 @@ const sections: Section[] = [
     id: "permission",
     title: "It works like a careful engineer.",
     paragraphs: [
-      "It categorizes every action by risk. Reading and searching happens silently. Editing files or running scripts prompts you once. Dangerous operations\u2014like deploying or force-pushing\u2014ask every single time.",
+      "Permissions categorise every action by risk. Reading and searching happens silently. More dangerous operations like editing files, running scripts, up to deploying and force pushing prompts you.",
       <>
         You can declaratively tune these rules in your{" "}
         <code className="bg-muted px-1.5 py-0.5 rounded text-sm font-mono">
           config.toml
-        </code>
-        . Allow it to write freely in{" "}
+        </code>{" "}
+        or use the{" "}
+        <code className="bg-muted px-1.5 py-0.5 rounded text-sm font-mono">
+          /permissions
+        </code>{" "}
+        command to do it on the fly. Allow it to write freely in{" "}
         <code className="bg-muted px-1.5 py-0.5 rounded text-sm font-mono">
           src/**
         </code>{" "}
@@ -89,7 +93,7 @@ const sections: Section[] = [
         <code className="bg-muted px-1.5 py-0.5 rounded text-sm font-mono">
           terraform/
         </code>
-        . The defaults are safe, but the control is yours.
+        . The defaults are safe, but you can tweak it however you want.
       </>,
     ],
     terminal: [
@@ -142,7 +146,7 @@ const sections: Section[] = [
     title: "It speaks your model.",
     paragraphs: [
       "mew supports OpenAI-shape and Anthropic-shape API adapters out of the box. It comes with defaults for opencode-zen, opencode-go, z-ai, and deepseek, pulling model catalogs dynamically.",
-      "You can point it at any compatible endpoint, local or remote. Whether you want the frontier intelligence of Claude 3.5 Sonnet or the speed of a local Llamafile, mew adapts.",
+      "You can point it at any compatible endpoint, local or remote. Whether you want the intelligence of today's frontier models or the locality of LM Studio, mew can adapt.",
     ],
     terminal: [
       { type: "user", text: "/model anthropic/claude-3-5-sonnet" },
@@ -196,8 +200,10 @@ const sections: Section[] = [
         <code className="bg-muted px-1.5 py-0.5 rounded text-sm font-mono">
           config.toml
         </code>
-        . Credentials can be set via environment variables, the system keyring,
-        or a credentials file. Everything is overridable.
+        that can either be edited with your favorite editor, or with the
+        built-in TUI config tool. Credentials can be set via environment
+        variables, the system keyring, or a credentials file. Everything is
+        overridable.
       </>,
       <>
         Environment variables with the{" "}
@@ -657,7 +663,7 @@ const DesktopTerminal = ({ section }: { section: Section }) => {
         <TerminalContent lines={section.terminal} progress={progress} />
       </div>
     );
-  if (innerWidth > 768) {
+  if (typeof window !== "undefined" && window.innerWidth > 768) {
     return (
       <div
         className="mew-enter rounded-lg overflow-hidden font-mono text-zinc-100 bg-tui-chat shadow-sm"
@@ -780,7 +786,12 @@ export default function CapabilitiesSection() {
       (entries) => {
         entries.forEach((entry) => {
           if (entry.isIntersecting) {
-            if (HAS_VIEW_TRANSITION && innerWidth > 768) {
+            // if we have view transitions and we're not prerendering
+            if (
+              HAS_VIEW_TRANSITION &&
+              typeof window !== "undefined" &&
+              window.innerWidth > 768
+            ) {
               (document as any).startViewTransition(() => {
                 setActiveId(entry.target.id);
               });

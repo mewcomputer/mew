@@ -344,6 +344,57 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         )));
     }
 
+    // Background Jobs
+    if !app.background_jobs.is_empty() {
+        text.push_line(Line::from(vec![Span::styled(
+            "Background Jobs",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )]));
+        for job in &app.background_jobs {
+            let elapsed = job.started_at.elapsed().as_secs();
+            let (icon, color) = match &job.status {
+                crate::app::BackgroundJobStatus::Running => ("▸", Color::Yellow),
+                crate::app::BackgroundJobStatus::Completed => ("✓", Color::Green),
+                crate::app::BackgroundJobStatus::Failed => ("✗", Color::Red),
+                crate::app::BackgroundJobStatus::Cancelled => ("⊘", Color::DarkGray),
+            };
+            let time_str = if elapsed < 60 {
+                format!("{}s", elapsed)
+            } else {
+                format!("{}m", elapsed / 60)
+            };
+            let status_label = match &job.status {
+                crate::app::BackgroundJobStatus::Running => String::new(),
+                crate::app::BackgroundJobStatus::Completed => "  done".to_string(),
+                crate::app::BackgroundJobStatus::Failed => "  failed".to_string(),
+                crate::app::BackgroundJobStatus::Cancelled => "  cancelled".to_string(),
+            };
+            // Truncate the command to keep the sidebar narrow.
+            let max = area.width.saturating_sub(10) as usize;
+            let trimmed: String = job.command.chars().take(max).collect();
+            let cmd = if job.command.chars().count() > max {
+                format!("{}…", trimmed)
+            } else {
+                trimmed
+            };
+            text.push_line(Line::from(vec![
+                Span::styled(format!("  {} ", icon), Style::default().fg(color)),
+                Span::styled(cmd, Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("  {}", time_str),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(status_label, Style::default().fg(color)),
+            ]));
+        }
+        text.push_line(Line::from(Span::styled(
+            "─".repeat(area.width.saturating_sub(2) as usize),
+            Style::default().fg(DIVIDER),
+        )));
+    }
+
     // Session
     text.push_line(Line::from(vec![Span::styled(
         "Session",

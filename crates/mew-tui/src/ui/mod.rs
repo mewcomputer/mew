@@ -80,6 +80,49 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         0
     };
 
+    // Landing / start screen: when there's no conversation yet, show the cat +
+    // "mew" hero with a centered input directly beneath it instead of the
+    // normal bottom-pinned layout. Reverts to the normal layout automatically
+    // once the first message lands (app.messages becomes non-empty).
+    if app.messages.is_empty() {
+        // Keep the status line pinned to the bottom; the hero + centered input
+        // live in the region above it.
+        let status_rect = Rect::new(
+            main_area.x,
+            main_area.bottom().saturating_sub(1),
+            main_area.width,
+            1,
+        );
+        let hero_area = Rect::new(
+            main_area.x,
+            main_area.y,
+            main_area.width,
+            main_area.height.saturating_sub(1),
+        );
+
+        let input_rect = welcome::draw_landing(f, app, hero_area, slash_height);
+        input::draw_input(f, app, input_rect);
+
+        // Slash autocomplete sits directly above the centered input.
+        if show_slash {
+            let slash_rect = Rect::new(
+                input_rect.x,
+                input_rect.y.saturating_sub(slash_height),
+                input_rect.width,
+                slash_height,
+            );
+            overlays::draw_slash_autocomplete(f, app, &slash_cmds, slash_rect);
+        }
+
+        status::draw_status(f, app, status_rect);
+
+        app.chat_area = hero_area;
+        app.input_area = input_rect;
+        app.clear_expired_alerts();
+        draw_overlays(f, app, main_area);
+        return;
+    }
+
     // Estimate the input's content width (the slot minus the 1-cell border
     // on each side) so the layout reserves enough vertical space for wrapped
     // lines. The exact width is computed again in `draw_input` once the slot
@@ -121,32 +164,38 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.input_area = vert[3];
 
     app.clear_expired_alerts();
+    draw_overlays(f, app, main_area);
+}
 
+/// Render modal overlays (alerts, permission prompts, user-question dialogs,
+/// persona-switch confirms, command palette). Shared by the normal and landing
+/// layouts so both respond identically to these modes.
+fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
     if app.alert.is_some() {
-        overlays::draw_alert(f, app, main_area);
+        overlays::draw_alert(f, app, area);
     }
 
     if app.mode == Mode::PermissionPrompt {
         if let Some(ref perm) = app.permission {
-            overlays::draw_permission_modal(f, perm, main_area);
+            overlays::draw_permission_modal(f, perm, area);
         }
     }
 
     if app.mode == Mode::UserQuestion {
         if let Some(ref uq) = app.user_question {
-            overlays::draw_user_question_modal(f, uq, main_area);
+            overlays::draw_user_question_modal(f, uq, area);
         }
     }
 
     if app.mode == Mode::PersonaSwitchConfirm {
         if let Some(ref state) = app.persona_switch_confirm {
-            overlays::draw_persona_confirm_modal(f, state, main_area);
+            overlays::draw_persona_confirm_modal(f, state, area);
         }
     }
 
     if app.mode == Mode::CommandPalette {
         if let Some(ref mut picker) = app.picker {
-            overlays::draw_picker(f, picker, main_area);
+            overlays::draw_picker(f, picker, area);
         }
     }
 }

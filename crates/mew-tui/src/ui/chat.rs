@@ -18,8 +18,6 @@ use super::{
 use crate::app::{byte_at_display_offset, App, ToolDisplayState};
 use mew_message::{Part, Role, ToolState};
 
-use super::welcome::draw_welcome;
-
 /// State for tracking visual rows during chat rendering for drag-to-select.
 struct ChatLineCtx<'a, 't> {
     text: &'t mut Text<'a>,
@@ -188,12 +186,6 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         app.last_md_width = md_width;
     }
 
-    if app.messages.is_empty() {
-        draw_welcome(f, area);
-        app.chat_rows = chat_rows;
-        return;
-    }
-
     for (msg_idx, msg) in app.messages.iter().enumerate() {
         let is_last = msg_idx + 1 == msg_count;
         let is_streaming = app.streaming && is_last;
@@ -303,7 +295,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                         }
                     });
                     let header = if app.reasoning_expanded {
-                        format!("\u{25bc} thinking  [Ctrl-T to collapse]")
+                        "\u{25bc} thinking  [Ctrl-T to collapse]".to_string()
                     } else if let Some(dur) = dur_text {
                         format!("\u{25b8} thought for {} \u{00b7} {} lines", dur, line_count)
                     } else {

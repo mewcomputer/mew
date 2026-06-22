@@ -56,6 +56,36 @@ fn gap_segment(width: usize) -> PillSegment {
 fn build_pills(app: &App) -> Vec<Pill> {
     let mut pills = Vec::new();
 
+    // permission mode — prepended so it's the first thing the user sees.
+    // Standard mode is implicit (no pill). Permissive gets an amber badge;
+    // Auto gets a purple badge (the LLM is the gate); Auto+ gets a deeper
+    // purple (same family, signals "more committed"); Dangerous! gets a
+    // loud red badge. The visual cue matches the kind of decision-maker:
+    // human / LLM / LLM-with-fail-closed / deterministic.
+    match app.permission_mode {
+        mew_hooks::PermissionMode::Standard => {}
+        mew_hooks::PermissionMode::Permissive => pills.push(Pill {
+            text: "Permissive".into(),
+            fg: Color::Rgb(40, 25, 5),
+            bg: Color::Rgb(245, 200, 80),
+        }),
+        mew_hooks::PermissionMode::Auto => pills.push(Pill {
+            text: "Auto".into(),
+            fg: Color::Rgb(240, 230, 250),
+            bg: Color::Rgb(95, 50, 130),
+        }),
+        mew_hooks::PermissionMode::AutoPlus => pills.push(Pill {
+            text: "Auto+".into(),
+            fg: Color::Rgb(250, 235, 255),
+            bg: Color::Rgb(70, 25, 110),
+        }),
+        mew_hooks::PermissionMode::Dangerous => pills.push(Pill {
+            text: "⚠ Dangerous!".into(),
+            fg: Color::Rgb(255, 240, 240),
+            bg: Color::Rgb(140, 30, 30),
+        }),
+    }
+
     // model — dark green background, light green text.
     let model_label = if !app.status.provider.is_empty() && !app.status.model.is_empty() {
         format!("{}/{}", app.status.provider, app.status.model)
@@ -389,5 +419,93 @@ mod tests {
 
     fn text_of(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.to_string()).collect()
+    }
+
+    #[test]
+    fn test_build_pills_standard_mode_has_no_perm_pill() {
+        let mut app = crate::app::App::new();
+        app.permission_mode = mew_hooks::PermissionMode::Standard;
+        app.status.model = "test-model".into();
+        let pills = build_pills(&app);
+        // No pill should contain the "Dangerous" warning text.
+        assert!(
+            pills.iter().all(|p| !p.text.contains("Dangerous")),
+            "Standard mode must not show the Dangerous! pill, got: {:?}",
+            pills.iter().map(|p| &p.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_build_pills_dangerous_mode_prepends_warning_pill() {
+        let mut app = crate::app::App::new();
+        app.permission_mode = mew_hooks::PermissionMode::Dangerous;
+        app.status.model = "test-model".into();
+        let pills = build_pills(&app);
+        assert!(!pills.is_empty(), "expected at least one pill");
+        assert!(
+            pills[0].text.contains("Dangerous"),
+            "Dangerous! pill should be first (prepended), got first: {:?}",
+            pills[0].text
+        );
+    }
+
+    #[test]
+    fn test_build_pills_permissive_mode_prepends_amber_pill() {
+        let mut app = crate::app::App::new();
+        app.permission_mode = mew_hooks::PermissionMode::Permissive;
+        app.status.model = "test-model".into();
+        let pills = build_pills(&app);
+        assert!(!pills.is_empty(), "expected at least one pill");
+        assert_eq!(
+            pills[0].text, "Permissive",
+            "Permissive pill should be first (prepended), got first: {:?}",
+            pills[0].text
+        );
+        // The amber pill should NOT contain the red "Dangerous!" cue.
+        assert!(
+            !pills[0].text.contains("Dangerous"),
+            "Permissive pill must not show Dangerous! cue"
+        );
+    }
+
+    #[test]
+    fn test_build_pills_auto_mode_prepends_purple_pill() {
+        let mut app = crate::app::App::new();
+        app.permission_mode = mew_hooks::PermissionMode::Auto;
+        app.status.model = "test-model".into();
+        let pills = build_pills(&app);
+        assert!(!pills.is_empty(), "expected at least one pill");
+        assert_eq!(
+            pills[0].text, "Auto",
+            "Auto pill should be first (prepended), got first: {:?}",
+            pills[0].text
+        );
+        // Auto's purple pill is distinct from amber Permissive and red
+        // Dangerous — the visual cue should communicate "LLM is the gate."
+        assert!(pills[0].bg != Color::Rgb(245, 200, 80), "Auto must not be amber");
+        assert!(pills[0].bg != Color::Rgb(140, 30, 30), "Auto must not be red");
+    }
+
+    #[test]
+    fn test_build_pills_autoplus_mode_prepends_deeper_purple_pill() {
+        let mut app = crate::app::App::new();
+        app.permission_mode = mew_hooks::PermissionMode::AutoPlus;
+        app.status.model = "test-model".into();
+        let pills = build_pills(&app);
+        assert!(!pills.is_empty(), "expected at least one pill");
+        assert_eq!(
+            pills[0].text, "Auto+",
+            "Auto+ pill should be first (prepended), got first: {:?}",
+            pills[0].text
+        );
+        // Auto+ is in the same purple family as Auto but distinct from it
+        // (different color) and from amber Permissive / red Dangerous.
+        assert_ne!(
+            pills[0].bg,
+            Color::Rgb(95, 50, 130),
+            "Auto+ must not be the same shade as Auto — should be deeper"
+        );
+        assert_ne!(pills[0].bg, Color::Rgb(245, 200, 80), "Auto+ must not be amber");
+        assert_ne!(pills[0].bg, Color::Rgb(140, 30, 30), "Auto+ must not be red");
     }
 }

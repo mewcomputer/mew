@@ -166,6 +166,15 @@ pub struct Agent {
     pub pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
     /// Active persona name (for display/status). `None` = no persona.
     pub persona_name: Option<String>,
+    /// Provider used by the Auto permission mode to classify tool calls
+    /// (the small LLM that decides allow / deny / escalate when the user
+    /// has selected Auto mode). `None` → Auto mode falls through to the
+    /// user modal at runtime.
+    pub classifier_provider: Option<Arc<dyn Provider>>,
+    /// Model id to use when calling the classifier provider. Each provider
+    /// has a default model if unset; the CLI / config can pin a specific
+    /// one (e.g. `gpt-4o-mini` for cost or a local model for privacy).
+    pub classifier_model: Option<String>,
 }
 
 impl Agent {
@@ -223,6 +232,8 @@ impl Agent {
             personas: Vec::new(),
             pending_persona_switch: Arc::new(tokio::sync::Mutex::new(None)),
             persona_name: None,
+            classifier_provider: None,
+            classifier_model: None,
         }
     }
 
@@ -231,6 +242,127 @@ impl Agent {
         engine: Arc<mew_config::permissions::PermissionEngine>,
     ) {
         self.permission_engine = Some(engine);
+    }
+
+    /// Switch the runtime permission mode. Called by the `/permissions` slash
+    /// command and the `--dangerously-skip-permissions` CLI flag (via the
+    /// engine's initial mode). Cheap; takes effect on the next tool call.
+    pub fn set_permission_mode(&self, mode: mew_hooks::PermissionMode) {
+        if let Some(ref engine) = self.permission_engine {
+            engine.set_mode(mode);
+        }
+    }
+
+    /// Current permission mode (Standard by default if no engine is set).
+    pub fn permission_mode(&self) -> mew_hooks::PermissionMode {
+        self.permission_engine
+            .as_ref()
+            .map(|e| e.mode())
+            .unwrap_or(mew_hooks::PermissionMode::Standard)
+    }
+
+    /// Set the provider (and optional model id) used by Auto mode to classify
+    /// tool calls. If a provider isn't set when Auto mode is active,
+    /// `classify_permission` returns `None` and the call falls through to
+    /// the user modal — the safe default.
+    pub fn set_classifier_provider(
+        &mut self,
+        provider: Arc<dyn Provider>,
+        model: Option<String>,
+    ) {
+        self.classifier_provider = Some(provider);
+        self.classifier_model = model;
+    }
+
+    /// Call the configured classifier LLM to decide whether `tool_call`
+    /// should be allowed. Returns `None` if no classifier provider is
+    /// configured, the call fails, or the response can't be parsed —
+    /// callers should treat `None` as "escalate to the user."
+    pub async fn classify_permission(
+        &self,
+        tool_call: &mew_hooks::ToolCall,
+    ) -> Option<mew_prompts::classifier::ClassifierDecision> {
+        let provider = self.classifier_provider.as_ref()?;
+        let model = self
+            .classifier_model
+            .clone()
+            .unwrap_or_else(|| provider.name().to_string());
+
+        let sensitivity = self
+            .tools
+            .get(&tool_call.tool_name)
+            .map(|t| t.sensitivity())
+            .unwrap_or(mew_tools::Sensitivity::ReadOnly);
+
+        let cwd = std::env::current_dir().ok();
+        let cwd_str = cwd.as_ref().map(|p| p.to_string_lossy().to_string());
+
+        let prompt = mew_prompts::classifier::permission_decision(
+            &tool_call.tool_name,
+            &tool_call.input,
+            sensitivity_label(sensitivity),
+            cwd_str.as_deref(),
+            None,
+        );
+
+        let request = mew_provider::Request {
+            model,
+            messages: vec![mew_message::Message {
+                id: ulid::Ulid::new(),
+                session_id: self.session_id,
+                role: mew_message::Role::User,
+                parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                    base: mew_message::PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: self.session_id,
+                    },
+                    text: prompt,
+                    synthetic: true,
+                })],
+                time: mew_message::Time {
+                    created: chrono::Utc::now().timestamp_millis(),
+                    completed: None,
+                },
+                assistant: None,
+            }],
+            tools: Vec::new(),
+            system: String::new(),
+            reasoning: None,
+            params: Some(mew_provider::ChatParams {
+                temperature: Some(0.0),
+                max_tokens: Some(8),
+                ..Default::default()
+            }),
+            headers: http::HeaderMap::new(),
+        };
+
+        let stream = match provider.stream(request).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "classifier provider error; escalating to user");
+                return None;
+            }
+        };
+
+        // Collect text from the response stream.
+        use futures::StreamExt;
+        let mut text = String::new();
+        let mut stream = stream;
+        while let Some(event) = stream.next().await {
+            if let mew_provider::ProviderEvent::PartDelta { delta, .. } = event {
+                text.push_str(&delta);
+            }
+        }
+
+        let decision = mew_prompts::classifier::ClassifierDecision::parse(&text);
+        if decision.is_none() {
+            tracing::warn!(
+                classifier_text = %text,
+                "classifier response could not be parsed; escalating to user"
+            );
+        }
+        decision
     }
 
     pub fn set_system(&mut self, system: String) {
@@ -324,12 +456,13 @@ impl Agent {
         self.persona_prompt = if persona.body.is_empty() {
             None
         } else if persona.config.template == Some(true) {
+            let tool_names: Vec<String> = self.tools.keys().cloned().collect();
             Some(render_persona_template(
                 &persona.body,
                 &persona.name,
                 self.supports_vision,
                 &self.active_tool_names,
-                &self.tools,
+                &tool_names,
                 &self.denied_tool_names,
             ))
         } else {
@@ -379,6 +512,17 @@ impl Agent {
     /// the session log. The session file is the immutable event log and keeps
     /// everything; only what the model sees this turn is reset. Resume
     /// reconstructs forward from the marker.
+    ///
+    /// Permission caches are tied to the *session* lifetime (the JSONL log),
+    /// not the *context* (what the model sees this turn), so they survive
+    /// `/clear`. Both `permission_engine.session_allows` (the HashSet backing
+    /// the `AllowSession` keypress in the permission modal) and
+    /// `workspace_allowances` (the set of directories outside workspace
+    /// roots the user has granted access to) persist. This is deliberate:
+    /// a "session" is the JSONL log; a "context" is the visible turn.
+    /// Clearing the latter doesn't invalidate the user's prior grants
+    /// within the former. Pinned by
+    /// `tests::test_clear_context_preserves_permission_caches`.
     pub async fn clear_context(&self) {
         self.messages.lock().await.clear();
 
@@ -781,84 +925,43 @@ async fn run_shell_job(
     done.notify_waiters();
 }
 
-/// Render a persona body as a minijinja template, exposing the agent's
-/// current capabilities so persona authors can write conditional system
-/// prompts (e.g. "you can see images" only when `supports_vision` is true).
-///
-/// Variables available in the template:
-/// - `supports_vision` (bool)
-/// - `persona_name` (string)
-/// - `tools` (list of active tool names)
-/// - `denied_tools` (list of explicitly denied tool names)
-///
-/// Falls back to the raw body on any render error (with a warning) so a
-/// typo in the template never bricks the persona.
+/// Render a persona body through minijinja. **Moved to
+/// `mew_prompts::persona::render_template`.** Kept here as a thin
+/// re-export so existing call sites continue to compile.
 fn render_persona_template(
     body: &str,
     persona_name: &str,
     supports_vision: bool,
     active_tool_names: &Option<HashSet<String>>,
-    all_tools: &HashMap<String, Arc<dyn Tool>>,
+    all_tool_names: &[String],
     denied_tool_names: &HashSet<String>,
 ) -> String {
-    use minijinja::context;
-
-    // Compute the effective tool list the model will see this turn:
-    // start from the full registry, apply the allowlist if set, then
-    // subtract the denylist.
-    let effective: Vec<String> = all_tools
-        .keys()
-        .filter(|name| {
-            let allowed = active_tool_names
-                .as_ref()
-                .is_none_or(|set| set.contains(*name));
-            allowed && !denied_tool_names.contains(*name)
-        })
-        .cloned()
-        .collect();
-
-    let denied: Vec<String> = denied_tool_names.iter().cloned().collect();
-
-    let ctx = context! {
-        supports_vision => supports_vision,
-        persona_name => persona_name,
-        tools => effective,
-        denied_tools => denied,
-    };
-
-    minijinja::Environment::new()
-        .render_str(body, ctx)
-        .unwrap_or_else(|e| {
-            tracing::warn!(
-                error = %e,
-                persona = %persona_name,
-                "persona template render failed, falling back to raw body"
-            );
-            body.to_string()
-        })
+    mew_prompts::persona::render_template(
+        body,
+        persona_name,
+        supports_vision,
+        active_tool_names,
+        all_tool_names,
+        denied_tool_names,
+    )
 }
 
-/// Build the `<available_skills>` block for the system prompt from a
-/// slice of skill references. Renders one `<skill>` element per skill with
-/// its name and description, XML-escaped.
+/// Build the `<available_skills>` block for the system prompt. **Moved to
+/// `mew_prompts::skills::build_xml`.** Kept here as a thin re-export so the
+/// existing call site at `rebuild_system()` keeps working.
 fn build_skills_xml(skills: &[&mew_skills::Skill]) -> String {
-    let mut buf = String::from("<available_skills>\n");
-    for skill in skills {
-        buf.push_str(&format!(
-            "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n  </skill>\n",
-            escape_xml(&skill.name),
-            escape_xml(&skill.description),
-        ));
-    }
-    buf.push_str("</available_skills>\n");
-    buf
+    mew_prompts::skills::build_xml(skills)
 }
 
-fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+/// Map a tool's `Sensitivity` to the label string the classifier prompt
+/// expects. Kept here (next to `Agent::classify_permission`) so the
+/// classifier call site doesn't have to know about `mew_tools` directly.
+fn sensitivity_label(s: mew_tools::Sensitivity) -> &'static str {
+    match s {
+        mew_tools::Sensitivity::ReadOnly => "ReadOnly",
+        mew_tools::Sensitivity::Mutating => "Mutating",
+        mew_tools::Sensitivity::Dangerous => "Dangerous",
+    }
 }
 
 pub(crate) trait ToolInput {

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Decision specified in a config rule.
@@ -49,6 +51,10 @@ pub struct PermissionEngine {
     /// that exact path. Sits above the normal deny→allow cascade as its own
     /// tier.
     secret_globs: Vec<globset::GlobMatcher>,
+    /// Runtime permission mode. Stored as a u8 (0 = Standard, 1 = Dangerous)
+    /// for lock-free reads on the hot path. Mutated by `set_mode` and read by
+    /// `check` on every tool call.
+    mode: Arc<AtomicU8>,
 }
 
 impl PermissionEngine {
@@ -57,6 +63,43 @@ impl PermissionEngine {
             rules,
             session_allows: Mutex::new(HashSet::new()),
             secret_globs: Vec::new(),
+            mode: Arc::new(AtomicU8::new(mew_hooks::PermissionMode::Standard as u8)),
+        }
+    }
+
+    /// Construct with an initial permission mode (e.g. `Dangerous` when
+    /// `--dangerously-skip-permissions` is set on the CLI).
+    pub fn with_mode(self, mode: mew_hooks::PermissionMode) -> Self {
+        self.mode.store(mode as u8, Ordering::Relaxed);
+        self
+    }
+
+    /// Switch the runtime mode. Called by `Agent::set_permission_mode` from
+    /// the `/permissions` slash command. Cheap (atomic store); the next
+    /// `check` call observes the new mode.
+    pub fn set_mode(&self, mode: mew_hooks::PermissionMode) {
+        self.mode.store(mode as u8, Ordering::Relaxed);
+    }
+
+    /// Current mode. Lock-free read.
+    pub fn mode(&self) -> mew_hooks::PermissionMode {
+        match self.mode.load(Ordering::Relaxed) {
+            x if x == mew_hooks::PermissionMode::Standard as u8 => {
+                mew_hooks::PermissionMode::Standard
+            }
+            x if x == mew_hooks::PermissionMode::Permissive as u8 => {
+                mew_hooks::PermissionMode::Permissive
+            }
+            x if x == mew_hooks::PermissionMode::Auto as u8 => {
+                mew_hooks::PermissionMode::Auto
+            }
+            x if x == mew_hooks::PermissionMode::AutoPlus as u8 => {
+                mew_hooks::PermissionMode::AutoPlus
+            }
+            x if x == mew_hooks::PermissionMode::Dangerous as u8 => {
+                mew_hooks::PermissionMode::Dangerous
+            }
+            _ => mew_hooks::PermissionMode::Standard,
         }
     }
 
@@ -72,21 +115,56 @@ impl PermissionEngine {
 
     /// Evaluate rules for a tool call and return the runtime decision.
     ///
-    /// Evaluation order:
-    /// 0. Secret-file guard (`read` only): force `Prompt` unless a literal
-    ///    allow rule explicitly permits the exact path.
-    /// 1. Deny rules (first match wins)
-    /// 2. Allow rules (first match wins)
-    /// 3. Ask rules
-    /// 4. Session-allow cache
-    /// 5. Default based on sensitivity
+    /// Mode-aware cascade:
+    ///
+    /// - **Dangerous**: short-circuits to `AllowOnce` for everything. No
+    ///   prompts, no rule checks, no secret-file guard, no bash decomposition.
+    ///   The user has explicitly opted into "no holds barred." Output
+    ///   redaction in tools still applies.
+    ///
+    /// - **Auto**: short-circuits to `Prompt` for everything. Every tool
+    ///   call needs to be classified by an external LLM (the classifier
+    ///   path is implemented at the agent layer, not here). The engine
+    ///   just signals "this needs a decision"; the agent's classifier call
+    ///   converts that into AllowOnce / Deny / escalate-to-user. No rules,
+    ///   secret guard, or bash decomposition fire here — the classifier is
+    ///   the only gate.
+    ///
+    /// - **Permissive**: secret-file guard and bash decomposition still
+    ///   fire (real safety tiers); deny / allow / ask rules and session
+    ///   cache are SKIPPED; default by sensitivity (ReadOnly → AllowOnce,
+    ///   Mutating → AllowOnce, Dangerous → Prompt).
+    ///
+    /// - **Standard** (default): the full cascade — secret guard, bash
+    ///   decomposition, deny rules, allow rules, ask rules, session-allow
+    ///   cache, sensitivity default.
     pub async fn check(
         &self,
         tool_name: &str,
         input: &Value,
         sensitivity: mew_tools::Sensitivity,
     ) -> mew_hooks::PermissionDecision {
-        // 0. Secret-file guard.
+        // 0a. Dangerous mode: full override. No prompts, no rule checks,
+        // no secret guard, no bash decomposition. Pure bypass.
+        if self.mode() == mew_hooks::PermissionMode::Dangerous {
+            return mew_hooks::PermissionDecision::AllowOnce;
+        }
+
+        // 0b. Auto / Auto+ mode: every call needs a classifier decision.
+        // Return Prompt so the agent's permission flow routes to the
+        // classifier LLM. The engine doesn't distinguish Auto from Auto+
+        // here — the difference lives in the agent's classifier wiring
+        // (Auto falls back to user on escalate/failure; Auto+ denies).
+        if matches!(
+            self.mode(),
+            mew_hooks::PermissionMode::Auto | mew_hooks::PermissionMode::AutoPlus
+        ) {
+            return mew_hooks::PermissionDecision::Prompt;
+        }
+
+        // 1. Secret-file guard (`read` only): force `Prompt` unless a literal
+        // allow rule explicitly permits the exact path. Fires in Standard and
+        // Permissive.
         if tool_name == "read" && !self.secret_globs.is_empty() {
             if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
                 if self.is_secret_path(path) && !self.has_literal_allow(tool_name, path) {
@@ -95,16 +173,13 @@ impl PermissionEngine {
             }
         }
 
-        // 0.5. Bash command decomposition. Compound commands (pipes, &&, ;)
+        // 2. Bash command decomposition. Compound commands (pipes, &&, ;)
         // and opaque constructs ($(…), eval, bash -c, | sh) cannot be safely
-        // checked with prefix matching alone. Decompose and require every
-        // program to be explicitly allowed.
+        // checked with prefix matching alone. Fires in Standard and Permissive.
         if tool_name == "bash" {
             if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
                 let parsed = crate::shell::parse_command(cmd);
                 if parsed.has_opaque {
-                    // The engine cannot see what the opaque construct will
-                    // run. Force a prompt regardless of rules.
                     return mew_hooks::PermissionDecision::Prompt;
                 }
                 if parsed.programs.len() > 1 {
@@ -112,11 +187,11 @@ impl PermissionEngine {
                         .check_compound_bash(&parsed.programs, sensitivity)
                         .await;
                 }
-                // Single program — fall through to normal rule matching.
             }
         }
 
-        // 1. Deny rules
+        // 3. Deny rules fire in Standard AND Permissive (user safety rails).
+        // In Dangerous mode this is skipped via the short-circuit at step 0.
         for rule in &self.rules {
             if rule.decision != RuleDecision::Deny {
                 continue;
@@ -129,7 +204,14 @@ impl PermissionEngine {
             }
         }
 
-        // 2. Allow rules
+        // 4. Permissive mode short-circuit. Auto-allow ReadOnly/Mutating;
+        // still prompt on Dangerous. No allow rules, ask rules, or
+        // session-allow cache consulted.
+        if self.mode() == mew_hooks::PermissionMode::Permissive {
+            return self.check_permissive_mode(sensitivity);
+        }
+
+        // 5. Allow rules (first match wins) — Standard only.
         for rule in &self.rules {
             if rule.decision != RuleDecision::Allow {
                 continue;
@@ -142,7 +224,7 @@ impl PermissionEngine {
             }
         }
 
-        // 2.5 Ask rules (force a prompt even for ReadOnly tools)
+        // 6. Ask rules (force a prompt even for ReadOnly tools) — Standard only.
         for rule in &self.rules {
             if rule.decision != RuleDecision::Ask {
                 continue;
@@ -155,17 +237,33 @@ impl PermissionEngine {
             }
         }
 
-        // 3. Session allows
+        // 7. Session allows — Standard only.
         let session = self.session_allows.lock().await;
         if session.contains(tool_name) {
             return mew_hooks::PermissionDecision::AllowOnce;
         }
         drop(session);
 
-        // 4. Default based on sensitivity
+        // 8. Default based on sensitivity — Standard only.
         match sensitivity {
             mew_tools::Sensitivity::ReadOnly => mew_hooks::PermissionDecision::AllowOnce,
             _ => mew_hooks::PermissionDecision::Prompt,
+        }
+    }
+
+    /// Permissive-mode default: ReadOnly and Mutating tools auto-allow;
+    /// Dangerous tools (bash, shell_background, shell_monitor) still prompt.
+    /// Called after secret-file guard, bash decomposition, and deny rules
+    /// have already had their chance to fire.
+    fn check_permissive_mode(
+        &self,
+        sensitivity: mew_tools::Sensitivity,
+    ) -> mew_hooks::PermissionDecision {
+        match sensitivity {
+            mew_tools::Sensitivity::ReadOnly | mew_tools::Sensitivity::Mutating => {
+                mew_hooks::PermissionDecision::AllowOnce
+            }
+            mew_tools::Sensitivity::Dangerous => mew_hooks::PermissionDecision::Prompt,
         }
     }
 
@@ -177,6 +275,7 @@ impl PermissionEngine {
             .insert(tool_name.to_string());
     }
 
+    /// Dangerous-mode check: only deny rules are consulted. Everything else
     /// Check a compound bash command (pipe, &&, ;) where every program must
     /// be explicitly allowed for the whole command to auto-allow. Any deny
     /// hit on any program short-circuits to Deny. Any program without a
@@ -860,5 +959,444 @@ mod tests {
             )
             .await;
         assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce);
+    }
+
+    // ------------------------------------------------------------------
+    // PermissionMode (Dangerous! / bypass)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_mode_default_is_standard() {
+        let engine = PermissionEngine::new(vec![]);
+        assert_eq!(engine.mode(), mew_hooks::PermissionMode::Standard);
+    }
+
+    #[tokio::test]
+    async fn test_with_mode_constructor_sets_initial_mode() {
+        let engine =
+            PermissionEngine::new(vec![]).with_mode(mew_hooks::PermissionMode::Dangerous);
+        assert_eq!(engine.mode(), mew_hooks::PermissionMode::Dangerous);
+    }
+
+    #[tokio::test]
+    async fn test_mode_can_be_toggled_at_runtime() {
+        let engine = PermissionEngine::new(vec![]);
+        assert_eq!(engine.mode(), mew_hooks::PermissionMode::Standard);
+        engine.set_mode(mew_hooks::PermissionMode::Dangerous);
+        assert_eq!(engine.mode(), mew_hooks::PermissionMode::Dangerous);
+        engine.set_mode(mew_hooks::PermissionMode::Standard);
+        assert_eq!(engine.mode(), mew_hooks::PermissionMode::Standard);
+    }
+
+    #[tokio::test]
+    async fn test_dangerous_mode_auto_allows_bash_without_rules() {
+        // No rules, Dangerous mode → bash runs without prompt.
+        let engine =
+            PermissionEngine::new(vec![]).with_mode(mew_hooks::PermissionMode::Dangerous);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("rm -rf /tmp/something"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            mew_hooks::PermissionDecision::AllowOnce,
+            "Dangerous mode must auto-allow bash without prompting"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dangerous_mode_auto_allows_write() {
+        // No rules, Dangerous mode → Mutating write auto-allows.
+        let engine =
+            PermissionEngine::new(vec![]).with_mode(mew_hooks::PermissionMode::Dangerous);
+        let decision = engine
+            .check(
+                "write",
+                &make_input("foo.rs"),
+                mew_tools::Sensitivity::Mutating,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            mew_hooks::PermissionDecision::AllowOnce,
+            "Dangerous mode must auto-allow Mutating tools without prompting"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dangerous_mode_overrides_deny_rules() {
+        // Dangerous mode overrides EVERYTHING, including user-configured deny
+        // rules. The user has explicitly opted into "no holds barred" — they
+        // know what they're doing. Pinned here so the override-everything
+        // contract is documented.
+        let engine = PermissionEngine::new(vec![PermissionRule {
+            tool: "bash".to_string(),
+            decision: RuleDecision::Deny,
+            r#match: MatchConditions {
+                command_prefix: Some("rm".to_string()),
+                ..Default::default()
+            },
+        }])
+        .with_mode(mew_hooks::PermissionMode::Dangerous);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("rm -rf /"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            mew_hooks::PermissionDecision::AllowOnce,
+            "Dangerous mode must override deny rules — pure bypass"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dangerous_mode_skips_secret_guard() {
+        // Even secret-file reads auto-allow in Dangerous mode (the user has
+        // opted out of all prompts). Secret redaction in tool output still
+        // applies; this is only about the permission gate.
+        let engine = PermissionEngine::new(vec![])
+            .with_secret_files(vec![".env".into()])
+            .with_mode(mew_hooks::PermissionMode::Dangerous);
+        let decision = engine
+            .check(
+                "read",
+                &make_input(".env"),
+                mew_tools::Sensitivity::ReadOnly,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            mew_hooks::PermissionDecision::AllowOnce,
+            "Dangerous mode must skip the secret-file prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dangerous_mode_skips_opaque_bash_prompt() {
+        // Opaque bash constructs (eval, $()) normally force Prompt. In
+        // Dangerous mode they auto-allow like everything else.
+        let engine =
+            PermissionEngine::new(vec![]).with_mode(mew_hooks::PermissionMode::Dangerous);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("eval $(cat .env)"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            mew_hooks::PermissionDecision::AllowOnce,
+            "Dangerous mode must skip opaque-construct prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dangerous_mode_does_not_override_session_allows() {
+        // session_allows are still honored in Dangerous mode (which they
+        // would be anyway since everything auto-allows). This test pins that
+        // we don't accidentally crash or behave weirdly.
+        let engine =
+            PermissionEngine::new(vec![]).with_mode(mew_hooks::PermissionMode::Dangerous);
+        engine.add_session_allow("write").await;
+        let decision = engine
+            .check(
+                "write",
+                &make_input("foo.rs"),
+                mew_tools::Sensitivity::Mutating,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce);
+    }
+
+    // ------------------------------------------------------------------
+    // PermissionMode::Permissive (middle tier)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_permissive_mode_auto_allows_readonly() {
+        let engine =
+            PermissionEngine::new(vec![]).with_mode(mew_hooks::PermissionMode::Permissive);
+        let decision = engine
+            .check(
+                "read",
+                &make_input("foo.rs"),
+                mew_tools::Sensitivity::ReadOnly,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce);
+    }
+
+    #[tokio::test]
+    async fn test_permissive_mode_auto_allows_mutating() {
+        let engine =
+            PermissionEngine::new(vec![]).with_mode(mew_hooks::PermissionMode::Permissive);
+        let decision = engine
+            .check(
+                "write",
+                &make_input("foo.rs"),
+                mew_tools::Sensitivity::Mutating,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            mew_hooks::PermissionDecision::AllowOnce,
+            "Permissive mode must auto-allow Mutating tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_permissive_mode_prompts_on_dangerous() {
+        // bash is Dangerous sensitivity. Permissive mode still prompts.
+        let engine =
+            PermissionEngine::new(vec![]).with_mode(mew_hooks::PermissionMode::Permissive);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("ls"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            mew_hooks::PermissionDecision::Prompt,
+            "Permissive mode must still prompt for Dangerous tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_permissive_mode_respects_deny_rules() {
+        // Even though Permissive auto-allows Mutating, deny rules still fire.
+        let engine = PermissionEngine::new(vec![PermissionRule {
+            tool: "write".to_string(),
+            decision: RuleDecision::Deny,
+            r#match: MatchConditions {
+                path_glob: Some("/etc/**".to_string()),
+                ..Default::default()
+            },
+        }])
+        .with_mode(mew_hooks::PermissionMode::Permissive);
+        let decision = engine
+            .check(
+                "write",
+                &make_input("/etc/passwd"),
+                mew_tools::Sensitivity::Mutating,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            mew_hooks::PermissionDecision::Deny,
+            "Permissive mode must respect user-configured deny rules"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_permissive_mode_respects_secret_guard() {
+        // Secret-file guard fires in Permissive (real safety tier).
+        let engine = PermissionEngine::new(vec![])
+            .with_secret_files(vec![".env".into()])
+            .with_mode(mew_hooks::PermissionMode::Permissive);
+        let decision = engine
+            .check(
+                "read",
+                &make_input(".env"),
+                mew_tools::Sensitivity::ReadOnly,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            mew_hooks::PermissionDecision::Prompt,
+            "Permissive mode must respect the secret-file guard"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_permissive_mode_respects_bash_decomposition() {
+        // Opaque bash constructs (eval, $()) force Prompt in Permissive.
+        let engine =
+            PermissionEngine::new(vec![]).with_mode(mew_hooks::PermissionMode::Permissive);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("eval $(cat .env)"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            mew_hooks::PermissionDecision::Prompt,
+            "Permissive mode must respect bash decomposition"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_permissive_mode_skips_allow_rules() {
+        // In Permissive mode, allow rules don't run (Mutating auto-allows
+        // anyway). Pinned so we don't accidentally consult them.
+        let engine = PermissionEngine::new(vec![PermissionRule {
+            tool: "write".to_string(),
+            decision: RuleDecision::Allow,
+            r#match: MatchConditions {
+                path_glob: Some("/special/**".to_string()),
+                ..Default::default()
+            },
+        }])
+        .with_mode(mew_hooks::PermissionMode::Permissive);
+        // Should auto-allow via the sensitivity default, not via the rule.
+        let decision = engine
+            .check(
+                "write",
+                &make_input("not/special.rs"),
+                mew_tools::Sensitivity::Mutating,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::AllowOnce);
+    }
+
+    // ------------------------------------------------------------------
+    // PermissionMode::Auto (classifier-driven)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_auto_mode_short_circuits_to_prompt() {
+        // Auto mode forces Prompt for every call regardless of sensitivity
+        // or rules — the classifier (at the agent layer) will decide what
+        // to do with that Prompt.
+        let engine =
+            PermissionEngine::new(vec![]).with_mode(mew_hooks::PermissionMode::Auto);
+        let decision = engine
+            .check(
+                "read",
+                &make_input("foo.rs"),
+                mew_tools::Sensitivity::ReadOnly,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            mew_hooks::PermissionDecision::Prompt,
+            "Auto mode must short-circuit to Prompt for ReadOnly too"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auto_mode_prompts_even_for_readonly() {
+        let engine =
+            PermissionEngine::new(vec![]).with_mode(mew_hooks::PermissionMode::Auto);
+        let decision = engine
+            .check(
+                "echo",
+                &serde_json::json!({"input": "hello"}),
+                mew_tools::Sensitivity::ReadOnly,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::Prompt);
+    }
+
+    #[tokio::test]
+    async fn test_auto_mode_skips_deny_rules() {
+        // In Auto mode deny rules don't fire — the classifier is the only
+        // gate. Same posture as Dangerous.
+        let engine = PermissionEngine::new(vec![PermissionRule {
+            tool: "bash".to_string(),
+            decision: RuleDecision::Deny,
+            r#match: MatchConditions {
+                command_prefix: Some("rm".to_string()),
+                ..Default::default()
+            },
+        }])
+        .with_mode(mew_hooks::PermissionMode::Auto);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("rm -rf /"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(
+            decision,
+            mew_hooks::PermissionDecision::Prompt,
+            "Auto mode must skip deny rules — classifier is the gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auto_mode_skips_secret_guard() {
+        // The classifier is responsible for recognizing sensitive reads;
+        // the secret-file guard doesn't fire in Auto mode.
+        let engine = PermissionEngine::new(vec![])
+            .with_secret_files(vec![".env".into()])
+            .with_mode(mew_hooks::PermissionMode::Auto);
+        let decision = engine
+            .check(
+                "read",
+                &make_input(".env"),
+                mew_tools::Sensitivity::ReadOnly,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::Prompt);
+    }
+
+    #[tokio::test]
+    async fn test_auto_mode_skips_opaque_bash_prompt() {
+        // Opaque bash constructs don't force-prompt in Auto — the classifier
+        // sees the raw command and decides.
+        let engine =
+            PermissionEngine::new(vec![]).with_mode(mew_hooks::PermissionMode::Auto);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("eval $(cat .env)"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::Prompt);
+    }
+
+    // ------------------------------------------------------------------
+    // PermissionMode::AutoPlus (Auto with fail-closed semantics)
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_auto_plus_mode_short_circuits_to_prompt() {
+        // Same engine-level behavior as Auto. The Auto+/Auto difference
+        // lives in the agent's classifier wiring (fail-closed vs fall-through
+        // to user). Pinned so the engine treats them the same.
+        let engine = PermissionEngine::new(vec![])
+            .with_mode(mew_hooks::PermissionMode::AutoPlus);
+        let decision = engine
+            .check(
+                "read",
+                &make_input("foo.rs"),
+                mew_tools::Sensitivity::ReadOnly,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::Prompt);
+    }
+
+    #[tokio::test]
+    async fn test_auto_plus_mode_skips_deny_rules() {
+        let engine = PermissionEngine::new(vec![PermissionRule {
+            tool: "bash".to_string(),
+            decision: RuleDecision::Deny,
+            r#match: MatchConditions {
+                command_prefix: Some("rm".to_string()),
+                ..Default::default()
+            },
+        }])
+        .with_mode(mew_hooks::PermissionMode::AutoPlus);
+        let decision = engine
+            .check(
+                "bash",
+                &make_bash_input("rm -rf /"),
+                mew_tools::Sensitivity::Dangerous,
+            )
+            .await;
+        assert_eq!(decision, mew_hooks::PermissionDecision::Prompt);
     }
 }

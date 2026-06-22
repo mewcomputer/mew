@@ -266,9 +266,7 @@ impl Loader {
                 tools: Some(vec!["read".into(), "glob".into(), "grep".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
                 max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
-                body: "You are a research assistant. Your job is to investigate the codebase and answer questions thoroughly. \
-                       Read files, search for patterns, and gather context before answering. \
-                       Be thorough but concise. Cite specific file paths and line numbers when referencing code.".into(),
+                body: mew_prompts::subagent::RESEARCHER_BODY.into(),
                 path: PathBuf::from("(built-in)"),
             },
             SubagentDef {
@@ -280,10 +278,7 @@ impl Loader {
                 tools: Some(vec!["read".into(), "glob".into(), "grep".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
                 max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
-                body: "You are a code reviewer. Examine the provided code or diff for: \
-                       bugs, security issues, performance problems, style violations, and missing error handling. \
-                       Be specific about what you find. Reference file paths and line numbers. \
-                       Rate severity as: critical, warning, or suggestion.".into(),
+                body: mew_prompts::subagent::REVIEWER_BODY.into(),
                 path: PathBuf::from("(built-in)"),
             },
             SubagentDef {
@@ -295,9 +290,7 @@ impl Loader {
                 tools: Some(vec!["read".into(), "write".into(), "edit".into(), "glob".into(), "grep".into(), "bash".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
                 max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
-                body: "You are a code implementation assistant. Write clean, idiomatic code that follows the project's existing conventions. \
-                       Read existing code to understand patterns before writing new code. \
-                       Make minimal, focused changes. Test your changes when possible.".into(),
+                body: mew_prompts::subagent::CODER_BODY.into(),
                 path: PathBuf::from("(built-in)"),
             },
         ]

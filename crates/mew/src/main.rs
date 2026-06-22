@@ -27,7 +27,7 @@ use mew_tools::tools::exit_tool::ExitTool;
 use mew_tools::tools::flag_important::{FlagImportant, FlaggedFile};
 use mew_tools::tools::glob::Glob;
 use mew_tools::tools::grep::Grep;
-use mew_tools::tools::jobs::{JobBlock, JobCancel, JobStatus, ShellBackground};
+use mew_tools::tools::jobs::{JobBlock, JobCancel, JobStatus, ShellBackground, ShellMonitor};
 use mew_tools::tools::progress_update::ProgressUpdate;
 use mew_tools::tools::read::Read;
 use mew_tools::tools::skill::Skill;
@@ -64,6 +64,30 @@ enum Commands {
         #[arg(long)]
         raw: bool,
 
+        /// Auto-allow Mutating tools (write/edit/etc.); bash still prompts.
+        /// Equivalent to `/permissions permissive`. `-D` and `-A` win if set.
+        #[arg(long, short = 'P', env = "MEW_PERMISSIVE")]
+        permissive: bool,
+
+        /// Route every tool call through a small LLM classifier
+        /// (allow/deny/escalate). Equivalent to `/permissions auto`.
+        /// `-D` wins if both are set. Requires a classifier provider.
+        #[arg(long, short = 'A', env = "MEW_AUTO")]
+        auto: bool,
+
+        /// Like `--auto`, but the classifier CANNOT escalate — escalate or
+        /// failure means Deny (fail closed). Equivalent to
+        /// `/permissions auto_plus`. Wins over `-A` if both are set.
+        #[arg(long, env = "MEW_AUTO_PLUS")]
+        auto_plus: bool,
+
+        /// Skip all permission prompts. Every tool auto-runs and overrides
+        /// deny rules, ask rules, and the secret-file guard. Equivalent to
+        /// `/permissions dangerous`. Wins over `-P`, `-A`, and
+        /// `--auto-plus` if set.
+        #[arg(long, short = 'D', env = "MEW_DANGEROUS")]
+        dangerously_skip_permissions: bool,
+
         /// The prompt to send
         prompt: Vec<String>,
     },
@@ -85,6 +109,29 @@ enum Commands {
         #[arg(long)]
         raw: bool,
 
+        /// Auto-allow Mutating tools (write/edit/etc.); bash still prompts.
+        /// Equivalent to `/permissions permissive`.
+        #[arg(long, short = 'P', env = "MEW_PERMISSIVE")]
+        permissive: bool,
+
+        /// Route every tool call through a small LLM classifier
+        /// (allow/deny/escalate). Equivalent to `/permissions auto`.
+        #[arg(long, short = 'A', env = "MEW_AUTO")]
+        auto: bool,
+
+        /// Like `--auto`, but the classifier CANNOT escalate — escalate or
+        /// failure means Deny (fail closed). Equivalent to
+        /// `/permissions auto_plus`.
+        #[arg(long, env = "MEW_AUTO_PLUS")]
+        auto_plus: bool,
+
+        /// Skip all permission prompts. Every tool auto-runs and overrides
+        /// deny rules, ask rules, and the secret-file guard. Equivalent to
+        /// `/permissions dangerous`. Can be toggled at runtime via the
+        /// `/permissions` slash command.
+        #[arg(long, short = 'D', env = "MEW_DANGEROUS")]
+        dangerously_skip_permissions: bool,
+
         /// Connect to an external ACP agent
         #[arg(long)]
         acp_agent: Option<String>,
@@ -102,6 +149,22 @@ enum Commands {
         /// Dump raw request/response
         #[arg(long)]
         raw: bool,
+
+        /// Auto-allow Mutating tools; bash still prompts.
+        #[arg(long, short = 'P', env = "MEW_PERMISSIVE")]
+        permissive: bool,
+
+        /// Route every tool call through a small LLM classifier.
+        #[arg(long, short = 'A', env = "MEW_AUTO")]
+        auto: bool,
+
+        /// Like `--auto`, but fail-closed on classifier uncertainty.
+        #[arg(long, env = "MEW_AUTO_PLUS")]
+        auto_plus: bool,
+
+        /// Skip all permission prompts. Every tool auto-runs.
+        #[arg(long, short = 'D', env = "MEW_DANGEROUS")]
+        dangerously_skip_permissions: bool,
     },
     /// View or edit configuration
     Config {
@@ -139,40 +202,74 @@ async fn main() -> Result<()> {
             model,
             variant,
             raw,
+            permissive,
+            auto,
+            auto_plus,
+            dangerously_skip_permissions,
             prompt,
         }) => {
             let provider = resolve_provider(provider, &state);
             let model = resolve_model_opt(model, &state);
-            run_cmd(provider, model, variant, raw, prompt).await
+            run_cmd(
+                provider,
+                model,
+                variant,
+                raw,
+                resolve_mode(permissive, auto, auto_plus, dangerously_skip_permissions),
+                prompt,
+            )
+            .await
         }
         Some(Commands::Chat {
             provider,
             model,
             variant,
             raw,
+            permissive,
+            auto,
+            auto_plus,
+            dangerously_skip_permissions,
             acp_agent,
         }) => {
+            let mode = resolve_mode(permissive, auto, auto_plus, dangerously_skip_permissions);
             if let Some(agent_cmd) = acp_agent {
-                chat_with_acp(&agent_cmd).await
+                chat_with_acp(&agent_cmd, mode).await
             } else {
                 let provider = resolve_provider(provider, &state);
                 let model = resolve_model_opt(model, &state);
-                chat_cmd(provider, model, variant, raw).await
+                chat_cmd(provider, model, variant, raw, mode).await
             }
         }
         Some(Commands::Acp {
             provider,
             model,
             raw,
+            permissive,
+            auto,
+            auto_plus,
+            dangerously_skip_permissions,
         }) => {
             let provider = resolve_provider(provider, &state);
             let model = resolve_model_opt(model, &state);
-            run_acp_server(&provider, model, raw).await
+            run_acp_server(
+                &provider,
+                model,
+                raw,
+                resolve_mode(permissive, auto, auto_plus, dangerously_skip_permissions),
+            )
+            .await
         }
         None => {
             let provider = resolve_provider(None, &state);
             let model = resolve_model_opt(None, &state);
-            chat_cmd(provider, model, None, false).await
+            chat_cmd(
+                provider,
+                model,
+                None,
+                false,
+                mew_hooks::PermissionMode::Standard,
+            )
+            .await
         }
         Some(Commands::Config { command }) => {
             config_cmd(command)?;
@@ -328,6 +425,7 @@ fn build_tools(
         Arc::new(ProgressUpdate),
         Arc::new(AskUser),
         Arc::new(ShellBackground),
+        Arc::new(ShellMonitor),
         Arc::new(JobStatus),
         Arc::new(JobBlock),
         Arc::new(JobCancel),
@@ -461,7 +559,10 @@ async fn drain_pending_persona_switch(
     }
 }
 
-fn build_permission_engine(cfg: &Config) -> Arc<mew_config::permissions::PermissionEngine> {
+fn build_permission_engine(
+    cfg: &Config,
+    mode: mew_hooks::PermissionMode,
+) -> Arc<mew_config::permissions::PermissionEngine> {
     let secret_globs: Vec<String> = cfg
         .secrets
         .files
@@ -470,7 +571,8 @@ fn build_permission_engine(cfg: &Config) -> Arc<mew_config::permissions::Permiss
         .collect();
     Arc::new(
         mew_config::permissions::PermissionEngine::new(cfg.permissions.rules.clone())
-            .with_secret_files(secret_globs),
+            .with_secret_files(secret_globs)
+            .with_mode(mode),
     )
 }
 
@@ -667,7 +769,7 @@ fn load_mcp_configs() -> Vec<mew_mcp::McpServerConfig> {
     configs
 }
 
-async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
+async fn chat_with_acp(agent_cmd: &str, _mode: mew_hooks::PermissionMode) -> Result<()> {
     use std::sync::Arc;
 
     let parts: Vec<&str> = agent_cmd.split_whitespace().collect();
@@ -817,7 +919,12 @@ async fn chat_with_acp(agent_cmd: &str) -> Result<()> {
     result
 }
 
-async fn run_acp_server(provider_flag: &str, model_flag: Option<String>, raw: bool) -> Result<()> {
+async fn run_acp_server(
+    provider_flag: &str,
+    model_flag: Option<String>,
+    raw: bool,
+    mode: mew_hooks::PermissionMode,
+) -> Result<()> {
     let cfg = mew_config::load().context("load config")?;
     let cat = load_catalog(&cfg).await;
     let cat_for_resolver = cat.clone();
@@ -850,7 +957,7 @@ async fn run_acp_server(provider_flag: &str, model_flag: Option<String>, raw: bo
     let mut tools = tools;
     tools.push(Arc::new(FlagImportant::new(flagged_files.clone())));
 
-    let permission_engine = build_permission_engine(&cfg);
+    let permission_engine = build_permission_engine(&cfg, mode);
 
     let mut agent = Agent::new(provider, dispatcher.clone(), None, tools, None);
     agent.flagged_files = flagged_files;
@@ -995,11 +1102,35 @@ async fn connect_mcp_servers(
     (tools, clients, status)
 }
 
+/// Resolve the initial permission mode from CLI flags. Precedence:
+/// `-D` (Dangerous) > `--auto-plus` (Auto+) > `-A` (Auto) >
+/// `-P` (Permissive) > Standard. Dangerous and the Auto family both
+/// bypass all gates but Dangerous is the stronger "trust me" signal.
+fn resolve_mode(
+    permissive: bool,
+    auto: bool,
+    auto_plus: bool,
+    dangerous: bool,
+) -> mew_hooks::PermissionMode {
+    if dangerous {
+        mew_hooks::PermissionMode::Dangerous
+    } else if auto_plus {
+        mew_hooks::PermissionMode::AutoPlus
+    } else if auto {
+        mew_hooks::PermissionMode::Auto
+    } else if permissive {
+        mew_hooks::PermissionMode::Permissive
+    } else {
+        mew_hooks::PermissionMode::Standard
+    }
+}
+
 async fn run_cmd(
     provider_flag: String,
     model_flag: Option<String>,
     variant_flag: Option<String>,
     raw: bool,
+    mode: mew_hooks::PermissionMode,
     prompt_parts: Vec<String>,
 ) -> Result<()> {
     let prompt = prompt_parts.join(" ");
@@ -1018,6 +1149,7 @@ async fn run_cmd(
         model_flag,
         variant_flag,
         raw,
+        mode,
         prompt,
     )
     .await
@@ -1028,6 +1160,7 @@ async fn chat_cmd(
     model_flag: Option<String>,
     variant_flag: Option<String>,
     raw: bool,
+    mode: mew_hooks::PermissionMode,
 ) -> Result<()> {
     let cfg = mew_config::load().context("load config")?;
 
@@ -1040,6 +1173,7 @@ async fn chat_cmd(
         model_flag,
         variant_flag,
         raw,
+        mode,
     )
     .await
 }
@@ -1080,6 +1214,7 @@ async fn run_tui(
     model_flag: Option<String>,
     variant_flag: Option<String>,
     raw: bool,
+    mode: mew_hooks::PermissionMode,
 ) -> Result<()> {
     let cat_for_resolver = cat.cloned();
     let (provider_id, model_id) = resolve_model(cfg, cat, provider_flag, model_flag);
@@ -1235,7 +1370,7 @@ async fn run_tui(
         _mcp_clients = mcp_cls;
     }
 
-    let permission_engine = build_permission_engine(cfg);
+    let permission_engine = build_permission_engine(cfg, mode);
 
     // Load project context files.
     let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());
@@ -1652,6 +1787,42 @@ async fn run_tui(
                                 mew_tui::SlashResult::OpenModelPicker => {
                                     app.open_command_palette();
                                 }
+                                mew_tui::SlashResult::PermissionModeMenu => {
+                                    app.open_permission_mode_picker();
+                                }
+                                mew_tui::SlashResult::SetPermissionMode(mode) => {
+                                    agent.set_permission_mode(mode);
+                                    app.permission_mode = mode;
+                                    let alert = match mode {
+                                        mew_hooks::PermissionMode::Standard => {
+                                            "Standard permission mode — prompts restored."
+                                                .to_string()
+                                        }
+                                        mew_hooks::PermissionMode::Permissive => {
+                                            "Permissive mode — Mutating tools auto-allow; \
+                                             bash still prompts and your rules still apply."
+                                                .to_string()
+                                        }
+                                        mew_hooks::PermissionMode::Auto => {
+                                            "Auto mode — small LLM classifier decides each \
+                                             tool call. Falls back to user on escalate."
+                                                .to_string()
+                                        }
+                                        mew_hooks::PermissionMode::AutoPlus => {
+                                            "Auto+ mode — classifier decides, but escalate or \
+                                             failure means Deny (fail closed). No human in \
+                                             the loop."
+                                                .to_string()
+                                        }
+                                        mew_hooks::PermissionMode::Dangerous => {
+                                            "⚠ Dangerous! mode — every tool auto-runs; \
+                                             overrides deny rules, ask rules, and the \
+                                             secret-file guard."
+                                                .to_string()
+                                        }
+                                    };
+                                    app.set_alert(alert);
+                                }
                                 mew_tui::SlashResult::ToggleMouseCapture => {
                                     toggle_mouse_capture(&mut app, &mut terminal).await;
                                 }
@@ -1749,6 +1920,40 @@ async fn run_tui(
                                     .on_persona_change(old.as_deref(), &name)
                                     .await;
                             }
+                        }
+                        mew_tui::events::Action::SetPermissionMode(mode) => {
+                            agent.set_permission_mode(mode);
+                            app.permission_mode = mode;
+                            let alert = match mode {
+                                mew_hooks::PermissionMode::Standard => {
+                                    "Standard permission mode — prompts restored for \
+                                     Mutating/Dangerous tools."
+                                        .to_string()
+                                }
+                                mew_hooks::PermissionMode::Permissive => {
+                                    "Permissive mode — Mutating tools auto-allow; \
+                                     bash still prompts and your rules still apply."
+                                        .to_string()
+                                }
+                                mew_hooks::PermissionMode::Auto => {
+                                    "Auto mode — small LLM classifier decides each \
+                                     tool call. Falls back to user on escalate."
+                                        .to_string()
+                                }
+                                mew_hooks::PermissionMode::AutoPlus => {
+                                    "Auto+ mode — classifier decides, but escalate or \
+                                     failure means Deny (fail closed). No human in \
+                                     the loop."
+                                        .to_string()
+                                }
+                                mew_hooks::PermissionMode::Dangerous => {
+                                    "⚠ Dangerous! mode — every tool auto-runs; \
+                                     overrides deny rules, ask rules, and the \
+                                     secret-file guard."
+                                        .to_string()
+                                }
+                            };
+                            app.set_alert(alert);
                         }
                         mew_tui::events::Action::InsertAtMention(mention) => {
                             app.insert_mention(&mention);
@@ -1927,6 +2132,39 @@ async fn run_tui(
                                     );
                                 }
                             }
+                            mew_tui::events::Action::SetPermissionMode(mode) => {
+                                agent.set_permission_mode(mode);
+                                app.permission_mode = mode;
+                                let alert = match mode {
+                                    mew_hooks::PermissionMode::Standard => {
+                                        "Standard permission mode — prompts restored."
+                                            .to_string()
+                                    }
+                                    mew_hooks::PermissionMode::Permissive => {
+                                        "Permissive mode — Mutating tools auto-allow; \
+                                         bash still prompts and your rules still apply."
+                                            .to_string()
+                                    }
+                                    mew_hooks::PermissionMode::Auto => {
+                                        "Auto mode — small LLM classifier decides each \
+                                         tool call. Falls back to user on escalate."
+                                            .to_string()
+                                    }
+                                    mew_hooks::PermissionMode::AutoPlus => {
+                                        "Auto+ mode — classifier decides, but escalate or \
+                                         failure means Deny (fail closed). No human in \
+                                         the loop."
+                                            .to_string()
+                                    }
+                                    mew_hooks::PermissionMode::Dangerous => {
+                                        "⚠ Dangerous! mode — every tool auto-runs; \
+                                         overrides deny rules, ask rules, and the \
+                                         secret-file guard."
+                                            .to_string()
+                                    }
+                                };
+                                app.set_alert(alert);
+                            }
                             mew_tui::events::Action::InsertAtMention(mention) => {
                                 app.insert_mention(&mention);
                             }
@@ -1982,6 +2220,13 @@ async fn run_tui(
                                     }
                                     mew_tui::SlashResult::OpenModelPicker => {
                                         // Deferred to main loop; ignored during drain.
+                                    }
+                                    mew_tui::SlashResult::PermissionModeMenu => {
+                                        // Deferred to main loop; ignored during drain.
+                                    }
+                                    mew_tui::SlashResult::SetPermissionMode(mode) => {
+                                        // Deferred to main loop; ignored during drain.
+                                        let _ = mode;
                                     }
                                     mew_tui::SlashResult::ToggleMouseCapture => {
                                         // Deferred to main loop; ignored during drain.
@@ -2328,6 +2573,7 @@ fn provider_name_to_shape(pid: &str) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_and_run(
     cfg: &Config,
     cat: Option<&Catalog>,
@@ -2335,6 +2581,7 @@ async fn build_and_run(
     model_flag: Option<String>,
     variant_flag: Option<String>,
     raw: bool,
+    mode: mew_hooks::PermissionMode,
     prompt: String,
 ) -> Result<()> {
     let cat_for_resolver = cat.cloned();
@@ -2395,7 +2642,7 @@ async fn build_and_run(
         _mcp_clients = mcp_cls;
     }
 
-    let permission_engine = build_permission_engine(cfg);
+    let permission_engine = build_permission_engine(cfg, mode);
 
     let mut agent = Agent::new(
         provider,
@@ -2597,6 +2844,10 @@ async fn build_and_run(
                 // and the switch is harmless on its own (no model pin
                 // means just a system prompt + tool allowlist change), so
                 // we silently drop the apply.
+            }
+            mew_agent::AgentEvent::JobUpdate { .. } => {
+                // No sidebar in non-interactive mode; the job's output is
+                // surfaced through its own tool result when it finishes.
             }
         }
     }

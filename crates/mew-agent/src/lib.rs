@@ -96,6 +96,15 @@ pub enum AgentEvent {
     /// — never mid-turn — so the user sees the full response before the
     /// model swap happens.
     PersonaSwitchRequested { name: String },
+    /// A background shell job started, completed, failed, or was cancelled.
+    /// The TUI uses this to keep the sidebar's background-jobs section
+    /// in sync without polling the agent's registry.
+    JobUpdate {
+        job_id: String,
+        command: String,
+        /// One of "running", "completed", "failed", "cancelled".
+        state: String,
+    },
 }
 
 impl std::fmt::Debug for AgentEvent {
@@ -193,6 +202,11 @@ impl std::fmt::Debug for AgentEvent {
             AgentEvent::PersonaSwitchRequested { name } => f
                 .debug_struct("PersonaSwitchRequested")
                 .field("name", name)
+                .finish(),
+            AgentEvent::JobUpdate { job_id, state, .. } => f
+                .debug_struct("JobUpdate")
+                .field("job_id", job_id)
+                .field("state", state)
                 .finish(),
         }
     }

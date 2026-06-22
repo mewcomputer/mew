@@ -667,6 +667,8 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     }
                 } else if kind == "model" {
                     Some(Action::SwitchModel(id))
+                } else if kind == "permission_mode" {
+                    mew_hooks::PermissionMode::from_id(&id).map(Action::SetPermissionMode)
                 } else if kind == "file" {
                     if label.contains("[subagent]") {
                         Some(Action::InsertSubagentMention(id))
@@ -755,4 +757,7 @@ pub enum Action {
     /// User confirmed a persona switch from the confirm modal. The string
     /// is the target persona name.
     PersonaSwitchConfirmed(String),
+    /// Apply a permission mode change. Fires from `/permissions <mode>` and
+    /// from the permission-mode picker.
+    SetPermissionMode(mew_hooks::PermissionMode),
 }

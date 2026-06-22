@@ -162,6 +162,207 @@ pub enum PermissionDecision {
     Prompt,
 }
 
+/// Outcome of a *blocking* hook — a hook that can not only mutate the
+/// incoming value but also gate whether the action proceeds at all.
+///
+/// The transformation hooks (`on_chat_message`, `on_system_prompt`,
+/// `on_tool_execute_after`, `on_shell_env`, `on_user_input`, etc.) still
+/// return their transformed value directly — they're "see and rewrite"
+/// hooks. The blocking hooks (`on_permission_ask`, `on_tool_execute_before`)
+/// return `HookOutcome<T>` so plugins can veto the action entirely.
+///
+/// Variants:
+/// - **`Proceed(value)`** — let the action run; `value` is the (possibly
+///   modified) input the action will see.
+/// - **`Block(reason)`** — don't run the action. `reason` is surfaced to
+///   the user (permission modal) or to the model (tool error) and logged.
+/// - **`Suppress`** — don't run, don't log, don't surface. Use this for
+///   telemetry hooks that want to silently drop an action without revealing
+///   that the action was attempted.
+///
+/// The `Retry` variant from the parity doc is intentionally not included —
+/// there's no concrete use case yet and adding it would expose API surface
+/// that isn't wired to anything. Add when there's a real retry path.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HookOutcome<T> {
+    Proceed(T),
+    Block(String),
+    Suppress,
+}
+
+impl<T> HookOutcome<T> {
+    /// Convenience for the common case: proceed without modification.
+    pub fn proceed(value: T) -> Self {
+        HookOutcome::Proceed(value)
+    }
+
+    /// True if this outcome would let the action run.
+    pub fn is_proceed(&self) -> bool {
+        matches!(self, HookOutcome::Proceed(_))
+    }
+
+    /// True if this outcome blocks the action (Block or Suppress).
+    pub fn is_blocked(&self) -> bool {
+        !self.is_proceed()
+    }
+
+    /// Map the inner value when Proceed; pass Block/Suppress through.
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> HookOutcome<U> {
+        match self {
+            HookOutcome::Proceed(v) => HookOutcome::Proceed(f(v)),
+            HookOutcome::Block(r) => HookOutcome::Block(r),
+            HookOutcome::Suppress => HookOutcome::Suppress,
+        }
+    }
+}
+
+#[cfg(test)]
+mod hook_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn test_proceed_is_not_blocked() {
+        let o: HookOutcome<i32> = HookOutcome::Proceed(42);
+        assert!(o.is_proceed());
+        assert!(!o.is_blocked());
+    }
+
+    #[test]
+    fn test_block_is_blocked() {
+        let o: HookOutcome<i32> = HookOutcome::Block("nope".into());
+        assert!(!o.is_proceed());
+        assert!(o.is_blocked());
+    }
+
+    #[test]
+    fn test_suppress_is_blocked() {
+        let o: HookOutcome<i32> = HookOutcome::Suppress;
+        assert!(!o.is_proceed());
+        assert!(o.is_blocked());
+    }
+
+    #[test]
+    fn test_map_proceed_applies_fn() {
+        let o: HookOutcome<i32> = HookOutcome::Proceed(5);
+        let mapped = o.map(|x| x * 2);
+        assert_eq!(mapped, HookOutcome::Proceed(10));
+    }
+
+    #[test]
+    fn test_map_block_passes_through() {
+        let o: HookOutcome<i32> = HookOutcome::Block("reason".into());
+        let mapped = o.map(|x| x * 2);
+        assert_eq!(mapped, HookOutcome::Block("reason".into()));
+    }
+
+    #[test]
+    fn test_map_suppress_passes_through() {
+        let o: HookOutcome<i32> = HookOutcome::Suppress;
+        let mapped: HookOutcome<i32> = o.map(|x| x * 2);
+        assert_eq!(mapped, HookOutcome::Suppress);
+    }
+
+    #[test]
+    fn test_proceed_helper() {
+        let o = HookOutcome::proceed("hello");
+        assert_eq!(o, HookOutcome::Proceed("hello"));
+    }
+}
+
+/// Runtime permission mode. Controls how `PermissionEngine::check` short-circuits
+/// before reaching the normal rule cascade.
+///
+/// Five modes form a permission slider from most to least restrictive:
+///
+/// - **Standard** — default. Mutating/Dangerous tools prompt; deny rules,
+///   ask rules, secret-file guards, and bash decomposition all fire.
+/// - **Permissive** — Mutating tools (write/edit/switch_persona/job_cancel)
+///   auto-allow; Dangerous tools (bash/shell_background/shell_monitor) still
+///   prompt; user-configured deny rules, ask rules, secret-file guards, and
+///   bash decomposition all still fire. "I trust the agent with file edits,
+///   but bash and my safety rules still apply."
+/// - **Auto** — every tool call is routed through a small/cheap LLM
+///   classifier instead of the user. The classifier returns allow / deny /
+///   escalate; escalate falls back to the user modal. Deny rules, ask rules,
+///   secret-file guards, and bash decomposition are all skipped — the
+///   classifier is the only gate. "Don't interrupt me; let the model decide."
+///   Requires a classifier provider to be configured; without one, Auto
+///   mode is a no-op and falls through to the user modal.
+/// - **Auto+** — like Auto, but the classifier CANNOT escalate. If the
+///   classifier returns "escalate" or the call fails (provider error /
+///   timeout / malformed response), the call is **denied** — fail closed.
+///   Use this when you want hands-off but you also don't want a provider
+///   outage to silently run `rm -rf`. The classifier is the only gate, but
+///   uncertainty means no.
+/// - **Dangerous!** — every tool auto-runs; no prompts, no rule checks, no
+///   secret-file guards, no bash decomposition. The user is explicitly
+///   opting into "don't ask me anything, even the things I said don't do."
+///   Secret redaction in tool output still applies (defense in depth).
+///
+/// Set via the `/permissions` slash command, the `--dangerously-skip-permissions`
+/// / `--permissive` / `--auto` / `--auto-plus` CLI flags, or the
+/// `MEW_DANGEROUS` / `MEW_PERMISSIVE` / `MEW_AUTO` / `MEW_AUTO_PLUS` env vars.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Default. Tools go through the normal cascade (deny → allow → ask →
+    /// session-allow → sensitivity default). Mutating/Dangerous tools prompt.
+    #[default]
+    Standard,
+    /// Auto-allow Mutating tools; still prompt on Dangerous sensitivity;
+    /// respect deny/ask rules, secret-file guard, and bash decomposition.
+    Permissive,
+    /// Route every tool call through the classifier LLM. Classifier
+    /// returns allow / deny / escalate; escalate falls back to user.
+    /// All other permission tiers (rules, secret guard, bash decomp) are
+    /// skipped — the classifier is the gate.
+    Auto,
+    /// Route every tool call through the classifier LLM, but the
+    /// classifier CANNOT escalate. Escalate / failure → Deny (fail closed).
+    AutoPlus,
+    /// Override EVERYTHING. Every tool auto-runs; no prompts, no rule checks,
+    /// no secret-file guards, no bash decomposition. The user has explicitly
+    /// opted into "no holds barred." Output redaction still applies.
+    Dangerous,
+}
+
+impl PermissionMode {
+    /// Parse from the lowercase id used in slash-command / CLI serialization.
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "standard" => Some(PermissionMode::Standard),
+            "permissive" => Some(PermissionMode::Permissive),
+            "auto" => Some(PermissionMode::Auto),
+            "auto_plus" | "autoplus" => Some(PermissionMode::AutoPlus),
+            "dangerous" => Some(PermissionMode::Dangerous),
+            _ => None,
+        }
+    }
+
+    /// Stable lowercase id for serialization and picker `id` fields.
+    pub fn id(&self) -> &'static str {
+        match self {
+            PermissionMode::Standard => "standard",
+            PermissionMode::Permissive => "permissive",
+            PermissionMode::Auto => "auto",
+            PermissionMode::AutoPlus => "auto_plus",
+            PermissionMode::Dangerous => "dangerous",
+        }
+    }
+
+    /// Human-readable label for the picker. Includes a short risk cue so the
+    /// user knows what they're picking.
+    pub fn picker_label(&self) -> &'static str {
+        match self {
+            PermissionMode::Standard => "Standard",
+            PermissionMode::Permissive => "Permissive",
+            PermissionMode::Auto => "Auto",
+            PermissionMode::AutoPlus => "Auto+",
+            PermissionMode::Dangerous => "Dangerous!",
+        }
+    }
+}
+
 /// Per-plugin hook configuration. Allows scoping which hooks fire, what
 /// they match against, and how long they can run — without disabling the
 /// plugin entirely.
@@ -357,13 +558,13 @@ pub trait Dispatcher: Send + Sync {
     /// model. Plugins may prepend, append, or replace sections. Called every
     /// turn (system prompt is rebuilt from scratch each turn).
     async fn on_system_prompt(&self, prompt: String) -> String;
-    async fn on_tool_execute_before(&self, call: &ToolCall, input: Value) -> Value;
+    async fn on_tool_execute_before(&self, call: &ToolCall, input: Value) -> HookOutcome<Value>;
     async fn on_tool_execute_after(&self, call: &ToolCall, output: ToolOutput) -> ToolOutput;
     async fn on_permission_ask(
         &self,
         call: &ToolCall,
         current: PermissionDecision,
-    ) -> PermissionDecision;
+    ) -> HookOutcome<PermissionDecision>;
     async fn on_shell_env(&self, env: HashMap<String, String>) -> HashMap<String, String>;
 
     /// Called when the user submits a prompt, before it reaches the agent.
@@ -434,8 +635,8 @@ impl Dispatcher for NopDispatcher {
     async fn on_system_prompt(&self, prompt: String) -> String {
         prompt
     }
-    async fn on_tool_execute_before(&self, _call: &ToolCall, input: Value) -> Value {
-        input
+    async fn on_tool_execute_before(&self, _call: &ToolCall, input: Value) -> HookOutcome<Value> {
+        HookOutcome::Proceed(input)
     }
     async fn on_tool_execute_after(&self, _call: &ToolCall, output: ToolOutput) -> ToolOutput {
         output
@@ -444,8 +645,8 @@ impl Dispatcher for NopDispatcher {
         &self,
         _call: &ToolCall,
         current: PermissionDecision,
-    ) -> PermissionDecision {
-        current
+    ) -> HookOutcome<PermissionDecision> {
+        HookOutcome::Proceed(current)
     }
     async fn on_shell_env(&self, env: HashMap<String, String>) -> HashMap<String, String> {
         env

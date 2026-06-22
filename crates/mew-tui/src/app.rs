@@ -57,6 +57,11 @@ pub enum SlashResult {
         name: String,
         args: String,
     },
+    /// Open the permission-mode picker (Standard / Dangerous!).
+    PermissionModeMenu,
+    /// Apply a permission-mode selection directly (used by `/permissions
+    /// <mode>` and by the picker).
+    SetPermissionMode(mew_hooks::PermissionMode),
 }
 
 /// The application's main state.
@@ -116,6 +121,10 @@ pub struct App {
     pub personas: Vec<(String, String)>,
     /// Active persona name, if any.
     pub active_persona: Option<String>,
+    /// Current permission mode (Standard / Dangerous!). Mirrors the agent's
+    /// runtime mode so the TUI can render the picker state, the status-line
+    /// badge, and alert the user when it changes.
+    pub permission_mode: mew_hooks::PermissionMode,
     /// MCP server status: (name, connected, tool_count)
     pub mcp_status: Vec<(String, bool, usize)>,
     /// Available subagent names and descriptions for @-mention.
@@ -195,6 +204,9 @@ pub struct App {
     pub short_cwd: String,
     /// Running subagent tasks for sidebar display.
     pub subagents: Vec<SubagentState>,
+    /// Background shell jobs, kept in sync via `AgentEvent::JobUpdate`.
+    /// Each entry represents either a running or recently-finished job.
+    pub background_jobs: Vec<BackgroundJobState>,
 }
 
 /// A running or completed subagent task shown in the sidebar.
@@ -217,6 +229,23 @@ pub enum SubagentStatus {
     Running,
     Completed,
     Failed { reason: String },
+    Cancelled,
+}
+
+/// A background shell job shown in the sidebar.
+#[derive(Debug, Clone)]
+pub struct BackgroundJobState {
+    pub job_id: String,
+    pub command: String,
+    pub started_at: Instant,
+    pub status: BackgroundJobStatus,
+}
+
+#[derive(Debug, Clone)]
+pub enum BackgroundJobStatus {
+    Running,
+    Completed,
+    Failed,
     Cancelled,
 }
 
@@ -397,6 +426,7 @@ impl App {
             tools: Vec::new(),
             personas: Vec::new(),
             active_persona: None,
+            permission_mode: Default::default(),
             mcp_status: Vec::new(),
             subagent_names: Vec::new(),
             sidebar_collapsed: std::collections::HashMap::new(),
@@ -437,6 +467,7 @@ impl App {
             git_branch_resolved: false,
             short_cwd: short_cwd(),
             subagents: Vec::new(),
+            background_jobs: Vec::new(),
         }
     }
 
@@ -493,6 +524,80 @@ impl App {
             items,
             filter: String::new(),
             selected: 0,
+            cursor: 0,
+            scroll: 0,
+            visible_items: PICKER_VISIBLE_ITEMS,
+        });
+    }
+
+    /// Open the permission-mode picker (Standard / Permissive / Auto /
+    /// Auto+ / Dangerous!). Marks the currently active mode with a
+    /// trailing "● active" suffix so the user can see what's currently
+    /// in effect before selecting.
+    pub fn open_permission_mode_picker(&mut self) {
+        let active = self.permission_mode;
+        let marker = |m: mew_hooks::PermissionMode| -> &'static str {
+            if m == active { " ● active" } else { "" }
+        };
+        let items = vec![
+            PickerItem {
+                id: mew_hooks::PermissionMode::Standard.id().into(),
+                label: format!("Standard{}", marker(mew_hooks::PermissionMode::Standard)),
+                description: "Prompts for Mutating/Dangerous tools. Default.".into(),
+            },
+            PickerItem {
+                id: mew_hooks::PermissionMode::Permissive.id().into(),
+                label: format!("Permissive{}", marker(mew_hooks::PermissionMode::Permissive)),
+                description: "Auto-allows Mutating tools (write/edit/etc.). \
+                              Still prompts for bash and respects your deny rules, \
+                              ask rules, and secret-file guard."
+                    .into(),
+            },
+            PickerItem {
+                id: mew_hooks::PermissionMode::Auto.id().into(),
+                label: format!("Auto{}", marker(mew_hooks::PermissionMode::Auto)),
+                description: "Routes every tool call through a small/cheap LLM \
+                              classifier. Classifier returns allow/deny/escalate; \
+                              escalate falls back to the user modal. Skip the \
+                              prompts — let the model decide. Requires a \
+                              classifier provider to be configured."
+                    .into(),
+            },
+            PickerItem {
+                id: mew_hooks::PermissionMode::AutoPlus.id().into(),
+                label: format!("Auto+{}", marker(mew_hooks::PermissionMode::AutoPlus)),
+                description: "Like Auto, but the classifier CANNOT escalate. \
+                              Escalate or any classifier failure → Deny (fail \
+                              closed). Hands-off but uncertainty means no. \
+                              Use when you trust the model more than your \
+                              own attention but don't want a provider outage \
+                              to silently run destructive tools."
+                    .into(),
+            },
+            PickerItem {
+                id: mew_hooks::PermissionMode::Dangerous.id().into(),
+                label: format!("Dangerous!{}", marker(mew_hooks::PermissionMode::Dangerous)),
+                description: "Every tool auto-runs. Overrides deny rules, ask rules, \
+                              secret-file guard, bash decomposition. Pure bypass — \
+                              you've said \"don't ask me anything, even the things I \
+                              said don't do.\" Output redaction still applies."
+                    .into(),
+            },
+        ];
+        // Pre-select the active mode so Enter on an unchanged picker is a no-op.
+        let pre_selected = match active {
+            mew_hooks::PermissionMode::Standard => 0,
+            mew_hooks::PermissionMode::Permissive => 1,
+            mew_hooks::PermissionMode::Auto => 2,
+            mew_hooks::PermissionMode::AutoPlus => 3,
+            mew_hooks::PermissionMode::Dangerous => 4,
+        };
+        self.mode = Mode::CommandPalette;
+        self.picker = Some(PickerState {
+            kind: "permission_mode".into(),
+            items,
+            filter: String::new(),
+            selected: pre_selected,
             cursor: 0,
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
@@ -1210,6 +1315,10 @@ impl App {
                 description: "switch persona (e.g. /persona researcher)".into(),
             },
             SlashCommand {
+                name: "/permissions".into(),
+                description: "switch permission mode (Standard or Dangerous!)".into(),
+            },
+            SlashCommand {
                 name: "/quit".into(),
                 description: "exit mew".into(),
             },
@@ -1292,6 +1401,21 @@ impl App {
                         }
                     }
                     SlashResult::Message(out)
+                }
+            }
+            "/permissions" => {
+                // `/permissions`        → open the picker
+                // `/permissions standard|permissive|auto|auto_plus|dangerous` → switch directly
+                if let Some(arg) = arg {
+                    let mode = arg.trim();
+                    match mew_hooks::PermissionMode::from_id(mode) {
+                        Some(m) => SlashResult::SetPermissionMode(m),
+                        None => SlashResult::Message(format!(
+                            "unknown permission mode '{mode}'; expected 'standard', 'permissive', 'auto', 'auto_plus', or 'dangerous'"
+                        )),
+                    }
+                } else {
+                    SlashResult::PermissionModeMenu
                 }
             }
             "/sessions" => SlashResult::Message(self.build_sessions_list()),
@@ -1814,6 +1938,36 @@ impl App {
                 });
                 self.mode = crate::app::Mode::PermissionPrompt;
             }
+            AgentEvent::JobUpdate {
+                job_id,
+                command,
+                state,
+            } => {
+                let status = match state.as_str() {
+                    "running" => BackgroundJobStatus::Running,
+                    "completed" => BackgroundJobStatus::Completed,
+                    "failed" => BackgroundJobStatus::Failed,
+                    // "cancelled" or any unrecognized value.
+                    _ => BackgroundJobStatus::Cancelled,
+                };
+                if let Some(job) = self
+                    .background_jobs
+                    .iter_mut()
+                    .find(|j| j.job_id == job_id)
+                {
+                    // Existing entry: transition its state. Preserve the
+                    // original started_at so the elapsed counter is stable.
+                    job.status = status;
+                } else {
+                    // First update we've seen for this job.
+                    self.background_jobs.push(BackgroundJobState {
+                        job_id,
+                        command,
+                        started_at: Instant::now(),
+                        status,
+                    });
+                }
+            }
         }
     }
 
@@ -2022,6 +2176,192 @@ mod tests {
         assert!(names.contains(&"/help"));
         assert!(names.contains(&"/clear"));
         assert!(names.contains(&"/quit"));
+        assert!(names.contains(&"/permissions"));
+    }
+
+    #[test]
+    fn test_permissions_slash_with_no_arg_opens_picker() {
+        let app = App::new();
+        let result = app.handle_slash("/permissions");
+        assert!(matches!(result, SlashResult::PermissionModeMenu));
+    }
+
+    #[test]
+    fn test_permissions_slash_with_dangerous_arg() {
+        let app = App::new();
+        let result = app.handle_slash("/permissions dangerous");
+        assert!(matches!(
+            result,
+            SlashResult::SetPermissionMode(mew_hooks::PermissionMode::Dangerous)
+        ));
+    }
+
+    #[test]
+    fn test_permissions_slash_with_standard_arg() {
+        let app = App::new();
+        let result = app.handle_slash("/permissions standard");
+        assert!(matches!(
+            result,
+            SlashResult::SetPermissionMode(mew_hooks::PermissionMode::Standard)
+        ));
+    }
+
+    #[test]
+    fn test_permissions_slash_with_permissive_arg() {
+        let app = App::new();
+        let result = app.handle_slash("/permissions permissive");
+        assert!(matches!(
+            result,
+            SlashResult::SetPermissionMode(mew_hooks::PermissionMode::Permissive)
+        ));
+    }
+
+    #[test]
+    fn test_permissions_slash_with_auto_arg() {
+        let app = App::new();
+        let result = app.handle_slash("/permissions auto");
+        assert!(matches!(
+            result,
+            SlashResult::SetPermissionMode(mew_hooks::PermissionMode::Auto)
+        ));
+    }
+
+    #[test]
+    fn test_permissions_slash_with_auto_plus_arg() {
+        let app = App::new();
+        let result = app.handle_slash("/permissions auto_plus");
+        assert!(matches!(
+            result,
+            SlashResult::SetPermissionMode(mew_hooks::PermissionMode::AutoPlus)
+        ));
+    }
+
+    #[test]
+    fn test_permission_mode_picker_has_five_items() {
+        let mut app = App::new();
+        app.open_permission_mode_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.items.len(), 5, "picker should show all five modes");
+        let ids: Vec<&str> = picker.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "standard",
+                "permissive",
+                "auto",
+                "auto_plus",
+                "dangerous",
+            ],
+            "modes ordered from most-restrictive to least"
+        );
+    }
+
+    #[test]
+    fn test_permission_mode_picker_preselects_autoplus() {
+        let mut app = App::new();
+        app.permission_mode = mew_hooks::PermissionMode::AutoPlus;
+        app.open_permission_mode_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(
+            picker.selected, 3,
+            "AutoPlus should pre-select index 3 (between Auto and Dangerous!)"
+        );
+        let autoplus = picker.items.iter().find(|i| i.id == "auto_plus").unwrap();
+        assert!(
+            autoplus.label.contains("● active"),
+            "active marker on Auto+ row: {:?}",
+            autoplus.label
+        );
+    }
+
+    #[test]
+    fn test_permission_mode_picker_has_three_items() {
+        // Back-compat shim — kept as a 3-item check to make the picker
+        // expansion to Auto visible. The new comprehensive test is
+        // `test_permission_mode_picker_has_four_items` below.
+        let mut app = App::new();
+        app.open_permission_mode_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert!(
+            picker.items.len() >= 3,
+            "picker should show at least three modes"
+        );
+    }
+
+    #[test]
+    fn test_permission_mode_picker_has_four_items() {
+        // Back-compat shim — kept so a refactor that drops AutoPlus still
+        // catches the regression. The comprehensive test is
+        // `test_permission_mode_picker_has_five_items` below.
+        let mut app = App::new();
+        app.open_permission_mode_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert!(
+            picker.items.len() >= 4,
+            "picker should show at least four modes"
+        );
+    }
+
+    #[test]
+    fn test_permission_mode_picker_preselects_permissive() {
+        let mut app = App::new();
+        app.permission_mode = mew_hooks::PermissionMode::Permissive;
+        app.open_permission_mode_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(
+            picker.selected, 1,
+            "Permissive should pre-select index 1 (middle item)"
+        );
+        let permissive = picker
+            .items
+            .iter()
+            .find(|i| i.id == "permissive")
+            .unwrap();
+        assert!(
+            permissive.label.contains("● active"),
+            "active marker on Permissive row: {:?}",
+            permissive.label
+        );
+    }
+
+    #[test]
+    fn test_permissions_slash_with_unknown_arg_errors() {
+        let app = App::new();
+        let result = app.handle_slash("/permissions banana");
+        assert!(matches!(result, SlashResult::Message(_)));
+    }
+
+    #[test]
+    fn test_permission_mode_picker_marks_active_mode() {
+        let mut app = App::new();
+        app.permission_mode = mew_hooks::PermissionMode::Dangerous;
+        app.open_permission_mode_picker();
+        let picker = app.picker.as_ref().expect("picker opened");
+        assert_eq!(picker.kind, "permission_mode");
+        let dangerous = picker
+            .items
+            .iter()
+            .find(|i| i.id == "dangerous")
+            .expect("dangerous item");
+        assert!(
+            dangerous.label.contains("● active"),
+            "active mode should be marked: {:?}",
+            dangerous.label
+        );
+        let standard = picker.items.iter().find(|i| i.id == "standard").unwrap();
+        assert!(!standard.label.contains("● active"));
+    }
+
+    #[test]
+    fn test_permission_mode_picker_preselects_active() {
+        let mut app = App::new();
+        app.permission_mode = mew_hooks::PermissionMode::Dangerous;
+        app.open_permission_mode_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(
+            picker.selected, 4,
+            "Dangerous index should be 4 (fifth item in slider with Auto and Auto+)"
+        );
     }
 
     #[test]

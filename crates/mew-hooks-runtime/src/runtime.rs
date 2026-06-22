@@ -809,16 +809,25 @@ impl Dispatcher for SubprocessDispatcher {
         headers
     }
 
-    async fn on_tool_execute_before(&self, call: &ToolCall, input: Value) -> Value {
+    async fn on_tool_execute_before(
+        &self,
+        call: &ToolCall,
+        input: Value,
+    ) -> mew_hooks::HookOutcome<Value> {
         let json = input.to_string();
-        self.pipe_json_filtered(
-            mew_hooks::HookId::ToolExecuteBefore,
-            &json,
-            Some(&call.tool_name),
-            || input.clone(),
-            |s| serde_json::from_str(s).unwrap_or(input.clone()),
-        )
-        .await
+        let v = self
+            .pipe_json_filtered(
+                mew_hooks::HookId::ToolExecuteBefore,
+                &json,
+                Some(&call.tool_name),
+                || input.clone(),
+                |s| serde_json::from_str(s).unwrap_or(input.clone()),
+            )
+            .await;
+        // TODO: inspect the plugin's exit code (or a `block:` prefix on stdout)
+        // to support HookOutcome::Block / Suppress. For now, subprocess plugins
+        // can only transform the input — they can't veto it.
+        mew_hooks::HookOutcome::Proceed(v)
     }
 
     async fn on_tool_execute_after(&self, call: &ToolCall, output: ToolOutput) -> ToolOutput {
@@ -837,9 +846,9 @@ impl Dispatcher for SubprocessDispatcher {
         &self,
         call: &ToolCall,
         current: PermissionDecision,
-    ) -> PermissionDecision {
+    ) -> mew_hooks::HookOutcome<PermissionDecision> {
         let dec_str = format!("{:?}", current);
-        let result = self
+        let v = self
             .pipe_json_filtered(
                 mew_hooks::HookId::PermissionAsk,
                 &dec_str,
@@ -853,7 +862,10 @@ impl Dispatcher for SubprocessDispatcher {
                 },
             )
             .await;
-        result
+        // TODO: support Block / Suppress via exit-code protocol (2 = block
+        // with stderr as reason, 3 = suppress). For now, subprocess plugins
+        // can only override the decision — they can't veto.
+        mew_hooks::HookOutcome::Proceed(v)
     }
 
     async fn on_shell_env(&self, env: HashMap<String, String>) -> HashMap<String, String> {

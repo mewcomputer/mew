@@ -57,3 +57,6 @@ deps:
 # Update dependencies
 tidy:
     cargo update
+
+site-dev:
+    cd site && pnpm install && pnpm run dev

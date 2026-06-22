@@ -11,25 +11,45 @@ the mew tree at HEAD.
 
 ## priority at a glance
 
-| feature | value | effort | notes |
-|---|---|---|---|
-| todos | high | small | session-lived task list, dependency-enforced |
-| ask_user_question | high | small | structured Q&A, reuses permission-modal plumbing |
-| personas | high | medium | the big one for us; loader layer is already there |
-| secret files + words | high | small | real safety gap, plugs into existing engine |
-| flag_important | medium | small | carries files across compaction |
-| /clear + session/context split | medium | small | mental-model shift, cheap to land |
-| /rewind | medium | medium | builds on the split, destructive variant |
-| shell decomposition | medium | medium | extends `PermissionEngine`, finer-grained |
-| hooks runtime parity | medium | medium | matchers + blocking outcomes + deadlines |
-| jobs (async subagents + bg shell) | medium | medium | promotes "job" to first-class |
-| autonomous permission mode | low | medium | classifier-based, opt-in |
-| daemon/TUI split | low | large | iroh + acp-server already cover the remoting case |
-| minijinja templating | low | small *if personas exist* | only worth it once personas ship |
+**status legend**: ✅ shipped · ⚠️ partial · 🟡 open · ⛔ deferred
 
-sequencing suggestion at the bottom.
+| feature | value | effort | status | notes |
+|---|---|---|---|---|
+| todos | high | small | ✅ | `mew-agent/src/todos.rs` + 5 tools + `App.todos` + sidecar `todos.json` |
+| ask_user_question | high | small | ✅ | `mew-tools/src/tools/ask_user.rs` + `AgentEvent::AskUser` + modal |
+| personas | high | medium | ✅ | `mew-personas` + minijinja templating + tools_deny + skills_allow + confirm modal |
+| secret files + words | high | small | ✅ | `secrets.files` + `secrets.words` in config; redaction in Read/Bash/Grep/Glob |
+| flag_important | medium | small | ✅ | `mew-tools/src/tools/flag_important.rs` + compaction re-injection in `turn.rs` |
+| /clear + session/context split | medium | small | ✅ | `Agent::clear_context` writes synthetic marker to session log |
+| /rewind | medium | medium | ✅ | non-destructive (in-memory head pointer); `/rewind <n>` slash command |
+| shell decomposition | medium | medium | ✅ | `mew-config/src/shell.rs`; opaque detection; `MatchConditions.command_program` |
+| hooks runtime parity | medium | medium | ✅ | 21 hooks + matchers + disabled_hooks + timeout_ms + `HookOutcome<T>` generalization (Proceed/Block/Suppress) on the two blocking hooks; **subprocess `Block`/`Suppress` protocol still TODO** (Rust plugins get the full API today) |
+| jobs (async subagents + bg shell) | medium | medium | ✅ | `mew-agent/src/agent.rs::ShellJob` + 5 jobs tools + sidebar section |
+| autonomous permission mode | low | medium | ✅ | went further than the parity doc — four modes (`Auto`, `Auto+`) on top of Standard/Permissive/Dangerous! |
+| daemon/TUI split | low | large | ⛔ | iroh + acp-server cover the remoting case; deferred |
+| minijinja templating | low | small *if personas exist* | ✅ | shipped with personas (`template: true` frontmatter) |
+
+**11 of 13 shipped, 1 partial, 1 deferred.** The only remaining tier-1/2 work is the hooks runtime polish (generalize `PermissionDecision` to a `HookOutcome` enum + `!name` negation). Tier 3 is complete.
 
 ---
+
+## Status as of 2026-06-21
+
+The parity doc was the original planning surface. What actually shipped, in chronological order:
+
+1. **Personas v2 polish** — sidebar section, confirm modal, `switch_persona` tool, `tools_deny`, `skills_allow`, minijinja templating. Documented in `CURRENT.md`.
+2. **Secrets** — config, permission pre-check, redaction in Read/Bash/Grep/Glob.
+3. **Shell command decomposition** — `shell.rs`, opaque detection, `MatchConditions.command_program`/`command_subcommand`.
+4. **Hooks runtime overhaul** — 21 hooks, `HookId` enum, `PluginHookConfig`, parallel dispatch, plugin health.
+5. **Telemetry exporter** example plugin (Prometheus `/metrics` on :9090).
+6. **Jobs** — background shell + job control, `ShellJob` registry, 5 tools, sidebar section.
+7. **Landing / start page redesign** — centered hero with the cat ASCII + bold "mew" wordmark.
+8. **Permission semantic audit** — `/clear` × permission caches pinned, Mutating/Dangerous collapse pinned.
+9. **Dangerous! permission mode** → **Permissive** → **Auto** → **Auto+** — four-tier slider beyond what the parity doc proposed.
+10. **System prompts centralization** — new `mew-prompts` crate with `system` / `persona` / `skills` / `subagent` / `classifier` / `inventory` modules. Foundation for Auto.
+11. **Auto / Auto+ classifier-driven modes** — small LLM routes permissions; Auto escalates to user on uncertainty, Auto+ fails closed.
+
+The four open questions at the bottom of this doc are still open. The single partial item (hooks runtime polish) is the only remaining tier-1/2 work.
 
 ## Persona
 
@@ -508,6 +528,11 @@ registry surface and the shell-background tool.
 
 ## autonomous permission mode
 
+> **STATUS (2026-06-21): ✅ shipped — went further than this section proposed.**
+> See `CURRENT.md` sections "Dangerous! permission mode", "Auto permission mode (classifier-driven)",
+> and "Auto+ permission mode (fail-closed classifier)". Five-mode slider: Standard / Permissive /
+> Auto / Auto+ / Dangerous!. Classifier prompt and parser live in `mew-prompts::classifier`.
+
 a third permission mode (after standard and bypass): a classifier model handles
 routine approvals, escalates to human when unsure or after repeated refusals.
 
@@ -537,6 +562,10 @@ code.
 
 ## explicit non-goals for now
 
+> **STATUS (2026-06-21):** daemon/TUI split still deferred; `tool_search` still
+> deferred; plan/execute never built (personas shipped standalone instead).
+> All three remain non-goals — none have hit the "worth the cost" bar yet.
+
 - **daemon/TUI split with `/detach`.** real architecture cost (ipc, lifecycle,
   re-attach state sync). iroh already gives remote access; acp-server already
   gives headless. marginal value is low for us. defer.
@@ -544,6 +573,7 @@ code.
   with heavy mcp servers. skip until it hurts.
 - **personas + plan/execute + plan-reviewer as one bundle.** ship personas
   standalone first; plan mode is a follow-up milestone that depends on personas.
+  **(done: personas shipped standalone. plan mode remains unbuilt.)**
 
 ---
 
@@ -551,45 +581,56 @@ code.
 
 three tiers. within each tier, order is flexible.
 
-**tier 1 (small, high-value, mostly independent):**
-1. todos
-2. ask_user_question
-3. secret files + words
-4. flag_important
-5. /clear
+**status:** all three tiers shipped as of 2026-06-21. Tier 1 + Tier 2 fully done; Tier 3 done with extras (Auto+ mode). The hooks-runtime-parity item in Tier 2 is the only partial item.
+
+**tier 1 (small, high-value, mostly independent) — ✅ all shipped:**
+1. ✅ todos
+2. ✅ ask_user_question
+3. ✅ secret files + words
+4. ✅ flag_important
+5. ✅ /clear
 
 any of these can land in any order. todos and ask_user_question are the ones
 we already want; secrets and flag_important are cheap safety/quality wins; /clear
 is the foundation for the session/context vocabulary.
 
-**tier 2 (medium, some dependencies):**
-6. personas (standalone, no templating, no plan mode)
-7. /rewind (builds on /clear's vocabulary)
-8. shell decomposition (independent)
-9. hooks runtime parity (independent; sets up m11)
+**tier 2 (medium, some dependencies) — ⚠️ 3/4 shipped:**
+6. ✅ personas (standalone, no templating, no plan mode)
+7. ✅ /rewind (builds on /clear's vocabulary)
+8. ✅ shell decomposition (independent)
+9. ⚠️ hooks runtime parity (independent; sets up m11) — 21 hooks + matchers + deadlines landed; `HookOutcome` enum + `!name` negation still open
 
 personas is the centerpiece. the others can interleave.
 
-**tier 3 (larger or riskier):**
-10. jobs (async subagents + background shell)
-11. minijinja templating (only if personas shipped and someone needs it)
-12. autonomous permission mode (opt-in, behind a flag)
-13. plan/execute workflow (builds on personas)
+**tier 3 (larger or riskier) — ✅ all shipped:**
+10. ✅ jobs (async subagents + background shell)
+11. ✅ minijinja templating (only if personas shipped and someone needs it)
+12. ✅ autonomous permission mode (opt-in, behind a flag) — went further: `Auto` (LLM routes, escalates) + `Auto+` (fail-closed variant) both shipped
+13. ⛔ plan/execute workflow (builds on personas) — deferred indefinitely; personas shipped standalone per the original plan, no plan-reviewer subagent or BLAKE3 hashing built yet
 
 ---
 
 ## open questions
 
+> **STATUS (2026-06-21): all four still open.** No urgency — the current shapes
+> are working in production. Worth revisiting if any of them starts to hurt.
+
 - does `mew-skills` get refactored into a shared `mew-harness` crate with
   loaders for skills + personas + subagents, or do we port the loader per-type?
-  the three are 90% identical; a shared crate kills duplication.
+  the three are 90% identical; a shared crate kills duplication. **(still three
+  separate crates; no refactor yet. not painful enough to warrant the work.)**
 - tool trait currently takes `ToolCtx` by value in `execute`. secrets +
   flagged-files + active-persona all want richer context. is it time to make
   `ToolCtx` carry an `Arc<ToolCtxShared>` with the growing shared state, or
-  keep adding fields?
+  keep adding fields? **(still adding fields. `ToolCtx` now carries `secrets`,
+  `dispatcher`, etc. Field count is creeping up but no concrete pain yet.)**
 - `/rewind` destructive or non-destructive? i lean non-destructive (in-memory
-  head pointer) but it's a real product decision.
+  head pointer) but it's a real product decision. **(resolved: non-destructive.
+  see `App::rewind_to` and `test_rewind_to_*` tests.)**
 - where does the mew base system prompt live once personas exist? today it's
   implicit (ctx files + skills). personas force the question of whether mew
   ships a default persona body the way polytoken does
   (`transclude("polytoken://system_prompts/persona.md")`).
+  **(still implicit. `mew-prompts::system::assemble` joins ctx + skills +
+  persona body in a fixed order, but there's no shipped "mew base" body.
+  Could ship one as a built-in `default` persona when this becomes urgent.)**

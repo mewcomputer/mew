@@ -167,6 +167,71 @@ async fn test_clear_context_empties_messages() {
 }
 
 #[tokio::test]
+async fn test_clear_context_preserves_permission_caches() {
+    // /clear resets the visible context (messages) and writes a synthetic
+    // marker to the session log. It does NOT wipe the in-memory permission
+    // caches — `session_allows` and `workspace_allowances` are tied to the
+    // session lifetime (the JSONL log), not the visible context. This test
+    // pins that decision so future refactors don't quietly change it.
+    let mut agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+
+    let engine = std::sync::Arc::new(
+        mew_config::permissions::PermissionEngine::new(vec![]),
+    );
+    agent.set_permission_engine(engine.clone());
+
+    // 1. `session_allows` survives `/clear`.
+    engine.add_session_allow("write").await;
+    let write_input = serde_json::json!({"path": "foo.rs"});
+    let before = engine
+        .check("write", &write_input, Sensitivity::Mutating)
+        .await;
+    assert_eq!(
+        before,
+        mew_hooks::PermissionDecision::AllowOnce,
+        "session-allow should hit before /clear"
+    );
+
+    agent.clear_context().await;
+    assert_eq!(
+        agent.messages.lock().await.len(),
+        0,
+        "messages should be empty after /clear"
+    );
+
+    let after = engine
+        .check("write", &write_input, Sensitivity::Mutating)
+        .await;
+    assert_eq!(
+        after,
+        mew_hooks::PermissionDecision::AllowOnce,
+        "session-allow MUST survive /clear — tied to session lifetime, not context"
+    );
+
+    // 2. `workspace_allowances` survives `/clear` (same lifetime argument).
+    let dir = std::path::PathBuf::from("/tmp/outside-workspace");
+    agent.workspace_allowances.lock().await.insert(dir.clone());
+    assert!(agent
+        .workspace_allowances
+        .lock()
+        .await
+        .contains(&dir));
+
+    agent.clear_context().await;
+
+    assert!(
+        agent.workspace_allowances.lock().await.contains(&dir),
+        "workspace_allowances MUST survive /clear — tied to session lifetime, not context"
+    );
+}
+
+#[tokio::test]
 async fn test_clear_context_writes_marker_to_session() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let session_id = format!("clear-test-{}", ulid::Ulid::new());

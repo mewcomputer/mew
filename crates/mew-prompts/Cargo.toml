@@ -1,0 +1,19 @@
+[package]
+name = "mew-prompts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Central registry of every prompt mew sends to the LLM (system, persona, skills, subagent, classifier). One crate to look at when you ask 'where does the system say X to the model?'"
+
+[dependencies]
+mew-message = { workspace = true }
+mew-context = { workspace = true }
+mew-skills = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+minijinja = { workspace = true }
+tracing = { workspace = true }
+
+[lib]
+path = "src/lib.rs"

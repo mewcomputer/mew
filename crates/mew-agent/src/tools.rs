@@ -8,7 +8,7 @@ use mew_message::{
 };
 use mew_tools::{Sensitivity, ToolCtx, ToolProgress};
 
-use crate::agent::{Agent, ToolInput};
+use crate::agent::{Agent, ShellJobState, ToolInput};
 use crate::AgentEvent;
 
 // Track whether the subagent tool returned an error, not whether the
@@ -162,10 +162,62 @@ impl Agent {
                     _ => PermissionDecision::Prompt,
                 }
             };
-            let decision = self
+            // Run the permission-ask hook. The hook can proceed with the
+            // engine's default decision, force-block with a reason, or
+            // silently suppress. Block/Suppress collapse to Deny here.
+            let hook_outcome = self
                 .dispatcher
                 .on_permission_ask(&hook_call, default_decision)
                 .await;
+            let decision = match hook_outcome {
+                mew_hooks::HookOutcome::Proceed(d) => d,
+                mew_hooks::HookOutcome::Block(reason) => {
+                    tracing::info!(
+                        tool = %hook_call.tool_name,
+                        reason = %reason,
+                        "permission hook blocked the call"
+                    );
+                    PermissionDecision::Deny
+                }
+                mew_hooks::HookOutcome::Suppress => PermissionDecision::Deny,
+            };
+
+            // In Auto / Auto+ mode, route the Prompt decision through the
+            // classifier LLM instead of showing the user modal directly.
+            //
+            // - **Auto**: classifier returns Allow → AllowOnce, Deny → Deny,
+            //   Escalate / failure → fall through to user modal (safe default).
+            // - **Auto+**: classifier returns Allow → AllowOnce, Deny /
+            //   Escalate / failure → Deny (fail closed; the user opted into
+            //   "no human in the loop" so uncertainty means no).
+            let decision = if decision == PermissionDecision::Prompt
+                && matches!(
+                    self.permission_mode(),
+                    mew_hooks::PermissionMode::Auto | mew_hooks::PermissionMode::AutoPlus
+                )
+            {
+                match self.classify_permission(&hook_call).await {
+                    Some(mew_prompts::classifier::ClassifierDecision::Allow) => {
+                        PermissionDecision::AllowOnce
+                    }
+                    Some(mew_prompts::classifier::ClassifierDecision::Deny) => {
+                        PermissionDecision::Deny
+                    }
+                    Some(mew_prompts::classifier::ClassifierDecision::Escalate) => {
+                        match self.permission_mode() {
+                            mew_hooks::PermissionMode::AutoPlus => PermissionDecision::Deny,
+                            _ => PermissionDecision::Prompt, // Auto → user modal
+                        }
+                    }
+                    None => match self.permission_mode() {
+                        // Provider error / timeout / malformed response.
+                        mew_hooks::PermissionMode::AutoPlus => PermissionDecision::Deny,
+                        _ => PermissionDecision::Prompt, // Auto → user modal
+                    },
+                }
+            } else {
+                decision
+            };
 
             let decision = if decision == PermissionDecision::Prompt {
                 let (perm_tx, perm_rx) = oneshot::channel();
@@ -282,10 +334,109 @@ impl Agent {
             } else {
                 hook_call.input.clone()
             };
-            let input = self
+            // Run the tool-execute-before hook. The hook can proceed with the
+            // (possibly modified) input, force-block with a reason, or
+            // silently suppress. Block/Suppress skip the tool invocation
+            // entirely and produce a tool error result.
+            let input = match self
                 .dispatcher
                 .on_tool_execute_before(&hook_call, input)
-                .await;
+                .await
+            {
+                mew_hooks::HookOutcome::Proceed(v) => v,
+                mew_hooks::HookOutcome::Block(reason) => {
+                    tracing::info!(
+                        tool = %hook_call.tool_name,
+                        reason = %reason,
+                        "tool-execute-before hook blocked the call"
+                    );
+                    let error_state = ToolState::Error(ToolStateError {
+                        input: hook_call.input.clone(),
+                        error: format!("blocked by hook: {reason}"),
+                        time: ToolTime {
+                            start: Utc::now().timestamp_millis(),
+                            end: Some(Utc::now().timestamp_millis()),
+                        },
+                    });
+                    if let Some(ref mut msg) = assistant_msg {
+                        self.update_tool_call(msg, part_id, error_state.clone());
+                    }
+                    let _ = ev_tx
+                        .send(AgentEvent::PartUpdated {
+                            part_id,
+                            part: Part::ToolCall(ToolCallPart {
+                                base: tc.base.clone(),
+                                tool_name: tc.tool_name.clone(),
+                                call_id: tc.call_id.clone(),
+                                state: error_state,
+                                raw_input: tc.raw_input.clone(),
+                            }),
+                        })
+                        .await;
+                    let _ = ev_tx
+                        .send(AgentEvent::ToolEnd {
+                            call_id: call_id.clone(),
+                            success: false,
+                        })
+                        .await;
+                    result_parts.push(Part::ToolResult(ToolResultPart {
+                        base: PartBase {
+                            id: ulid::Ulid::new(),
+                            message_id: assistant_id,
+                            session_id: self.session_id,
+                        },
+                        call_id: tc.call_id.clone(),
+                    }));
+                    continue;
+                }
+                mew_hooks::HookOutcome::Suppress => {
+                    tracing::debug!(
+                        tool = %hook_call.tool_name,
+                        "tool-execute-before hook suppressed the call"
+                    );
+                    // Suppress behaves like Block but at debug level — the
+                    // model still needs to see a result, so produce an error
+                    // state with a generic message.
+                    let error_state = ToolState::Error(ToolStateError {
+                        input: hook_call.input.clone(),
+                        error: "tool call suppressed".into(),
+                        time: ToolTime {
+                            start: Utc::now().timestamp_millis(),
+                            end: Some(Utc::now().timestamp_millis()),
+                        },
+                    });
+                    if let Some(ref mut msg) = assistant_msg {
+                        self.update_tool_call(msg, part_id, error_state.clone());
+                    }
+                    let _ = ev_tx
+                        .send(AgentEvent::PartUpdated {
+                            part_id,
+                            part: Part::ToolCall(ToolCallPart {
+                                base: tc.base.clone(),
+                                tool_name: tc.tool_name.clone(),
+                                call_id: tc.call_id.clone(),
+                                state: error_state,
+                                raw_input: tc.raw_input.clone(),
+                            }),
+                        })
+                        .await;
+                    let _ = ev_tx
+                        .send(AgentEvent::ToolEnd {
+                            call_id: call_id.clone(),
+                            success: false,
+                        })
+                        .await;
+                    result_parts.push(Part::ToolResult(ToolResultPart {
+                        base: PartBase {
+                            id: ulid::Ulid::new(),
+                            message_id: assistant_id,
+                            session_id: self.session_id,
+                        },
+                        call_id: tc.call_id.clone(),
+                    }));
+                    continue;
+                }
+            };
 
             let (progress_tx, mut progress_rx) = mpsc::channel::<ToolProgress>(16);
             // Forward progress chunks to the TUI with 50ms debounce.
@@ -1129,6 +1280,13 @@ impl Agent {
                         .map(std::path::PathBuf::from)
                         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
                     let job_id = self.start_shell_job(command, &cwd).await;
+                    let _ = ev_tx
+                        .send(AgentEvent::JobUpdate {
+                            job_id: job_id.clone(),
+                            command: command.to_string(),
+                            state: "running".into(),
+                        })
+                        .await;
                     (format!("started job: {}", job_id), true)
                 }
             }
@@ -1139,6 +1297,13 @@ impl Agent {
                     .unwrap_or("");
                 match self.shell_job_status(job_id).await {
                     Some((state, output)) => {
+                        let _ = ev_tx
+                            .send(AgentEvent::JobUpdate {
+                                job_id: job_id.to_string(),
+                                command: String::new(),
+                                state: state.as_str().into(),
+                            })
+                            .await;
                         let out = format!("state: {}\n\n{}", state.as_str(), output);
                         (out, true)
                     }
@@ -1168,12 +1333,70 @@ impl Agent {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if self.cancel_shell_job(job_id).await {
+                    let _ = ev_tx
+                        .send(AgentEvent::JobUpdate {
+                            job_id: job_id.to_string(),
+                            command: String::new(),
+                            state: "cancelled".into(),
+                        })
+                        .await;
                     (format!("cancelled job: {}", job_id), true)
                 } else {
                     (
                         format!("job '{}' not found or already finished", job_id),
                         false,
                     )
+                }
+            }
+            "shell_monitor" => {
+                let command = input
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let timeout = input
+                    .get("timeout_secs")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(60);
+                if command.is_empty() {
+                    ("shell_monitor: 'command' is required".into(), false)
+                } else {
+                    let cwd_str = input.get("cwd").and_then(|v| v.as_str());
+                    let cwd = cwd_str
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                    let job_id = self.start_shell_job(command, &cwd).await;
+                    let result = self.shell_job_block(&job_id, timeout).await;
+                    let _ = self.cancel_shell_job(&job_id).await;
+                    match result {
+                        Some((ShellJobState::Completed { exit_code: 0 }, output)) => {
+                            let last = output
+                                .lines()
+                                .rev()
+                                .take(20)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            (format!("ready (exit 0)\n\n{}", last), true)
+                        }
+                        Some((state, output)) => {
+                            let last = output
+                                .lines()
+                                .rev()
+                                .take(20)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            (
+                                format!("not ready after {}s: {}\n\n{}", timeout, state.as_str(), last),
+                                false,
+                            )
+                        }
+                        None => (format!("shell_monitor: job '{}' not found", job_id), false),
+                    }
                 }
             }
             _ => (format!("unknown job tool: {}", tc.tool_name), false),
