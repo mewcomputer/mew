@@ -7,6 +7,7 @@ license.workspace = true
 description = "Central registry of every prompt mew sends to the LLM (system, persona, skills, subagent, classifier). One crate to look at when you ask 'where does the system say X to the model?'"
 
 [dependencies]
+include_dir = "0.7"
 mew-message = { workspace = true }
 mew-context = { workspace = true }
 mew-skills = { workspace = true }

@@ -406,6 +406,94 @@ Updated `/permissions auto_plus` slash command routing (also accepts `autoplus`)
 - `mew-tui/src/ui/status.rs` — deeper-purple "Auto+" pill; status pill test.
 - `mew/src/main.rs` — `--auto-plus` / `MEW_AUTO_PLUS=1` flag on all three subcommands; `resolve_mode(permissive, auto, auto_plus, dangerous)`; alert text for Auto+ in all three dispatch sites.
 
+## Open questions answered (2026-06-22)
+
+Five open questions from `POLYTOKEN_PARITY.md` and the current session, all closed.
+
+### 1. Plan file lifecycle ✅
+Added `plan_path: Option<PathBuf>` to `Agent` + `set_plan_path(...)` setter. In `run_with_parts()` at the start of every turn, if `plan_path` resolves to an existing file, it's auto-flagged as important (Included mode) so it survives compaction. The user no longer has to remember to call `flag_important` on the plan. Wired in `main.rs` at all three startup sites via `agent.set_plan_path(&cfg.plan_path)`.
+
+### 2. `Arc<ToolCtxShared>` ✅
+Split `ToolCtx` (per-call: `call_id`, `cancel`, `progress_tx`) from a new `ToolCtxShared` (session-wide: `session_id`, `cwd`, `dispatcher`, `secrets`). `ToolCtx` now holds `Arc<ToolCtxShared>` and implements `Deref<Target = ToolCtxShared>` so existing tools that access `ctx.session_id`, `ctx.cwd`, etc. work unchanged. New shared state (plan_path, classifier cache, anything else) grows the `ToolCtxShared` struct without bloating the per-call context. Updated all test helpers with `ToolCtx::test_new(cwd)` and `ToolCtx::test_with_secrets(cwd, secrets)`.
+
+### 3. Subagent classifier sharing ✅
+No code change — subagents already share the parent's `permission_engine` (and therefore the parent's classifier provider/cache) via the agent reference. Documented in `Agent::set_classifier_provider` doc comment: "Also initializes the session-scoped classifier cache. Subagents share the parent's cache via the agent reference (no per-subagent provider today)."
+
+### 4. Classifier cache ✅
+Added `Agent::classifier_cache: Option<Arc<ClassifierCache>>` (extracted `ClassifierCache` type alias for readability). Keyed by `(tool_name, serialized_input)`. On cache hit, returns the cached decision without calling the classifier (with `tracing::debug!("classifier cache hit")`). On miss, calls the classifier and stores the result. Session-scoped — no TTL; `clear_classifier_cache()` is called from `clear_context()` so `/clear` starts fresh.
+
+### 5. `mew-harness` shared crate ✅
+New `crates/mew-harness/` crate extracts ~150 LOC of duplicated discovery logic from `mew-skills`, `mew-personas`, and `mew-subagents`:
+
+- **Shared helpers**: `find_git_root`, `paths_between`, `dirs_home`, `global_dirs_for(home, kind)` — were copy-pasted across all three crates.
+- **`LoadSpec` + `load_markdown_dirs`**: generic loader that walks project + global paths, finds the right file at each location, and hands it to a caller-provided `parse_and_name` closure. Supports two shapes via `LoadFileSpec::SubdirFile(name)` (skills/personas) and `LoadFileSpec::FlatMd` (subagents). Enforces name match against on-disk identifier (subdir name for SubdirFile, file stem for FlatMd) and dedup.
+- **8 tests** in mew-harness covering the helpers and both file shapes.
+
+Migrated all three loaders to thin wrappers around `mew_harness::load_markdown_dirs`. Removed ~150 LOC of duplicated scanning code from each crate. Tests in each crate still pass without modification (added `with_test_home()` helper to isolate `$HOME` so the global scan doesn't pick up the developer's real `~/.config/mew/skills`).
+
+### Verified
+- `cargo test --all` — all pass (no failures)
+- `cargo clippy --all -- -D warnings` — clean
+- `cargo build --all` — full workspace compiles
+
+### Files touched
+- New: `crates/mew-harness/{Cargo.toml, src/lib.rs}`
+- Edited: `Cargo.toml` (workspace member + path dep)
+- Edited: `crates/mew-skills/{Cargo.toml, src/lib.rs}` — Loader uses mew-harness; helpers removed; tests use `with_test_home()`
+- Edited: `crates/mew-personas/{Cargo.toml, src/lib.rs}` — same; preserves built-in defaults merging
+- Edited: `crates/mew-subagents/{Cargo.toml, src/lib.rs}` — same; uses `LoadFileSpec::FlatMd` for the flat .md shape; preserves built-in defaults merging
+
+## Mew VFS (compile-time embedded resources) (2026-06-22)
+
+A `mew://` virtual filesystem for built-in resources, modeled on Go's `//go:embed` directive. Uses the `include_dir` crate to embed the `mew-prompts/resources/` directory at compile time so every file there is accessible as a `&'static str` at runtime with zero filesystem I/O.
+
+### Structure
+
+```
+crates/mew-prompts/resources/
+├── personas/
+│   ├── builder.md      # was: BUILDER_BODY const
+│   └── planner.md      # was: PLANNER_BODY const
+└── subagents/
+    ├── researcher.md   # was: RESEARCHER_BODY const
+    ├── reviewer.md     # was: REVIEWER_BODY const
+    └── coder.md        # was: CODER_BODY const
+```
+
+### `mew-prompts::vfs` API
+
+```rust
+pub fn read_builtin(path: &str) -> Option<&'static str>
+```
+
+The `.md` extension is optional — `read_builtin("personas/builder")` and `read_builtin("personas/builder.md")` both work. Returns `None` if the path doesn't exist or isn't valid UTF-8.
+
+### Migration
+
+All five const bodies (`BUILDER_BODY`, `PLANNER_BODY` in `mew-personas`; `RESEARCHER_BODY`, `REVIEWER_BODY`, `CODER_BODY` in `mew-prompts::subagent`) moved from Rust const strings into markdown files. The consts in `mew-personas` are now `include_str!("../../mew-prompts/resources/personas/{name}.md")`. The consts in `mew-prompts::subagent` were removed; callers use `mew_prompts::vfs::read_builtin("subagents/{name}")` directly.
+
+### What this enables
+
+- **Editing built-ins is easier.** Change a `.md` file and rebuild; no Rust string quoting, no escape characters.
+- **Single source of truth for built-ins.** All built-in resources live under one directory in `mew-prompts/resources/`. `mew-prompts::inventory` lists them alongside the dynamic prompts.
+- **Shadowing works naturally.** A user file at `.mew/personas/builder.md` (in their project) is loaded by the existing disk loader; the VFS is only consulted as a fallback. No new plumbing needed.
+- **Future: transclude.** A `{{ transclude("mew://system_prompts/base.md") }}` template function would let personas and subagents include shared prompt fragments. Not implemented yet — would be a small addition to the existing minijinja template work.
+
+### Verified
+- `cargo test --all` — all pass
+- `cargo clippy --all -- -D warnings` — clean
+- `cargo build --all` — full workspace compiles
+
+### Files touched
+- `crates/mew-prompts/Cargo.toml` — added `include_dir = "0.7"`
+- `crates/mew-prompts/src/vfs.rs` — new module with `read_builtin` + `top_level`
+- `crates/mew-prompts/src/lib.rs` — added `pub mod vfs;`
+- `crates/mew-prompts/src/subagent.rs` — removed consts; `builtin_bodies()` calls `vfs::read_builtin`; tests updated
+- `crates/mew-prompts/resources/personas/{builder,planner}.md` — new
+- `crates/mew-prompts/resources/subagents/{researcher,reviewer,coder}.md` — new
+- `crates/mew-personas/src/lib.rs` — consts now `include_str!` from the resource files
+- `crates/mew-subagents/src/lib.rs` — built-in bodies use `vfs::read_builtin`
+
 ## HookOutcome generalization (2026-06-21)
 
 Generalized the two blocking hooks (`on_permission_ask`, `on_tool_execute_before`) to return a `HookOutcome<T>` enum instead of the bare transformed value. Plugins can now veto an action, not just transform it. Closes the last partial item from `POLYTOKEN_PARITY.md`'s hooks-runtime-parity row.

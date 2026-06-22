@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+mew-harness = { workspace = true }
 serde = { workspace = true }
 serde_yaml = "0.9"
 regex = "1"

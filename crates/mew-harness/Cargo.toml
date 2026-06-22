@@ -1,17 +1,16 @@
 [package]
-name = "mew-personas"
+name = "mew-harness"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+description = "Shared markdown-directory loader and discovery helpers used by mew-skills, mew-personas, and mew-subagents."
 
 [dependencies]
-mew-harness = { workspace = true }
-serde = { workspace = true }
-serde_yaml = "0.9"
-regex = "1"
-thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[lib]
+path = "src/lib.rs"

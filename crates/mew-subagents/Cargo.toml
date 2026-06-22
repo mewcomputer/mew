@@ -6,6 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
+mew-harness = { workspace = true }
 mew-hooks = { workspace = true }
 mew-message = { workspace = true }
 mew-provider = { workspace = true }

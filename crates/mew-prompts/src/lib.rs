@@ -29,3 +29,4 @@ pub mod persona;
 pub mod skills;
 pub mod subagent;
 pub mod system;
+pub mod vfs;

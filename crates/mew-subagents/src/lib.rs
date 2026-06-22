@@ -6,7 +6,7 @@ use regex::Regex;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace};
+use tracing::debug;
 
 #[derive(Error, Debug)]
 pub enum SubagentError {
@@ -222,27 +222,19 @@ impl Loader {
     }
 
     pub fn load(&self) -> Result<Vec<SubagentDef>, SubagentError> {
-        let mut defs = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-
-        let root = find_git_root(&self.cwd).unwrap_or_else(|_| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| self.cwd.clone())
-        });
-
-        let project_dirs = paths_between(&root, &self.cwd);
-        for dir in project_dirs.iter().rev() {
-            self.scan_dir(dir, &mut defs, &mut seen)?;
-        }
-
-        if let Some(home) = dirs_home() {
-            for dir in global_agent_dirs(&home) {
-                self.scan_dir(&dir, &mut defs, &mut seen)?;
-            }
-        }
+        let spec = mew_harness::LoadSpec {
+            prefixes: SUBAGENT_PREFIXES,
+            file: mew_harness::LoadFileSpec::FlatMd,
+        };
+        let mut defs = mew_harness::load_markdown_dirs(&self.cwd, &spec, |path| -> Result<_, SubagentError> {
+            let def = load_agent_file(path)?;
+            let name = def.name.clone();
+            Ok(mew_harness::Loaded { value: def, name })
+        })?;
 
         // Add built-in defaults for any not already defined by the user.
+        let mut seen: std::collections::HashSet<String> =
+            defs.iter().map(|d| d.name.clone()).collect();
         for def in Self::builtin_defaults() {
             if !seen.contains(&def.name) {
                 seen.insert(def.name.clone());
@@ -266,7 +258,9 @@ impl Loader {
                 tools: Some(vec!["read".into(), "glob".into(), "grep".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
                 max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
-                body: mew_prompts::subagent::RESEARCHER_BODY.into(),
+                body: mew_prompts::vfs::read_builtin("subagents/researcher")
+                    .unwrap_or("")
+                    .to_string(),
                 path: PathBuf::from("(built-in)"),
             },
             SubagentDef {
@@ -278,7 +272,9 @@ impl Loader {
                 tools: Some(vec!["read".into(), "glob".into(), "grep".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
                 max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
-                body: mew_prompts::subagent::REVIEWER_BODY.into(),
+                body: mew_prompts::vfs::read_builtin("subagents/reviewer")
+                    .unwrap_or("")
+                    .to_string(),
                 path: PathBuf::from("(built-in)"),
             },
             SubagentDef {
@@ -290,76 +286,14 @@ impl Loader {
                 tools: Some(vec!["read".into(), "write".into(), "edit".into(), "glob".into(), "grep".into(), "bash".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
                 max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
-                body: mew_prompts::subagent::CODER_BODY.into(),
+                body: mew_prompts::vfs::read_builtin("subagents/coder")
+                    .unwrap_or("")
+                    .to_string(),
                 path: PathBuf::from("(built-in)"),
             },
         ]
     }
 
-    fn scan_dir(
-        &self,
-        dir: &Path,
-        defs: &mut Vec<SubagentDef>,
-        seen: &mut std::collections::HashSet<String>,
-    ) -> Result<(), SubagentError> {
-        let prefixes = [
-            ".mew/agents",
-            ".opencode/agents",
-            ".claude/agents",
-            ".agents",
-        ];
-
-        for prefix in &prefixes {
-            let agents_dir = dir.join(prefix);
-            if !agents_dir.is_dir() {
-                continue;
-            }
-
-            let entries = match std::fs::read_dir(&agents_dir) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            for entry in entries {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                let path = entry.path();
-                if !path.extension().map(|e| e == "md").unwrap_or(false) {
-                    continue;
-                }
-
-                let file_stem = match path.file_stem().and_then(|s| s.to_str()) {
-                    Some(s) => s.to_string(),
-                    None => continue,
-                };
-
-                match load_agent_file(&path) {
-                    Ok(def) => {
-                        if def.name != file_stem {
-                            debug!(
-                                name = %def.name,
-                                file = %file_stem,
-                                "subagent name does not match filename, skipping"
-                            );
-                            continue;
-                        }
-                        if seen.contains(&def.name) {
-                            trace!(name = %def.name, "duplicate subagent, skipping");
-                            continue;
-                        }
-                        seen.insert(def.name.clone());
-                        defs.push(def);
-                    }
-                    Err(e) => {
-                        debug!(path = %path.display(), error = %e, "failed to load subagent");
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 fn load_agent_file(path: &Path) -> Result<SubagentDef, SubagentError> {
@@ -451,59 +385,12 @@ fn validate_name(name: &str) -> Result<(), SubagentError> {
     Ok(())
 }
 
-fn find_git_root(dir: &Path) -> Result<PathBuf, SubagentError> {
-    let mut current = dir.to_path_buf();
-    loop {
-        if current.join(".git").exists() {
-            return Ok(current);
-        }
-        match current.parent() {
-            Some(parent) => current = parent.to_path_buf(),
-            None => {
-                return Err(SubagentError::Io(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "git root not found",
-                )))
-            }
-        }
-    }
-}
-
-fn paths_between(root: &Path, leaf: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if !leaf.starts_with(root) {
-        out.push(leaf.to_path_buf());
-        return out;
-    }
-    let mut current = root.to_path_buf();
-    out.push(current.clone());
-    let root_str = root.to_string_lossy();
-    let leaf_str = leaf.to_string_lossy();
-    let suffix = leaf_str.strip_prefix(&*root_str).unwrap_or("");
-    let suffix = suffix.strip_prefix('/').unwrap_or(suffix);
-    let suffix = suffix.strip_prefix('\\').unwrap_or(suffix);
-    for component in suffix.split(['/', '\\']) {
-        if component.is_empty() {
-            continue;
-        }
-        current = current.join(component);
-        out.push(current.clone());
-    }
-    out
-}
-
-fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-fn global_agent_dirs(home: &Path) -> Vec<PathBuf> {
-    vec![
-        home.join(".config").join("mew").join("agents"),
-        home.join(".config").join("opencode").join("agents"),
-        home.join(".claude").join("agents"),
-        home.join(".agents"),
-    ]
-}
+const SUBAGENT_PREFIXES: &[&str] = &[
+    ".mew/agents",
+    ".opencode/agents",
+    ".claude/agents",
+    ".agents",
+];
 
 pub fn apply_config_overrides(
     defs: &mut [SubagentDef],
