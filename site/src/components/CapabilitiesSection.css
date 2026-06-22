@@ -38,41 +38,6 @@
     animation: mew-enter 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-::view-transition-old(root),
-::view-transition-new(root) {
-    animation: none;
-}
-
-::view-transition-old(terminal-card) {
-    filter: blur(4px);
-    animation: terminal-old 450ms ease-in-out forwards;
-}
-
-::view-transition-new(terminal-card) {
-    animation: terminal-new 450ms ease-in-out;
-}
-
-@keyframes terminal-old {
-    from {
-        opacity: 1;
-        filter: blur(0);
-    }
-    to {
-        opacity: 0;
-        filter: blur(4px);
-    }
-}
-
-@keyframes terminal-new {
-    from {
-        opacity: 0;
-        filter: blur(4px);
-    }
-    to {
-        opacity: 1;
-        filter: blur(0);
-    }
-}
 
 .mew-reveal {
     opacity: 0;

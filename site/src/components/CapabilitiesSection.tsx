@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
 import "./CapabilitiesSection.css";
+import { AnimatePresence, motion } from "motion/react";
 
 // --- Types ---
 
@@ -655,31 +656,17 @@ const DesktopTerminal = ({ section }: { section: Section }) => {
     charIndex: 0,
     complete: true,
   };
-  const body =
-    section.graphic === "picker" ? (
-      <ModelPicker />
-    ) : (
+  const body = (
+    <>
+      <div className="absolute inset-0 p-8 pointer-events-none lg:pointer-events-auto">
+        {section.graphic === "picker" && <ModelPicker />}
+      </div>
       <div className="p-8 min-h-[320px] text-[13px] leading-snug">
         <TerminalContent lines={section.terminal} progress={progress} />
       </div>
-    );
-  if (typeof window !== "undefined" && window.innerWidth > 768) {
-    return (
-      <div
-        className="mew-enter rounded-lg overflow-hidden font-mono text-zinc-100 bg-tui-chat shadow-sm"
-        style={{ viewTransitionName: "terminal-card" }}
-      >
-        {body}
-        <TuiChrome />
-      </div>
-    );
-  }
-  return (
-    <div className="mew-enter rounded-lg overflow-hidden font-mono text-zinc-100 bg-tui-chat shadow-sm">
-      {body}
-      <TuiChrome />
-    </div>
+    </>
   );
+  return body;
 };
 
 // --- Section item ---
@@ -778,26 +765,12 @@ export default function CapabilitiesSection() {
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const activeSection = sections.find((s) => s.id === activeId) || sections[0];
 
-  const HAS_VIEW_TRANSITION =
-    typeof document !== "undefined" && "startViewTransition" in document;
-
   useEffect(() => {
     const observer = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {
           if (entry.isIntersecting) {
-            // if we have view transitions and we're not prerendering
-            if (
-              HAS_VIEW_TRANSITION &&
-              typeof window !== "undefined" &&
-              window.innerWidth > 768
-            ) {
-              (document as any).startViewTransition(() => {
-                setActiveId(entry.target.id);
-              });
-            } else {
-              setActiveId(entry.target.id);
-            }
+            setActiveId(entry.target.id);
           }
         });
       },
@@ -874,16 +847,35 @@ export default function CapabilitiesSection() {
         }`}
         style={overlayTop !== null ? { top: `${overlayTop}px` } : undefined}
       >
-        <div className="mx-auto max-w-7xl px-6">
-          <div className="grid grid-cols-2 gap-32">
-            {HAS_VIEW_TRANSITION ? (
-              <DesktopTerminal section={activeSection} />
-            ) : (
-              <DesktopTerminal key={activeSection.id} section={activeSection} />
-            )}
-            <div />
+        <AnimatePresence mode="sync">
+          <div className="mx-auto max-w-7xl px-6">
+            <div className="grid grid-cols-2 gap-32">
+              <motion.div
+                layoutId={"terminal-overlay"}
+                transition={{
+                  type: "tween",
+                  duration: 0.15,
+                  ease: "easeInOut",
+                }}
+                className="rounded-lg overflow-hidden font-mono text-zinc-100 bg-tui-chat shadow-sm"
+              >
+                <motion.div
+                  key={activeSection.id}
+                  layoutId={`terminal-content`}
+                  initial={{ opacity: 0, filter: "blur(2px)" }}
+                  animate={{ opacity: 1, filter: "blur(0px)" }}
+                  exit={{ opacity: 0, filter: "blur(2px)" }}
+                  transition={{ duration: 0.65, ease: "easeOut" }}
+                >
+                  <DesktopTerminal section={activeSection} />
+                </motion.div>
+                <TuiChrome />
+              </motion.div>
+
+              <div />
+            </div>
           </div>
-        </div>
+        </AnimatePresence>
       </div>
     </div>
   );
