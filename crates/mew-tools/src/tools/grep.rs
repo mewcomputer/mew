@@ -194,18 +194,11 @@ mod tests {
     }
 
     fn ctx_with_secrets(cwd: PathBuf, words: Vec<&str>, globs: Vec<&str>) -> ToolCtx {
-        ToolCtx {
-            session_id: mew_message::SessionId::from(ulid::Ulid::new()),
-            call_id: "test".to_string(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            progress_tx: tokio::sync::mpsc::channel(1).0,
-            cwd,
-            dispatcher: None,
-            secrets: std::sync::Arc::new(SecretSet {
-                words: words.iter().map(|s| s.to_string()).collect(),
-                globs: globs.iter().map(|s| s.to_string()).collect(),
-            }),
-        }
+        let secrets = std::sync::Arc::new(SecretSet {
+            words: words.iter().map(|s| s.to_string()).collect(),
+            globs: globs.iter().map(|s| s.to_string()).collect(),
+        });
+        ToolCtx::test_with_secrets(cwd, secrets)
     }
 
     #[tokio::test]

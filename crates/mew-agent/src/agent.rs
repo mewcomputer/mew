@@ -16,6 +16,16 @@ use ulid::Ulid;
 
 use crate::{AgentEvent, SessionWriter};
 
+/// Session-scoped classifier decision cache. Keyed by
+/// `(tool_name, serialized_input)`; values are the classifier's parsed
+/// decisions. Cleared on `/clear`.
+pub type ClassifierCache = std::sync::Mutex<
+    std::collections::HashMap<
+        (String, String),
+        mew_prompts::classifier::ClassifierDecision,
+    >,
+>;
+
 /// Status of a background subagent task.
 pub struct SubagentTask {
     pub name: String,
@@ -175,6 +185,11 @@ pub struct Agent {
     /// has a default model if unset; the CLI / config can pin a specific
     /// one (e.g. `gpt-4o-mini` for cost or a local model for privacy).
     pub classifier_model: Option<String>,
+    /// Session-scoped cache of classifier decisions, keyed by
+    /// `(tool_name, serialized_input)`. Cleared on `/clear`. Subagents
+    /// share this cache via the agent reference — there's no per-subagent
+    /// classifier provider today.
+    pub classifier_cache: Option<Arc<ClassifierCache>>,
     /// Path to the plan file (e.g. `PLAN.md`). When set and the file exists,
     /// it's auto-flagged as important at the start of each turn so it
     /// survives context compaction without the model having to remember.
@@ -239,6 +254,7 @@ impl Agent {
             persona_name: None,
             classifier_provider: None,
             classifier_model: None,
+            classifier_cache: None,
             plan_path: None,
         }
     }
@@ -267,10 +283,23 @@ impl Agent {
             .unwrap_or(mew_hooks::PermissionMode::Standard)
     }
 
+    /// Clear the session-scoped classifier cache. Called on `/clear` and
+    /// on `clear_context()` so a fresh context gets fresh classifier
+    /// decisions (the old ones were made under different context).
+    pub fn clear_classifier_cache(&self) {
+        if let Some(ref cache) = self.classifier_cache {
+            cache.lock().expect("classifier cache poisoned").clear();
+        }
+    }
+
     /// Set the provider (and optional model id) used by Auto mode to classify
     /// tool calls. If a provider isn't set when Auto mode is active,
     /// `classify_permission` returns `None` and the call falls through to
     /// the user modal — the safe default.
+    ///
+    /// Also initializes the session-scoped classifier cache. Subagents share
+    /// the parent's cache via the agent reference (no per-subagent provider
+    /// today).
     pub fn set_classifier_provider(
         &mut self,
         provider: Arc<dyn Provider>,
@@ -278,6 +307,9 @@ impl Agent {
     ) {
         self.classifier_provider = Some(provider);
         self.classifier_model = model;
+        self.classifier_cache = Some(Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )));
     }
 
     /// Set the plan file path. When set and the file exists, it's
@@ -296,19 +328,38 @@ impl Agent {
         tool_call: &mew_hooks::ToolCall,
     ) -> Option<mew_prompts::classifier::ClassifierDecision> {
         let provider = self.classifier_provider.as_ref()?;
-        let model = self
-            .classifier_model
-            .clone()
-            .unwrap_or_else(|| provider.name().to_string());
-
         let sensitivity = self
             .tools
             .get(&tool_call.tool_name)
             .map(|t| t.sensitivity())
             .unwrap_or(mew_tools::Sensitivity::ReadOnly);
 
+        // Check the session-scoped cache first. Key on (tool_name, serialized
+        // input) — exact match required. No TTL: decisions don't change
+        // within a session; `/clear` empties the cache.
+        let cache_key = (
+            tool_call.tool_name.clone(),
+            serde_json::to_string(&tool_call.input).unwrap_or_default(),
+        );
+        if let Some(ref cache) = self.classifier_cache {
+            if let Some(cached) = cache
+                .lock()
+                .expect("classifier cache poisoned")
+                .get(&cache_key)
+                .copied()
+            {
+                tracing::debug!(tool = %tool_call.tool_name, "classifier cache hit");
+                return Some(cached);
+            }
+        }
+
         let cwd = std::env::current_dir().ok();
         let cwd_str = cwd.as_ref().map(|p| p.to_string_lossy().to_string());
+
+        let model = self
+            .classifier_model
+            .clone()
+            .unwrap_or_else(|| provider.name().to_string());
 
         let prompt = mew_prompts::classifier::permission_decision(
             &tool_call.tool_name,
@@ -374,6 +425,17 @@ impl Agent {
                 classifier_text = %text,
                 "classifier response could not be parsed; escalating to user"
             );
+        }
+        // Cache successful decisions so repeated tool calls with the same
+        // input don't hit the classifier. Only successful parses are cached
+        // (None means "couldn't parse" — let the next call try again).
+        if let Some(d) = decision {
+            if let Some(ref cache) = self.classifier_cache {
+                cache
+                    .lock()
+                    .expect("classifier cache poisoned")
+                    .insert(cache_key, d);
+            }
         }
         decision
     }
@@ -538,6 +600,9 @@ impl Agent {
     /// `tests::test_clear_context_preserves_permission_caches`.
     pub async fn clear_context(&self) {
         self.messages.lock().await.clear();
+        // Clear the classifier cache too — a fresh context should get
+        // fresh classifier decisions, not stale ones from before the clear.
+        self.clear_classifier_cache();
 
         if let Some(session) = &self.session {
             let now = chrono::Utc::now().timestamp_millis();

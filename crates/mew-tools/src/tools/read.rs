@@ -109,6 +109,9 @@ impl Tool for Read {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SecretSet;
+    use std::sync::Arc;
+    use super::*;
     use std::path::PathBuf;
 
     fn dummy_ctx(cwd: PathBuf) -> ToolCtx {
@@ -116,18 +119,11 @@ mod tests {
     }
 
     fn ctx_with_secret_words(cwd: PathBuf, words: Vec<&str>) -> ToolCtx {
-        ToolCtx {
-            session_id: mew_message::SessionId::from(ulid::Ulid::new()),
-            call_id: "test".to_string(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            progress_tx: tokio::sync::mpsc::channel(1).0,
-            cwd,
-            dispatcher: None,
-            secrets: std::sync::Arc::new(crate::SecretSet {
-                words: words.iter().map(|s| s.to_string()).collect(),
-                globs: vec![],
-            }),
-        }
+        let secrets = std::sync::Arc::new(SecretSet {
+            words: words.iter().map(|s| s.to_string()).collect(),
+            globs: vec![],
+        });
+        ToolCtx::test_with_secrets(cwd, secrets)
     }
 
     #[tokio::test]
