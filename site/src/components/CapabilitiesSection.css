@@ -38,6 +38,11 @@
     animation: mew-enter 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
+::view-transition-old(root),
+::view-transition-new(root) {
+    animation: none;
+}
+
 ::view-transition-old(terminal-card) {
     filter: blur(4px);
     animation: terminal-old 450ms ease-in-out forwards;
