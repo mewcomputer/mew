@@ -641,6 +641,64 @@ impl SubprocessDispatcher {
             None => parse(initial),
         }
     }
+
+    /// Like `pipe_json_filtered` but returns the raw last plugin response
+    /// (or None if all plugins failed / there were no candidates). Used by
+    /// the blocking hooks (`on_permission_ask`, `on_tool_execute_before`)
+    /// so they can detect Block/Suppress markers before parsing the value.
+    async fn pipe_json_raw(
+        &self,
+        hook: mew_hooks::HookId,
+        initial: &str,
+        subject: Option<&str>,
+    ) -> Option<String> {
+        let mut candidates: Vec<&PluginProcess> = self
+            .plugins
+            .iter()
+            .filter(|p| self.should_fire(&p.name, hook.as_config(), subject))
+            .collect();
+        candidates.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let params = serde_json::json!({
+            "value": initial,
+        });
+        let wire = hook.as_wire().to_string();
+        let results = futures::future::join_all(candidates.iter().map(|p| {
+            let params = params.clone();
+            let method = wire.clone();
+            async move { (p.name.clone(), p.call(&method, &params).await) }
+        }))
+        .await;
+
+        let mut last: Option<String> = None;
+        for (name, result) in results {
+            match result {
+                Ok(s) => last = Some(s),
+                Err(e) => error!("plugin {} {}() failed: {}", name, hook.as_wire(), e),
+            }
+        }
+        last
+    }
+
+    /// Check whether a raw plugin response indicates Block or Suppress.
+    /// Returns `Some(Outcome)` for recognized markers; `None` for normal
+    /// responses that should be parsed as a value.
+    fn detect_outcome(raw: &str) -> Option<mew_hooks::HookOutcome<()>> {
+        let trimmed = raw.trim();
+        let lower = trimmed.to_lowercase();
+        if lower == "suppress" {
+            Some(mew_hooks::HookOutcome::Suppress)
+        } else if let Some(reason) = lower.strip_prefix("block") {
+            let reason = reason.trim_start_matches(':').trim();
+            if reason.is_empty() {
+                Some(mew_hooks::HookOutcome::Block("blocked by plugin".into()))
+            } else {
+                Some(mew_hooks::HookOutcome::Block(reason.into()))
+            }
+        } else {
+            None
+        }
+    }
 }
 
 #[async_trait]
@@ -815,19 +873,27 @@ impl Dispatcher for SubprocessDispatcher {
         input: Value,
     ) -> mew_hooks::HookOutcome<Value> {
         let json = input.to_string();
-        let v = self
-            .pipe_json_filtered(
-                mew_hooks::HookId::ToolExecuteBefore,
-                &json,
-                Some(&call.tool_name),
-                || input.clone(),
-                |s| serde_json::from_str(s).unwrap_or(input.clone()),
-            )
-            .await;
-        // TODO: inspect the plugin's exit code (or a `block:` prefix on stdout)
-        // to support HookOutcome::Block / Suppress. For now, subprocess plugins
-        // can only transform the input — they can't veto it.
-        mew_hooks::HookOutcome::Proceed(v)
+        match self
+            .pipe_json_raw(mew_hooks::HookId::ToolExecuteBefore, &json, Some(&call.tool_name))
+            .await
+        {
+            Some(raw) => {
+                // Check for Block/Suppress markers in the plugin response.
+                if let Some(outcome) = Self::detect_outcome(&raw) {
+                    return match outcome {
+                        mew_hooks::HookOutcome::Proceed(_) => {
+                            mew_hooks::HookOutcome::Proceed(input)
+                        }
+                        mew_hooks::HookOutcome::Block(r) => mew_hooks::HookOutcome::Block(r),
+                        mew_hooks::HookOutcome::Suppress => mew_hooks::HookOutcome::Suppress,
+                    };
+                }
+                // Normal response: parse as the modified value.
+                let v = serde_json::from_str(&raw).unwrap_or(input);
+                mew_hooks::HookOutcome::Proceed(v)
+            }
+            None => mew_hooks::HookOutcome::Proceed(input),
+        }
     }
 
     async fn on_tool_execute_after(&self, call: &ToolCall, output: ToolOutput) -> ToolOutput {
@@ -848,24 +914,32 @@ impl Dispatcher for SubprocessDispatcher {
         current: PermissionDecision,
     ) -> mew_hooks::HookOutcome<PermissionDecision> {
         let dec_str = format!("{:?}", current);
-        let v = self
-            .pipe_json_filtered(
-                mew_hooks::HookId::PermissionAsk,
-                &dec_str,
-                Some(&call.tool_name),
-                || current,
-                |s| match s {
+        match self
+            .pipe_json_raw(mew_hooks::HookId::PermissionAsk, &dec_str, Some(&call.tool_name))
+            .await
+        {
+            Some(raw) => {
+                // Check for Block/Suppress markers in the plugin response.
+                if let Some(outcome) = Self::detect_outcome(&raw) {
+                    return match outcome {
+                        mew_hooks::HookOutcome::Proceed(_) => {
+                            mew_hooks::HookOutcome::Proceed(current)
+                        }
+                        mew_hooks::HookOutcome::Block(r) => mew_hooks::HookOutcome::Block(r),
+                        mew_hooks::HookOutcome::Suppress => mew_hooks::HookOutcome::Suppress,
+                    };
+                }
+                // Normal response: parse as a PermissionDecision.
+                let v = match raw.trim() {
                     "AllowOnce" => PermissionDecision::AllowOnce,
                     "AllowSession" => PermissionDecision::AllowSession,
                     "Deny" => PermissionDecision::Deny,
                     _ => current,
-                },
-            )
-            .await;
-        // TODO: support Block / Suppress via exit-code protocol (2 = block
-        // with stderr as reason, 3 = suppress). For now, subprocess plugins
-        // can only override the decision — they can't veto.
-        mew_hooks::HookOutcome::Proceed(v)
+                };
+                mew_hooks::HookOutcome::Proceed(v)
+            }
+            None => mew_hooks::HookOutcome::Proceed(current),
+        }
     }
 
     async fn on_shell_env(&self, env: HashMap<String, String>) -> HashMap<String, String> {

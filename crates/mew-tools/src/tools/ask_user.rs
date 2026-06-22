@@ -87,15 +87,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_errors_when_not_intercepted() {
         let tool = AskUser;
-        let ctx = ToolCtx {
-            session_id: mew_message::SessionId::from(ulid::Ulid::new()),
-            call_id: "test".into(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            progress_tx: tokio::sync::mpsc::channel(1).0,
-            cwd: std::path::PathBuf::from("."),
-            dispatcher: None,
-            secrets: Default::default(),
-        };
+        let ctx = ToolCtx::test_new(std::path::PathBuf::from("."));
         let result = tool.execute(ctx, serde_json::json!({})).await;
         assert!(result.is_err());
     }

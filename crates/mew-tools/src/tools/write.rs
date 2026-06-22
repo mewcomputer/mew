@@ -132,15 +132,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn dummy_ctx(cwd: PathBuf) -> ToolCtx {
-        ToolCtx {
-            session_id: mew_message::SessionId::from(ulid::Ulid::new()),
-            call_id: "test".to_string(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            progress_tx: tokio::sync::mpsc::channel(1).0,
-            cwd,
-            dispatcher: None,
-            secrets: Default::default(),
-        }
+        ToolCtx::test_new(cwd)
     }
 
     #[tokio::test]

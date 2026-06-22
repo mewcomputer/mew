@@ -130,15 +130,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn dummy_ctx_with_cwd(cwd: PathBuf) -> ToolCtx {
-        ToolCtx {
-            session_id: mew_message::SessionId::from(ulid::Ulid::new()),
-            call_id: "test".to_string(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            progress_tx: tokio::sync::mpsc::channel(1).0,
-            cwd,
-            dispatcher: None,
-            secrets: Default::default(),
-        }
+        ToolCtx::test_new(cwd)
     }
 
     fn write_temp_file(dir: &std::path::Path, name: &str, content: &str) -> PathBuf {

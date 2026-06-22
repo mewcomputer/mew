@@ -480,3 +480,54 @@ Both blocking hooks default to `HookOutcome::Proceed(input)` — preserves the e
 - `mew-hooks-runtime/src/runtime.rs` — both `SubprocessDispatcher` impls wrap their result in `HookOutcome::Proceed(...)`.
 - `mew-hooks-runtime/tests/plugin_integration.rs` — assertions updated.
 - `mew-agent/src/hooks_tests.rs` — two mock impls updated.
+
+## Polish items (classifier config, !name negation, subprocess Block/Suppress) (2026-06-22)
+
+Three independent polish items, each closing a gap from earlier milestones.
+
+### 1. Classifier config in config.toml — fixes a broken feature
+
+Auto/Auto+ modes were shipped but `set_classifier_provider` was never called in `main.rs` — both modes silently fell through to the user modal on every call. Now wired via config:
+
+```toml
+[permissions]
+classifier_provider = "opencode-go"
+classifier_model = "deepseek-v4-flash"   # optional; uses provider default if unset
+```
+
+New `maybe_set_classifier_provider(agent, cfg, cat, raw)` helper (`mew/src/main.rs:582`) builds the classifier provider via the existing `build_provider(...)` and calls `agent.set_classifier_provider(provider, model)`. Called at all three startup sites (`build_and_run`, `run_tui`, `run_acp_server`). If the provider build fails, logs a warning and Auto falls through to the user modal — the safe default.
+
+### 2. `!name` matcher negation in PluginHookConfig
+
+`PluginHookConfig::matches()` now supports `!`-prefix negation:
+
+- `"bash"` → fire only for bash (existing behavior)
+- `"!bash"` → fire for everything except bash
+- `"!bash|!write"` → fire for everything except bash and write
+- `"bash|write|!rm"` → fire for bash or write, but never rm (mixed)
+- `"!*"` → fire for nothing (exclude all)
+
+Logic: negative entries (starting with `!`) are checked first — if subject matches any negative, return false. If all entries are negative, return true (default include). If positives exist, subject must match one. 4 new tests in `mew-hooks/src/lib.rs`.
+
+### 3. Subprocess Block/Suppress protocol
+
+`SubprocessDispatcher` can now return `HookOutcome::Block` and `HookOutcome::Suppress` from subprocess plugins. Protocol:
+
+- Plugin responds with `"block"` or `"block: <reason>"` → `HookOutcome::Block(reason)`
+- Plugin responds with `"suppress"` → `HookOutcome::Suppress`
+- Anything else → parsed as the modified value → `HookOutcome::Proceed(value)`
+
+New `pipe_json_raw(hook, initial, subject) -> Option<String>` method returns the raw last plugin response before parsing. `detect_outcome(raw) -> Option<HookOutcome<()>>` checks for Block/Suppress markers. Both blocking hooks (`on_permission_ask`, `on_tool_execute_before`) now use `pipe_json_raw` + `detect_outcome` instead of the old `pipe_json_filtered` wrapper. Backward compatible — existing plugins that return bare values still work (Proceed).
+
+### Verified
+
+- `cargo test --all` — all pass (no failures)
+- `cargo clippy --all -- -D warnings` — clean
+- `cargo build --all` — full workspace compiles
+
+### Files touched
+
+- `mew-config/src/lib.rs` — `PermissionsConfig` gains `classifier_provider` + `classifier_model` fields
+- `mew-hooks/src/lib.rs` — `PluginHookConfig::matches()` supports `!`-prefix negation; 4 new tests
+- `mew-hooks-runtime/src/runtime.rs` — `pipe_json_raw` + `detect_outcome` helpers; both blocking hooks rewritten to use them; TODOs removed
+- `mew/src/main.rs` — `maybe_set_classifier_provider(...)` helper; called at all three startup sites

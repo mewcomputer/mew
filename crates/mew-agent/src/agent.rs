@@ -175,6 +175,11 @@ pub struct Agent {
     /// has a default model if unset; the CLI / config can pin a specific
     /// one (e.g. `gpt-4o-mini` for cost or a local model for privacy).
     pub classifier_model: Option<String>,
+    /// Path to the plan file (e.g. `PLAN.md`). When set and the file exists,
+    /// it's auto-flagged as important at the start of each turn so it
+    /// survives context compaction without the model having to remember.
+    /// Set from `config.toml: plan_path = "PLAN.md"`.
+    pub plan_path: Option<PathBuf>,
 }
 
 impl Agent {
@@ -234,6 +239,7 @@ impl Agent {
             persona_name: None,
             classifier_provider: None,
             classifier_model: None,
+            plan_path: None,
         }
     }
 
@@ -272,6 +278,13 @@ impl Agent {
     ) {
         self.classifier_provider = Some(provider);
         self.classifier_model = model;
+    }
+
+    /// Set the plan file path. When set and the file exists, it's
+    /// auto-flagged as important at the start of each turn so it survives
+    /// context compaction.
+    pub fn set_plan_path(&mut self, path: impl Into<PathBuf>) {
+        self.plan_path = Some(path.into());
     }
 
     /// Call the configured classifier LLM to decide whether `tool_call`
@@ -581,6 +594,34 @@ impl Agent {
         prompt: String,
         attachments: Vec<Part>,
     ) -> mpsc::Receiver<AgentEvent> {
+        // Auto-flag the plan file as important if it exists. This guarantees
+        // the plan survives context compaction without the model having to
+        // remember to call flag_important every turn.
+        if let Some(ref plan_path) = self.plan_path {
+            let path = if plan_path.is_absolute() {
+                plan_path.clone()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_default()
+                    .join(plan_path)
+            };
+            if path.exists() {
+                let path = path.clone();
+                let flagged = self.flagged_files.clone();
+                tokio::spawn(async move {
+                    let mut guard = flagged.lock().await;
+                    let already = guard.iter().any(|f| f.path == path);
+                    if !already {
+                        guard.push(FlaggedFile {
+                            path: path.clone(),
+                            mode: mew_tools::tools::flag_important::FlagMode::Included,
+                        });
+                        tracing::debug!(plan = %path.display(), "auto-flagged plan file as important");
+                    }
+                });
+            }
+        }
+
         let (tx, rx) = mpsc::channel(256);
         let agent = self.clone();
 

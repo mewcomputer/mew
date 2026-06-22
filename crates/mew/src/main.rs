@@ -576,6 +576,39 @@ fn build_permission_engine(
     )
 }
 
+/// If the config specifies a classifier provider, build it and wire it into
+/// the agent so Auto / Auto+ permission modes can classify tool calls.
+/// Without this, Auto mode falls through to the user modal on every call.
+fn maybe_set_classifier_provider(
+    agent: &mut mew_agent::Agent,
+    cfg: &Config,
+    cat: Option<&Catalog>,
+    raw: bool,
+) {
+    if let Some(ref provider_id) = cfg.permissions.classifier_provider {
+        let model_id = cfg.permissions.classifier_model.as_deref().unwrap_or("");
+        match build_provider(cfg, cat, provider_id, model_id, raw) {
+            Ok(provider) => {
+                agent.set_classifier_provider(
+                    provider,
+                    cfg.permissions.classifier_model.clone(),
+                );
+                tracing::info!(
+                    provider = %provider_id,
+                    model = ?cfg.permissions.classifier_model,
+                    "classifier provider configured for Auto/Auto+ modes"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to build classifier provider; Auto/Auto+ will fall through to user"
+                );
+            }
+        }
+    }
+}
+
 /// Build the `SecretSet` shared with every tool call: words to redact from
 /// output, and file globs whose results get dropped from search tools.
 fn build_secret_set(cfg: &Config) -> Arc<SecretSet> {
@@ -963,9 +996,18 @@ async fn run_acp_server(
     agent.flagged_files = flagged_files;
     agent.secrets = build_secret_set(&cfg);
     agent.set_permission_engine(permission_engine);
+    maybe_set_classifier_provider(&mut agent, &cfg, cat.as_ref(), raw);
+    agent.set_plan_path(&cfg.plan_path);
     agent.set_personas((*personas_arc).clone());
     agent.set_pending_persona_switch(pending_persona_switch.clone());
     agent.register_plugin_tools().await;
+    // Apply the default persona on startup (non-interactive path — no TUI app).
+    if cfg.default_persona != "none" && cfg.default_persona != "default" {
+        if let Some(persona) = personas_arc.iter().find(|p| p.name == cfg.default_persona) {
+            agent.apply_persona(persona);
+            tracing::info!(persona = %persona.name, "applied default persona on startup");
+        }
+    }
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
     } else {
@@ -1406,7 +1448,27 @@ async fn run_tui(
         }
     }
     agent.set_permission_engine(permission_engine);
+    maybe_set_classifier_provider(&mut agent, cfg, cat, raw);
+    agent.set_plan_path(&cfg.plan_path);
     agent.register_plugin_tools().await;
+    // Apply the default persona on startup (builder by default). The agent's
+    // system prompt and tool set are configured now; `app` state is synced
+    // below after the App is created.
+    let startup_persona = if cfg.default_persona != "none" && cfg.default_persona != "default" {
+        match loaded_personas.iter().find(|p| p.name == cfg.default_persona) {
+            Some(persona) => {
+                agent.apply_persona(persona);
+                tracing::info!(persona = %persona.name, "applied default persona on startup");
+                Some(persona.name.clone())
+            }
+            None => {
+                tracing::warn!(persona = %cfg.default_persona, "default_persona not found; skipping");
+                None
+            }
+        }
+    } else {
+        None
+    };
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
     } else {
@@ -1496,6 +1558,11 @@ async fn run_tui(
     app.status.model = display_model.clone();
     app.status.provider = display_provider.clone();
     app.status.session_id = session_id.clone();
+    // Sync the startup persona into the App so the sidebar and status
+    // line show the right state from the first frame.
+    if let Some(ref name) = startup_persona {
+        app.active_persona = Some(name.clone());
+    }
     if let Some(c) = cat {
         app.status.context_window = c.context_window(&model_id) as u32;
     }
@@ -2664,6 +2731,8 @@ async fn build_and_run(
     }
     agent.register_plugin_tools().await;
     agent.set_permission_engine(permission_engine);
+    maybe_set_classifier_provider(&mut agent, cfg, cat, raw);
+    agent.set_plan_path(&cfg.plan_path);
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
     } else {

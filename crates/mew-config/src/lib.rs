@@ -28,6 +28,24 @@ pub struct Config {
     pub plugins: HashMap<String, mew_hooks::PluginHookConfig>,
     #[serde(default)]
     pub workspace: WorkspaceConfig,
+    /// Persona to load on startup. Defaults to "builder". Set to "planner"
+    /// for a read-only planning phase, or any user-defined persona name.
+    /// Set to "none" or "default" to start without a persona.
+    #[serde(default = "default_persona")]
+    pub default_persona: String,
+    /// Where the planner persona writes its plan and the builder reads it.
+    /// Defaults to "PLAN.md" in the workspace root. Can be a relative path
+    /// (".mew/plans/current.md") or absolute.
+    #[serde(default = "default_plan_path")]
+    pub plan_path: String,
+}
+
+fn default_persona() -> String {
+    "builder".into()
+}
+
+fn default_plan_path() -> String {
+    "PLAN.md".into()
 }
 
 impl Default for Config {
@@ -77,6 +95,8 @@ impl Default for Config {
             secrets: SecretsConfig::default(),
             plugins: HashMap::new(),
             workspace: WorkspaceConfig::default(),
+            default_persona: default_persona(),
+            plan_path: default_plan_path(),
         }
     }
 }
@@ -121,6 +141,14 @@ pub struct ThinkingVariantDef {
 pub struct PermissionsConfig {
     #[serde(default)]
     pub rules: Vec<permissions::PermissionRule>,
+    /// Provider ID for the classifier LLM used by Auto / Auto+ permission
+    /// modes. If unset, Auto mode falls through to the user modal on every
+    /// call (no classifier available).
+    #[serde(default)]
+    pub classifier_provider: Option<String>,
+    /// Model ID for the classifier LLM. If unset, uses the provider's default.
+    #[serde(default)]
+    pub classifier_model: Option<String>,
 }
 
 /// Secrets configuration section. Files listed here are guarded: reads of

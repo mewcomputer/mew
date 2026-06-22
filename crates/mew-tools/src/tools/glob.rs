@@ -1,6 +1,7 @@
-use crate::{Sensitivity, Tool, ToolCtx, ToolError, ToolOutput};
+use crate::{Sensitivity, SecretSet, Tool, ToolCtx, ToolError, ToolOutput};
 use async_trait::async_trait;
 use serde_json::Value;
+use std::sync::Arc;
 
 pub struct Glob;
 
@@ -104,30 +105,15 @@ mod tests {
     use std::path::PathBuf;
 
     fn dummy_ctx(cwd: PathBuf) -> ToolCtx {
-        ToolCtx {
-            session_id: mew_message::SessionId::from(ulid::Ulid::new()),
-            call_id: "test".to_string(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            progress_tx: tokio::sync::mpsc::channel(1).0,
-            cwd,
-            dispatcher: None,
-            secrets: Default::default(),
-        }
+        ToolCtx::test_new(cwd)
     }
 
     fn ctx_with_secret_globs(cwd: PathBuf, globs: Vec<&str>) -> ToolCtx {
-        ToolCtx {
-            session_id: mew_message::SessionId::from(ulid::Ulid::new()),
-            call_id: "test".to_string(),
-            cancel: tokio_util::sync::CancellationToken::new(),
-            progress_tx: tokio::sync::mpsc::channel(1).0,
-            cwd,
-            dispatcher: None,
-            secrets: std::sync::Arc::new(crate::SecretSet {
-                words: vec![],
-                globs: globs.iter().map(|s| s.to_string()).collect(),
-            }),
-        }
+        let secrets = Arc::new(SecretSet {
+            globs: globs.iter().map(|s| s.to_string()).collect(),
+            words: vec![],
+        });
+        ToolCtx::test_with_secrets(cwd, secrets)
     }
 
     #[tokio::test]

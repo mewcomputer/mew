@@ -83,11 +83,27 @@ static NAME_RE: LazyLock<Regex> =
 /// Discovers and loads personas from the filesystem.
 pub struct Loader {
     cwd: PathBuf,
+    /// If true, skip appending built-in personas (planner, builder) in
+    /// `load()`. Defaults to `false` (built-ins are included). Tests that
+    /// want to verify the scan logic without built-in noise use
+    /// `Loader::new(dir).without_builtins()`.
+    skip_builtins: bool,
 }
 
 impl Loader {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
-        Self { cwd: cwd.into() }
+        Self {
+            cwd: cwd.into(),
+            skip_builtins: false,
+        }
+    }
+
+    /// Skip the built-in planner/builder personas in `load()`. Useful for
+    /// testing the scan logic without the built-in noise, or for callers
+    /// that only want user-defined personas.
+    pub fn without_builtins(mut self) -> Self {
+        self.skip_builtins = true;
+        self
     }
 
     /// Scans for personas in the standard locations and loads them.
@@ -121,6 +137,19 @@ impl Loader {
         if let Some(home) = dirs_home() {
             for dir in global_persona_dirs(&home) {
                 self.scan_dir(&dir, &mut personas, &mut seen)?;
+            }
+        }
+
+        // Append built-in defaults (planner, builder) for any name not
+        // already provided by the user. User-defined personas override
+        // built-ins by name — the scan above populated `seen`, so any
+        // built-in whose name is already taken is skipped.
+        if !self.skip_builtins {
+            for builtin in builtin_defaults() {
+                if !seen.contains(&builtin.name) {
+                    seen.insert(builtin.name.clone());
+                    personas.push(builtin);
+                }
             }
         }
 
@@ -351,7 +380,7 @@ mod tests {
             "You are a researcher.",
         );
 
-        let loader = Loader::new(cwd);
+        let loader = Loader::new(cwd).without_builtins();
         let personas = loader.load().unwrap();
         assert_eq!(personas.len(), 1);
         assert_eq!(personas[0].name, "researcher");
@@ -373,7 +402,7 @@ mod tests {
             "  model: z-ai/glm-4.5-air\n  tools:\n    - read\n    - write\n    - bash\n",
         );
 
-        let loader = Loader::new(cwd);
+        let loader = Loader::new(cwd).without_builtins();
         let personas = loader.load().unwrap();
         assert_eq!(personas.len(), 1);
         assert_eq!(
@@ -394,7 +423,7 @@ mod tests {
         write_persona(cwd, "researcher", "Research", "body1");
         write_persona(cwd, "executor", "Execute", "body2");
 
-        let loader = Loader::new(cwd);
+        let loader = Loader::new(cwd).without_builtins();
         let personas = loader.load().unwrap();
         assert_eq!(personas.len(), 2);
     }
@@ -413,7 +442,7 @@ mod tests {
         )
         .unwrap();
 
-        let loader = Loader::new(cwd);
+        let loader = Loader::new(cwd).without_builtins();
         let personas = loader.load().unwrap();
         assert_eq!(personas.len(), 1);
         assert_eq!(personas[0].description, "First");
@@ -432,7 +461,7 @@ mod tests {
     #[test]
     fn test_load_no_personas() {
         let tmp = tempfile::tempdir().unwrap();
-        let loader = Loader::new(tmp.path());
+        let loader = Loader::new(tmp.path()).without_builtins();
         let personas = loader.load().unwrap();
         assert!(personas.is_empty());
     }
@@ -445,7 +474,7 @@ mod tests {
         std::fs::create_dir_all(&persona_dir).unwrap();
         std::fs::write(persona_dir.join("PERSONA.md"), "Just a body").unwrap();
 
-        let loader = Loader::new(cwd);
+        let loader = Loader::new(cwd).without_builtins();
         let personas = loader.load().unwrap();
         assert_eq!(personas.len(), 1);
         assert_eq!(personas[0].name, "no-fm");
@@ -465,7 +494,7 @@ mod tests {
         )
         .unwrap();
 
-        let loader = Loader::new(cwd);
+        let loader = Loader::new(cwd).without_builtins();
         let personas = loader.load().unwrap();
         assert!(personas.is_empty());
     }
@@ -476,7 +505,7 @@ mod tests {
         let cwd = tmp.path();
         write_persona_with_mew(cwd, "locked", "No tools", "body", "  tools: []\n");
 
-        let loader = Loader::new(cwd);
+        let loader = Loader::new(cwd).without_builtins();
         let personas = loader.load().unwrap();
         assert_eq!(personas.len(), 1);
         let tools = personas[0].config.tools.as_ref().unwrap();
@@ -495,7 +524,7 @@ mod tests {
             "  tools_deny:\n    - bash\n    - write\n",
         );
 
-        let loader = Loader::new(cwd);
+        let loader = Loader::new(cwd).without_builtins();
         let personas = loader.load().unwrap();
         assert_eq!(personas.len(), 1);
         let deny = personas[0].config.tools_deny.as_ref().unwrap();
@@ -514,7 +543,7 @@ mod tests {
             "  skills:\n    - git-release\n    - code-review\n",
         );
 
-        let loader = Loader::new(cwd);
+        let loader = Loader::new(cwd).without_builtins();
         let personas = loader.load().unwrap();
         assert_eq!(personas.len(), 1);
         let skills = personas[0].config.skills.as_ref().unwrap();
@@ -530,9 +559,149 @@ mod tests {
         let cwd = tmp.path();
         write_persona_with_mew(cwd, "minimal", "No skills", "body", "  skills: []\n");
 
-        let loader = Loader::new(cwd);
+        let loader = Loader::new(cwd).without_builtins();
         let personas = loader.load().unwrap();
         let skills = personas[0].config.skills.as_ref().unwrap();
         assert!(skills.is_empty());
     }
+
+    #[test]
+    fn test_builtin_defaults_returns_planner_and_builder() {
+        let builtins = builtin_defaults();
+        let names: Vec<&str> = builtins.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"planner"));
+        assert!(names.contains(&"builder"));
+    }
+
+    #[test]
+    fn test_builtin_planner_has_readonly_tools() {
+        let builtins = builtin_defaults();
+        let planner = builtins.iter().find(|p| p.name == "planner").unwrap();
+        let tools = planner.config.tools.as_ref().expect("planner has tool allowlist");
+        // Planner can investigate and write plans, but can't run shell commands.
+        assert!(tools.contains(&"read".to_string()));
+        assert!(tools.contains(&"grep".to_string()));
+        assert!(tools.contains(&"write".to_string()));
+        assert!(!tools.contains(&"bash".to_string()));
+    }
+
+    #[test]
+    fn test_builtin_builder_has_all_tools() {
+        let builtins = builtin_defaults();
+        let builder = builtins.iter().find(|p| p.name == "builder").unwrap();
+        // Builder has no tool restriction (None = all tools).
+        assert!(builder.config.tools.is_none());
+    }
+
+    #[test]
+    fn test_load_includes_builtins_when_not_overridden() {
+        let loader = Loader::new("/nonexistent");
+        let personas = loader.load().unwrap();
+        let names: Vec<&str> = personas.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"planner"), "planner should be a built-in default");
+        assert!(names.contains(&"builder"), "builder should be a built-in default");
+    }
 }
+
+/// Built-in personas shipped with mew. User-defined personas (loaded from
+/// `.mew/personas/<name>/PERSONA.md` etc.) override these by name.
+///
+/// - **planner** — read-only investigation + plan writing. Writes a plan to
+///   `PLAN.md` (or the configured `plan_path`), flag_important's it, then
+///   hands off to the builder. No bash or dangerous tools.
+/// - **builder** — the default persona. All tools available. Reads the plan
+///   from `PLAN.md` at the start of work and executes it step by step.
+pub fn builtin_defaults() -> Vec<Persona> {
+    vec![
+        Persona {
+            name: "builder".into(),
+            description: "Executes plans step by step. The default persona — all tools available.".into(),
+            body: BUILDER_BODY.into(),
+            path: PathBuf::from("(built-in)"),
+            config: PersonaConfig::default(),
+        },
+        Persona {
+            name: "planner".into(),
+            description: "Investigates the codebase and writes a plan. Read-only tools plus plan writing.".into(),
+            body: PLANNER_BODY.into(),
+            path: PathBuf::from("(built-in)"),
+            config: PersonaConfig {
+                tools: Some(vec![
+                    "read".into(),
+                    "glob".into(),
+                    "grep".into(),
+                    "write".into(),
+                    "edit".into(),
+                    "ask_user_question".into(),
+                    "flag_important".into(),
+                    "todo_create".into(),
+                    "todo_update".into(),
+                    "todo_complete".into(),
+                    "todo_list".into(),
+                ]),
+                ..Default::default()
+            },
+        },
+    ]
+}
+
+const BUILDER_BODY: &str = "\
+You are a builder. Your job is to execute plans step by step, making real \
+changes to the codebase.
+
+## Workflow
+
+1. If a plan exists (check PLAN.md or the plan path configured in your \
+environment), read it first. It contains the steps you should follow.
+2. Work through the plan one step at a time. Use `todo_list` to track \
+progress if the plan has explicit steps.
+3. Make focused, minimal changes. Read the relevant code before editing.
+4. Test your changes when possible.
+5. Update the plan or todos as you complete each step.
+
+## Principles
+
+- Prefer the smallest change that solves the problem.
+- Read before you write. Understand existing patterns before adding new ones.
+- If you're stuck or unsure, use `ask_user_question` rather than guessing.
+- Save progress to CURRENT.md frequently (append-only, dated sections).
+
+You have access to all tools: file reads/writes/edits, shell commands, \
+search, subagents, and more. Use them responsibly.
+";
+
+const PLANNER_BODY: &str = "\
+You are a planner. Your job is to investigate the codebase, understand the \
+problem, and write a clear, actionable plan. You do NOT make changes — \
+you produce the plan that a builder will execute.
+
+## Workflow
+
+1. Read the relevant code, configs, and documentation. Use `glob`, `grep`, \
+and `read` liberally.
+2. Ask clarifying questions with `ask_user_question` when the requirements \
+are ambiguous.
+3. Write the plan to PLAN.md (or the configured plan path). The plan should \
+have:
+   - A clear goal statement
+   - Numbered steps, each with a concrete description
+   - Files that will be touched
+   - Risks or tradeoffs called out
+4. Call `flag_important` on the plan file so it survives context compaction.
+5. Use `todo_create` to create session todos from the plan steps.
+6. Hand off to the builder persona when the plan is ready.
+
+## Principles
+
+- Investigate before planning. A plan built on assumptions is worse than \
+asking one question.
+- Be concrete. \"Update the config parser\" is not a step; \"add a `ports` \
+field to the ServerConfig struct in config.rs and parse it in load_config\" \
+is.
+- Flag risks. If a step could break something, say so.
+- Keep the plan skimmable. The builder will read it start-to-finish.
+
+You do NOT have bash or other dangerous tools. You can read, search, write \
+the plan file, and create todos. That's intentional — planning is a \
+read-only phase.
+";

@@ -483,15 +483,17 @@ impl Agent {
                 }
             });
 
-            let ctx = ToolCtx {
-                session_id: self.session_id,
-                call_id: tc.call_id.clone(),
-                cancel: self.cancel_token.child_token(),
+            let ctx = ToolCtx::new(
+                std::sync::Arc::new(mew_tools::ToolCtxShared {
+                    session_id: self.session_id,
+                    cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                    dispatcher: Some(self.dispatcher.clone()),
+                    secrets: self.secrets.clone(),
+                }),
+                tc.call_id.clone(),
+                self.cancel_token.child_token(),
                 progress_tx,
-                cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-                dispatcher: Some(self.dispatcher.clone()),
-                secrets: self.secrets.clone(),
-            };
+            );
 
             // Workspace sandbox check for path-based tools (skip bash/echo).
             let tool_cwd = ctx.cwd.clone();

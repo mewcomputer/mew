@@ -406,12 +406,37 @@ impl PluginHookConfig {
     /// True if `hook` should fire for the given `subject` (e.g. tool name).
     /// Returns `true` when no matcher is configured for the hook (fire by
     /// default) or the subject matches the pipe-separated pattern.
+    ///
+    /// Supports `!`-prefix negation:
+    /// - `"bash"` → fire only for bash
+    /// - `"bash|write"` → fire for bash or write
+    /// - `"!bash"` → fire for everything except bash
+    /// - `"!bash|!write"` → fire for everything except bash and write
+    /// - `"bash|write|!rm"` → fire for bash or write, but never rm
     pub fn matches(&self, hook: &str, subject: &str) -> bool {
         match self.matchers.get(hook) {
             None => true,
-            Some(pattern) => pattern
-                .split('|')
-                .any(|p| p.trim() == subject || p.trim() == "*"),
+            Some(pattern) => {
+                let entries: Vec<&str> = pattern.split('|').map(|p| p.trim()).collect();
+
+                // Check if any negative entry excludes the subject.
+                if entries.iter().any(|&p| {
+                    p.strip_prefix('!')
+                        .is_some_and(|n| n.trim() == subject || n.trim() == "*")
+                }) {
+                    return false;
+                }
+
+                // If all entries are negative, subject is included by default.
+                if entries.iter().all(|p| p.starts_with('!')) {
+                    return true;
+                }
+
+                // Positive entries define the allowed set.
+                entries
+                    .iter()
+                    .any(|&p| !p.starts_with('!') && (p == subject || p == "*"))
+            }
         }
     }
 
@@ -782,6 +807,61 @@ mod tests {
         };
         assert!(cfg.matches("on_permission_ask", "bash"));
         assert!(cfg.matches("on_permission_ask", "anything"));
+    }
+
+    #[test]
+    fn test_matcher_negation_single_exclude() {
+        let mut matchers = HashMap::new();
+        matchers.insert("on_tool_execute_before".into(), "!bash".into());
+        let cfg = PluginHookConfig {
+            matchers,
+            ..Default::default()
+        };
+        assert!(!cfg.matches("on_tool_execute_before", "bash"), "!bash must exclude bash");
+        assert!(cfg.matches("on_tool_execute_before", "read"), "!bash must include read");
+        assert!(cfg.matches("on_tool_execute_before", "write"), "!bash must include write");
+    }
+
+    #[test]
+    fn test_matcher_negation_multiple_excludes() {
+        let mut matchers = HashMap::new();
+        matchers.insert("on_tool_execute_before".into(), "!bash|!write".into());
+        let cfg = PluginHookConfig {
+            matchers,
+            ..Default::default()
+        };
+        assert!(!cfg.matches("on_tool_execute_before", "bash"));
+        assert!(!cfg.matches("on_tool_execute_before", "write"));
+        assert!(cfg.matches("on_tool_execute_before", "read"));
+        assert!(cfg.matches("on_tool_execute_before", "edit"));
+    }
+
+    #[test]
+    fn test_matcher_mixed_positive_and_negative() {
+        // "bash|write|!rm" = fire for bash or write, but never rm.
+        let mut matchers = HashMap::new();
+        matchers.insert("on_tool_execute_before".into(), "bash|write|!rm".into());
+        let cfg = PluginHookConfig {
+            matchers,
+            ..Default::default()
+        };
+        assert!(cfg.matches("on_tool_execute_before", "bash"));
+        assert!(cfg.matches("on_tool_execute_before", "write"));
+        assert!(!cfg.matches("on_tool_execute_before", "rm"));
+        assert!(!cfg.matches("on_tool_execute_before", "read"), "read not in positives");
+    }
+
+    #[test]
+    fn test_matcher_negation_wildcard() {
+        // "!*" = exclude everything.
+        let mut matchers = HashMap::new();
+        matchers.insert("on_tool_execute_before".into(), "!*".into());
+        let cfg = PluginHookConfig {
+            matchers,
+            ..Default::default()
+        };
+        assert!(!cfg.matches("on_tool_execute_before", "bash"));
+        assert!(!cfg.matches("on_tool_execute_before", "anything"));
     }
 
     #[test]
