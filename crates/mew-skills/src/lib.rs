@@ -71,11 +71,12 @@ impl Loader {
             prefixes: SKILL_PREFIXES,
             file: mew_harness::LoadFileSpec::SubdirFile("SKILL.md"),
         };
-        let skills = mew_harness::load_markdown_dirs(&self.cwd, &spec, |path| -> Result<_, SkillError> {
-            let skill = load_skill_file(path)?;
-            let name = skill.name.clone();
-            Ok(mew_harness::Loaded { value: skill, name })
-        })?;
+        let skills =
+            mew_harness::load_markdown_dirs(&self.cwd, &spec, |path| -> Result<_, SkillError> {
+                let skill = load_skill_file(path)?;
+                let name = skill.name.clone();
+                Ok(mew_harness::Loaded { value: skill, name })
+            })?;
         debug!(count = skills.len(), "loaded skills");
         Ok(skills)
     }
@@ -168,7 +169,7 @@ mod tests {
     /// lifetime; when the guard is dropped, HOME is restored.
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn with_test_home() -> impl Drop {
-        use std::sync::{MutexGuard, Mutex};
+        use std::sync::{Mutex, MutexGuard};
         struct Guard {
             lock: MutexGuard<'static, ()>,
             _dir: tempfile::TempDir,
@@ -189,8 +190,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("HOME");
         // SAFETY: serialized via HOME_LOCK above.
-        unsafe { std::env::set_var("HOME", dir.path()); }
-        Guard { lock, _dir: dir, prev }
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+        }
+        Guard {
+            lock,
+            _dir: dir,
+            prev,
+        }
     }
 
     #[test]

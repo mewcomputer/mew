@@ -87,6 +87,19 @@ impl Default for Config {
                 ..Default::default()
             },
         );
+        // Umans AI Coding Plan (https://app.umans.ai/offers/code/docs). Anthropic-shaped:
+        // hits /v1/messages with `x-api-key` and `anthropic-version: 2023-06-01` headers.
+        // Model list and pricing come from umans's own /v1/models/info endpoint
+        // (loaded by `mew_catalog::load_umans`), not from models.dev.
+        providers.insert(
+            "umans".into(),
+            ProviderConfig {
+                shape: "anthropic".into(),
+                base_url: "https://api.code.umans.ai/v1".into(),
+                credential_ref: "umans".into(),
+                ..Default::default()
+            },
+        );
         Self {
             providers,
             default_model: String::new(),
@@ -268,7 +281,7 @@ pub fn load() -> Result<Config, ConfigError> {
 }
 
 pub fn config_dir() -> PathBuf {
-    directories::ProjectDirs::from("ai", "mew", "mew")
+    directories::ProjectDirs::from("computer", "mew", "mew")
         .map(|d| d.config_dir().to_path_buf())
         .unwrap_or_else(|| {
             std::env::var_os("HOME")
@@ -415,6 +428,20 @@ mod tests {
         assert!(cfg.providers.contains_key("opencode-zen"));
         assert!(cfg.providers.contains_key("opencode-go"));
         assert!(cfg.providers.contains_key("z-ai"));
+        assert!(cfg.providers.contains_key("umans"));
+    }
+
+    #[test]
+    fn test_default_umans_provider() {
+        let cfg = Config::default();
+        let umans = cfg
+            .providers
+            .get("umans")
+            .expect("umans built-in provider should be present");
+        assert_eq!(umans.shape, "anthropic");
+        assert_eq!(umans.base_url, "https://api.code.umans.ai/v1");
+        assert_eq!(umans.credential_ref, "umans");
+        assert_eq!(umans.kind, "direct");
     }
 
     #[test]

@@ -94,6 +94,7 @@ impl Tool for Glob {
             output: files.join("\n"),
             error: String::new(),
             diff: None,
+            metadata: None,
         })
     }
 }
@@ -101,7 +102,9 @@ impl Tool for Glob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SecretSet;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn dummy_ctx(cwd: PathBuf) -> ToolCtx {
         ToolCtx::test_new(cwd)

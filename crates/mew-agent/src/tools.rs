@@ -146,15 +146,22 @@ impl Agent {
                 input: tc.input().clone(),
             };
 
-            // Permission check.
+            // Permission check. The escape tier inside the engine reads
+            // the cwd to resolve relative path args. The agent layer's
+            // `ToolCtx` is constructed a few lines below with
+            // `std::env::current_dir()` as its cwd — we mirror that here
+            // so the engine sees the same working directory the tool
+            // itself will see.
             let sensitivity = self
                 .tools
                 .get(&tc.tool_name)
                 .map(|t| t.sensitivity())
                 .unwrap_or(Sensitivity::Dangerous);
+            let engine_cwd =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let default_decision = if let Some(ref engine) = self.permission_engine {
                 engine
-                    .check(&tc.tool_name, &hook_call.input, sensitivity)
+                    .check(&tc.tool_name, &hook_call.input, sensitivity, &engine_cwd)
                     .await
             } else {
                 match sensitivity {
@@ -165,21 +172,33 @@ impl Agent {
             // Run the permission-ask hook. The hook can proceed with the
             // engine's default decision, force-block with a reason, or
             // silently suppress. Block/Suppress collapse to Deny here.
+            // `deny_reason` tracks *why* the decision was Deny so the model
+            // gets an actionable error instead of a bare "permission denied".
+            let mut deny_reason: Option<String> = None;
             let hook_outcome = self
                 .dispatcher
                 .on_permission_ask(&hook_call, default_decision)
                 .await;
             let decision = match hook_outcome {
-                mew_hooks::HookOutcome::Proceed(d) => d,
+                mew_hooks::HookOutcome::Proceed(d) => {
+                    if d == PermissionDecision::Deny {
+                        deny_reason = Some("deny rule or workspace-escape tier".into());
+                    }
+                    d
+                }
                 mew_hooks::HookOutcome::Block(reason) => {
                     tracing::info!(
                         tool = %hook_call.tool_name,
                         reason = %reason,
                         "permission hook blocked the call"
                     );
+                    deny_reason = Some(format!("blocked by hook: {reason}"));
                     PermissionDecision::Deny
                 }
-                mew_hooks::HookOutcome::Suppress => PermissionDecision::Deny,
+                mew_hooks::HookOutcome::Suppress => {
+                    deny_reason = Some("suppressed by hook".into());
+                    PermissionDecision::Deny
+                }
             };
 
             // In Auto / Auto+ mode, route the Prompt decision through the
@@ -194,24 +213,31 @@ impl Agent {
                 && matches!(
                     self.permission_mode(),
                     mew_hooks::PermissionMode::Auto | mew_hooks::PermissionMode::AutoPlus
-                )
-            {
+                ) {
                 match self.classify_permission(&hook_call).await {
                     Some(mew_prompts::classifier::ClassifierDecision::Allow) => {
                         PermissionDecision::AllowOnce
                     }
                     Some(mew_prompts::classifier::ClassifierDecision::Deny) => {
+                        deny_reason = Some("classifier denied".into());
                         PermissionDecision::Deny
                     }
                     Some(mew_prompts::classifier::ClassifierDecision::Escalate) => {
                         match self.permission_mode() {
-                            mew_hooks::PermissionMode::AutoPlus => PermissionDecision::Deny,
+                            mew_hooks::PermissionMode::AutoPlus => {
+                                deny_reason =
+                                    Some("classifier escalated (Auto+ fail-closed)".into());
+                                PermissionDecision::Deny
+                            }
                             _ => PermissionDecision::Prompt, // Auto → user modal
                         }
                     }
                     None => match self.permission_mode() {
                         // Provider error / timeout / malformed response.
-                        mew_hooks::PermissionMode::AutoPlus => PermissionDecision::Deny,
+                        mew_hooks::PermissionMode::AutoPlus => {
+                            deny_reason = Some("classifier unavailable (Auto+ fail-closed)".into());
+                            PermissionDecision::Deny
+                        }
                         _ => PermissionDecision::Prompt, // Auto → user modal
                     },
                 }
@@ -228,8 +254,16 @@ impl Agent {
                     })
                     .await;
                 match perm_rx.await {
-                    Ok(d) => d,
-                    Err(_) => PermissionDecision::Deny,
+                    Ok(d) => {
+                        if d == PermissionDecision::Deny {
+                            deny_reason = Some("user denied".into());
+                        }
+                        d
+                    }
+                    Err(_) => {
+                        deny_reason = Some("permission request channel closed".into());
+                        PermissionDecision::Deny
+                    }
                 }
             } else {
                 decision
@@ -242,9 +276,13 @@ impl Agent {
             }
 
             if decision == PermissionDecision::Deny {
+                let perm_error = match &deny_reason {
+                    Some(reason) => format!("permission denied: {reason}"),
+                    None => "permission denied".to_string(),
+                };
                 let error_state = ToolState::Error(ToolStateError {
                     input: hook_call.input.clone(),
-                    error: "permission denied".into(),
+                    error: perm_error,
                     time: ToolTime {
                         start: Utc::now().timestamp_millis(),
                         end: Some(Utc::now().timestamp_millis()),
@@ -556,6 +594,7 @@ impl Agent {
                         output: String::new(),
                         error: e.to_string(),
                         diff: None,
+                        metadata: None,
                     }
                 }
             };
@@ -591,7 +630,7 @@ impl Agent {
                     ToolState::Completed(ToolStateCompleted {
                         input: input.clone(),
                         output: output.output.clone(),
-                        metadata: None,
+                        metadata: output.metadata.clone(),
                         diff: output.diff.clone(),
                         time: ToolTime {
                             start: Utc::now().timestamp_millis(),
@@ -1149,15 +1188,30 @@ impl Agent {
             None => return,
         };
 
-        // Parse questions. The prompts stay here for result formatting; the
-        // AskUserQuestion structs move into the event.
-        let parsed: Vec<String> = input
+        // Parse questions. Each must have a prompt and a 2-4 element options
+        // array. The prompts and option labels are kept here for result
+        // formatting; the full AskUserQuestion structs move into the event.
+        let parsed: Vec<(String, Vec<String>)> = input
             .get("questions")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|q| q.get("prompt").and_then(|v| v.as_str()).map(String::from))
-                    .collect::<Vec<String>>()
+                    .filter_map(|q| {
+                        let prompt = q.get("prompt").and_then(|v| v.as_str())?.to_string();
+                        let labels: Vec<String> = q
+                            .get("options")
+                            .and_then(|v| v.as_array())
+                            .map(|opts| {
+                                opts.iter()
+                                    .filter_map(|o| {
+                                        o.get("label").and_then(|v| v.as_str()).map(String::from)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Some((prompt, labels))
+                    })
+                    .collect()
             })
             .unwrap_or_default();
 
@@ -1166,9 +1220,15 @@ impl Agent {
         } else {
             let questions: Vec<crate::AskUserQuestion> = parsed
                 .iter()
-                .map(|prompt| crate::AskUserQuestion {
+                .map(|(prompt, labels)| crate::AskUserQuestion {
                     prompt: prompt.clone(),
-                    default: None,
+                    options: labels
+                        .iter()
+                        .map(|l| crate::QuestionOption {
+                            label: l.clone(),
+                            description: String::new(),
+                        })
+                        .collect(),
                 })
                 .collect();
             let (tx, rx) = oneshot::channel();
@@ -1182,12 +1242,17 @@ impl Agent {
             match rx.await {
                 Ok(answers) => {
                     let mut text = String::new();
-                    for (i, prompt) in parsed.iter().enumerate() {
+                    for (i, (prompt, labels)) in parsed.iter().enumerate() {
                         let answer = answers.get(i).map(|s| s.as_str()).unwrap_or("(no answer)");
+                        let picked = match answer {
+                            a if labels.iter().any(|l| l == a) => "selected",
+                            "(no answer)" => "no answer",
+                            _ => "freeform",
+                        };
                         if !text.is_empty() {
                             text.push_str("\n\n");
                         }
-                        text.push_str(&format!("Q: {}\nA: {}", prompt, answer));
+                        text.push_str(&format!("Q: {}\nA ({}): {}", prompt, picked, answer));
                     }
                     (text, true)
                 }
@@ -1270,10 +1335,7 @@ impl Agent {
 
         let (output, success) = match tc.tool_name.as_str() {
             "shell_background" => {
-                let command = input
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
                 if command.is_empty() {
                     ("shell_background: 'command' is required".into(), false)
                 } else {
@@ -1293,10 +1355,7 @@ impl Agent {
                 }
             }
             "job_status" => {
-                let job_id = input
-                    .get("job_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let job_id = input.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
                 match self.shell_job_status(job_id).await {
                     Some((state, output)) => {
                         let _ = ev_tx
@@ -1313,10 +1372,7 @@ impl Agent {
                 }
             }
             "job_block" => {
-                let job_id = input
-                    .get("job_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let job_id = input.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
                 let timeout = input
                     .get("timeout_secs")
                     .and_then(|v| v.as_u64())
@@ -1330,10 +1386,7 @@ impl Agent {
                 }
             }
             "job_cancel" => {
-                let job_id = input
-                    .get("job_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let job_id = input.get("job_id").and_then(|v| v.as_str()).unwrap_or("");
                 if self.cancel_shell_job(job_id).await {
                     let _ = ev_tx
                         .send(AgentEvent::JobUpdate {
@@ -1351,10 +1404,7 @@ impl Agent {
                 }
             }
             "shell_monitor" => {
-                let command = input
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
                 let timeout = input
                     .get("timeout_secs")
                     .and_then(|v| v.as_u64())
@@ -1393,7 +1443,12 @@ impl Agent {
                                 .collect::<Vec<_>>()
                                 .join("\n");
                             (
-                                format!("not ready after {}s: {}\n\n{}", timeout, state.as_str(), last),
+                                format!(
+                                    "not ready after {}s: {}\n\n{}",
+                                    timeout,
+                                    state.as_str(),
+                                    last
+                                ),
                                 false,
                             )
                         }

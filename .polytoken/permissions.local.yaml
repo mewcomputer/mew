@@ -1,0 +1,5 @@
+version: 2
+allow:
+- tool: web_fetch
+  args:
+    url: https://api.code.umans.ai/v1/models/info{,/**}

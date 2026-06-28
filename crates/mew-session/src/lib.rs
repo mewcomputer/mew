@@ -295,7 +295,7 @@ pub fn session_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("MEW_SESSION_DIR") {
         return PathBuf::from(p);
     }
-    directories::ProjectDirs::from("ai", "mew", "mew")
+    directories::ProjectDirs::from("computer", "mew", "mew")
         .map(|d| d.config_dir().join("sessions"))
         .unwrap_or_else(|| {
             std::env::var_os("HOME")

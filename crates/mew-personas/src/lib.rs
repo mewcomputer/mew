@@ -124,18 +124,21 @@ impl Loader {
             prefixes: PERSONA_PREFIXES,
             file: mew_harness::LoadFileSpec::SubdirFile("PERSONA.md"),
         };
-        let mut personas = mew_harness::load_markdown_dirs(&self.cwd, &spec, |path| -> Result<_, PersonaError> {
-            let persona = load_persona_file(path)?;
-            let name = persona.name.clone();
-            Ok(mew_harness::Loaded { value: persona, name })
-        })?;
+        let mut personas =
+            mew_harness::load_markdown_dirs(&self.cwd, &spec, |path| -> Result<_, PersonaError> {
+                let persona = load_persona_file(path)?;
+                let name = persona.name.clone();
+                Ok(mew_harness::Loaded {
+                    value: persona,
+                    name,
+                })
+            })?;
 
         // Append built-in defaults (planner, builder) for any name not
         // already provided by the user. User-defined personas override
         // built-ins by name.
         if !self.skip_builtins {
-            let mut seen: HashSet<String> =
-                personas.iter().map(|p| p.name.clone()).collect();
+            let mut seen: HashSet<String> = personas.iter().map(|p| p.name.clone()).collect();
             for builtin in builtin_defaults() {
                 if !seen.contains(&builtin.name) {
                     seen.insert(builtin.name.clone());
@@ -147,7 +150,6 @@ impl Loader {
         debug!(count = personas.len(), "loaded personas");
         Ok(personas)
     }
-
 }
 
 const PERSONA_PREFIXES: &[&str] = &[
@@ -454,7 +456,11 @@ mod tests {
     fn test_builtin_planner_has_readonly_tools() {
         let builtins = builtin_defaults();
         let planner = builtins.iter().find(|p| p.name == "planner").unwrap();
-        let tools = planner.config.tools.as_ref().expect("planner has tool allowlist");
+        let tools = planner
+            .config
+            .tools
+            .as_ref()
+            .expect("planner has tool allowlist");
         // Planner can investigate and write plans, but can't run shell commands.
         assert!(tools.contains(&"read".to_string()));
         assert!(tools.contains(&"grep".to_string()));
@@ -475,8 +481,14 @@ mod tests {
         let loader = Loader::new("/nonexistent");
         let personas = loader.load().unwrap();
         let names: Vec<&str> = personas.iter().map(|p| p.name.as_str()).collect();
-        assert!(names.contains(&"planner"), "planner should be a built-in default");
-        assert!(names.contains(&"builder"), "builder should be a built-in default");
+        assert!(
+            names.contains(&"planner"),
+            "planner should be a built-in default"
+        );
+        assert!(
+            names.contains(&"builder"),
+            "builder should be a built-in default"
+        );
     }
 }
 
@@ -492,14 +504,17 @@ pub fn builtin_defaults() -> Vec<Persona> {
     vec![
         Persona {
             name: "builder".into(),
-            description: "Executes plans step by step. The default persona — all tools available.".into(),
+            description: "Executes plans step by step. The default persona — all tools available."
+                .into(),
             body: BUILDER_BODY.into(),
             path: PathBuf::from("(built-in)"),
             config: PersonaConfig::default(),
         },
         Persona {
             name: "planner".into(),
-            description: "Investigates the codebase and writes a plan. Read-only tools plus plan writing.".into(),
+            description:
+                "Investigates the codebase and writes a plan. Read-only tools plus plan writing."
+                    .into(),
             body: PLANNER_BODY.into(),
             path: PathBuf::from("(built-in)"),
             config: PersonaConfig {

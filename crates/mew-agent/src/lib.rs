@@ -10,13 +10,21 @@ use mew_session::Writer as SessionWriterInner;
 /// Alias for the interior-mutability wrapper required by the async agent loop.
 pub type SessionWriter = Arc<Mutex<SessionWriterInner>>;
 
+/// One option within an `ask_user_question` question. The TUI renders each
+/// option as a numbered row, with `description` shown beneath as a hint.
+#[derive(Debug, Clone)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
 /// One question in an `ask_user_question` request. Carried from the tool
-/// through `AgentEvent::AskUser` to the TUI, which renders it as a free-text
-/// input and returns the answer.
+/// through `AgentEvent::AskUser` to the TUI, which renders the options as
+/// a numbered list and returns the selected answer (label or freeform text).
 #[derive(Debug, Clone)]
 pub struct AskUserQuestion {
     pub prompt: String,
-    pub default: Option<String>,
+    pub options: Vec<QuestionOption>,
 }
 
 /// Events emitted by the agent core to the TUI.
@@ -214,6 +222,7 @@ impl std::fmt::Debug for AgentEvent {
 
 mod agent;
 mod events;
+mod reasoning_truncator;
 pub mod runner;
 mod todos;
 mod tools;
@@ -222,6 +231,9 @@ mod workspace;
 
 pub use agent::Agent;
 pub use mew_subagents::SubagentOutcome;
+pub use reasoning_truncator::{
+    ReasoningTruncator, DEFAULT_REASONING_TRUNCATION_THRESHOLD, TRUNCATION_ACK_TEXT,
+};
 pub use todos::{Todo, TodoList, TodoStatus};
 
 #[cfg(test)]

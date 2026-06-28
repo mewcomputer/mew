@@ -54,10 +54,11 @@ impl Tool for Read {
         // Check file size before reading.
         let metadata = tokio::fs::metadata(&path)
             .await
-            .map_err(|e| ToolError::Execution(format!("stat failed: {}", e)))?;
+            .map_err(|e| ToolError::Execution(format!("{}: {}", path.display(), e)))?;
         if metadata.len() > MAX_FILE_SIZE {
             return Err(ToolError::Execution(format!(
-                "file too large ({} bytes, max {})",
+                "{}: file too large ({} bytes, max {})",
+                path.display(),
                 metadata.len(),
                 MAX_FILE_SIZE
             )));
@@ -65,11 +66,14 @@ impl Tool for Read {
 
         let content = tokio::fs::read_to_string(&path)
             .await
-            .map_err(|e| ToolError::Execution(format!("read failed: {}", e)))?;
+            .map_err(|e| ToolError::Execution(format!("{}: {}", path.display(), e)))?;
 
         // Detect binary files via null byte.
         if content.contains('\0') {
-            return Err(ToolError::Execution("cannot read binary file".into()));
+            return Err(ToolError::Execution(format!(
+                "{}: cannot read binary file",
+                path.display()
+            )));
         }
 
         let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -102,6 +106,7 @@ impl Tool for Read {
             output: content,
             error: String::new(),
             diff: None,
+            metadata: None,
         })
     }
 }
@@ -109,10 +114,10 @@ impl Tool for Read {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SecretSet;
-    use std::sync::Arc;
     use super::*;
+    use crate::SecretSet;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn dummy_ctx(cwd: PathBuf) -> ToolCtx {
         ToolCtx::test_new(cwd)
@@ -197,5 +202,44 @@ mod tests {
         let result = tool.execute(ctx, input).await.unwrap();
         assert_eq!(result.output, "just text");
         assert!(!result.output.contains("redacted"));
+    }
+
+    /// Regression: every read error must include the file path so the model
+    /// can fix its `path` argument without guessing.
+    #[tokio::test]
+    async fn test_read_missing_error_includes_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = Read;
+        let ctx = dummy_ctx(dir.path().to_path_buf());
+        let input = serde_json::json!({"path": "does_not_exist.txt"});
+        let result = tool.execute(ctx, input).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("does_not_exist.txt"),
+            "expected the missing path in error: {err}"
+        );
+    }
+
+    /// Regression: the binary-file error must include the path so the model
+    /// knows which file it accidentally targeted.
+    #[tokio::test]
+    async fn test_read_binary_error_includes_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.bin");
+        // 4 NUL bytes — enough to trip the binary detector.
+        tokio::fs::write(&path, [0u8, 1, 0, 1]).await.unwrap();
+
+        let tool = Read;
+        let ctx = dummy_ctx(dir.path().to_path_buf());
+        let input = serde_json::json!({"path": "blob.bin"});
+        let result = tool.execute(ctx, input).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("blob.bin"),
+            "expected the binary path in error: {err}"
+        );
+        assert!(err.contains("binary"), "expected 'binary' in error: {err}");
     }
 }

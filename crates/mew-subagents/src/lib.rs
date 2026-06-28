@@ -226,11 +226,15 @@ impl Loader {
             prefixes: SUBAGENT_PREFIXES,
             file: mew_harness::LoadFileSpec::FlatMd,
         };
-        let mut defs = mew_harness::load_markdown_dirs(&self.cwd, &spec, |path| -> Result<_, SubagentError> {
-            let def = load_agent_file(path)?;
-            let name = def.name.clone();
-            Ok(mew_harness::Loaded { value: def, name })
-        })?;
+        let mut defs = mew_harness::load_markdown_dirs(
+            &self.cwd,
+            &spec,
+            |path| -> Result<_, SubagentError> {
+                let def = load_agent_file(path)?;
+                let name = def.name.clone();
+                Ok(mew_harness::Loaded { value: def, name })
+            },
+        )?;
 
         // Add built-in defaults for any not already defined by the user.
         let mut seen: std::collections::HashSet<String> =
@@ -293,7 +297,6 @@ impl Loader {
             },
         ]
     }
-
 }
 
 fn load_agent_file(path: &Path) -> Result<SubagentDef, SubagentError> {

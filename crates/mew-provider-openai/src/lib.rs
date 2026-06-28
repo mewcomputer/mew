@@ -227,6 +227,14 @@ impl Adapter {
                 if let Some(m) = params.max_tokens {
                     body_obj.insert("max_tokens".into(), json!(m));
                 }
+                if let Some(tc) = params.tool_choice {
+                    let v = match tc {
+                        mew_provider::ToolChoice::Auto => json!("auto"),
+                        mew_provider::ToolChoice::Required => json!("required"),
+                        mew_provider::ToolChoice::None_ => json!("none"),
+                    };
+                    body_obj.insert("tool_choice".into(), v);
+                }
             }
         }
 

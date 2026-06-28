@@ -1,0 +1,35 @@
+[package]
+name = "mew-web-bridge"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mew-web"
+path = "src/main.rs"
+
+[dependencies]
+mew-daemon = { workspace = true }
+mew-protocol = { workspace = true }
+mew-message = { workspace = true }
+
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tungstenite = "0.24"
+futures = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+include_dir = "0.7"
+
+[dev-dependencies]
+mew-agent = { workspace = true }
+mew-hooks = { workspace = true }
+mew-provider-fake = { workspace = true }
+mew-provider = { workspace = true }
+mew-message = { workspace = true }
+tempfile = "3"
+serde_json = { workspace = true }
+tracing = { workspace = true }

@@ -757,11 +757,13 @@ impl mew_tools::Tool for McpTool {
                     String::new()
                 },
                 diff: None,
+                ..Default::default()
             }),
             Err(e) => Ok(mew_hooks::ToolOutput {
                 output: String::new(),
                 error: e.to_string(),
                 diff: None,
+                metadata: None,
             }),
         }
     }

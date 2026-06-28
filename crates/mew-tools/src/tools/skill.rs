@@ -80,6 +80,7 @@ impl Tool for Skill {
             output: skill.body.clone(),
             error: String::new(),
             diff: None,
+            metadata: None,
         })
     }
 }

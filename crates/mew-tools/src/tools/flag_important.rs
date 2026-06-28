@@ -120,6 +120,7 @@ impl Tool for FlagImportant {
             ),
             error: String::new(),
             diff: None,
+            ..Default::default()
         })
     }
 }

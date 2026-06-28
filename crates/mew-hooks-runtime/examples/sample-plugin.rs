@@ -126,7 +126,6 @@ fn handle(method: &str, params: &serde_json::Value) -> serde_json::Value {
         }
 
         // -- New hooks demonstrating the extended API --
-
         "on-model-finish" => {
             let finish = params["finish"].as_str().unwrap_or("?");
             let input = params["input_tokens"].as_u64().unwrap_or(0);

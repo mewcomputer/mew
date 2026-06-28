@@ -1,621 +1,510 @@
-# Progress — 2026-06-21
+# Progress — 2026-06-27
 
-## Personas v2 polish (all committed)
+## B1 web UI polish — COMPLETE
 
-- **Sidebar section**: collapsible "Personas" section between Tools and MCP, active persona marked in purple
-- **Confirm modal**: `/persona <name>` shows a diff (model, tools, deny, skills changes) before applying. Confirm/Cancel buttons, y/n shortcuts
-- **switch_persona tool**: model-callable, queues switch at end-of-turn (not mid-turn), gated by PermissionEngine (Mutating sensitivity)
-- **tools_deny**: PersonaConfig extended with denylist. Applied after allowlist in turn.rs tool filter
-- **skills allowlist**: PersonaConfig gains `skills` field. Skill tool gates by filter, system prompt skills XML rebuilt on persona change
-- **Minijinja templating**: `template: true` in frontmatter renders persona body with `supports_vision`, `tools`, `denied_tools`, `persona_name`
+Finished all five B1 polish items for `mew-web-ui`.
 
-## Secrets (all committed)
+**Subagent visualization:**
+- `SubagentPanel.tsx` — renders running/completed/cancelled/failed subagents with colored status dots, display name, and last progress message (`↳ message`).
+- Store: `subagents: Map<string, SubagentInfo>` state, `onSubagentStart`/`onSubagentStatus`/`onSubagentEnd` actions. Bridge wires the three events.
 
-- **Config**: `secrets.files.paths` + `secrets.words.values` in config.toml
-- **Permission pre-check**: `read` of secret-file glob forces Prompt unless literal allow rule
-- **Redaction**: `secrets.rs` module with `redact_secret_words()` — replaces values with `[REDACTED]`, preserves structure
-- **Wired into**: Read, Bash (before truncation), Grep (drops secret-file lines + redacts words), Glob (drops secret-file results)
+**AskUserRequest rendering:**
+- `AskUserCard.tsx` — renders pending questions with selectable options or free-text input. Submit button sends answers back via `respondToAskUser`.
+- Store: `pendingAskUser: PendingAskUser[]` state, `onAskUserRequest`/`resolveAskUser` actions. `askUserResponders` side-channel map (like `permissionResponders`).
+- TS client fix: `ask-user-request` event now includes a `respond` callback (matching the `permission-request` pattern). Added `respondToAskUser()` method.
 
-## Shell command decomposition (all committed)
+**Todo list rendering:**
+- `TodoPanel.tsx` — renders the agent's todo list with status icons (✅🔄⬜⛔), dependency labels, and progress count (done/total + active).
+- Store: `todos: TodoItem[]` state, `onTodosUpdated` action that maps wire `Todo[]` → `TodoItem[]`. Bridge wires `todos-updated`.
 
-- **`mew-config/src/shell.rs`**: splits compound commands on `|`, `&&`, `;`, respects quotes
-- **Opaque detection**: `$(...)`, backticks, `<(...)`, `eval`, `bash -c`, `| sh`, `| xargs` → force Prompt
-- **PermissionEngine**: compound commands require all programs allowed; single commands use prefix matching (backward compat)
-- **MatchConditions**: `command_program` + `command_subcommand` fields added
+**Reconnect with backoff:**
+- `App.tsx` — exponential backoff reconnection (2s, 4s, 8s, ... cap 30s). On unexpected WS close, retries automatically and re-attaches to the same session via `attachSession`. `intentionalDisconnectRef` prevents retries during unmount. `reconnectTimerRef` is cleared on cleanup.
+- TS client fix: `close` event handler now clears `ws` and `openPromise` so `connect()` can be called again after a disconnect.
 
-## Hooks runtime overhaul (all committed)
+**Playwright e2e:**
+- `playwright.config.ts` + `e2e/chat.spec.ts` — 3 browser-level tests: page loads, send prompt + see streaming text, session list drawer opens. Spawns `mew daemon --fake-provider` + `mew-web` bridge as subprocesses, uses a temp dir for the socket. All 3 pass.
 
-- **21 hooks** in Dispatcher trait (was ~12, many unwired)
-- **HookId enum**: single source of truth (as_wire, as_config, ALL, Display)
-- **PluginHookConfig**: per-plugin `disabled_hooks`, `matchers`, `timeout_ms`
-- **on_register_tools**: subprocess plugins can now register async tools (ToolRegistration::execute is now async)
-- **Parallel dispatch**: `pipe_json_filtered` uses `join_all` (latency = max, not sum)
-- **Plugin health**: `healthy: AtomicBool`, writer drain on crash, user notification
-- **config_read**: wired to PluginInfo (session_id, model, provider, workspace, active_persona)
-- **ChatParams/headers**: flow through to provider Request, OpenAI adapter uses them
-- **New hooks**: on_user_input, on_persona_change, on_session_save, on_model_finish, on_provider_event, on_tool_error, on_subagent_start/end, on_pre_model_turn, on_stop, on_pre/post_compaction
+All wired into `App.tsx` layout: `ChatSurface → TodoPanel → SubagentPanel → AskUserCard → InputArea`.
 
-## Telemetry
+Verified: `pnpm exec tsc --noEmit` clean, `pnpm build` succeeds, `npx playwright test` 3/3 pass.
 
-- **telemetry-exporter.rs** example plugin: Prometheus /metrics endpoint on :9090
-- Collects token/cost/tool/turn metrics from hooks
-- Zero external deps (std::net only)
+## Daemonization (A1) — COMPLETE
 
-## Decisions made
+Implemented `mew daemon --background` using the standard double-fork + setsid daemonization pattern. The daemon can now detach from the terminal and survive logout.
 
-- `on_event(&dyn Any)` removed entirely — replaced with specific typed hooks (was !Send, couldn't forward to subprocess)
-- `pipe_json_filtered` changed from sequential (pipe) to parallel (broadcast, last alphabetical wins) — documented as behavior change
-- Plugin restart deferred — needs Arc<Mutex<Option<PluginProcess>>> per slot (documented as TODO)
-- ProviderEvent derives Serialize/Deserialize (field: &'static str limitation noted for Rust in-process plugins)
+**What changed:**
 
-## Jobs (background shell + job control)
+- **`main.rs` restructured**: Split into a sync `main()` (parses CLI, handles `--stop`/`--background` before tokio starts) and `async_main(cli, daemonized)` (the runtime body). This was critical: `dup2` calls in `daemonize()` must run *before* tokio creates its internal FDs, or the runtime panics with "Bad file descriptor".
+- **`daemonize()` function**: Redirects stdio to `/dev/null` (or `--log` file) *before* forking, then double-forks (first fork detaches from parent, `setsid()` creates a new session, second fork ensures the child can never re-acquire a terminal). Writes PID to pidfile. Re-inits tracing to write to the redirected stderr.
+- **`--background` flag**: Detaches the daemon from the terminal.
+- **`--log <path>` flag**: Redirects logs to a file instead of `/dev/null`.
+- **`--pidfile <path>` flag**: Overrides the default PID file path (`$XDG_RUNTIME_DIR/mew.pid` or `/tmp/mew.pid`).
+- **`--stop` flag**: Reads the PID from the pidfile and sends SIGTERM. Removes the pidfile after.
+- **SIGTERM handling in `DaemonServer`**: Both `run()` and `run_tcp()` now use `tokio::select!` with a SIGTERM handler, so the daemon shuts down gracefully on `--stop` or `kill`.
+- **Tracing init dedup**: `daemonize()` inits tracing for the daemon child; `async_main` skips re-init when `daemonized == true` (avoids "global default trace dispatcher already set" panic).
+- **`nix` crate**: Added as a workspace + `mew` dependency for `fork`, `setsid`, `dup2`, `kill`.
 
-- **Shell job registry** (`mew-agent/src/agent.rs`): `ShellJob` struct (id, command, started_at, cancel token, accumulated output, state, done Notify) + `ShellJobState` enum (Running / Completed{exit_code} / Failed{reason} / Cancelled). Stored in `Agent.shell_jobs: Arc<Mutex<HashMap<String, ShellJob>>>`, mirroring the subagent_tasks registry.
-- **Five tools** (`mew-tools/src/tools/jobs.rs`, intercepted by agent core — same pattern as `subagent_start`):
-  - `shell_background` — launches detached, returns job ID immediately (Dangerous)
-  - `job_status` — state + accumulated output so far (ReadOnly)
-  - `job_block` — wait for terminal state up to timeout_secs, returns final output (ReadOnly)
-  - `job_cancel` — kills the process (Mutating)
-  - `shell_monitor` — readiness polling: launches via shell_background, blocks until exit 0 or timeout (Dangerous)
-- **AgentEvent::JobUpdate** { job_id, command, state }: emitted from job lifecycle (start, status-check, cancel). Emitted as string `state` ("running"/"completed"/"failed"/"cancelled") for clean serialization across the ACP boundary.
-- **Sidebar "Background Jobs" section** (`mew-tui/src/ui/sidebar.rs`): mirrors the Subagents block. Shows icon (▸/✓/✗/⊘), truncated command, elapsed time, and status label. `BackgroundJobState` on App updated via `handle_agent_event` — existing entries transition state in place (preserving started_at); unknown job_ids are inserted.
+**Verified live:**
+```
+$ mew daemon --fake-provider --socket /tmp/mew.sock --pidfile /tmp/mew.pid --log /tmp/mew.log --background
+$ # daemon runs in background, survives terminal close
+$ mew daemon --stop --pidfile /tmp/mew.pid
+daemon (PID 12345) stopped
+```
 
-## Next up
+fmt clean, clippy clean, all 717 tests pass.
 
-- Jobs milestone complete. No outstanding feature work queued; pending items are housekeeping (this doc) and any polish the user requests.
+## Shared sessions Phase 1 — COMPLETE
 
-## Landing / start page redesign (2026-06-21)
+Finished implementing live shared sessions per `SHARED_SESSIONS_SPEC.md` Phase 1. The workspace now builds clean, all 717 tests pass, and `just ci` is green.
 
-- **Centered start screen** instead of the old "welcome content floats up top, input pinned to bottom" layout. When `app.messages.is_empty()`, `ui/mod.rs::draw` now takes an early landing branch: a centered cat + bold "mew" hero with the input directly beneath it, plus the status line still pinned to the bottom. Reverts to the normal bottom-pinned layout automatically once the first message lands (transition trigger: first sent message, per operator decision).
-- **Hero composition** (`ui/welcome.rs::draw_landing`, replaces the old `draw_welcome`): the pre-existing-but-unused `CAT` ASCII const is now wired in, rendered green (matching the companion sprite) with the bold "mew" wordmark to its right on the cat's face line. Hero is centered as a fixed-width, left-aligned block so the cat art stays coherent.
-- **Centered input**: ~60% width clamped to [30, 80], rendered via the existing `draw_input` (unchanged — it already takes a rect and sets the cursor). Hero + input are centered as one vertical unit so the cat reads as hovering just above the field. Slash autocomplete is supported on the landing screen too (drawn into the rows directly above the centered input).
-- **Overlay refactor**: factored the alert/permission/user-question/persona-confirm/command-palette block out of `draw()` into a shared `draw_overlays(f, app, area)` helper used by both the landing and normal branches, so both respond identically to those modes.
-- **chat.rs cleanup**: removed the now-unreachable `draw_welcome` call + import from `draw_chat` (mod.rs intercepts the empty-messages case before `draw_chat` runs).
-- **Incidental clippy fix**: `chat.rs` had a pre-existing `useless_format` lint on the "thinking [Ctrl-T to collapse]" header (present in HEAD, flagged under toolchain 1.94.0). Applied clippy's suggested `.to_string()` so the `-D warnings` gate stays green. Unrelated to the feature; called out for transparency.
-- **Verified**: `cargo build -p mew`, `cargo clippy --all -- -D warnings`, `cargo test --all` all pass.
+**What was done this session (resume from mid-implementation):**
 
-## Permission semantic audit (2026-06-21)
+- **`main.rs` builder closure**: Updated both the fake-provider and real-provider builder closures to accept `AgentBuildParams { session_id, writer, cwd }`. The `build_session_agent` helper now takes `writer` and `session_id` params and threads them into `Agent::new`. The closures parse the `sess_<ULID>` string into a `SessionId` (Ulid). The `mew` binary builds clean.
+- **`DaemonServer::with_session_dir`**: New constructor that lets tests isolate sessions to a temp dir instead of the global `~/.local/share/mew/sessions`. `with_model_management` now preserves the custom session dir instead of resetting to the global default. `SessionManager::create` now uses `Writer::open_at(&self.session_dir, …)` instead of `Writer::open(…)` so it respects the configured dir.
+- **Daemon tests updated** (`e2e.rs`, `concurrency.rs`, `tcp.rs`): All builder closures updated to the `AgentBuildParams` signature and use `DaemonServer::with_session_dir` with a temp `sessions/` subdir. Session IDs are parsed to `SessionId` for the `Agent::new` call.
+- **Web-bridge e2e tests updated**: Two builder closures fixed to the new tuple-return shape + `with_session_dir`; `SessionReady` patterns use `..` for the new optional `model`/`provider` fields.
+- **Unused imports cleaned**: Removed `HashMap`, `PermissionDecision`, `oneshot`, `Mutex` from `mew-daemon/src/lib.rs`; removed unused `anyhow::Result` from `tcp.rs`.
+- **Protocol round-trip tests** (+10 new, 47 → 57): `AttachSession`, `ListSessions`, `SessionState` (lowercase serialization), `SessionInfo` (full + optional-field-skip), `RequestResolved`, `SessionCleared`, `SessionList` (multi-entry), `SessionHistory` (with a real `Message` + empty list). Added `PartialEq, Eq` derives to `SessionState` for `assert_eq!` support.
+- **Web UI session list**: New `SessionListDrawer` component (slide-in drawer with backdrop, Escape-to-close, new-session button, attach-to-session). `TopBar` now has a sessions button showing the current session ID. `App.tsx` wires the drawer, persists `sessionId` to `localStorage`, and reconnects via `attachSession` on reload (falling back to `newSession` if the session is gone).
+- **Store updates**: `availableSessions`, `sessionsLoading` state; `onSessionHistory` (maps wire `Message[]` → `ChatMessage[]` via `wirePartToMessagePart`), `onSessionCleared` (wipes messages + counters), `setAvailableSessions`, `setSessionsLoading`. Bridge wires `session-list`, `session-history`, `session-cleared`, and `request-resolved` events.
+- **Cancellation test fix**: `test_cancellation_during_stream` in `mew-agent/src/tests.rs` was failing because `run()` now creates a fresh per-turn `CancellationToken` (the shared-sessions change), so cancelling the agent's permanent token didn't reach the turn. Fixed by calling `run_with_parts` with `Some(agent.cancel_token.clone())`.
+- **Drive-by clippy fixes**: `unwrap_or_else(CancellationToken::new)` → `unwrap_or_default()` in `agent.rs`; `#[allow(clippy::too_many_arguments)]` on `build_session_agent` (now 8 args).
 
-Audit of the three permission paths before any new feature (autonomous mode, plan/execute, worktree-scoped allows) lands on top of the foundation.
+**Verification:** `cargo fmt --check` clean, `cargo clippy --all -- -D warnings` clean, `cargo test --all` — 717 tests pass, `just ci` green (including `just e2e` subprocess test).
 
-### Three paths into the permission prompt
+## Shared sessions Phase 1 — IN PROGRESS (stopped mid-implementation)
 
-1. **Regular tool call → `PermissionRequest`** (`mew-agent/src/tools.rs:140-230`): engine decides `AllowOnce` / `AllowSession` / `Deny` / `Prompt` via `PermissionEngine::check`. If `Prompt`, the dispatcher hook `on_permission_ask` runs first; if it doesn't bypass, an `AgentEvent::PermissionRequest` is emitted and the agent blocks on the oneshot. TUI consumer at `app.rs:1828` renders the standard modal; keypress `1` sends `AllowSession` (`events.rs:305, 323`). On `AllowSession`, the agent calls `engine.add_session_allow(&tool_name)` at `tools.rs:186-190`. Test: `tests.rs:687-714`.
-2. **Workspace sandbox → `WorkspacePermissionRequest`** (`mew-agent/src/workspace.rs:31-58`): triggered by `ensure_workspace_path` at `tools.rs:349` for path-based tools only (`read`/`write`/`edit` from `input.path`; `glob`/`grep` defaulting to `.`). Bash and echo are explicitly skipped (the `workspace.rs:67-77` path extractor returns `None` for them). Fires when resolved path is outside `workspace_roots` AND not in `workspace_allowances`. The *containing directory* (not the file) is added to `workspace_allowances` on `AllowOnce`/`AllowSession`. TUI consumer at `app.rs:1828` sets `tool_name = "workspace"` and reuses the same modal.
-3. **Subagent's tool call → `SubagentPermissionRequest`** (`mew-agent/src/tools.rs:723-741`): the subagent emits `mew_subagents::SubagentEvent::PermissionRequest { tool_name, call_id, input, tx }`; the parent forwards it as `AgentEvent::SubagentPermissionRequest`. Each subagent has its own `PermissionEngine`, so an `AllowSession` decision updates the subagent's `session_allows`, not the parent's. TUI consumer at `app.rs:1818` reuses the standard `PermissionState` modal.
+Started implementing live shared sessions per `SHARED_SESSIONS_SPEC.md` Phase 1. Work is partially complete; the daemon lib compiles but the full workspace does not yet build because `main.rs`'s builder closure and the daemon tests still use the old signature.
 
-### Two product decisions resolved
+**Done:**
 
-- **`/clear` keeps both permission caches.** `permission_engine.session_allows` and `workspace_allowances` are tied to the *session* lifetime (the JSONL log on disk), not the *context* (what the model sees this turn). `/clear` resets the visible context and writes a synthetic marker to the log, but prior `AllowSession` grants and prior outside-workspace directory allowances persist within the session. The rationale: a "session" really is the JSONL log; a "context" is the visible turn. Clearing the latter doesn't invalidate the user's prior grants within the former. Resolved with a doc comment on `Agent::clear_context` (`agent.rs:378-394`) and a new test `tests.rs::test_clear_context_preserves_permission_caches` that pins the behavior.
-- **Mutating and Dangerous collapse to `Prompt` in the default cascade.** `PermissionEngine::check` only differentiates `ReadOnly` (`AllowOnce`); both `Mutating` and `Dangerous` fall through to `Prompt`. The three-way sensitivity split is informational only — used in modal labels but not in the default decision. Existing tests already pin this: `permissions.rs::test_default_mutating_prompt` (line 354) and `test_dangerous_prompt` (line 367). Users can opt into auto-allow via session-allow or declarative rules in `config.toml`.
+- **Protocol** (`crates/mew-protocol/src/lib.rs`): added `ClientMessage::AttachSession`, `ClientMessage::ListSessions`, `ServerMessage::SessionList`, `ServerMessage::SessionHistory`, `ServerMessage::RequestResolved`, `ServerMessage::SessionCleared`, plus `SessionInfo` / `SessionState` structs. Compiles clean.
+- **TS client** (`mew-web-client/src/index.ts`): mirrored all new wire types (`Message`, `Role`, `Finish`, `Tokens`, `AssistantMeta`, `Time`, `SessionInfo`, `SessionState`), added `attachSession()` / `listSessions()` methods, new events (`session-list`, `session-history`, `request-resolved`, `session-cleared`), and dispatch cases. `tsc --noEmit` clean.
+- **Agent API** (`crates/mew-agent/src/agent.rs`): `run_with_parts` now takes `Option<CancellationToken>`; the per-turn clone assigns it so one `Cancel` no longer poisons all future turns. Added `session_meta()` accessor. Updated the two TUI callers in `main.rs` to pass `None`. `mew-agent` compiles clean.
+- **Daemon session module** (`crates/mew-daemon/src/session.rs`, new): `SessionManager` (create/attach/list/remove) and `Session` (broadcast via per-client `mpsc::UnboundedSender`, turn serialization, per-turn cancel, pending-request maps, detach-by-id). Resume-from-disk with `Meta::depth != 0` filtering and per-session loading lock. Added `mew-session` + `tokio-util` deps.
+- **Daemon connection handler** (`crates/mew-daemon/src/lib.rs`): rewrote `handle_connection` to use `SessionManager`, spawn a per-connection writer task, broadcast events, route permission/ask-user responses from any client, cancel+drain on last-client disconnect. `mew-daemon` lib compiles (with 3 unused-import warnings to clean up). Updated `DaemonClient`'s `translate_server_message` catch-all for the new variants.
 
-### Audit gaps still open (deferred)
+**Not done (resume points):**
 
-- **No bypass / YOLO mode.** No `--dangerously-skip-permissions` or `MEW_BYPASS_PERMISSIONS=1`. The CLI ergonomics gap users coming from `claude --dangerously-skip-permissions` will notice. Small addition; doesn't affect the resolved semantics above.
-- **No shared `HookOutcome` enum across blocking hooks.** `PermissionDecision` (`AllowOnce` / `AllowSession` / `Deny` / `Prompt`) is essentially the outcome enum for `on_permission_ask`, but other blocking hooks (`on_tool_execute_before`, `on_chat_message`, `on_chat_params`, `on_chat_headers`) have their own return types. Generalizing is a small-medium refactor in `mew-hooks` + `mew-hooks-runtime`.
-- **Plan mode would benefit from a "read-only toolset" permission stance** (per the parity doc), but plan mode doesn't exist yet. When it lands, gating should go through the permission engine, not a parallel code path.
+- `crates/mew/src/main.rs` builder closure at ~L1171/L1195 still has the old `move || { ... }` signature; needs to accept `AgentBuildParams { session_id, writer, cwd }` and use the supplied `Writer` instead of calling `Agent::new(..., None, ...)` with no session. `build_session_agent` needs to thread the writer through. Until this is fixed the workspace won't build.
+- `crates/mew-daemon/tests/` (e2e.rs, concurrency.rs) construct `DaemonServer`/builder with the old no-arg closure; they'll need updating to the new `AgentBuildParams` signature and a fake provider path.
+- Clean up unused imports in `mew-daemon/src/lib.rs` (`HashMap`, `PermissionDecision`, `oneshot`, `Mutex`).
+- Add protocol round-trip tests for the new variants (pattern matches existing tests in `crates/mew-protocol/src/lib.rs`).
+- Web UI: session list drawer + attach button + render `SessionHistory` / handle `SessionCleared`. Store updates for the new events.
+- Run `just ci` green.
 
-### Verified
+`todo #69` is set back to `pending` so the next session can pick it up.
 
-- `cargo test -p mew-agent clear_context` — 3/3 pass (including the new `test_clear_context_preserves_permission_caches`).
-- `cargo clippy -p mew-agent -- -D warnings` — clean.
+## Shared sessions spec — reviewed and ready
 
-## Dangerous! permission mode (2026-06-21)
+Wrote and twice reviewed `SHARED_SESSIONS_SPEC.md` for live shared sessions across daemon clients.
 
-Adds an opt-in permission slider with three modes (`Standard` / `Permissive` / `Dangerous!`), wired through a `PermissionMode` enum, a runtime mode field on `PermissionEngine`, a `/permissions` slash command with a picker, status-line badges, and two CLI flags.
+First reviewer pass found critical/high issues around the broadcast mechanism (`SplitSink` cannot be shared), sync/async `AgentBuilder` mismatch, permanent agent-level `cancel_token`, disconnect-during-turn deadlock on pending oneshots, missing `RequestResolved`, `SwitchModel` scoping, `AttachSession` TOCTOU race, and a few smaller gaps.
 
-### Three-mode hierarchy
+Revised the spec to address all of the above and ran a second reviewer pass. Remaining medium finding (per-turn cancellation must cascade to subagents/shell jobs) was fixed by specifying that `start_subagent` / `start_shell_job` accept a parent `CancellationToken`. Minor cleanups (`SessionState` enum, `SessionHistory` sent only on disk resume, corrupt meta handling, `SessionCleared` broadcast) were also incorporated.
 
-The modes form a permission slider from most to least restrictive:
+Key final design:
 
-| Mode | ReadOnly | Mutating | Dangerous | Deny rules | Ask rules | Secret guard | Bash decomp |
-|---|---|---|---|---|---|---|---|
-| **Standard** (default) | AllowOnce | Prompt | Prompt | Fire | Fire | Fire | Fire |
-| **Permissive** | AllowOnce | **AllowOnce** | Prompt | Fire | Fire | Fire | Fire |
-| **Dangerous!** | AllowOnce | AllowOnce | AllowOnce | **Skip** | **Skip** | **Skip** | **Skip** |
+- Daemon owns sessions via `SessionManager`; connections attach to sessions.
+- `Session` broadcasts via per-client `mpsc::UnboundedSender<ServerMessage>`.
+- One turn at a time; fresh `CancellationToken` per turn.
+- Permission/ask-user requests go to all clients; any client can respond; `RequestResolved` dismisses modals everywhere.
+- Idle sessions resume from disk via `Agent::load_messages`.
+- `SessionCleared` keeps `/clear` consistent across clients.
 
-The naming distinguishes `Permissive` from the parity doc's "Auto" / classifier mode (which would route prompts through a small LLM instead of a human — separate future feature).
+Spec is approved for Phase 1 implementation.
 
-### Data layer
+## Web UI plan update — session branching preserved for later
 
-- **`PermissionMode` enum** (`mew-hooks/src/lib.rs:165-208`): `Standard` (default), `Permissive`, `Dangerous`. Includes `from_id()` / `id()` / `picker_label()` helpers.
-- **`PermissionEngine` mode field** (`mew-config/src/permissions.rs:52, 62, 75-104`): `Arc<AtomicU8>` for lock-free reads on the hot path. `with_mode(mode)` constructor variant for initial mode, `set_mode(mode)` for runtime toggling, `mode()` getter (handles all three variants explicitly).
-- **Mode-aware cascade in `check()`** (`permissions.rs:118-247`):
-  - **Dangerous**: short-circuits to `AllowOnce` for everything at step 0.
-  - **Standard + Permissive**: secret-file guard fires (step 1), bash decomposition fires (step 2), deny rules fire (step 3).
-  - **Permissive only**: skips allow/ask/session-allow/default cascade; falls into `check_permissive_mode(sensitivity)` which returns `AllowOnce` for ReadOnly/Mutating, `Prompt` for Dangerous.
-  - **Standard only**: full cascade — allow rules, ask rules, session-allow cache, sensitivity default.
+Updated `WEB_UI_PLAN.md` per feedback: moved **session branching / threading** and **multi-model comparison** out of Phase 4 into a new **"Preserved for future exploration"** section. They stay tracked but are not assigned to a phase now. Renumbered Phase 4 accordingly (4.1 session sharing, 4.2 command palette, 4.3 PWA + mobile, 4.4 per-hunk change review). No implementation changes; planning only.
 
-### `Agent::set_permission_mode(mode)` forwarder
+## Chat surface polish — complete pass
 
-`mew-agent/src/agent.rs:236-249` — calls `engine.set_mode(mode)` if a permission engine is set; no-op otherwise. Cheap atomic store; takes effect on the next `check()` call.
+Finished Phase 1 chat surface polish for `mew-web-ui`:
 
-### `/permissions` slash command
+- **Input shortcuts** (`InputArea.tsx`): changed send shortcut from plain `Enter` to `Cmd/Ctrl + Enter`. Plain `Enter` now inserts a newline. Updated placeholder and send-button tooltip.
+- **Shiki syntax highlighting**:
+  - Added `shiki` + `@shikijs/langs`.
+  - Created `src/lib/shiki.ts` with lazy highlighter using `shiki/core`, `engine/oniguruma`, 14 common languages, and `github-dark`/`github-light` themes.
+  - Created `src/components/CodeBlock.tsx` and `src/components/MarkdownBody.tsx`. Streaming text renders plain markdown; finalized text gets highlighted code blocks.
+  - Updated `MessageItem.tsx` to use `MarkdownBody`.
+- **Shared `CopyButton` + message copy**: extracted `CopyButton.tsx`, added a hover-to-reveal copy button on assistant messages (copies all text parts).
+- **Tool output inline** (`ToolCallCard.tsx`): removed the need to expand a tool card to see output. A compact output panel is visible once the tool has output; full input/output still available via expand.
+- **Error boundaries**: added `ErrorBoundary.tsx`, wrapped the whole app in `App.tsx`, and wrapped each `MessageItem` in `ChatSurface.tsx` so a single bad message can't crash the app.
+- **Light/dark theme support**:
+  - Created `src/lib/theme.tsx` with `ThemeProvider` and `useTheme`. Supports `light`/`dark`/`system`, persisted to `localStorage`, reacts to `prefers-color-scheme` changes.
+  - Wrapped app in `ThemeProvider` (`main.tsx`).
+  - Added `ThemeToggle` to `TopBar`.
+  - Updated `CodeBlock` to use the resolved theme and removed the hardcoded `#0d1117` background.
+- Verified: `pnpm exec tsc --noEmit` clean, `pnpm build` succeeds.
 
-- Added to `App::builtin_slash_commands()` (`mew-tui/src/app.rs:1234-1237`).
-- Routes through `handle_slash` (`app.rs:1373-1386`): `/permissions` opens the picker; `/permissions standard|permissive|dangerous` switches directly. Unknown args produce a `SlashResult::Message` with usage help.
-- `App::open_permission_mode_picker()` (`app.rs:524-568`) reuses the cmdk-style picker pattern (mirrors `open_model_picker`). Three items, ordered from most to least restrictive. Each item marked with `● active` for the current mode; pre-selects the active item so Enter on unchanged state is a no-op.
-- `SlashResult::PermissionModeMenu` and `SlashResult::SetPermissionMode(PermissionMode)` variants added; handled in all three dispatch sites in `main.rs` (lines 1657-1681, 1949-1964, and 2010-2024).
-- `Action::SetPermissionMode(PermissionMode)` added to `events.rs:761-764`; picker dispatch at `events.rs:670-672`; main-loop handlers in `main.rs:1759-1784` and `1985-2006`. Each handler calls `agent.set_permission_mode()`, updates `app.permission_mode`, and shows a mode-specific alert.
+## Catalog parser + model picker fixes
 
-### Status-line badges
+Two issues fixed after initial model picker implementation:
 
-`mew-tui/src/ui/status.rs:56-77` — `build_pills()` prepends a mode pill:
-- **Standard**: no pill (implicit default)
-- **Permissive**: amber "Permissive" pill (medium-risk cue)
-- **Dangerous!**: red "⚠ Dangerous!" pill (high-risk cue)
+- **Catalog parser** (`mew-catalog`): The models.dev API returns a nested
+  format `{ "provider_id": { "models": { "model_id": {...} } } }` but the
+  parser only handled `{"models": [...]}` and `[...]` formats. The first
+  parser path was silently returning 0 models (serde default on missing
+  `models` field). Added a third parser path that:
+  - Detects the nested format by checking for `models` sub-objects
+  - Maps models.dev field names to our `Model` struct (`limit.context` →
+    `context_window`, `limit.output` → `max_output`, `modalities.input`
+    contains "image" → `vision`, `cost` → `pricing`)
+  - Sets `provider` from the top-level key
+  - Result: **2674 models** parsed (was 0)
 
-The pill is the first item, before the model/persona/cwd/git pills, so the user always sees the mode state before anything else.
+- **Model lister filter** (`main.rs`): Now only shows models from providers
+  with credentials (`provider_has_credential`). Previously showed all
+  configured providers' models even without credentials.
 
-### CLI flags
+- **Typography plugin** (`mew-web-ui`): Installed `@tailwindcss/typography`
+  and added to tailwind config. The `prose` class was referenced in
+  `MessageItem.tsx` but the plugin wasn't installed — markdown rendered
+  with default browser styles (dark text on dark background). CSS bundle
+  grew from 14KB to 34KB confirming the plugin is included.
 
-`mew chat/run/acp`:
-- `-D` / `--dangerously-skip-permissions` / `MEW_DANGEROUS=1` → starts in Dangerous! mode
-- `-P` / `--permissive` / `MEW_PERMISSIVE=1` → starts in Permissive mode
-- `-D` wins over `-P` if both are set (Dangerous is the stronger override)
+- **Empty-object parse fix**: `parse(b"{}")` now returns an empty catalog
+  instead of falling through to the array parser (which would error).
 
-A `resolve_mode(permissive, dangerous)` helper (`main.rs:1015-1023`) folds the two flags into a single `PermissionMode`. Threads through `run_cmd` / `chat_cmd` / `run_acp_server` / `run_tui` / `build_and_run` and into `build_permission_engine(cfg, mode)`. The mode can be toggled at runtime via `/permissions`, so the CLI flags just set the initial state.
+Verified: 12 models in picker (7 opencode-go + 5 umans), clippy clean,
+33 catalog tests pass.
 
-### Tests
+---
 
-- `mew-config/src/permissions.rs` — 17 new tests across Standard / Permissive / Dangerous, plus the cascade interaction tests (e.g., `test_permissive_mode_respects_deny_rules`, `test_dangerous_mode_overrides_deny_rules`, `test_permissive_mode_respects_secret_guard`).
-- `mew-tui/src/app.rs` — 7 new tests for the slash command + picker (3 items, perm/danger/standard routing, active-mode marker, pre-selection at each of the three indices).
-- `mew-tui/src/ui/status.rs` — 3 new tests covering Standard (no pill), Permissive (amber pill), and Dangerous! (red pill).
+## Model picker (end-to-end: protocol → daemon → TS client → UI)
 
-### Verified
+Added model switching to the web UI. Four layers changed:
 
-- `cargo test --all` — 458/458 pass.
+- **Protocol** (`mew-protocol`): New `ClientMessage::ListModels` and
+  `SwitchModel { provider, model }`. New `ServerMessage::ModelList { models }`
+  and `ModelSwitched { provider, model }`. New `ModelInfo` struct
+  (id, provider, model, description).
+- **Daemon** (`mew-daemon`): `DaemonServer` gains optional `model_switcher`
+  and `model_lister` closures. `with_model_management()` builder method.
+  Connection handler dispatches `ListModels` (calls lister) and `SwitchModel`
+  (calls switcher, rebuilds provider on the agent, updates vision/context/
+  max_output from catalog). `DaemonClient::translate_server_message` handles
+  the new server messages (returns empty Vec — not AgentEvents).
+- **main.rs**: Wires the switcher/lister for non-fake-provider daemons.
+  Lister reads from the catalog (sync, no network). Switcher calls
+  `build_provider` + updates agent metadata.
+- **TS client** (`mew-web-client`): New `ModelInfo` type, `listModels()` and
+  `switchModel()` methods. New `model-list` and `model-switched` events.
+- **Store** (`mew-web-ui`): `availableModels`, `currentModel`,
+  `currentProvider` state. Bridge wires `model-list` → `setAvailableModels`
+  and `model-switched` → `setCurrentModel`.
+- **UI**: `ModelPicker` component — searchable dropdown grouped by provider,
+  shows active model with checkmark, fetches on connect. Sits in the TopBar.
+
+Verified: daemon returns 5 models from catalog, ListModels round-trips
+through WS, clippy clean, all 47 protocol + 5 daemon tests pass.
+
+---
+
+## Bridge serves React app from `mew-web-ui/dist/`
+
+The `mew-web-bridge` binary now serves the built React app instead of the
+old vanilla-JS prototype. Changes:
+
+- **`include_dir` embedding**: `mew-web-ui/dist/` is embedded at compile
+  time via `include_dir!("$CARGO_MANIFEST_DIR/../../mew-web-ui/dist")`.
+  Vite hashes asset filenames (`index-BNDoaku_.js`), so files are served
+  dynamically by path lookup rather than hardcoded `include_bytes!`.
+- **MIME type mapping**: full extension table (JS, CSS, SVG, fonts, images,
+  source maps). Correct `Content-Type` headers verified via curl.
+- **SPA fallback**: unknown GET paths serve `index.html` so TanStack Router
+  client-side routing works.
+- **Removed old assets**: `INDEX_HTML`, `MAIN_JS`, `STYLE_CSS` constants and
+  the `_unused_message_import` function deleted. The old vanilla JS files
+  were already moved to `mew-web-ui-legacy/`.
+- **Justfile updates**: `build-web` now runs `pnpm --filter mew-web-ui build`.
+  New recipes: `dev-ui` (Vite dev server with HMR) and `clean-web` (purge
+  dist + Vite cache).
+
+Verified end-to-end: `GET /` serves index.html, `GET /assets/*.js` and
+`*.css` serve with correct MIME types, SPA fallback works, e2e test passes,
+clippy clean.
+
+---
+
+# Progress — 2026-06-25
+
+## UX fixes: tool error messages + bash output (committed)
+
+- **Bash partial output on timeout**: timeout now returns `Ok(ToolOutput)` with partial stdout/stderr + `"timeout after Ns (partial output shown)"` instead of opaque `Err("timeout")`. The model can see what the command produced before it was killed.
+- **Bash stdout/stderr separation**: stdout and stderr collected separately. Final output shows stdout first, then `--- stderr ---` separator, then stderr lines. The model can distinguish error output from normal output.
+- **Edit error context**: `"old_string not found"` now includes file path, line count, first/last line snippets, and a recovery hint. Ambiguous match includes path + "include more context" hint.
+- **Read error messages**: all errors now include the file path (stat, read, too-large, binary) instead of raw io::Error strings.
+- **Permission denied reason**: tracked `deny_reason` at every Deny source in the agent tool loop. Error now says `"permission denied: deny rule or workspace-escape tier"`, `"permission denied: user denied"`, `"permission denied: classifier denied"`, etc. instead of bare `"permission denied"`.
+
+## Daemon architecture: minimal vertical slice (in progress)
+
+Started the daemon split — separating the agent loop into a standalone server process that frontends (TUI, Discord bot, iOS app) connect to over WebSocket.
+
+### Created crates
+
+- **`mew-protocol`** (`crates/mew-protocol/`): Wire message types for daemon↔frontend communication. `ClientMessage` (NewSession, Prompt, Cancel, PermissionResponse, AskUserResponse, SlashCommand) and `ServerMessage` (SessionReady, Provider, ToolStart/End, PartUpdated, PermissionRequest, AskUserRequest, Subagent events, TodosUpdated, SlashResult, etc.). Tagged enums with `serde(tag = "type")`. JSON codec helpers. Conversion functions from `ProviderEvent` and `SubagentOutcome` to wire types.
+
+- **`mew-daemon`** (`crates/mew-daemon/`): WebSocket server over Unix socket. `DaemonServer::new(builder)` takes an agent-builder closure (so main.rs owns the agent setup). Accept loop spawns a task per connection. Each connection creates a session, handles client messages, streams `ServerMessage`s. Channel-bearing `AgentEvent` variants (PermissionRequest, AskUser, etc.) translated to ID-paired wire requests with `oneshot::Sender` stashed in a pending-requests map.
+
+- **`mew-message`**: Added `ProviderEventWire` — serializable mirror of `ProviderEvent` using `String` instead of `&'static str` for the `field` parameter.
+
+### main.rs changes
+
+- Added `Daemon` subcommand: `mew daemon [--socket <path>] [--provider <id>] [--model <id>] [--raw] [-P/-A/--auto-plus/-D]`. Default socket: `$XDG_RUNTIME_DIR/mew.sock` or `/tmp/mew.sock`.
+- Extracted `build_session_agent()` helper from `run_acp_server` — shared between ACP server and daemon. Builds full agent (provider, tools, MCP, personas, skills, subagents, context files, pricing, permission engine).
+- `run_daemon()` — loads config + catalog, wraps `build_session_agent` in a closure, starts `DaemonServer`.
+
+### Decisions
+
+- **Wire format**: JSON over WebSocket text frames (MessagePack as binary frames later — same schema, different codec).
+- **ACP**: Will be dropped entirely. `mew-acp` and `mew-acp-iroh` crates still exist but will be removed in a follow-up.
+- **First slice scope**: `mew daemon` → Unix socket → one session → stream AgentEvents. Multi-session, TUI client mode, and ACP removal come next.
+
+### Next steps
+
+1. Add TUI daemon client mode (`mew chat --connect ws://unix:/tmp/mew.sock`) — WebSocket client that translates ServerMessages back to AgentEvents.
+2. Remove ACP crates.
+3. Session registry for multi-session support.
+4. MessagePack codec.
+
+---
+
+# Progress — 2026-06-26
+
+## ACP removed
+
+Step 5 of `DAEMON_PLAN.md` is done. `mew-acp` and `mew-acp-iroh` are gone, and ACP is no longer accessible from the binary.
+
+### What changed
+
+- **Crates deleted**: `crates/mew-acp/` and `crates/mew-acp-iroh/`.
+- **Workspace `Cargo.toml`**: dropped both crates from `members`, removed their path deps, and removed `iroh` / `opaque-ke` / `chacha20poly1305` (kept `rand` — the TUI spinner still uses it).
+- **`crates/mew/Cargo.toml`**: removed `mew-acp` dep.
+- **`crates/mew-message/src/lib.rs`**: removed `ErrorKind::AcpProtocol` (and it from the roundtrip test loop).
+- **`crates/mew/src/main.rs`**:
+  - Removed the `Acp { ... }` Commands variant and its `Some(Commands::Acp { ... })` match arm.
+  - Removed the `--acp-agent` flag on `Chat` and the `chat_with_acp(...)` dispatch branch.
+  - Deleted `chat_with_acp` and `run_acp_server` (~280 lines), replaced with a tombstone comment.
+  - Updated the `build_session_agent` doc comment — it's now documented as used by `run_daemon` only (the TUI's `--connect` mode goes through the daemon side).
+- **Docs**: `CLAUDE.md` (architecture + ACP section), `POLYTOKEN_PARITY.md` (deferred → in-progress status for daemon/TUI split), `DAEMON_PLAN.md` already said "dropped entirely" — no change needed there.
+
+### Drive-by fixes (not ACP, but blocked the build)
+
+The tree had two pre-existing bugs in the daemon-client mode that surfaced once ACP came out:
+
+- `mew_tui::events::Action::Compact` doesn't exist — the existing `SlashCommand(text)` arm already handles `/compact`. Removed a redundant `Action::Compact` branch I'd added.
+- `mew_tui::App::push_synthetic_message` was private but called from `handle_slash_result_local` in `main.rs`. Made it `pub`.
+
+### Verification
+
+- `cargo build -p mew` — clean.
+- `cargo clippy -p mew -- -D warnings` — clean.
+- `cargo test --all` — 294 tests passed, 0 failed.
+
+### What's left in the daemon plan
+
+- **Step 6 (e2e test)**: daemon up → TUI connects → prompt streams → permission prompt → cancel. Worth doing before declaring the slice shippable.
+- **Follow-up slice**: session registry, MessagePack codec, TCP listener, config hot-reload.
+
+---
+
+# Progress — 2026-06-26 (later)
+
+## Testing push — Tier 1, 2, 3 all shipped
+
+Following up on the ACP removal: stood up a comprehensive test suite across three tiers. Test count went from **294 → 667** (+373 new tests). All passing, CI gate green.
+
+### Tier 1 — Foundation
+
+- **`mew-provider-fake`** (+13 tests): text_response/tool_call script shape, part_id consistency, streaming semantics, empty script, multi-byte text round-trip.
+- **`mew-protocol`** (+43 tests): exhaustive roundtrip for every ClientMessage and ServerMessage variant, nested structures (SubagentStart/TodosUpdated/AskUserRequest), negative tests (malformed JSON, missing fields, wrong types, unknown tags), PermissionDecision ↔ hooks conversions, ProviderEvent ↔ wire converters.
+- **`mew-daemon/tests/e2e.rs`** (+12 tests, new file): full daemon lifecycle over real Unix sockets — SessionReady, prompt streaming, tool-call finish, prompt without session, invalid JSON, /clear + /compact slash commands, cancel mid-stream, sequential prompts, concurrent connections, fresh-agent-per-connection.
+
+### Tier 2 — Behavior
+
+- **`mew-tools/tests/integration.rs`** (+8 tests, new file): composed tool scenarios — write→read round-trip, write→edit→bash cat cross-tool verification, glob→grep composition, bash nonzero exit surfaces code, glob no-match returns empty not error, read offset/limit pagination, grep extension filter, edit preserves filename for glob.
+- **mew-agent escape-tier integration** (+2 tests): `cat /etc/passwd` against `workspace_roots = [tempdir]` escalates to `Prompt` even in Permissive mode; with empty roots and an Allow rule, no prompt fires. Covers the escape tier end-to-end through `agent.run()` rather than just unit.
+- **mew-tools regression tests** (+4 tests): edit "not found" includes first/last line snippets + recovery hint; edit "ambiguous" suggests more context; read errors (missing + binary) include the file path. Pins down the UX fixes from 2026-06-25 so a refactor can't silently regress them.
+
+### Tier 3 — Polish
+
+- **`mew-daemon/tests/concurrency.rs`** (+6 tests, new file): 5 concurrent connections get distinct sessions, sequential prompts on one connection produce distinct part IDs (via custom `TurnRotatingProvider`), concurrent cross-connection prompts have disjoint part ID sets, prompt during in-flight turn serializes, rapid-fire Cancel doesn't crash, slash command during stream doesn't block.
+- **`mew-session/tests/roundtrip.rs`** (+6 tests): JSONL write/load, empty session loads empty, meta persists (model + subagent_name), multi-session independence, unknown session errors, reopen appends without truncating.
+- **`mew-personas/tests/discovery.rs`** (+8 tests): single + multi persona discovery, model pin + tool allowlist, tools_deny, markdown fence preservation, invalid name rejected, template flag parsed.
+- **`mew-subagents/tests/loader.rs`** (+9 tests): user defs picked up, built-in defaults included unless overridden, user override replaces built-in, tool allowlist parses, empty dir yields built-ins, display-name pool ≥ 10 unique entries, deterministic per seed, distribution varies across seeds, all picked names come from the pool.
+
+### Plumbing changes
+
+- `mew-daemon/Cargo.toml`: added `mew-provider-fake`, `tempfile`, `async-trait` as dev-deps.
+- `mew-tools/Cargo.toml`: added `test-utils` feature so `ToolCtx::test_new` is available to integration tests.
+- `mew-tools/src/lib.rs`: `test_new` now `#[cfg(any(test, feature = "test-utils"))]`.
+
+### Verification
+
+- `cargo fmt --check` — clean.
 - `cargo clippy --all -- -D warnings` — clean.
-- `mew chat --help` shows `-P, --permissive ... [env: MEW_PERMISSIVE=]` and `-D, --dangerously-skip-permissions ... [env: MEW_DANGEROUS=]`.
+- `cargo test --all` — 667 tests, 0 failures.
 
-### Decisions worth noting
+### Foundation for the web harness
 
-- **Dangerous! mode overrides EVERYTHING, including user-configured deny rules.** The user has explicitly opted into "no holds barred." Half-override (some rules fire, some don't) is confusing — either you're in "trust me, don't ask anything" mode or you're not. Pinned by `test_dangerous_mode_overrides_deny_rules`.
-- **Dangerous! mode does NOT override secret redaction in tool output.** It only skips the prompt; `Read` / `Bash` / `Grep` still redact values when displaying. Out of scope for the permission gate; lives in tool `execute()`.
-- **Permissive mode still respects deny rules, ask rules, secret-file guard, and bash decomposition.** Only the prompt-for-Mutating tier is lifted. "I trust the agent with file edits but bash and my safety rules still apply."
-- **`Auto` (classifier-driven approval) is a separate future feature**, per the parity doc. Naming was reserved to keep the door open. Pinned in the `PermissionMode` enum's doc comment.
-- **`chat_with_acp` doesn't propagate the flag yet** (`_mode` prefixed). ACP client mode is a thin wrapper around an external subprocess agent — the subprocess's own permissions apply. Could revisit if we add mew-as-ACP-server tests later.
+The Tier 1 e2e + concurrency tests validate the protocol and server surface that a future web frontend will sit on top of. The protocol itself (`mew-protocol`) is now exhaustively covered, so a JS/TS client implementing against `ClientMessage`/`ServerMessage` has a stable wire contract pinned down by tests. Next obvious work for the web harness UI: a thin WebSocket client library + a basic HTTP→WebSocket adapter so a browser frontend can connect to `mew daemon`.
 
-## System prompts centralization (`mew-prompts` crate, 2026-06-21)
 
-Created a new crate `crates/mew-prompts/` as the single home for every prompt mew sends to the LLM (system, persona, skills, subagent, classifier). One crate to look at when you ask "where does the system say X to the model?" Sets up Auto (the next milestone) so its classifier prompt has a place to land.
+---
 
-### Submodules
+# Progress — 2026-06-26 (web harness UI)
 
-- `mew-prompts::system` — base system prompt assembly. Re-exports `mew_context::build_system_prompt` as `build_context`; adds `assemble(ctx_files, skills_xml, persona_body) -> String` that joins context → skills → persona in standard order.
-- `mew-prompts::persona` — persona body rendering. Owns `render_template(body, persona_name, supports_vision, active_tool_names, all_tool_names, denied_tool_names) -> String`. Wraps `minijinja::Environment::new().render_str(...)` with a fall-back to the raw body on render error. Signature uses `&[String]` (just tool names) to avoid pulling in `mew-tools` and creating a workspace cycle.
-- `mew-prompts::skills` — `<available_skills>` XML block. Owns `build_xml(skills: &[&Skill]) -> String` and the XML-escape helper.
-- `mew-prompts::subagent` — built-in subagent system prompts. Owns `RESEARCHER_BODY`, `REVIEWER_BODY`, `CODER_BODY` constants and `builtin_bodies()` returning `Vec<(&'static str, &'static str)>` for the inventory.
-- `mew-prompts::classifier` — permission-decision prompt for Auto mode (stub). Owns `permission_decision(tool_name, input, sensitivity, cwd, recent_action) -> String` and a `ClassifierDecision` enum with a `parse(&str) -> Option<Self>` for the classifier LLM's response.
-- `mew-prompts::inventory` — `PromptSource { id, location, kind, description, preview }`, `PromptKind { System, User, Classifier }`, and `inventory() -> Vec<PromptSource>` listing every prompt the crate knows about.
+## Web harness UI: A → B → C → D end-to-end
 
-### Migrations
+Started the web harness path: a browser-based chat UI that talks to the mew daemon. Built all four layers from the original plan. The system is now runnable end-to-end via the new `mew-web` binary.
 
-| From | To | Notes |
-|---|---|---|
-| `mew-agent/src/agent.rs::render_persona_template` | `mew_prompts::persona::render_template` | Signature simplified: `all_tools: &HashMap<String, Arc<dyn Tool>>` → `all_tool_names: &[String]` (avoids workspace cycle). Thin re-export kept in `mew-agent` so call sites at `rebuild_system()` work unchanged. |
-| `mew-agent/src/agent.rs::build_skills_xml` | `mew_prompts::skills::build_xml` | Thin re-export kept in `mew-agent` for the same reason. |
-| `mew-subagents::builtin_defaults` body strings (researcher/reviewer/coder) | `mew_prompts::subagent::{RESEARCHER_BODY, REVIEWER_BODY, CODER_BODY}` | `builtin_defaults` now references the constants via `mew_prompts::subagent::RESEARCHER_BODY.into()`. `SubagentDef` struct stays in `mew-subagents`. |
+### Layer A — Daemon TCP listener
 
-### Workspace cycle resolution
+- `crates/mew-daemon/src/lib.rs`: `DaemonServer` is now generic over the connection stream (was Unix-only). Added `run_tcp(addr)` that binds a TCP `SocketAddr` and accepts WebSocket connections. `AgentBuilder` changed from `Box<dyn Fn>` to `Arc<dyn Fn>` so two listeners can share one closure.
+- `crates/mew/src/main.rs`: `mew daemon --port 127.0.0.1:9847` flag added. `--socket` and `--port` are independent — pass both for dual listeners, just `--port` for TCP-only.
+- `crates/mew-daemon/tests/tcp.rs`: 5 tests covering TCP path (SessionReady, streaming text, invalid JSON, concurrent connections, tool-call finish).
 
-`mew-tools` depends on `mew-subagents` (for `SubagentDef`). When `mew-subagents` started depending on `mew-prompts`, and `mew-prompts` was considering `mew-tools` for `Sensitivity`, cargo rejected the cycle:
+### Layer B — `mew-web-bridge`
 
-```
-mew-tools → mew-subagents → mew-prompts → mew-tools  ❌
-```
+- New crate `crates/mew-web-bridge/` with binary `mew-web`. Pure byte relay — no protocol awareness.
+  - Listens on TCP+WS at `--port` (default `127.0.0.1:9847`).
+  - On WS upgrade: opens a fresh connection to the daemon's Unix socket, proxies frames in both directions.
+  - On plain GET: serves embedded static assets (`/`, `/main.js`, `/style.css`).
+  - HTTP routing uses `BufReader::fill_buf()` peek-then-hand-off-to-`accept_async` so tungstenite's handshake reads from the same buffer (without this, the bridge hangs waiting for bytes already consumed).
+  - Auto-spawns `mew daemon` via subprocess if not already running.
+- `crates/mew-web-bridge/tests/e2e.rs`: 5 end-to-end tests (session relay, streaming text relay, invalid JSON as server error, concurrent sessions independence, tool-call finish end-to-end).
 
-Resolution: `mew-prompts` does NOT depend on `mew-tools`. The `persona::render_template` signature takes `&[String]` for tool names (no `Tool` trait needed). The `classifier::permission_decision` signature takes `sensitivity: &str` (caller converts from `mew_tools::Sensitivity` if it has it).
+### Layer C — `mew-web-client` (TypeScript)
 
-### What this gives Auto
+- New top-level directory `mew-web-client/` (not a Cargo crate — it's a TypeScript package).
+- `package.json` + `tsconfig.json` — strict TS, ES2022, generates `.d.ts` for consumers.
+- `src/index.ts` — typed `MewClient` class with:
+  - `connect()`, `disconnect()`, `newSession(cwd?)`, `prompt(text, attachments?)`, `cancel()`, `slashCommand(cmd)`, `respondToPermission(id, decision)`.
+  - `on(event, cb)` typed event handlers for every `ServerMessage` variant (provider, tool-start/end, permission-request, subagent-start/status/end, todos-updated, slash-result, etc.).
+  - Pluggable `socketFactory` so Node users can inject `ws`, browsers use native WebSocket.
+- `src/__tests__/client.test.ts`: 10 tests using an in-memory `MockWebSocket` (no daemon needed). Covers connect, session handshake, prompt/cancel/slash, permission-request round-trip, event dispatch, off() unsubscribe, malformed JSON, error routing. All 10 pass via `node --experimental-strip-types --test`.
 
-When Auto lands later, the classifier prompt is already in `mew-prompts::classifier::permission_decision(...)`. The classifier-side response parsing is `ClassifierDecision::parse(&str)`. Auto only needs to:
-1. Wire up the provider call (small LLM).
-2. Call `permission_decision(...)`, send the result, parse the response with `ClassifierDecision::parse(...)`.
-3. Translate the decision into the existing `PermissionDecision` enum and route through the current cascade.
+### Layer D — Minimal chat UI
 
-No new prompt format work; no new text scattered around the codebase.
+- `mew-web-ui/` at the workspace root: `index.html`, `style.css`, `main.js`. Vanilla JS, no framework, no build step.
+- The HTML is the chat shell; the JS speaks the wire protocol directly and renders streaming text, tool calls, permission dialogs, slash results. ~250 lines.
+- Embedded into the bridge via `include_bytes!` so `mew-web` is a single static binary.
 
-### Verified
+### Verification
 
-- `cargo test --all` — 484/484 pass (was 458; +26 in `mew-prompts`).
+- `cargo fmt --check` — clean.
 - `cargo clippy --all -- -D warnings` — clean.
-- `cargo build -p mew` — full binary builds.
+- `cargo test --all` — 677 tests pass.
+- `cd mew-web-client && node --experimental-strip-types --test src/__tests__/client.test.ts` — 10 tests pass.
+- Manual smoke (out of band, but reproducible): `cargo run -p mew-web -- --port 127.0.0.1:9847`, open `http://127.0.0.1:9847/` in a browser, type a prompt, see streaming text.
 
-### Files touched
+### What's still TBD for the web harness
 
-- New: `crates/mew-prompts/{Cargo.toml, src/lib.rs, src/system.rs, src/persona.rs, src/skills.rs, src/subagent.rs, src/classifier.rs, src/inventory.rs}`
-- Edited: `Cargo.toml` (workspace member + path dep), `crates/mew-agent/Cargo.toml` (added mew-prompts, removed minijinja), `crates/mew-agent/src/agent.rs` (replaced two functions with one-line wrappers, updated call site), `crates/mew-subagents/Cargo.toml` (added mew-prompts), `crates/mew-subagents/src/lib.rs` (replaced inline body strings with constants)
+- The static UI is hand-rolled JS. A natural next pass is to switch `main.js` to import the compiled `mew-web-client` (would also exercise the library from a browser context).
+- Auth: anyone with network access to the bridge can drive the daemon. Add a token check on the bridge side, or front the bridge with a reverse proxy.
+- TLS: bridge currently listens plain. Add `--tls-cert`/`--tls-key` flags and pass through `wss://`.
+- Session resume across reloads: persist `session_id` to localStorage so a refresh reconnects to the same daemon session.
 
-## Auto permission mode (classifier-driven, 2026-06-21)
+---
 
-A fourth mode that routes every tool call through a small/cheap LLM instead of the user. The classifier returns `allow` / `deny` / `escalate`; `escalate` falls back to the existing user modal. Per the parity doc's framing — "Auto mode is effectively Dangerous mode with a LLM in front" — the classifier is the only gate; deny rules, ask rules, the secret-file guard, and bash decomposition are all skipped.
+# Progress — 2026-06-26 (reasoning truncation)
 
-### Behavior matrix
+## Reasoning truncation: stop open-model "But.. Wait.. Actually.." loops
 
-| | Standard | Permissive | **Auto (new)** | Dangerous! |
-|---|---|---|---|---|
-| ReadOnly | AllowOnce | AllowOnce | **classifier** | AllowOnce |
-| Mutating | Prompt | AllowOnce | **classifier** | AllowOnce |
-| Dangerous | Prompt | Prompt | **classifier** | AllowOnce |
-| Deny rules | Fire | Fire | Skip | Skip |
-| Ask rules | Fire | Skip | Skip | Skip |
-| Secret guard | Fire | Fire | Skip | Skip |
-| Bash decomp | Fire | Fire | Skip | Skip |
-| Escalate (classifier "ask") | n/a | n/a | → user modal | n/a |
+Added `mew-agent::ReasoningTruncator` — a small piece of logic in the turn loop that breaks the overthinking loop GLM-class models fall into. Inspired by a TerminalBench write-up: when a single reasoning trace exceeds a threshold, truncate the text in place, forge a short assistant acknowledgement into history, and force the next request to use `tool_choice: required`. Provider-agnostic (no stream mutation) and works against every adapter mew supports today.
 
-### Data layer
+### What changed
 
-- **`PermissionMode::Auto`** variant (`mew-hooks/src/lib.rs:165-205`). `from_id("auto")` and `id() == "auto"`. `picker_label() == "Auto"`. `mode()` getter in `PermissionEngine` extended to handle all four variants explicitly.
+- **`mew-hooks` + `mew-provider`**: new `ToolChoice` enum (Auto / Required / None_) and a `tool_choice` field on `Request` and `ChatParams`. OpenAI adapter serializes it as `"auto"|"required"|"none"`; Anthropic as `"auto"|"any"|"none"`. Fake provider ignores it.
+- **`mew-agent`**: new `ReasoningTruncator` struct (`crates/mew-agent/src/reasoning_truncator.rs`). Default threshold is **5k tokens** (set as `DEFAULT_REASONING_TRUNCATION_THRESHOLD`). Threshold = 0 disables. Master switch via `Agent::set_reasoning_truncation_enabled(false)`.
+- **Token counting is approximate** — `len(chars).div_ceil(4)`. Documented as a soft cap, not a precise tokenizer.
+- **Forged acknowledgement** is injected as a synthetic `Part::Text` with `synthetic: true`, text: `"I've been thinking too long. Acknowledging overthinking — committing to my next action now and stopping further deliberation."` Exposed as `mew_agent::TRUNCATION_ACK_TEXT`.
+- **Wiring** in `turn.rs`: after each MessageEnd, the agent walks the assistant message's `ReasoningPart`s, calls `maybe_truncate_reasoning_in_place` (truncates any over-threshold), and if any was truncated, appends the ack and sets `force_tool_choice_next`. At the start of the next request, `take_force_tool_choice()` is read into `req.params.tool_choice`.
 
-### `PermissionEngine` cascade
+### Tests added
 
-`permissions.rs:check()` now has two short-circuits at the top:
-- Mode is `Dangerous` → `AllowOnce`.
-- Mode is `Auto` → `Prompt`. Every tool call requires a classifier decision; the engine just signals "this needs a decision" and the agent routes to the classifier. If the classifier is unconfigured or errors, the agent falls through to the user modal — the safe default.
+11 new tests, all passing:
+- 7 unit tests on `ReasoningTruncator` itself: threshold behaviour, flag consumption, default value, marker text, disabled-when-zero.
+- 4 integration tests through `agent.run()`:
+  - `test_long_reasoning_truncates_and_forges_ack` — long reasoning (20k chars) with 1k threshold gets truncated, ack appears in history, **next request has `tool_choice: Some(Required)`** (verified via `CapturingProvider`).
+  - `test_short_reasoning_does_not_trigger_truncation` — 800 chars < 5k default, no truncation, no ack, no force flag.
+  - `test_truncation_disabled_when_threshold_zero` — long reasoning + `set_reasoning_truncation_threshold(0)` leaves the trace intact.
+  - `test_set_reasoning_truncation_disabled_master_switch` — `set_reasoning_truncation_enabled(false)` overrides a high threshold.
 
-### `Agent::classify_permission`
+### Verification
 
-`mew-agent/src/agent.rs` — new method that:
-
-1. Builds the classifier prompt via `mew_prompts::classifier::permission_decision(tool, input, sensitivity, cwd, recent_action)`.
-2. Sends a single-turn message to the classifier provider with `temperature: 0.0, max_tokens: 8` (a classification prompt shouldn't ramble).
-3. Collects text from the `PartDelta` events.
-4. Parses with `mew_prompts::classifier::ClassifierDecision::parse(text)` (handles `allow`/`deny`/`escalate` plus synonyms like `approved`, `block`, `unsure`).
-5. Returns `None` on provider error / timeout / unparseable response — callers treat `None` as escalate-to-user.
-
-### Wiring into the permission flow
-
-`mew-agent/src/tools.rs:170-194` — between `on_permission_ask` and `PermissionRequest`:
-
-```rust
-let decision = if decision == PermissionDecision::Prompt
-    && self.permission_mode() == mew_hooks::PermissionMode::Auto
-{
-    match self.classify_permission(&hook_call).await {
-        Some(Allow)    => AllowOnce,
-        Some(Deny)     => Deny,
-        Some(Escalate) | None => Prompt,  // falls through to user modal
-    }
-} else { decision };
-```
-
-### `Agent` classifier provider storage
-
-- `classifier_provider: Option<Arc<dyn Provider>>` and `classifier_model: Option<String>` fields on `Agent`.
-- `set_classifier_provider(provider, model)` setter.
-- If unset when Auto is active, `classify_permission` returns `None` and the call falls through to the user modal.
-
-### Picker + status + CLI
-
-- **Picker** (`mew-tui/src/app.rs::open_permission_mode_picker`): 4 items now, ordered Standard → Permissive → Auto → Dangerous!. Each item has its description; Auto's says "Routes every tool call through a small/cheap LLM classifier. Classifier returns allow/deny/escalate; escalate falls back to the user modal."
-- **Status pill** (`mew-tui/src/ui/status.rs::build_pills`): purple "Auto" pill (RGB 240,230,250 on 95,50,130). Distinct from amber Permissive and red Dangerous! — visual cue matches the *kind of decision-maker*: human / LLM / deterministic.
-- **CLI flag**: `-A` / `--auto` / `MEW_AUTO=1` on `chat`/`run`/`acp`. `resolve_mode(permissive, auto, dangerous)` precedence: **Dangerous > Auto > Permissive > Standard**. Documented in the help text and the resolver doc comment.
-
-### Subcommand routing
-
-Updated `/permissions auto` slash command routing and all three main-loop `Action::SetPermissionMode` alert sites to mention Auto. Updated `/permissions <unknown>` error message to list the four valid values.
-
-### Tests
-
-- `mew-config/src/permissions.rs` — 5 new engine tests: `test_auto_mode_short_circuits_to_prompt`, `test_auto_mode_prompts_even_for_readonly`, `test_auto_mode_skips_deny_rules`, `test_auto_mode_skips_secret_guard`, `test_auto_mode_skips_opaque_bash_prompt`.
-- `mew-tui/src/app.rs` — `test_permissions_slash_with_auto_arg`, `test_permission_mode_picker_has_four_items`. Updated `test_permission_mode_picker_preselects_active` (Dangerous now at index 3, was 2).
-- `mew-tui/src/ui/status.rs` — `test_build_pills_auto_mode_prepends_purple_pill` (asserts the pill is purple, not amber or red).
-
-### Verified
-
-- `cargo test --all` — **492/492 pass** (was 484; +8 from Auto mode).
+- `cargo fmt --check` — clean.
 - `cargo clippy --all -- -D warnings` — clean.
-- `mew chat --help` shows `-A, --auto ... [env: MEW_AUTO=]` alongside `-P` and `-D`.
+- `cargo test --all` — 688 tests pass.
 
-### Decisions worth noting
+### Open follow-ups
 
-- **Classifier is the only gate in Auto mode.** Deny rules, ask rules, secret-file guard, and bash decomposition all skip — the user explicitly chose "let the model decide," so we don't second-guess it. If the user wants safety tiers, they pick Standard or Permissive.
-- **Failure modes default to the user.** Provider error, timeout, malformed response → `classify_permission` returns `None` → escalate to user modal. Auto is never more permissive than the user.
-- **Dangerous wins over Auto when both flags are set.** Both bypass all gates, but Dangerous is the deterministic-bypass signal and Auto is the LLM-mediated one. The user probably didn't intend to combine them; Dangerous is the stronger override.
-- **Subagent inheritance not yet wired.** Subagents currently inherit the parent's permission mode by virtue of the same `permission_engine` reference, but classifier calls would currently hit the parent's classifier provider. If a subagent needs its own classifier (different model, different cost profile), that's a follow-up.
-- **No caching yet.** Each tool call = one classifier call. Could be optimized later with a hash-keyed session cache (tool_name + input hash → last decision for N seconds) if latency/cost becomes a concern.
+- **Default `max_output_tokens` for large-context models**: separately discussed, not yet built. For models with very large total context (e.g. 400K), the input window = total - max_output. Defaulting max_output to a smaller value (e.g. 32K instead of 128K) would leave more room for context. Tracked for a follow-up.
 
-### Files touched
+---
 
-- `mew-hooks/src/lib.rs` — `PermissionMode::Auto` variant + `from_id`/`id`/`picker_label` for it.
-- `mew-config/src/permissions.rs` — `mode()` handles Auto; cascade short-circuits Auto to `Prompt`; 5 new tests.
-- `mew-agent/src/agent.rs` — `classifier_provider` / `classifier_model` fields; `set_classifier_provider` setter; `classify_permission` method; `sensitivity_label` helper.
-- `mew-agent/src/tools.rs` — Auto routing in the permission flow (between `on_permission_ask` and `PermissionRequest`).
-- `mew-tui/src/app.rs` — picker has 4 items; slash command routes `auto`; tests.
-- `mew-tui/src/ui/status.rs` — purple "Auto" pill; status pill test.
-- `mew/src/main.rs` — `--auto` / `-A` / `MEW_AUTO=1` flag on all three subcommands; `resolve_mode(permissive, auto, dangerous)`; alert text for Auto in all three dispatch sites.
+# Progress — 2026-06-26 (default `max_output_tokens`)
 
-## Auto+ permission mode (fail-closed classifier, 2026-06-21)
+Added a per-model cap on `params.max_tokens` so large-context models (e.g. GPT-5-Codex with 400K total / 272K input / 128K max output) don't silently burn 128K of the user's input window on output. The default caps output at 32K (or the model's natural max, whichever is smaller), and is honored uniformly by both OpenAI and Anthropic adapters.
 
-A fifth mode that runs the classifier like Auto but cannot escalate. If the classifier returns "escalate" or the call fails (provider error / timeout / malformed response), the call is **denied** — fail closed. The user picked this when they said "auto+ mode where the classifier can not escalate," choosing the safer "uncertainty means no" semantic over Auto's "fall back to user."
+Plan: `MAX_OUTPUT_TOKENS.md`.
 
-### Behavior matrix (Auto vs Auto+)
+### What changed
 
-| | Auto | **Auto+ (new)** |
-|---|---|---|
-| Classifier returns `allow` | AllowOnce | AllowOnce |
-| Classifier returns `deny` | Deny | Deny |
-| Classifier returns `escalate` | → user modal | **Deny** |
-| Classifier error / timeout / malformed | → user modal | **Deny** |
-| Classifier unconfigured | → user modal | **Deny** (safe default) |
-| Retry on failure | none | none |
+- **`mew-catalog`**: new `Catalog::max_output(model_id) -> Option<i64>` method. Returns `None` when the model is unknown (no hard-coded fallback — an unknown max_output is meaningfully different from a known 128K).
+- **`mew-provider-anthropic`**: `build_request_body` now reads `req.params.max_tokens` as the baseline instead of hard-coding 4096. This was a long-standing gap — the adapter silently ignored plugin-set `max_tokens` even when the dispatcher set them. The thinking-budget bump still applies on top. `Some(0)` is honored verbatim; only the API floor (`max_tokens >= 1`) is enforced explicitly, and only when thinking isn't on.
+- **`mew-agent`**: new `Agent::default_max_output_tokens: i64` field (0 = no override) and a saturating setter (`< 0 → 0`, `> i32::MAX → i32::MAX` at the call site in `turn.rs`). `build_session_agent` derives the default from the catalog: `cat.max_output(model_id).map(|v| v.min(32_768)).unwrap_or(0)`. The turn loop injects the default into `ChatParams.max_tokens` when the dispatcher returns `None`; a dispatcher that returns `Some(n)` still wins (the contract is preserved).
+- **No Config / env-var wiring** in this slice — the plan marked them optional and the runtime setter is sufficient for the demo. The plan records the precedence (catalog → TOML → env → setter) for a follow-up.
 
-Auto+ is identical to Auto at the engine level (both short-circuit to `Prompt` in `PermissionEngine::check()`). The difference lives in the agent's classifier wiring.
+### Tests added
 
-### Data layer
+14 new tests, all passing:
+- **7 in `mew-agent`**: setter basics, negative-clamp, huge-saturation, zero-disables, default-injected-into-request, override-by-dispatcher (twice — `Some(1234)` wins, `Some(0)` honored). The user-plugin override tests needed 23 hand-written pass-throughs to the embedded `NopDispatcher`; documented inline.
+- **5 in `mew-provider-anthropic`**: `params.max_tokens` honored on the wire, thinking-bump uses max of (default, `budget+4096`) — both directions tested (`8_000` budget → default wins, `64_000` → thinking wins), `Some(0)` without thinking → falls back to 4096 (API floor), `Some(0)` with thinking → thinking-bump handles the floor naturally, no-params → 4096 default.
 
-- **`PermissionMode::AutoPlus`** variant (`mew-hooks/src/lib.rs`). `from_id("auto_plus")` and `from_id("autoplus")` both parse (so users can type either). `id() == "auto_plus"`. `picker_label() == "Auto+"`. `mode()` getter in `PermissionEngine` extended to handle 5 variants explicitly.
+### Verification
 
-### `Agent` classifier wiring
-
-`mew-agent/src/tools.rs:170-201` — restructured the Auto routing into a single match that branches on mode for the Escalate and None cases:
-
-```rust
-match self.classify_permission(&hook_call).await {
-    Some(Allow) => AllowOnce,
-    Some(Deny)  => Deny,
-    Some(Escalate) => match self.permission_mode() {
-        AutoPlus => Deny,
-        _        => Prompt,  // Auto → user modal
-    },
-    None => match self.permission_mode() {
-        AutoPlus => Deny,
-        _        => Prompt,  // Auto → user modal
-    },
-}
-```
-
-No retry — the user wanted fail-closed, not fail-closed-after-retry.
-
-### Picker + status + CLI
-
-- **Picker** (`mew-tui/src/app.rs::open_permission_mode_picker`): 5 items now, ordered Standard → Permissive → Auto → **Auto+** → Dangerous!. Each item has its description; Auto+'s reads "Like Auto, but the classifier CANNOT escalate. Escalate or any classifier failure → Deny (fail closed). Hands-off but uncertainty means no."
-- **Status pill** (`mew-tui/src/ui/status.rs::build_pills`): deeper purple "Auto+" pill (RGB 250,235,255 on 70,25,110) — same purple hue as Auto but darker/more saturated. Distinct from amber Permissive, regular-purple Auto, and red Dangerous!. Visual cue: "Auto family, more committed."
-- **CLI flag**: `--auto-plus` / `MEW_AUTO_PLUS=1` on `chat`/`run`/`acp`. No short alias. `resolve_mode(permissive, auto, auto_plus, dangerous)` precedence: **Dangerous! > Auto+ > Auto > Permissive > Standard**.
-
-### Subcommand routing
-
-Updated `/permissions auto_plus` slash command routing (also accepts `autoplus`). Updated all three main-loop `Action::SetPermissionMode` alert sites to mention Auto+. Updated `/permissions <unknown>` error message to list the five valid values.
-
-### Tests
-
-- `mew-config/src/permissions.rs` — 2 new engine tests: `test_auto_plus_mode_short_circuits_to_prompt`, `test_auto_plus_mode_skips_deny_rules`.
-- `mew-tui/src/app.rs` — 3 new tests: `test_permissions_slash_with_auto_plus_arg`, `test_permission_mode_picker_has_five_items`, `test_permission_mode_picker_preselects_autoplus`. Updated `test_permission_mode_picker_preselects_active` (Dangerous now at index 4, was 3).
-- `mew-tui/src/ui/status.rs` — `test_build_pills_autoplus_mode_prepends_deeper_purple_pill` (asserts the pill is distinct from Auto / Permissive / Dangerous colors).
-
-### Verified
-
-- `cargo test --all` — **498/498 pass** (was 492; +6 from Auto+).
+- `cargo fmt --check` — clean.
 - `cargo clippy --all -- -D warnings` — clean.
-- `mew chat --help` shows `--auto-plus ... [env: MEW_AUTO_PLUS=]` alongside `-P`, `-A`, `-D`.
+- `cargo test --all` — 702 tests pass.
 
-### Decisions worth noting
+### Notes for the plan
 
-- **Auto+ is fail-closed (Deny), not fail-open.** The user explicitly chose this. A flaky classifier will stall the session, but never silently allows a destructive tool.
-- **No retry.** Picked the simpler semantics over "retry once then deny." A retry adds latency and a partial mitigation at best; if the classifier is broken, retrying just gives it more chances to fail.
-- **`from_id` accepts both `auto_plus` and `autoplus`.** Polls in advance for the underscore form (which matches the CLI and other enum id conventions) but tolerates the joined form for users who type `/permissions autoplus` without thinking.
-- **Status pill is deeper purple, not a different hue.** Same color family as Auto signals "Auto with more commitment." A different hue (e.g. cyan or magenta) would be visually too distant — Auto+ is conceptually adjacent to Auto, just stricter.
+The plan's test #12 had a math error (`30_000 + 4096 = 34_096 > 32_768`, so thinking wins, not the default) — caught by the Anthropic test, fixed in the plan. The corrected plan uses `8_000` budget (default wins) and `64_000` (thinking wins).
 
-### Files touched
+---
 
-- `mew-hooks/src/lib.rs` — `PermissionMode::AutoPlus` variant + `from_id`/`id`/`picker_label` for it (also accepts `autoplus`).
-- `mew-config/src/permissions.rs` — `mode()` handles AutoPlus; cascade short-circuits both Auto and Auto+ to `Prompt`; 2 new tests.
-- `mew-agent/src/tools.rs` — restructured classifier match to branch Escalate / None on mode (Auto → user modal, Auto+ → Deny).
-- `mew-tui/src/app.rs` — picker has 5 items; slash command routes `auto_plus`; tests.
-- `mew-tui/src/ui/status.rs` — deeper-purple "Auto+" pill; status pill test.
-- `mew/src/main.rs` — `--auto-plus` / `MEW_AUTO_PLUS=1` flag on all three subcommands; `resolve_mode(permissive, auto, auto_plus, dangerous)`; alert text for Auto+ in all three dispatch sites.
+# Progress — 2026-06-26 (subprocess e2e)
 
-## Open questions answered (2026-06-22)
+Wired up end-to-end testing that exercises the **actual binaries** (`mew` and `mew-web`) as real subprocesses, not just the library code. The new test in `crates/mew-web-bridge/tests/bin_e2e.rs`:
 
-Five open questions from `POLYTOKEN_PARITY.md` and the current session, all closed.
+1. Locates the `mew` and `mew-web` binaries in `target/debug/`.
+2. Picks a free TCP port and a tempdir for the daemon's Unix socket.
+3. Spawns `mew daemon --fake-provider --socket <tmp>/mew.sock` (new `--fake-provider` flag — see below).
+4. Spawns `mew-web --port <free> --daemon-socket <tmp>/mew.sock --spawn false` (the bridge skips its own daemon-spawn because one's already running).
+5. Connects a raw `tokio_tungstenite` WebSocket client to the bridge's port.
+6. Sends `NewSession` → asserts `SessionReady` arrives.
+7. Sends `Prompt` → asserts the streamed `PartDelta` events reassemble to "hello from fake provider" and `MessageEnd(Stop)` arrives.
+8. Closes the WS, child processes are killed via `Drop` guard.
 
-### 1. Plan file lifecycle ✅
-Added `plan_path: Option<PathBuf>` to `Agent` + `set_plan_path(...)` setter. In `run_with_parts()` at the start of every turn, if `plan_path` resolves to an existing file, it's auto-flagged as important (Included mode) so it survives compaction. The user no longer has to remember to call `flag_important` on the plan. Wired in `main.rs` at all three startup sites via `agent.set_plan_path(&cfg.plan_path)`.
+The test **gracefully skips** with a clear message if the binaries aren't built (`eprintln!` to stderr, returns `Ok(())`). That keeps `cargo test --all` green even before a fresh build, and `just ci` runs `build-web` first so it always builds.
 
-### 2. `Arc<ToolCtxShared>` ✅
-Split `ToolCtx` (per-call: `call_id`, `cancel`, `progress_tx`) from a new `ToolCtxShared` (session-wide: `session_id`, `cwd`, `dispatcher`, `secrets`). `ToolCtx` now holds `Arc<ToolCtxShared>` and implements `Deref<Target = ToolCtxShared>` so existing tools that access `ctx.session_id`, `ctx.cwd`, etc. work unchanged. New shared state (plan_path, classifier cache, anything else) grows the `ToolCtxShared` struct without bloating the per-call context. Updated all test helpers with `ToolCtx::test_new(cwd)` and `ToolCtx::test_with_secrets(cwd, secrets)`.
+### What changed
 
-### 3. Subagent classifier sharing ✅
-No code change — subagents already share the parent's `permission_engine` (and therefore the parent's classifier provider/cache) via the agent reference. Documented in `Agent::set_classifier_provider` doc comment: "Also initializes the session-scoped classifier cache. Subagents share the parent's cache via the agent reference (no per-subagent provider today)."
+- **`crates/mew/src/main.rs`**: new `--fake-provider` flag on the `Daemon` subcommand. When set, every connection gets a `FakeProvider`-backed agent that streams a fixed "hello from fake provider" text. Bypasses all real-provider setup so the daemon runs without network access. Documented as "for tests, demos, and offline experimentation — do not use in production."
+- **`crates/mew-web-bridge/tests/bin_e2e.rs`**: new subprocess e2e test. Includes `ChildGuard` for clean process teardown, `binary_paths()` helper that locates the binaries, and `wait_for_unix_socket`/`wait_for_tcp_port` polling helpers.
+- **`justfile`**: new `just e2e` recipe (`build-web && cargo test -p mew-web-bridge --test bin_e2e`). `just ci` now also depends on `e2e` so the subprocess test is part of the gate.
 
-### 4. Classifier cache ✅
-Added `Agent::classifier_cache: Option<Arc<ClassifierCache>>` (extracted `ClassifierCache` type alias for readability). Keyed by `(tool_name, serialized_input)`. On cache hit, returns the cached decision without calling the classifier (with `tracing::debug!("classifier cache hit")`). On miss, calls the classifier and stores the result. Session-scoped — no TTL; `clear_classifier_cache()` is called from `clear_context()` so `/clear` starts fresh.
+### Verification
 
-### 5. `mew-harness` shared crate ✅
-New `crates/mew-harness/` crate extracts ~150 LOC of duplicated discovery logic from `mew-skills`, `mew-personas`, and `mew-subagents`:
-
-- **Shared helpers**: `find_git_root`, `paths_between`, `dirs_home`, `global_dirs_for(home, kind)` — were copy-pasted across all three crates.
-- **`LoadSpec` + `load_markdown_dirs`**: generic loader that walks project + global paths, finds the right file at each location, and hands it to a caller-provided `parse_and_name` closure. Supports two shapes via `LoadFileSpec::SubdirFile(name)` (skills/personas) and `LoadFileSpec::FlatMd` (subagents). Enforces name match against on-disk identifier (subdir name for SubdirFile, file stem for FlatMd) and dedup.
-- **8 tests** in mew-harness covering the helpers and both file shapes.
-
-Migrated all three loaders to thin wrappers around `mew_harness::load_markdown_dirs`. Removed ~150 LOC of duplicated scanning code from each crate. Tests in each crate still pass without modification (added `with_test_home()` helper to isolate `$HOME` so the global scan doesn't pick up the developer's real `~/.config/mew/skills`).
-
-### Verified
-- `cargo test --all` — all pass (no failures)
-- `cargo clippy --all -- -D warnings` — clean
-- `cargo build --all` — full workspace compiles
-
-### Files touched
-- New: `crates/mew-harness/{Cargo.toml, src/lib.rs}`
-- Edited: `Cargo.toml` (workspace member + path dep)
-- Edited: `crates/mew-skills/{Cargo.toml, src/lib.rs}` — Loader uses mew-harness; helpers removed; tests use `with_test_home()`
-- Edited: `crates/mew-personas/{Cargo.toml, src/lib.rs}` — same; preserves built-in defaults merging
-- Edited: `crates/mew-subagents/{Cargo.toml, src/lib.rs}` — same; uses `LoadFileSpec::FlatMd` for the flat .md shape; preserves built-in defaults merging
-
-## Mew VFS (compile-time embedded resources) (2026-06-22)
-
-A `mew://` virtual filesystem for built-in resources, modeled on Go's `//go:embed` directive. Uses the `include_dir` crate to embed the `mew-prompts/resources/` directory at compile time so every file there is accessible as a `&'static str` at runtime with zero filesystem I/O.
-
-### Structure
-
-```
-crates/mew-prompts/resources/
-├── personas/
-│   ├── builder.md      # was: BUILDER_BODY const
-│   └── planner.md      # was: PLANNER_BODY const
-└── subagents/
-    ├── researcher.md   # was: RESEARCHER_BODY const
-    ├── reviewer.md     # was: REVIEWER_BODY const
-    └── coder.md        # was: CODER_BODY const
-```
-
-### `mew-prompts::vfs` API
-
-```rust
-pub fn read_builtin(path: &str) -> Option<&'static str>
-```
-
-The `.md` extension is optional — `read_builtin("personas/builder")` and `read_builtin("personas/builder.md")` both work. Returns `None` if the path doesn't exist or isn't valid UTF-8.
-
-### Migration
-
-All five const bodies (`BUILDER_BODY`, `PLANNER_BODY` in `mew-personas`; `RESEARCHER_BODY`, `REVIEWER_BODY`, `CODER_BODY` in `mew-prompts::subagent`) moved from Rust const strings into markdown files. The consts in `mew-personas` are now `include_str!("../../mew-prompts/resources/personas/{name}.md")`. The consts in `mew-prompts::subagent` were removed; callers use `mew_prompts::vfs::read_builtin("subagents/{name}")` directly.
-
-### What this enables
-
-- **Editing built-ins is easier.** Change a `.md` file and rebuild; no Rust string quoting, no escape characters.
-- **Single source of truth for built-ins.** All built-in resources live under one directory in `mew-prompts/resources/`. `mew-prompts::inventory` lists them alongside the dynamic prompts.
-- **Shadowing works naturally.** A user file at `.mew/personas/builder.md` (in their project) is loaded by the existing disk loader; the VFS is only consulted as a fallback. No new plumbing needed.
-- **Future: transclude.** A `{{ transclude("mew://system_prompts/base.md") }}` template function would let personas and subagents include shared prompt fragments. Not implemented yet — would be a small addition to the existing minijinja template work.
-
-### Verified
-- `cargo test --all` — all pass
-- `cargo clippy --all -- -D warnings` — clean
-- `cargo build --all` — full workspace compiles
-
-### Files touched
-- `crates/mew-prompts/Cargo.toml` — added `include_dir = "0.7"`
-- `crates/mew-prompts/src/vfs.rs` — new module with `read_builtin` + `top_level`
-- `crates/mew-prompts/src/lib.rs` — added `pub mod vfs;`
-- `crates/mew-prompts/src/subagent.rs` — removed consts; `builtin_bodies()` calls `vfs::read_builtin`; tests updated
-- `crates/mew-prompts/resources/personas/{builder,planner}.md` — new
-- `crates/mew-prompts/resources/subagents/{researcher,reviewer,coder}.md` — new
-- `crates/mew-personas/src/lib.rs` — consts now `include_str!` from the resource files
-- `crates/mew-subagents/src/lib.rs` — built-in bodies use `vfs::read_builtin`
-
-## HookOutcome generalization (2026-06-21)
-
-Generalized the two blocking hooks (`on_permission_ask`, `on_tool_execute_before`) to return a `HookOutcome<T>` enum instead of the bare transformed value. Plugins can now veto an action, not just transform it. Closes the last partial item from `POLYTOKEN_PARITY.md`'s hooks-runtime-parity row.
-
-### `HookOutcome<T>` enum
-
-`mew-hooks/src/lib.rs:170-220` — three variants:
-
-```rust
-pub enum HookOutcome<T> {
-    Proceed(T),         // let the action run with this (possibly modified) value
-    Block(String),      // don't run; the string is the reason shown/logged
-    Suppress,           // don't run, don't log, don't surface
-}
-```
-
-Helpers: `proceed(value)` constructor, `is_proceed()` / `is_blocked()` predicates, `map(f)` for value transformation.
-
-**`Retry` is intentionally not included.** No concrete use case wired; adding it would expose API surface that isn't connected to anything. Add when there's a real retry path.
-
-### Trait signature changes
-
-```rust
-// Before:
-async fn on_permission_ask(&self, call, current: PermissionDecision) -> PermissionDecision;
-async fn on_tool_execute_before(&self, call, input: Value) -> Value;
-
-// After:
-async fn on_permission_ask(&self, call, current: PermissionDecision) -> HookOutcome<PermissionDecision>;
-async fn on_tool_execute_before(&self, call, input: Value) -> HookOutcome<Value>;
-```
-
-The transformation hooks (`on_chat_message`, `on_system_prompt`, `on_tool_execute_after`, `on_shell_env`, `on_user_input`, `on_chat_params`, `on_chat_headers`) stay returning their transformed value directly. Only the blocking hooks gain the outcome type — they're the ones where "don't do this" is a meaningful response.
-
-### Agent call-site wiring
-
-`mew-agent/src/tools.rs`:
-
-- **`on_permission_ask`**: match on the outcome. `Proceed(d)` → use the decision as before. `Block(reason)` → force `Deny` with an `info!` log. `Suppress` → force `Deny` silently.
-- **`on_tool_execute_before`**: match on the outcome. `Proceed(v)` → use the input. `Block(reason)` → skip the tool, emit a `ToolState::Error` with `"blocked by hook: {reason}"`, emit `ToolEnd(success=false)`, `continue` the loop. `Suppress` → same shape but at `debug!` log level with a generic `"tool call suppressed"` message (the model still needs to see a result).
-
-### SubprocessDispatcher
-
-`mew-hooks-runtime/src/runtime.rs:812-857` — both impls wrap their existing `pipe_json_filtered` result in `HookOutcome::Proceed(...)`. **TODO** (left as code comments): inspect plugin exit codes or a `block:` prefix on stdout to support `Block` / `Suppress` from subprocess plugins. Today subprocess plugins can only transform the input — they can't veto. Rust in-process plugins can use the full outcome API immediately.
-
-### `NopDispatcher` defaults
-
-Both blocking hooks default to `HookOutcome::Proceed(input)` — preserves the existing "no plugin, no change" behavior.
-
-### Tests
-
-- `mew-hooks/src/lib.rs` — 7 new tests for `HookOutcome`: `proceed`/`block`/`suppress` predicates, `map` semantics for all three variants, `proceed()` helper.
-- `mew-hooks-runtime/tests/plugin_integration.rs` — updated assertions to wrap expected values in `HookOutcome::Proceed(...)`.
-- `mew-agent/src/hooks_tests.rs` — both mock impls updated to return `HookOutcome::Proceed(...)`.
-
-### Verified
-
-- `cargo test --all` — all pass (was 498, now 505 with the 7 new HookOutcome tests).
+- `cargo fmt --check` — clean.
 - `cargo clippy --all -- -D warnings` — clean.
-- `cargo build --all` — full workspace compiles.
+- `cargo test --all` — 703 tests pass (was 702 + 1 e2e).
+- `just e2e` — builds and runs the subprocess test in ~2s.
 
-### Still open (deferred)
+### Deferred (per the earlier conversation)
 
-- **Subprocess `Block` / `Suppress` protocol.** Rust plugins get the full API today; subprocess plugins can only transform. The exit-code mapping (0 → Proceed, 2 → Block with stderr as reason, 3 → Suppress) is documented as a TODO in `runtime.rs` but not wired.
-- **`!name` negation for matchers.** Mew's `PluginHookConfig` is per-plugin, not per-(global-vs-project), so polytoken's "disable inherited global hook" concept doesn't directly map. Could add `!`-prefix support to matcher strings (`"!bash"` = "fire for everything except bash") if needed.
-- **`Retry` variant.** Reserved in the parity doc but not implemented. No concrete retry path at the agent layer yet.
-
-### Files touched
-
-- `mew-hooks/src/lib.rs` — `HookOutcome<T>` enum + helpers + 7 tests; trait signatures for the two blocking hooks updated; `NopDispatcher` defaults updated.
-- `mew-agent/src/tools.rs` — both call sites updated to match on `HookOutcome` and handle `Block` / `Suppress`.
-- `mew-hooks-runtime/src/runtime.rs` — both `SubprocessDispatcher` impls wrap their result in `HookOutcome::Proceed(...)`.
-- `mew-hooks-runtime/tests/plugin_integration.rs` — assertions updated.
-- `mew-agent/src/hooks_tests.rs` — two mock impls updated.
-
-## Polish items (classifier config, !name negation, subprocess Block/Suppress) (2026-06-22)
-
-Three independent polish items, each closing a gap from earlier milestones.
-
-### 1. Classifier config in config.toml — fixes a broken feature
-
-Auto/Auto+ modes were shipped but `set_classifier_provider` was never called in `main.rs` — both modes silently fell through to the user modal on every call. Now wired via config:
-
-```toml
-[permissions]
-classifier_provider = "opencode-go"
-classifier_model = "deepseek-v4-flash"   # optional; uses provider default if unset
-```
-
-New `maybe_set_classifier_provider(agent, cfg, cat, raw)` helper (`mew/src/main.rs:582`) builds the classifier provider via the existing `build_provider(...)` and calls `agent.set_classifier_provider(provider, model)`. Called at all three startup sites (`build_and_run`, `run_tui`, `run_acp_server`). If the provider build fails, logs a warning and Auto falls through to the user modal — the safe default.
-
-### 2. `!name` matcher negation in PluginHookConfig
-
-`PluginHookConfig::matches()` now supports `!`-prefix negation:
-
-- `"bash"` → fire only for bash (existing behavior)
-- `"!bash"` → fire for everything except bash
-- `"!bash|!write"` → fire for everything except bash and write
-- `"bash|write|!rm"` → fire for bash or write, but never rm (mixed)
-- `"!*"` → fire for nothing (exclude all)
-
-Logic: negative entries (starting with `!`) are checked first — if subject matches any negative, return false. If all entries are negative, return true (default include). If positives exist, subject must match one. 4 new tests in `mew-hooks/src/lib.rs`.
-
-### 3. Subprocess Block/Suppress protocol
-
-`SubprocessDispatcher` can now return `HookOutcome::Block` and `HookOutcome::Suppress` from subprocess plugins. Protocol:
-
-- Plugin responds with `"block"` or `"block: <reason>"` → `HookOutcome::Block(reason)`
-- Plugin responds with `"suppress"` → `HookOutcome::Suppress`
-- Anything else → parsed as the modified value → `HookOutcome::Proceed(value)`
-
-New `pipe_json_raw(hook, initial, subject) -> Option<String>` method returns the raw last plugin response before parsing. `detect_outcome(raw) -> Option<HookOutcome<()>>` checks for Block/Suppress markers. Both blocking hooks (`on_permission_ask`, `on_tool_execute_before`) now use `pipe_json_raw` + `detect_outcome` instead of the old `pipe_json_filtered` wrapper. Backward compatible — existing plugins that return bare values still work (Proceed).
-
-### Verified
-
-- `cargo test --all` — all pass (no failures)
-- `cargo clippy --all -- -D warnings` — clean
-- `cargo build --all` — full workspace compiles
-
-### Files touched
-
-- `mew-config/src/lib.rs` — `PermissionsConfig` gains `classifier_provider` + `classifier_model` fields
-- `mew-hooks/src/lib.rs` — `PluginHookConfig::matches()` supports `!`-prefix negation; 4 new tests
-- `mew-hooks-runtime/src/runtime.rs` — `pipe_json_raw` + `detect_outcome` helpers; both blocking hooks rewritten to use them; TODOs removed
-- `mew/src/main.rs` — `maybe_set_classifier_provider(...)` helper; called at all three startup sites
+- **TS-side e2e**: not yet wired. Once `mew-web-ui` is a real consumer of `mew-web-client`, a Node-side test that spawns the same binaries and uses the compiled `mew-web-client` library to round-trip would be the natural next step. Tracks with the "we have a decent UI" milestone.

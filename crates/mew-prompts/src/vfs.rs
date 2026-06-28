@@ -52,12 +52,28 @@ pub fn top_level() -> Vec<&'static str> {
         .entries()
         .iter()
         .map(|e| e.path().display().to_string())
-        .filter_map(|p| p.split('/').next().map(|s| {
-            // Leak the string so we get `&'static str`; the set is bounded
-            // and this is only called for discovery (not in hot paths).
-            Box::leak(s.to_string().into_boxed_str()) as &'static str
-        }))
+        .filter_map(|p| {
+            p.split('/').next().map(|s| {
+                // Leak the string so we get `&'static str`; the set is bounded
+                // and this is only called for discovery (not in hot paths).
+                Box::leak(s.to_string().into_boxed_str()) as &'static str
+            })
+        })
         .collect()
+}
+
+/// List all files under a directory in the VFS. Returns the paths relative
+/// to the resources root. E.g. `list_dir("personas")` returns
+/// `["personas/builder.md", "personas/planner.md"]`.
+pub fn list_dir(dir: &str) -> Vec<String> {
+    match BUILTIN.get_dir(dir) {
+        Some(d) => d
+            .entries()
+            .iter()
+            .map(|e| e.path().display().to_string())
+            .collect(),
+        None => Vec::new(),
+    }
 }
 
 #[cfg(test)]

@@ -77,7 +77,6 @@ pub enum ErrorKind {
     ToolExec,
     ToolTimeout,
     McpTransport,
-    AcpProtocol,
     Network,
     Unknown,
 }
@@ -250,6 +249,43 @@ pub struct ToolTime {
 
 fn is_default<T: Default + PartialEq>(t: &T) -> bool {
     *t == T::default()
+}
+
+// ---------------------------------------------------------------------------
+// ProviderEventWire — serializable mirror of mew_provider::ProviderEvent
+// ---------------------------------------------------------------------------
+
+/// A wire-serializable representation of `ProviderEvent`.
+///
+/// `ProviderEvent` uses `&'static str` for the `field` parameter, which
+/// doesn't round-trip through serde. This mirror uses `String` so it
+/// serializes cleanly for the daemon protocol.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProviderEventWire {
+    PartStart {
+        part: Part,
+    },
+    PartDelta {
+        part_id: PartId,
+        field: String,
+        delta: String,
+    },
+    PartEnd {
+        part_id: PartId,
+    },
+    MessageEnd {
+        finish: Finish,
+        usage: Tokens,
+        cost: f64,
+    },
+    RetryWait {
+        attempt: u32,
+        max_attempts: u32,
+        delay_secs: u64,
+        reason: String,
+    },
+    Error(MessageError),
 }
 
 #[cfg(test)]
@@ -649,7 +685,6 @@ mod tests {
             ErrorKind::ToolExec,
             ErrorKind::ToolTimeout,
             ErrorKind::McpTransport,
-            ErrorKind::AcpProtocol,
             ErrorKind::Network,
             ErrorKind::Unknown,
         ];

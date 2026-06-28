@@ -92,6 +92,7 @@ impl Tool for SwitchPersona {
                     .into(),
                 error: String::new(),
                 diff: None,
+                metadata: None,
             });
         }
 
@@ -149,6 +150,7 @@ impl Tool for SwitchPersona {
             output: format!("queued switch to persona '{name}' for end of turn. {change_summary}."),
             error: String::new(),
             diff: None,
+            ..Default::default()
         })
     }
 }

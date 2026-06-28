@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use ratatui::{
     layout::{Margin, Rect},
     style::{Color, Modifier, Style},
@@ -6,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use super::{DIVIDER, STATUS_BG};
+use super::{display_width, DIVIDER, STATUS_BG};
 use crate::app::{
     App, PermissionState, PersonaSummary, PersonaSwitchConfirmState, PickerState, SlashCommand,
     UserQuestionState, PICKER_VISIBLE_ITEMS,
@@ -66,19 +68,55 @@ pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCom
 }
 
 pub(super) fn draw_alert(f: &mut Frame, app: &App, area: Rect) {
-    let (text, _) = app.alert.as_ref().unwrap();
-    let width = text.len() as u16 + 4;
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = area.height.saturating_sub(3);
-    let popup = Rect::new(x, y, width, 1);
+    // Render toasts (bottom-right, stacking upward).
+    if !app.toasts.is_empty() {
+        draw_toasts(f, app, area);
+    }
 
-    let style = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Green)
-        .add_modifier(Modifier::BOLD);
-    let para = Paragraph::new(Line::from(Span::styled(format!(" {} ", text), style)));
-    f.render_widget(Clear, popup);
-    f.render_widget(para, popup);
+    // Render the legacy centered alert (backward compat).
+    if let Some((text, _)) = &app.alert {
+        let width = text.len() as u16 + 4;
+        let x = (area.width.saturating_sub(width)) / 2;
+        let y = area.height.saturating_sub(3);
+        let popup = Rect::new(x, y, width, 1);
+
+        let style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD);
+        let para = Paragraph::new(Line::from(Span::styled(format!(" {} ", text), style)));
+        f.render_widget(Clear, popup);
+        f.render_widget(para, popup);
+    }
+}
+
+/// Render toast notifications in the bottom-right corner, stacking upward.
+/// Each toast is a small green-on-black pill with the message text.
+fn draw_toasts(f: &mut Frame, app: &App, area: Rect) {
+    let max_width: u16 = 50;
+    let visible: Vec<&(String, Instant)> = app.toasts.iter().rev().take(3).collect();
+    for (i, (text, born)) in visible.into_iter().cloned().enumerate() {
+        let elapsed = born.elapsed();
+        let ttl = Duration::from_secs(3);
+        let remaining = ttl.saturating_sub(elapsed);
+        let fading = remaining < Duration::from_millis(500);
+        let width = (text.len() as u16 + 4).min(max_width);
+        let x = area.width.saturating_sub(width);
+        let y = area.height.saturating_sub(3 + i as u16);
+        let popup = Rect::new(x, y, width, 1);
+
+        let style = if fading {
+            Style::default().fg(Color::DarkGray).bg(Color::Black)
+        } else {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        };
+        let para = Paragraph::new(Line::from(Span::styled(format!(" {} ", text), style)));
+        f.render_widget(Clear, popup);
+        f.render_widget(para, popup);
+    }
 }
 
 pub(super) fn draw_permission_modal(f: &mut Frame, perm: &PermissionState, area: Rect) {
@@ -155,30 +193,88 @@ pub(super) fn draw_permission_modal(f: &mut Frame, perm: &PermissionState, area:
     f.render_widget(Paragraph::new(Line::from(option_lines)), option_area);
 }
 
-pub(super) fn draw_user_question_modal(f: &mut Frame, uq: &UserQuestionState, area: Rect) {
-    // Each question takes 3 lines (prompt, answer, blank) + a hint line.
-    let per_q: u16 = 3;
-    let width = 64u16.min(area.width.saturating_sub(4));
-    let height = (3 + per_q * uq.questions.len() as u16).min(area.height.saturating_sub(4));
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup = Rect::new(x, y, width, height);
+/// Render the ask_user overlay into the input slot. The caller passes a rect
+/// large enough to fit the current page; the slot is already painted with
+/// STATUS_BG, so this function only emits the text content.
+pub(super) fn draw_user_question(f: &mut Frame, uq: &UserQuestionState, area: Rect) {
+    // Re-derive the rect exactly like draw_input does: 1-cell padding on every
+    // side. Matches the visual weight of the regular input box.
+    let padded = Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    if padded.width == 0 || padded.height == 0 {
+        return;
+    }
 
-    f.render_widget(Clear, popup);
-    let bg = Block::default().style(Style::default().bg(STATUS_BG));
-    f.render_widget(bg, popup);
+    if uq.review {
+        draw_user_question_review(f, uq, padded);
+    } else {
+        draw_user_question_page(f, uq, padded);
+    }
+}
 
-    let inner = Rect::new(
-        popup.x + 2,
-        popup.y + 1,
-        popup.width.saturating_sub(4),
-        popup.height.saturating_sub(2),
+fn draw_user_question_page(f: &mut Frame, uq: &UserQuestionState, area: Rect) {
+    let question = match uq.questions.get(uq.page) {
+        Some(q) => q,
+        None => return,
+    };
+    let n = uq.questions.len();
+    let page_label = if n > 1 {
+        format!("({} / {})", uq.page + 1, n)
+    } else {
+        String::new()
+    };
+
+    // Line 0: prompt (cyan, bold) + optional page label on the right.
+    let prompt_style = Style::default()
+        .fg(Color::Cyan)
+        .bg(STATUS_BG)
+        .add_modifier(Modifier::BOLD);
+    let label_style = Style::default().fg(Color::DarkGray).bg(STATUS_BG);
+    let label_w = display_width(&page_label) as u16;
+    let label_reserve = if n > 1 { label_w + 1 } else { 0 };
+    let prompt_max = area.width.saturating_sub(label_reserve) as usize;
+    let mut prompt_line = Line::default();
+    prompt_line.spans.push(Span::styled(
+        truncate(&question.prompt, prompt_max),
+        prompt_style,
+    ));
+    if n > 1 {
+        let used = display_width(&question.prompt).min(prompt_max) as u16;
+        let pad = area.width.saturating_sub(used + label_reserve);
+        if pad > 0 {
+            prompt_line
+                .spans
+                .push(Span::styled(" ".repeat(pad as usize), prompt_style));
+        }
+        prompt_line
+            .spans
+            .push(Span::styled(page_label, label_style));
+    }
+    f.render_widget(
+        Paragraph::new(prompt_line).wrap(Wrap { trim: false }),
+        Rect::new(area.x, area.y, area.width, 1),
     );
 
-    let mut text = Text::default();
-    for (i, prompt) in uq.questions.iter().enumerate() {
-        let focused = i == uq.current;
-        let prompt_style = if focused {
+    // One line per option + one line for freeform. Each row: number, label,
+    // and (if present) the description underneath. With descriptions, each
+    // option takes 2 lines; without, 1. We compute rows in display order.
+    let mut row_index = 0usize;
+    let mut cursor_target: Option<(u16, u16)> = None;
+
+    // Track the y position as we lay out rows.
+    let mut y = area.y + 2; // leave 1 blank line after the prompt
+    if y >= area.y + area.height {
+        return;
+    }
+
+    for (i, opt) in question.options.iter().enumerate() {
+        let selected = row_index == uq.selected;
+        let number = format!("{}. ", i + 1);
+        let number_style = if selected {
             Style::default()
                 .fg(Color::Cyan)
                 .bg(STATUS_BG)
@@ -186,47 +282,220 @@ pub(super) fn draw_user_question_modal(f: &mut Frame, uq: &UserQuestionState, ar
         } else {
             Style::default().fg(Color::DarkGray).bg(STATUS_BG)
         };
-        let answer_style = if focused {
-            Style::default().fg(Color::White).bg(Color::DarkGray)
+        let label_style = if selected {
+            Style::default()
+                .fg(Color::White)
+                .bg(STATUS_BG)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray).bg(STATUS_BG)
         };
-        let answer = uq.answers.get(i).map(|s| s.as_str()).unwrap_or("");
-        text.push_line(Line::from(Span::styled(
-            format!(" {}", prompt),
-            prompt_style,
-        )));
-        text.push_line(Line::from(Span::styled(
-            format!("  {}", answer),
-            answer_style,
-        )));
-        text.push_line(Line::from(""));
+        let line = Line::from(vec![
+            Span::styled(number, number_style),
+            Span::styled(
+                truncate(&opt.label, area.width.saturating_sub(3) as usize),
+                label_style,
+            ),
+        ]);
+        f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+        y += 1;
+        row_index += 1;
+
+        if y >= area.y + area.height {
+            return;
+        }
+        let desc_style = Style::default().fg(Color::DarkGray).bg(STATUS_BG);
+        let indent = "    ";
+        let desc_max = area.width.saturating_sub(indent.len() as u16) as usize;
+        let desc_text = if opt.description.is_empty() {
+            String::new()
+        } else {
+            truncate(&opt.description, desc_max)
+        };
+        let desc_line = Line::from(Span::styled(format!("{}{}", indent, desc_text), desc_style));
+        f.render_widget(
+            Paragraph::new(desc_line),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        y += 1;
     }
 
-    f.render_widget(Paragraph::new(text), inner);
+    // Freeform row: "n. Type your own answer" with optional input field.
+    if y < area.y + area.height {
+        let freeform_index = question.options.len();
+        let selected = row_index == uq.selected;
+        let number = format!("{}. ", freeform_index + 1);
+        let number_style = if selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .bg(STATUS_BG)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray).bg(STATUS_BG)
+        };
+        let prefix = "Type your own answer";
+        let prefix_style = if selected {
+            Style::default()
+                .fg(Color::White)
+                .bg(STATUS_BG)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray).bg(STATUS_BG)
+        };
+        let line = if selected {
+            let text_max = area
+                .width
+                .saturating_sub(number.len() as u16 + prefix.len() as u16 + 2)
+                as usize;
+            let shown = truncate(&uq.freeform_text, text_max);
+            Line::from(vec![
+                Span::styled(number.clone(), number_style),
+                Span::styled(prefix.to_string(), prefix_style),
+                Span::styled(": ", prefix_style),
+                Span::styled(shown.clone(), prefix_style),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(number.clone(), number_style),
+                Span::styled(prefix.to_string(), prefix_style),
+            ])
+        };
+        f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+        if selected {
+            let col_offset = number.len() + prefix.len() + 2 + display_width(&uq.freeform_text);
+            let col = area.x + col_offset.min(area.width as usize - 1) as u16;
+            cursor_target = Some((col, y));
+        }
+        y += 1;
+    }
 
-    // Hint at the bottom.
-    let hint_style = Style::default().fg(Color::DarkGray).bg(STATUS_BG);
-    let hint_area = Rect::new(
-        inner.x,
-        inner.y + inner.height.saturating_sub(1),
-        inner.width,
-        1,
-    );
+    // Hint line at the bottom.
+    let hint_y = area.y + area.height.saturating_sub(1);
+    if hint_y > y {
+        let hint = "↑↓ select   1-9 jump   enter next   esc cancel";
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                hint,
+                Style::default().fg(Color::DarkGray).bg(STATUS_BG),
+            ))),
+            Rect::new(area.x, hint_y, area.width, 1),
+        );
+    }
+
+    if let Some((cx, cy)) = cursor_target {
+        f.set_cursor_position((cx, cy));
+    }
+}
+
+fn draw_user_question_review(f: &mut Frame, uq: &UserQuestionState, area: Rect) {
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .bg(STATUS_BG)
+        .add_modifier(Modifier::BOLD);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            "enter submit · tab next · esc cancel",
-            hint_style,
+            "review your answers",
+            header_style,
         ))),
-        hint_area,
+        Rect::new(area.x, area.y, area.width, 1),
     );
 
-    // Place the cursor at the end of the focused answer.
-    if let Some(answer) = uq.answers.get(uq.current) {
-        let row = inner.y + (uq.current as u16) * per_q + 1;
-        let col = inner.x + 2 + (answer.chars().count() as u16).min(inner.width.saturating_sub(4));
-        f.set_cursor_position((col, row));
+    let mut y = area.y + 2;
+    let max_y = area.y + area.height;
+    for (i, q) in uq.questions.iter().enumerate() {
+        if y + 1 >= max_y {
+            break;
+        }
+        let prompt_style = Style::default().fg(Color::DarkGray).bg(STATUS_BG);
+        let answer_style = Style::default()
+            .fg(Color::White)
+            .bg(STATUS_BG)
+            .add_modifier(Modifier::BOLD);
+        let prompt_max = area.width.saturating_sub(2) as usize;
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                truncate(&q.prompt, prompt_max),
+                prompt_style,
+            ))),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        y += 1;
+        let answer = uq.answers.get(i).map(|s| s.as_str()).unwrap_or("");
+        let answer_max = area.width.saturating_sub(4) as usize;
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  ▸ ", Style::default().fg(Color::Cyan).bg(STATUS_BG)),
+                Span::styled(truncate(answer, answer_max), answer_style),
+            ])),
+            Rect::new(area.x, y, area.width, 1),
+        );
+        y += 2; // blank line between pairs
     }
+
+    // Action row: [ Submit ]  [ Cancel ]
+    if y < max_y {
+        let submit_label = "[ Submit ]";
+        let cancel_label = "[ Cancel ]";
+        let gap = "  ";
+        let submit_w = submit_label.chars().count() as u16;
+        let cancel_w = cancel_label.chars().count() as u16;
+        let gap_w = gap.chars().count() as u16;
+        let total = submit_w + gap_w + cancel_w;
+        let start_x = area.x + area.width.saturating_sub(total) / 2;
+        let submit_style = if uq.review_selected == 0 {
+            Style::default()
+                .fg(Color::White)
+                .bg(STATUS_BG)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray).bg(STATUS_BG)
+        };
+        let cancel_style = if uq.review_selected == 1 {
+            Style::default()
+                .fg(Color::White)
+                .bg(STATUS_BG)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray).bg(STATUS_BG)
+        };
+        let mut line = Line::default();
+        line.spans
+            .push(Span::styled(submit_label.to_string(), submit_style));
+        line.spans.push(Span::styled(gap, submit_style));
+        line.spans
+            .push(Span::styled(cancel_label.to_string(), cancel_style));
+        f.render_widget(Paragraph::new(line), Rect::new(start_x, y, total, 1));
+    }
+
+    let hint_y = area.y + area.height.saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "← → switch   y/n shortcut   enter confirm   esc cancel",
+            Style::default().fg(Color::DarkGray).bg(STATUS_BG),
+        ))),
+        Rect::new(area.x, hint_y, area.width, 1),
+    );
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw + 1 > max {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out
 }
 
 pub(super) fn draw_picker(f: &mut Frame, picker: &mut PickerState, area: Rect) {
@@ -530,4 +799,155 @@ fn skills_style(target: &PersonaSummary, current: &Option<PersonaSummary>) -> St
     } else {
         Style::default().fg(Color::Gray)
     }
+}
+
+/// Draw the keyboard shortcuts overlay. A centered modal showing all
+/// available shortcuts grouped by category.
+pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
+    let width = 64.min(area.width.saturating_sub(4));
+    let height = 30.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    let modal_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .title(" Keyboard Shortcuts ")
+        .borders(ratatui::widgets::Borders::ALL)
+        .style(Style::default().bg(Color::Black).fg(Color::White));
+    let inner = block.inner(modal_area);
+    f.render_widget(block, modal_area);
+
+    let key_style = Style::default().fg(Color::Cyan);
+    let desc_style = Style::default().fg(Color::Gray);
+    let header_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+
+    let lines = vec![
+        Line::from(Span::styled("Global", header_style)),
+        Line::from(vec![
+            Span::styled("  Ctrl+P     ", key_style),
+            Span::styled("command palette", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  ?          ", key_style),
+            Span::styled("this help overlay", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+L     ", key_style),
+            Span::styled("scroll to bottom", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+C     ", key_style),
+            Span::styled("cancel stream / clear input / quit (2x)", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Esc        ", key_style),
+            Span::styled("cancel stream (2x) / close modal", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+D     ", key_style),
+            Span::styled("quit (when input empty)", desc_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Input Editing", header_style)),
+        Line::from(vec![
+            Span::styled("  Alt+Enter  ", key_style),
+            Span::styled("insert newline (multi-line)", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+A/E   ", key_style),
+            Span::styled("cursor to start / end", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+F/B   ", key_style),
+            Span::styled("cursor right / left", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+W     ", key_style),
+            Span::styled("delete word backward", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+U     ", key_style),
+            Span::styled("clear input", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+Z     ", key_style),
+            Span::styled("undo", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+Shift+Z", key_style),
+            Span::styled("redo", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Up/Down    ", key_style),
+            Span::styled("cursor between lines / history", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  @          ", key_style),
+            Span::styled("file picker (@-mention)", desc_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Tools & Sidebar", header_style)),
+        Line::from(vec![
+            Span::styled("  Ctrl+O     ", key_style),
+            Span::styled("expand/collapse bash output", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+T     ", key_style),
+            Span::styled("toggle reasoning blocks", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+1/2/3 ", key_style),
+            Span::styled("toggle sidebar sections", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+Shift+C", key_style),
+            Span::styled("copy selected text", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  x          ", key_style),
+            Span::styled("cancel most recent subagent", desc_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Slash Commands", header_style)),
+        Line::from(vec![
+            Span::styled("  /clear     ", key_style),
+            Span::styled("clear conversation", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  /compact   ", key_style),
+            Span::styled("force context compaction", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  /model     ", key_style),
+            Span::styled("switch model", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  /persona   ", key_style),
+            Span::styled("switch persona", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  /rewind    ", key_style),
+            Span::styled("rewind to earlier message", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  /cost      ", key_style),
+            Span::styled("session cost breakdown", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  /sessions  ", key_style),
+            Span::styled("list resumable sessions", desc_style),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press ? or Esc to close",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let para = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    f.render_widget(para, inner);
 }

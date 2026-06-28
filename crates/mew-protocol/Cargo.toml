@@ -1,0 +1,14 @@
+[package]
+name = "mew-protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+mew-message = { workspace = true }
+mew-hooks = { workspace = true }
+mew-provider = { workspace = true }
+mew-subagents = { workspace = true }

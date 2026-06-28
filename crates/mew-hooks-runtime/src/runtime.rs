@@ -874,7 +874,11 @@ impl Dispatcher for SubprocessDispatcher {
     ) -> mew_hooks::HookOutcome<Value> {
         let json = input.to_string();
         match self
-            .pipe_json_raw(mew_hooks::HookId::ToolExecuteBefore, &json, Some(&call.tool_name))
+            .pipe_json_raw(
+                mew_hooks::HookId::ToolExecuteBefore,
+                &json,
+                Some(&call.tool_name),
+            )
             .await
         {
             Some(raw) => {
@@ -915,7 +919,11 @@ impl Dispatcher for SubprocessDispatcher {
     ) -> mew_hooks::HookOutcome<PermissionDecision> {
         let dec_str = format!("{:?}", current);
         match self
-            .pipe_json_raw(mew_hooks::HookId::PermissionAsk, &dec_str, Some(&call.tool_name))
+            .pipe_json_raw(
+                mew_hooks::HookId::PermissionAsk,
+                &dec_str,
+                Some(&call.tool_name),
+            )
             .await
         {
             Some(raw) => {

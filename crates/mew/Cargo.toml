@@ -19,6 +19,7 @@ mew-provider-fake = { workspace = true }
 mew-agent = { workspace = true }
 mew-tools = { workspace = true }
 mew-config = { workspace = true }
+mew-prompts = { workspace = true }
 mew-session = { workspace = true }
 mew-catalog = { workspace = true }
 mew-context = { workspace = true }
@@ -27,7 +28,8 @@ mew-personas = { workspace = true }
 mew-hooks = { workspace = true }
 mew-tui = { workspace = true }
 mew-mcp = { workspace = true }
-mew-acp = { workspace = true }
+mew-daemon = { workspace = true }
+mew-protocol = { workspace = true }
 mew-hooks-runtime = { workspace = true }
 mew-subagents = { workspace = true }
 ratatui = { workspace = true }
@@ -44,3 +46,4 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
+nix = { workspace = true }

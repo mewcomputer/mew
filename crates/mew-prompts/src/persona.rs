@@ -56,16 +56,22 @@ pub fn render_template(
         denied_tools => denied,
     };
 
-    minijinja::Environment::new()
-        .render_str(body, ctx)
-        .unwrap_or_else(|e| {
-            tracing::warn!(
-                error = %e,
-                persona = %persona_name,
-                "persona template render failed, falling back to raw body"
-            );
-            body.to_string()
-        })
+    // Register the transclude function so persona bodies can include
+    // built-in prompt fragments: {{ transclude("mew://system_prompts/base") }}
+    let mut env = minijinja::Environment::new();
+    env.add_function("transclude", |path: String| -> String {
+        let stripped = path.strip_prefix("mew://").unwrap_or(&path);
+        crate::vfs::read_builtin(stripped).unwrap_or("").to_string()
+    });
+
+    env.render_str(body, ctx).unwrap_or_else(|e| {
+        tracing::warn!(
+            error = %e,
+            persona = %persona_name,
+            "persona template render failed, falling back to raw body"
+        );
+        body.to_string()
+    })
 }
 
 #[cfg(test)]
@@ -76,14 +82,7 @@ mod tests {
     #[test]
     fn test_render_template_verbatim_body() {
         let body = "You are a helpful assistant.";
-        let result = render_template(
-            body,
-            "default",
-            false,
-            &None,
-            &[],
-            &HashSet::new(),
-        );
+        let result = render_template(body, "default", false, &None, &[], &HashSet::new());
         assert_eq!(result, body);
     }
 
@@ -115,7 +114,11 @@ mod tests {
             body,
             "p",
             false,
-            &Some(HashSet::from(["read".into(), "write".into(), "bash".into()])),
+            &Some(HashSet::from([
+                "read".into(),
+                "write".into(),
+                "bash".into(),
+            ])),
             &registry,
             &HashSet::from(["write".into()]),
         );
@@ -128,14 +131,49 @@ mod tests {
     #[test]
     fn test_render_template_falls_back_on_error() {
         let body = "unclosed {{ brace";
-        let result = render_template(
-            body,
-            "p",
-            false,
-            &None,
-            &[],
-            &HashSet::new(),
-        );
+        let result = render_template(body, "p", false, &None, &[], &HashSet::new());
         assert_eq!(result, body, "render failure must fall back to raw body");
+    }
+
+    /// Transclude includes built-in VFS resources at render time.
+    #[test]
+    fn test_render_template_transclude() {
+        let body = "{{ transclude(\"mew://system_prompts/base\") }}";
+        let result = render_template(body, "p", false, &None, &[], &HashSet::new());
+        assert!(
+            result.contains("Save progress frequently"),
+            "transclude must inline the base prompt; got: {result}"
+        );
+    }
+
+    /// Transclude works without the mew:// scheme prefix.
+    #[test]
+    fn test_render_template_transclude_without_scheme() {
+        let body = "{{ transclude(\"system_prompts/base\") }}";
+        let result = render_template(body, "p", false, &None, &[], &HashSet::new());
+        assert!(
+            result.contains("Save progress frequently"),
+            "transclude without scheme must still work; got: {result}"
+        );
+    }
+
+    /// Transclude of a nonexistent path returns empty string (no crash).
+    #[test]
+    fn test_render_template_transclude_missing() {
+        let body = "[{{ transclude(\"mew://nonexistent/path\") }}]";
+        let result = render_template(body, "p", false, &None, &[], &HashSet::new());
+        assert_eq!(
+            result, "[]",
+            "transclude of missing path must be empty; got: {result}"
+        );
+    }
+
+    /// Transclude can be combined with other template variables.
+    #[test]
+    fn test_render_template_transclude_with_vars() {
+        let body = "{{ transclude(\"mew://system_prompts/base\") }}\n\nYou are {{ persona_name }}.";
+        let result = render_template(body, "researcher", false, &None, &[], &HashSet::new());
+        assert!(result.contains("Save progress frequently"));
+        assert!(result.contains("You are researcher."));
     }
 }

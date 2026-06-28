@@ -768,6 +768,12 @@ impl ConfigEditor {
                 lines.push(Line::from(
                     "Empty roots defaults to current working directory.",
                 ));
+                lines.push(Line::from(
+                    "Workspace roots are checked against path args of bash, shell_background,",
+                ));
+                lines.push(Line::from(
+                    "and shell_monitor commands. Args outside the roots escalate to Prompt.",
+                ));
                 f.render_widget(
                     Paragraph::new(lines).style(Style::default().bg(BG_RIGHT)),
                     inner,

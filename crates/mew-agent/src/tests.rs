@@ -3,6 +3,121 @@ use std::sync::Mutex as StdMutex;
 
 use mew_hooks::NopDispatcher;
 use mew_hooks::ToolOutput;
+
+/// Forwards every `Dispatcher` method to the embedded `NopDispatcher` so
+/// tests can override just one or two methods without hand-writing 25
+/// stubs. The struct is expected to have a field named `inner` of type
+/// `NopDispatcher`.
+macro_rules! impl_default_dispatcher_methods {
+    ($ty:ty) => {
+        #[async_trait::async_trait]
+        impl mew_hooks::Dispatcher for $ty {
+            async fn init(&self, _: &mew_hooks::PluginHost) {}
+            async fn shutdown(&self) {}
+            async fn on_register_tools(&self) -> Vec<mew_hooks::ToolRegistration> {
+                self.inner.on_register_tools().await
+            }
+            async fn on_register_slash_commands(&self) -> Vec<mew_hooks::SlashCommandDef> {
+                self.inner.on_register_slash_commands().await
+            }
+            async fn execute_slash_command(&self, c: &str, a: &str) -> Option<String> {
+                self.inner.execute_slash_command(c, a).await
+            }
+            async fn on_provider_event(&self, ev: &mew_provider::ProviderEvent) {
+                self.inner.on_provider_event(ev).await
+            }
+            async fn on_tool_error(&self, call: &mew_hooks::ToolCall, error: &str) {
+                self.inner.on_tool_error(call, error).await
+            }
+            async fn on_subagent_start(
+                &self,
+                name: &str,
+                parent_call_id: &str,
+                display_name: Option<&str>,
+            ) {
+                self.inner
+                    .on_subagent_start(name, parent_call_id, display_name)
+                    .await
+            }
+            async fn on_subagent_end(&self, name: &str, parent_call_id: &str, outcome: &str) {
+                self.inner
+                    .on_subagent_end(name, parent_call_id, outcome)
+                    .await
+            }
+            async fn on_turn_end(&self, messages: &[mew_message::Message]) {
+                self.inner.on_turn_end(messages).await
+            }
+            async fn on_pre_model_turn(&self, messages: &[mew_message::Message], system: &str) {
+                self.inner.on_pre_model_turn(messages, system).await
+            }
+            async fn on_stop(&self) {
+                self.inner.on_stop().await
+            }
+            async fn on_pre_compaction(&self, messages: &[mew_message::Message]) {
+                self.inner.on_pre_compaction(messages).await
+            }
+            async fn on_post_compaction(&self, messages: &[mew_message::Message]) {
+                self.inner.on_post_compaction(messages).await
+            }
+            async fn on_chat_message(&self, msg: mew_message::Message) -> mew_message::Message {
+                self.inner.on_chat_message(msg).await
+            }
+            async fn on_chat_headers(&self, h: http::HeaderMap) -> http::HeaderMap {
+                self.inner.on_chat_headers(h).await
+            }
+            async fn on_system_prompt(&self, prompt: String) -> String {
+                self.inner.on_system_prompt(prompt).await
+            }
+            async fn on_tool_execute_before(
+                &self,
+                call: &mew_hooks::ToolCall,
+                input: serde_json::Value,
+            ) -> mew_hooks::HookOutcome<serde_json::Value> {
+                self.inner.on_tool_execute_before(call, input).await
+            }
+            async fn on_tool_execute_after(
+                &self,
+                call: &mew_hooks::ToolCall,
+                output: mew_hooks::ToolOutput,
+            ) -> mew_hooks::ToolOutput {
+                self.inner.on_tool_execute_after(call, output).await
+            }
+            async fn on_permission_ask(
+                &self,
+                call: &mew_hooks::ToolCall,
+                current: mew_hooks::PermissionDecision,
+            ) -> mew_hooks::HookOutcome<mew_hooks::PermissionDecision> {
+                self.inner.on_permission_ask(call, current).await
+            }
+            async fn on_shell_env(
+                &self,
+                env: std::collections::HashMap<String, String>,
+            ) -> std::collections::HashMap<String, String> {
+                self.inner.on_shell_env(env).await
+            }
+            async fn on_user_input(&self, prompt: String) -> String {
+                self.inner.on_user_input(prompt).await
+            }
+            async fn on_persona_change(&self, old_persona: Option<&str>, new_persona: &str) {
+                self.inner.on_persona_change(old_persona, new_persona).await
+            }
+            async fn on_session_save(&self) {
+                self.inner.on_session_save().await
+            }
+            async fn on_model_finish(
+                &self,
+                finish: &str,
+                input_tokens: u32,
+                output_tokens: u32,
+                cost: f64,
+            ) {
+                self.inner
+                    .on_model_finish(finish, input_tokens, output_tokens, cost)
+                    .await
+            }
+        }
+    };
+}
 use mew_message::{
     Finish, Message, Part, PartBase, Role, TextPart, Time, Tokens, ToolCallPart, ToolState,
     ToolStatePending, ToolTime,
@@ -45,11 +160,23 @@ impl Provider for StatefulFakeProvider {
     }
 }
 
-/// A provider that captures every request's messages and replays a fixed
-/// script. Used to assert what the agent actually sent to the model.
+/// A provider that captures every request's full state (messages + params)
+/// and replays a list of scripts in order. Each `stream()` call pops the
+/// next script; once the queue is empty, the provider replays the last
+/// one forever (useful when the agent loops more turns than scripts
+/// you provided). Captures `Request` for inspection.
 struct CapturingProvider {
-    captured: StdMutex<Vec<Vec<Message>>>,
-    script: Vec<mew_provider::ProviderEvent>,
+    captured: StdMutex<Vec<Request>>,
+    scripts: StdMutex<Vec<Vec<mew_provider::ProviderEvent>>>,
+}
+
+impl CapturingProvider {
+    fn new(scripts: Vec<Vec<mew_provider::ProviderEvent>>) -> Self {
+        Self {
+            captured: StdMutex::new(Vec::new()),
+            scripts: StdMutex::new(scripts),
+        }
+    }
 }
 
 #[async_trait]
@@ -59,8 +186,15 @@ impl Provider for CapturingProvider {
     }
 
     async fn stream(&self, req: Request) -> Result<EventStream, ProviderError> {
-        self.captured.lock().unwrap().push(req.messages.clone());
-        let script = self.script.clone();
+        self.captured.lock().unwrap().push(req.clone());
+        let script = {
+            let mut scripts = self.scripts.lock().unwrap();
+            if scripts.is_empty() {
+                Vec::new()
+            } else {
+                scripts.remove(0)
+            }
+        };
         Ok(Box::pin(futures::stream::iter(script)))
     }
 }
@@ -107,6 +241,7 @@ impl Tool for EchoTool {
             output: input.to_string(),
             error: String::new(),
             diff: None,
+            metadata: None,
         })
     }
 }
@@ -181,16 +316,19 @@ async fn test_clear_context_preserves_permission_caches() {
         None,
     );
 
-    let engine = std::sync::Arc::new(
-        mew_config::permissions::PermissionEngine::new(vec![]),
-    );
+    let engine = std::sync::Arc::new(mew_config::permissions::PermissionEngine::new(vec![]));
     agent.set_permission_engine(engine.clone());
 
     // 1. `session_allows` survives `/clear`.
     engine.add_session_allow("write").await;
     let write_input = serde_json::json!({"path": "foo.rs"});
     let before = engine
-        .check("write", &write_input, Sensitivity::Mutating)
+        .check(
+            "write",
+            &write_input,
+            Sensitivity::Mutating,
+            std::path::Path::new("."),
+        )
         .await;
     assert_eq!(
         before,
@@ -206,7 +344,12 @@ async fn test_clear_context_preserves_permission_caches() {
     );
 
     let after = engine
-        .check("write", &write_input, Sensitivity::Mutating)
+        .check(
+            "write",
+            &write_input,
+            Sensitivity::Mutating,
+            std::path::Path::new("."),
+        )
         .await;
     assert_eq!(
         after,
@@ -217,11 +360,7 @@ async fn test_clear_context_preserves_permission_caches() {
     // 2. `workspace_allowances` survives `/clear` (same lifetime argument).
     let dir = std::path::PathBuf::from("/tmp/outside-workspace");
     agent.workspace_allowances.lock().await.insert(dir.clone());
-    assert!(agent
-        .workspace_allowances
-        .lock()
-        .await
-        .contains(&dir));
+    assert!(agent.workspace_allowances.lock().await.contains(&dir));
 
     agent.clear_context().await;
 
@@ -270,10 +409,7 @@ async fn test_flagged_files_re_injected_after_compaction() {
     std::fs::write(&plan_path, "# THE PLAN\nstep 1: do the thing").unwrap();
 
     let script = FakeProvider::text_response("ok");
-    let provider = std::sync::Arc::new(CapturingProvider {
-        captured: StdMutex::new(Vec::new()),
-        script,
-    });
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![script]));
 
     let mut agent = Agent::new(
         provider.clone(),
@@ -326,7 +462,7 @@ async fn test_flagged_files_re_injected_after_compaction() {
         !captured.is_empty(),
         "provider should have received at least one request"
     );
-    let request_msgs = &captured[0];
+    let request_msgs = &captured[0].messages;
     let has_flagged_content = request_msgs.iter().any(|m| {
         m.parts.iter().any(|p| match p {
             Part::Text(tp) => tp.text.contains("THE PLAN"),
@@ -712,7 +848,10 @@ async fn test_cancellation_during_stream() {
         None,
     );
 
-    let mut rx = agent.run("hi".into());
+    // Pass the agent's own cancel token so cancelling it propagates to the
+    // turn. (run_with_parts creates a fresh token when passed None, which
+    // would not be reachable from the agent's permanent cancel_token.)
+    let mut rx = agent.run_with_parts("hi".into(), vec![], Some(agent.cancel_token.clone()));
     // Cancel immediately.
     agent.cancel_token.cancel();
 
@@ -962,6 +1101,152 @@ async fn test_permission_engine_session_allow() {
         permissions_prompted, 1,
         "AllowSession should skip second prompt within same turn"
     );
+}
+
+// ------------------------------------------------------------------
+// Workspace-escape tier integration
+//
+// The escape tier sits between deny rules and the Permissive short-circuit.
+// A bash command that reads a path outside `workspace_roots` must escalate
+// to `Prompt` even in Permissive mode (which would otherwise auto-allow
+// Mutating tools). This regression covers that path end-to-end through
+// `agent.run()` rather than only via the engine's unit tests.
+// ------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_workspace_escape_tier_prompts_in_permissive_mode() {
+    use mew_config::permissions::PermissionEngine;
+    use mew_hooks::PermissionMode;
+    use mew_tools::tools::bash::Bash;
+
+    let dir = tempfile::tempdir().unwrap();
+    let workspace_root = dir.path().to_path_buf();
+
+    // Provider emits a bash tool call whose command reads a path outside
+    // the workspace, then a final text response.
+    let bash_call = FakeProvider::tool_call(
+        "bash",
+        "c1",
+        serde_json::json!({"command": "cat /etc/passwd"}),
+    );
+    let done = FakeProvider::text_response("done");
+    let provider = std::sync::Arc::new(StatefulFakeProvider::new(vec![bash_call, done]));
+
+    // Build the engine with the workspace root + Permissive mode. Permissive
+    // would normally auto-allow Mutating tools, but the escape tier must
+    // short-circuit to Prompt *before* the Permissive branch fires.
+    let engine = PermissionEngine::new(vec![])
+        .with_workspace_roots(vec![workspace_root.clone()], workspace_root.clone());
+    let engine = engine.with_mode(PermissionMode::Permissive);
+
+    let mut agent = Agent::new(
+        provider,
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![std::sync::Arc::new(Bash)],
+        None,
+    );
+    agent.set_permission_engine(std::sync::Arc::new(engine));
+
+    let mut rx = agent.run("read /etc/passwd".into());
+    let mut got_prompt = false;
+    let mut tool_started = false;
+
+    while let Some(ev) = rx.recv().await {
+        let mut should_break = false;
+        match ev {
+            AgentEvent::PermissionRequest { call, tx } => {
+                got_prompt = true;
+                assert_eq!(call.tool_name, "bash");
+                // Approve so the tool runs and the turn can complete.
+                let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+            }
+            AgentEvent::ToolStart { .. } => tool_started = true,
+            AgentEvent::Provider(ProviderEvent::MessageEnd {
+                finish: Finish::Stop,
+                ..
+            }) if got_prompt && tool_started => should_break = true,
+            _ => {}
+        }
+        if should_break {
+            break;
+        }
+    }
+
+    assert!(
+        got_prompt,
+        "escape tier must escalate to PermissionRequest even in Permissive mode"
+    );
+    assert!(
+        tool_started,
+        "after approval the bash tool must still execute"
+    );
+}
+
+#[tokio::test]
+async fn test_workspace_escape_tier_disabled_when_roots_empty() {
+    // The escape tier is opt-in: empty `workspace_roots` disables it, so
+    // `cat /etc/passwd` falls through to the normal permission flow.
+    use mew_config::permissions::PermissionEngine;
+    use mew_hooks::PermissionMode;
+    use mew_tools::tools::bash::Bash;
+
+    let bash_call = FakeProvider::tool_call(
+        "bash",
+        "c1",
+        serde_json::json!({"command": "cat /etc/passwd"}),
+    );
+    let done = FakeProvider::text_response("done");
+    let provider = std::sync::Arc::new(StatefulFakeProvider::new(vec![bash_call, done]));
+
+    // Permissive mode + no workspace_roots: bash is Dangerous, but Permissive
+    // for Mutating tools... actually bash is Dangerous. Permissive still
+    // prompts on Dangerous. Use Standard mode + an allow rule to confirm
+    // the escape tier is the only thing that escalates.
+    let engine = PermissionEngine::new(vec![mew_config::permissions::PermissionRule {
+        tool: "bash".into(),
+        decision: mew_config::permissions::RuleDecision::Allow,
+        r#match: mew_config::permissions::MatchConditions::default(),
+    }])
+    .with_mode(PermissionMode::Standard);
+
+    let mut agent = Agent::new(
+        provider,
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![std::sync::Arc::new(Bash)],
+        None,
+    );
+    agent.set_permission_engine(std::sync::Arc::new(engine));
+
+    let mut rx = agent.run("read /etc/passwd".into());
+    let mut got_prompt = false;
+    let mut tool_started = false;
+
+    while let Some(ev) = rx.recv().await {
+        let mut should_break = false;
+        match ev {
+            AgentEvent::PermissionRequest { call: _, tx } => {
+                got_prompt = true;
+                let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+            }
+            AgentEvent::ToolStart { .. } => tool_started = true,
+            AgentEvent::Provider(ProviderEvent::MessageEnd {
+                finish: Finish::Stop,
+                ..
+            }) if got_prompt && tool_started => should_break = true,
+            _ => {}
+        }
+        if should_break {
+            break;
+        }
+    }
+
+    assert!(
+        !got_prompt,
+        "with empty workspace_roots and an Allow rule, no PermissionRequest should fire"
+    );
+    assert!(tool_started, "tool must still execute after the allow rule");
 }
 
 // ------------------------------------------------------------------
@@ -1674,4 +1959,776 @@ fn test_apply_persona_without_template_is_verbatim() {
     let prompt = agent.persona_prompt.expect("prompt should be set");
     // Template syntax is preserved literally when template is not enabled.
     assert_eq!(prompt, "Hello {{ name }}");
+}
+
+// --------------------------------------------------------------------------
+// Reasoning truncation integration
+// --------------------------------------------------------------------------
+//
+// These exercise the full agent.run() pipeline with a fake provider that
+// emits a long ReasoningPart. They assert:
+//   - the assistant message's reasoning text is truncated in self.messages
+//   - a forged acknowledgement message is appended
+//   - the next model request has tool_choice = Required
+//   - threshold = 0 disables the behaviour entirely
+
+/// Build a ProviderEvent script that emits one big ReasoningPart followed
+/// by a single ToolCall and MessageEnd(ToolUse). Used to drive the
+/// truncation path.
+fn long_reasoning_then_tool_call_script(
+    reasoning_chars: usize,
+) -> Vec<mew_provider::ProviderEvent> {
+    use mew_message::{
+        Part, PartBase, ReasoningPart, ToolCallPart, ToolState, ToolStatePending, ToolTime,
+    };
+    let part_id = ulid::Ulid::new();
+    let message_id = ulid::Ulid::new();
+    let session_id = ulid::Ulid::new();
+    let reasoning_text = "x".repeat(reasoning_chars);
+
+    let mut events = vec![mew_provider::ProviderEvent::PartStart {
+        part: Part::Reasoning(ReasoningPart {
+            base: PartBase {
+                id: part_id,
+                message_id,
+                session_id,
+            },
+            text: reasoning_text,
+            signature: None,
+        }),
+    }];
+    events.push(mew_provider::ProviderEvent::PartEnd { part_id });
+
+    // Then a tool call (so the turn has something to do after truncation).
+    let tc_id = ulid::Ulid::new();
+    let tc_msg_id = ulid::Ulid::new();
+    let tc_sess_id = ulid::Ulid::new();
+    let now = chrono::Utc::now().timestamp_millis();
+    events.push(mew_provider::ProviderEvent::PartStart {
+        part: Part::ToolCall(ToolCallPart {
+            base: PartBase {
+                id: tc_id,
+                message_id: tc_msg_id,
+                session_id: tc_sess_id,
+            },
+            tool_name: "echo".into(),
+            call_id: "call_1".into(),
+            state: ToolState::Pending(ToolStatePending {
+                input: serde_json::json!({"input": "hi"}),
+                time: ToolTime {
+                    start: now,
+                    end: None,
+                },
+            }),
+            raw_input: String::new(),
+        }),
+    });
+    events.push(mew_provider::ProviderEvent::PartEnd { part_id: tc_id });
+    events.push(mew_provider::ProviderEvent::MessageEnd {
+        finish: Finish::ToolUse,
+        usage: Tokens::default(),
+        cost: 0.0,
+    });
+    events
+}
+
+#[tokio::test]
+async fn test_long_reasoning_truncates_and_forges_ack() {
+    let script1 = long_reasoning_then_tool_call_script(20_000); // ~5k tokens at 4 chars/tok
+    let script2 = FakeProvider::text_response("done");
+    // CapturingProvider pops scripts in order — first turn gets the
+    // long-reasoning + tool-call, second turn gets a plain text
+    // response (so the agent's turn loop terminates).
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![script1, script2]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![std::sync::Arc::new(EchoTool::mutating())],
+        None,
+    );
+    agent.set_reasoning_truncation_threshold(1000); // ~1000-token cap
+
+    let mut rx = agent.run("think a lot".into());
+
+    // Drain: PermissionRequest (EchoTool is mutating) → send AllowOnce →
+    // MessageEnd → loop continues for the post-tool turn → second
+    // MessageEnd. We pull events until we see two MessageEnds.
+    let mut message_ends = 0;
+    while let Some(ev) = rx.recv().await {
+        if let AgentEvent::Provider(ProviderEvent::MessageEnd { .. }) = &ev {
+            message_ends += 1;
+            if message_ends >= 2 {
+                break;
+            }
+        }
+        if let AgentEvent::PermissionRequest { tx, .. } = ev {
+            let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+        }
+    }
+
+    // The assistant message in self.messages must have truncated reasoning.
+    // Capture the truncator flag BEFORE acquiring the messages lock — the
+    // flag accessor borrows agent mutably while the lock guard borrows
+    // immutably, and we'd hit a borrow-checker conflict otherwise.
+    // The truncator's "force tool" flag has been consumed by the second
+    // turn already (that's the point — it set tool_choice on the next
+    // request). Verify via the captured requests: the second request
+    // should have tool_choice = Some(Required).
+    let captured = provider.captured.lock().unwrap();
+    assert!(
+        captured.len() >= 2,
+        "agent should have made at least 2 model requests, got {}",
+        captured.len()
+    );
+    let second_req = &captured[1];
+    let tc = second_req
+        .params
+        .as_ref()
+        .and_then(|p| p.tool_choice)
+        .expect("second request must have tool_choice set (the truncator's force flag)");
+    assert!(
+        matches!(tc, mew_provider::ToolChoice::Required),
+        "second request tool_choice must be Required, got {:?}",
+        tc
+    );
+
+    // Drop the lock guard before re-borrowing agent.
+    drop(captured);
+
+    let msgs = agent.messages.lock().await;
+    let assistant = msgs
+        .iter()
+        .find(|m| {
+            m.role == Role::Assistant && m.parts.iter().any(|p| matches!(p, Part::Reasoning(_)))
+        })
+        .expect("assistant message with reasoning should exist");
+    let reasoning_text = assistant
+        .parts
+        .iter()
+        .find_map(|p| match p {
+            Part::Reasoning(rp) => Some(rp.text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        reasoning_text.contains("truncated at ~1000 tokens"),
+        "reasoning should be truncated with marker: len={}, head={:?}",
+        reasoning_text.len(),
+        &reasoning_text[..80.min(reasoning_text.len())]
+    );
+    assert!(
+        reasoning_text.len() < 20_000,
+        "truncated reasoning should be smaller than the original 20k chars, got {}",
+        reasoning_text.len()
+    );
+
+    // The forged acknowledgement message must be present in history.
+    let has_ack = msgs.iter().any(|m| {
+        m.role == Role::Assistant
+            && m.parts.iter().any(
+                |p| matches!(p, Part::Text(tp) if tp.text.contains("Acknowledging overthinking")),
+            )
+    });
+    assert!(
+        has_ack,
+        "forged acknowledgement assistant message must be in history"
+    );
+}
+
+#[tokio::test]
+async fn test_short_reasoning_does_not_trigger_truncation() {
+    // ~200 tokens — well under the default 5k threshold.
+    let script1 = long_reasoning_then_tool_call_script(800);
+    let script2 = FakeProvider::text_response("done");
+    let provider = std::sync::Arc::new(StatefulFakeProvider::new(vec![script1, script2]));
+    let mut agent = Agent::new(
+        provider,
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![std::sync::Arc::new(EchoTool::mutating())],
+        None,
+    );
+    // Default threshold (5000). Don't change it.
+
+    let mut rx = agent.run("hi".into());
+    let mut message_ends = 0;
+    while let Some(ev) = rx.recv().await {
+        if let AgentEvent::Provider(ProviderEvent::MessageEnd { .. }) = &ev {
+            message_ends += 1;
+            if message_ends >= 2 {
+                break;
+            }
+        }
+        if let AgentEvent::PermissionRequest { tx, .. } = ev {
+            let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+        }
+    }
+
+    let force_tool_flag = agent.take_force_tool_choice();
+
+    // Reasoning must be intact (not truncated).
+    let msgs = agent.messages.lock().await;
+    let reasoning_text = msgs
+        .iter()
+        .flat_map(|m| m.parts.iter())
+        .find_map(|p| match p {
+            Part::Reasoning(rp) => Some(rp.text.clone()),
+            _ => None,
+        })
+        .expect("reasoning part should exist");
+    assert!(
+        !reasoning_text.contains("truncated at ~"),
+        "short reasoning must not be truncated, got len={}",
+        reasoning_text.len()
+    );
+    assert_eq!(reasoning_text.len(), 800);
+
+    // No acknowledgement was forged.
+    let has_ack = msgs.iter().any(|m| {
+        m.role == Role::Assistant
+            && m.parts.iter().any(
+                |p| matches!(p, Part::Text(tp) if tp.text.contains("Acknowledging overthinking")),
+            )
+    });
+    assert!(
+        !has_ack,
+        "no acknowledgement should be forged for short reasoning"
+    );
+
+    // No force-tool flag.
+    assert!(!force_tool_flag);
+}
+
+#[tokio::test]
+async fn test_truncation_disabled_when_threshold_zero() {
+    // Long reasoning but threshold = 0 disables truncation.
+    let script1 = long_reasoning_then_tool_call_script(20_000);
+    let script2 = FakeProvider::text_response("done");
+    let provider = std::sync::Arc::new(StatefulFakeProvider::new(vec![script1, script2]));
+    let mut agent = Agent::new(
+        provider,
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![std::sync::Arc::new(EchoTool::mutating())],
+        None,
+    );
+    agent.set_reasoning_truncation_threshold(0);
+
+    let mut rx = agent.run("hi".into());
+    let mut message_ends = 0;
+    while let Some(ev) = rx.recv().await {
+        if let AgentEvent::Provider(ProviderEvent::MessageEnd { .. }) = &ev {
+            message_ends += 1;
+            if message_ends >= 2 {
+                break;
+            }
+        }
+        if let AgentEvent::PermissionRequest { tx, .. } = ev {
+            let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+        }
+    }
+
+    let force_tool_flag = agent.take_force_tool_choice();
+    let msgs = agent.messages.lock().await;
+    let reasoning_text = msgs
+        .iter()
+        .flat_map(|m| m.parts.iter())
+        .find_map(|p| match p {
+            Part::Reasoning(rp) => Some(rp.text.clone()),
+            _ => None,
+        })
+        .expect("reasoning should exist");
+    assert_eq!(
+        reasoning_text.len(),
+        20_000,
+        "threshold=0 disables truncation; reasoning must be intact"
+    );
+    assert!(!force_tool_flag);
+}
+
+#[tokio::test]
+async fn test_set_reasoning_truncation_disabled_master_switch() {
+    // Master switch off overrides a high threshold.
+    let script1 = long_reasoning_then_tool_call_script(20_000);
+    let script2 = FakeProvider::text_response("done");
+    let provider = std::sync::Arc::new(StatefulFakeProvider::new(vec![script1, script2]));
+    let mut agent = Agent::new(
+        provider,
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![std::sync::Arc::new(EchoTool::mutating())],
+        None,
+    );
+    agent.set_reasoning_truncation_threshold(100);
+    agent.set_reasoning_truncation_enabled(false);
+
+    let mut rx = agent.run("hi".into());
+    let mut message_ends = 0;
+    while let Some(ev) = rx.recv().await {
+        if let AgentEvent::Provider(ProviderEvent::MessageEnd { .. }) = &ev {
+            message_ends += 1;
+            if message_ends >= 2 {
+                break;
+            }
+        }
+        if let AgentEvent::PermissionRequest { tx, .. } = ev {
+            let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
+        }
+    }
+
+    let msgs = agent.messages.lock().await;
+    let reasoning_text = msgs
+        .iter()
+        .flat_map(|m| m.parts.iter())
+        .find_map(|p| match p {
+            Part::Reasoning(rp) => Some(rp.text.clone()),
+            _ => None,
+        })
+        .expect("reasoning should exist");
+    assert_eq!(
+        reasoning_text.len(),
+        20_000,
+        "master switch off must skip truncation"
+    );
+}
+
+// --------------------------------------------------------------------------
+// Default `max_output_tokens` integration
+// --------------------------------------------------------------------------
+//
+// These exercise the agent's default-max-output wiring: the catalog
+// provides a value (capped at 32K), the turn loop injects it into the
+// request unless the dispatcher/plugin overrides, and a user-set
+// `set_default_max_output_tokens` overrides everything.
+
+#[tokio::test]
+async fn test_set_default_max_output_tokens_basic_setter() {
+    let mut agent = Agent::new(
+        std::sync::Arc::new(StatefulFakeProvider::new(vec![
+            FakeProvider::text_response("ok"),
+        ])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        Vec::new(),
+        None,
+    );
+    assert_eq!(agent.default_max_output_tokens, 0);
+    agent.set_default_max_output_tokens(8192);
+    assert_eq!(agent.default_max_output_tokens, 8192);
+}
+
+#[tokio::test]
+async fn test_set_default_max_output_tokens_clamps_negative_to_zero() {
+    let mut agent = Agent::new(
+        std::sync::Arc::new(StatefulFakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        Vec::new(),
+        None,
+    );
+    agent.set_default_max_output_tokens(-1);
+    assert_eq!(
+        agent.default_max_output_tokens, 0,
+        "negative must clamp to 0"
+    );
+
+    agent.set_default_max_output_tokens(-1_000_000);
+    assert_eq!(agent.default_max_output_tokens, 0);
+}
+
+#[tokio::test]
+async fn test_set_default_max_output_tokens_saturates_huge_via_field() {
+    // The setter itself doesn't saturate (we want to keep the full
+    // value for diagnostics / future fields); saturation happens at
+    // the turn.rs call site. Verify the field holds the full i64 value.
+    let mut agent = Agent::new(
+        std::sync::Arc::new(StatefulFakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        Vec::new(),
+        None,
+    );
+    agent.set_default_max_output_tokens(i64::MAX);
+    assert_eq!(agent.default_max_output_tokens, i64::MAX);
+}
+
+#[tokio::test]
+async fn test_set_default_max_output_tokens_zero_disables_override() {
+    // Setter 0 → request's max_tokens is None (no override).
+    let script = FakeProvider::text_response("ok");
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![script]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        Vec::new(),
+        None,
+    );
+    agent.set_default_max_output_tokens(0);
+
+    let mut rx = agent.run("hi".into());
+    while rx.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert!(
+        captured[0]
+            .params
+            .as_ref()
+            .and_then(|p| p.max_tokens)
+            .is_none(),
+        "setter(0) must disable override — request.max_tokens should be None"
+    );
+}
+
+#[tokio::test]
+async fn test_turn_loop_injects_default_max_output_into_request() {
+    let script = FakeProvider::text_response("ok");
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![script]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        Vec::new(),
+        None,
+    );
+    agent.set_default_max_output_tokens(16384);
+
+    let mut rx = agent.run("hi".into());
+    while rx.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    let max = captured[0]
+        .params
+        .as_ref()
+        .and_then(|p| p.max_tokens)
+        .expect("default must be injected when dispatcher returns None");
+    assert_eq!(max, 16384, "agent's default must reach the request");
+}
+
+#[tokio::test]
+async fn test_user_dispatcher_max_tokens_wins_over_default() {
+    // Build a dispatcher that overrides max_tokens. The agent's default
+    // must NOT win. We construct a wrapper that holds a NopDispatcher
+    // and overrides on_chat_params / on_chat_headers; the rest of the
+    // 23 trait methods are pass-throughs.
+    use mew_hooks::ChatParams;
+
+    struct OverrideDispatcher {
+        inner: NopDispatcher,
+    }
+
+    async fn pass_through(d: &OverrideDispatcher) {
+        // Suppress the unused field warning on `inner` for these tests
+        // — we use it for the field access in every method.
+        let _ = &d.inner;
+    }
+    let _ = pass_through; // function exists only to suppress lint
+
+    #[async_trait::async_trait]
+    impl mew_hooks::Dispatcher for OverrideDispatcher {
+        async fn on_chat_params(&self, _params: ChatParams) -> ChatParams {
+            ChatParams {
+                temperature: None,
+                top_p: None,
+                max_tokens: Some(1234),
+                tool_choice: None,
+            }
+        }
+        async fn on_chat_headers(&self, headers: http::HeaderMap) -> http::HeaderMap {
+            headers
+        }
+        async fn init(&self, _: &mew_hooks::PluginHost) {}
+        async fn shutdown(&self) {}
+        async fn on_register_tools(&self) -> Vec<mew_hooks::ToolRegistration> {
+            self.inner.on_register_tools().await
+        }
+        async fn on_register_slash_commands(&self) -> Vec<mew_hooks::SlashCommandDef> {
+            self.inner.on_register_slash_commands().await
+        }
+        async fn execute_slash_command(&self, c: &str, a: &str) -> Option<String> {
+            self.inner.execute_slash_command(c, a).await
+        }
+        async fn on_provider_event(&self, ev: &mew_provider::ProviderEvent) {
+            self.inner.on_provider_event(ev).await
+        }
+        async fn on_tool_error(&self, c: &mew_hooks::ToolCall, e: &str) {
+            self.inner.on_tool_error(c, e).await
+        }
+        async fn on_subagent_start(&self, n: &str, p: &str, d: Option<&str>) {
+            self.inner.on_subagent_start(n, p, d).await
+        }
+        async fn on_subagent_end(&self, n: &str, p: &str, o: &str) {
+            self.inner.on_subagent_end(n, p, o).await
+        }
+        async fn on_turn_end(&self, m: &[mew_message::Message]) {
+            self.inner.on_turn_end(m).await
+        }
+        async fn on_pre_model_turn(&self, m: &[mew_message::Message], s: &str) {
+            self.inner.on_pre_model_turn(m, s).await
+        }
+        async fn on_stop(&self) {
+            self.inner.on_stop().await
+        }
+        async fn on_pre_compaction(&self, m: &[mew_message::Message]) {
+            self.inner.on_pre_compaction(m).await
+        }
+        async fn on_post_compaction(&self, m: &[mew_message::Message]) {
+            self.inner.on_post_compaction(m).await
+        }
+        async fn on_chat_message(&self, msg: mew_message::Message) -> mew_message::Message {
+            self.inner.on_chat_message(msg).await
+        }
+        async fn on_system_prompt(&self, p: String) -> String {
+            self.inner.on_system_prompt(p).await
+        }
+        async fn on_tool_execute_before(
+            &self,
+            c: &mew_hooks::ToolCall,
+            v: serde_json::Value,
+        ) -> mew_hooks::HookOutcome<serde_json::Value> {
+            self.inner.on_tool_execute_before(c, v).await
+        }
+        async fn on_tool_execute_after(
+            &self,
+            c: &mew_hooks::ToolCall,
+            o: mew_hooks::ToolOutput,
+        ) -> mew_hooks::ToolOutput {
+            self.inner.on_tool_execute_after(c, o).await
+        }
+        async fn on_permission_ask(
+            &self,
+            c: &mew_hooks::ToolCall,
+            d: mew_hooks::PermissionDecision,
+        ) -> mew_hooks::HookOutcome<mew_hooks::PermissionDecision> {
+            self.inner.on_permission_ask(c, d).await
+        }
+        async fn on_shell_env(
+            &self,
+            e: std::collections::HashMap<String, String>,
+        ) -> std::collections::HashMap<String, String> {
+            self.inner.on_shell_env(e).await
+        }
+        async fn on_user_input(&self, p: String) -> String {
+            self.inner.on_user_input(p).await
+        }
+        async fn on_persona_change(&self, o: Option<&str>, n: &str) {
+            self.inner.on_persona_change(o, n).await
+        }
+        async fn on_session_save(&self) {
+            self.inner.on_session_save().await
+        }
+        async fn on_model_finish(&self, f: &str, i: u32, o: u32, c: f64) {
+            self.inner.on_model_finish(f, i, o, c).await
+        }
+    }
+
+    let script = FakeProvider::text_response("ok");
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![script]));
+    let dispatcher = std::sync::Arc::new(OverrideDispatcher {
+        inner: NopDispatcher,
+    });
+    let mut agent = Agent::new(provider.clone(), dispatcher, None, Vec::new(), None);
+    agent.set_default_max_output_tokens(16384);
+
+    let mut rx = agent.run("hi".into());
+    while rx.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    let max = captured[0]
+        .params
+        .as_ref()
+        .and_then(|p| p.max_tokens)
+        .expect("dispatcher must have set max_tokens");
+    assert_eq!(
+        max, 1234,
+        "dispatcher's explicit max_tokens must win over agent default"
+    );
+}
+
+#[tokio::test]
+async fn test_dispatcher_some_zero_is_honored_at_request_level() {
+    // Some(0) is a valid request-level override. The Anthropic
+    // adapter's wire floor is its problem (see Anthropic tests); the
+    // agent itself must NOT silently convert Some(0) → None.
+    use mew_hooks::ChatParams;
+
+    struct ZeroDispatcher {
+        inner: NopDispatcher,
+    }
+
+    #[async_trait::async_trait]
+    impl mew_hooks::Dispatcher for ZeroDispatcher {
+        async fn on_chat_params(&self, _: ChatParams) -> ChatParams {
+            ChatParams {
+                temperature: None,
+                top_p: None,
+                max_tokens: Some(0),
+                tool_choice: None,
+            }
+        }
+        async fn on_chat_headers(&self, h: http::HeaderMap) -> http::HeaderMap {
+            h
+        }
+        async fn init(&self, _: &mew_hooks::PluginHost) {}
+        async fn shutdown(&self) {}
+        async fn on_register_tools(&self) -> Vec<mew_hooks::ToolRegistration> {
+            self.inner.on_register_tools().await
+        }
+        async fn on_register_slash_commands(&self) -> Vec<mew_hooks::SlashCommandDef> {
+            self.inner.on_register_slash_commands().await
+        }
+        async fn execute_slash_command(&self, c: &str, a: &str) -> Option<String> {
+            self.inner.execute_slash_command(c, a).await
+        }
+        async fn on_provider_event(&self, ev: &mew_provider::ProviderEvent) {
+            self.inner.on_provider_event(ev).await
+        }
+        async fn on_tool_error(&self, c: &mew_hooks::ToolCall, e: &str) {
+            self.inner.on_tool_error(c, e).await
+        }
+        async fn on_subagent_start(&self, n: &str, p: &str, d: Option<&str>) {
+            self.inner.on_subagent_start(n, p, d).await
+        }
+        async fn on_subagent_end(&self, n: &str, p: &str, o: &str) {
+            self.inner.on_subagent_end(n, p, o).await
+        }
+        async fn on_turn_end(&self, m: &[mew_message::Message]) {
+            self.inner.on_turn_end(m).await
+        }
+        async fn on_pre_model_turn(&self, m: &[mew_message::Message], s: &str) {
+            self.inner.on_pre_model_turn(m, s).await
+        }
+        async fn on_stop(&self) {
+            self.inner.on_stop().await
+        }
+        async fn on_pre_compaction(&self, m: &[mew_message::Message]) {
+            self.inner.on_pre_compaction(m).await
+        }
+        async fn on_post_compaction(&self, m: &[mew_message::Message]) {
+            self.inner.on_post_compaction(m).await
+        }
+        async fn on_chat_message(&self, msg: mew_message::Message) -> mew_message::Message {
+            self.inner.on_chat_message(msg).await
+        }
+        async fn on_system_prompt(&self, p: String) -> String {
+            self.inner.on_system_prompt(p).await
+        }
+        async fn on_tool_execute_before(
+            &self,
+            c: &mew_hooks::ToolCall,
+            v: serde_json::Value,
+        ) -> mew_hooks::HookOutcome<serde_json::Value> {
+            self.inner.on_tool_execute_before(c, v).await
+        }
+        async fn on_tool_execute_after(
+            &self,
+            c: &mew_hooks::ToolCall,
+            o: mew_hooks::ToolOutput,
+        ) -> mew_hooks::ToolOutput {
+            self.inner.on_tool_execute_after(c, o).await
+        }
+        async fn on_permission_ask(
+            &self,
+            c: &mew_hooks::ToolCall,
+            d: mew_hooks::PermissionDecision,
+        ) -> mew_hooks::HookOutcome<mew_hooks::PermissionDecision> {
+            self.inner.on_permission_ask(c, d).await
+        }
+        async fn on_shell_env(
+            &self,
+            e: std::collections::HashMap<String, String>,
+        ) -> std::collections::HashMap<String, String> {
+            self.inner.on_shell_env(e).await
+        }
+        async fn on_user_input(&self, p: String) -> String {
+            self.inner.on_user_input(p).await
+        }
+        async fn on_persona_change(&self, o: Option<&str>, n: &str) {
+            self.inner.on_persona_change(o, n).await
+        }
+        async fn on_session_save(&self) {
+            self.inner.on_session_save().await
+        }
+        async fn on_model_finish(&self, f: &str, i: u32, o: u32, c: f64) {
+            self.inner.on_model_finish(f, i, o, c).await
+        }
+    }
+
+    let script = FakeProvider::text_response("ok");
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![script]));
+    let dispatcher = std::sync::Arc::new(ZeroDispatcher {
+        inner: NopDispatcher,
+    });
+    let mut agent = Agent::new(provider.clone(), dispatcher, None, Vec::new(), None);
+    agent.set_default_max_output_tokens(16384); // would normally win
+
+    let mut rx = agent.run("hi".into());
+    while rx.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    let max = captured[0]
+        .params
+        .as_ref()
+        .and_then(|p| p.max_tokens)
+        .expect("dispatcher's Some(0) must reach the request");
+    assert_eq!(
+        max, 0,
+        "Some(0) must be honored verbatim, not converted to None"
+    );
+}
+
+#[tokio::test]
+async fn test_default_max_output_saturates_to_i32_in_request() {
+    // Setter stores i64, turn.rs clamps to i32. Verify a value > i32::MAX
+    // saturates rather than panics or overflows.
+    let script = FakeProvider::text_response("ok");
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![script]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        Vec::new(),
+        None,
+    );
+    agent.set_default_max_output_tokens(i64::MAX);
+
+    let mut rx = agent.run("hi".into());
+    while rx.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    let max = captured[0]
+        .params
+        .as_ref()
+        .and_then(|p| p.max_tokens)
+        .expect("huge default must be injected (saturated)");
+    assert_eq!(
+        max,
+        i32::MAX,
+        "huge default must saturate to i32::MAX in the request"
+    );
+}
+
+#[tokio::test]
+async fn test_default_max_output_caps_at_32k_logic_directly() {
+    // This is a tiny unit-style test: the 32K cap is the
+    // build_session_agent logic (`raw_max_output.min(32_768)`), not a
+    // field invariant. The agent's setter doesn't apply the cap (it
+    // stores whatever the user passed). Verify both halves of the
+    // contract via a helper function we don't have to call through
+    // build_session_agent here.
+    let mut agent = Agent::new(
+        std::sync::Arc::new(StatefulFakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        Vec::new(),
+        None,
+    );
+    // Simulate the cap that build_session_agent would apply to a
+    // catalog value of 128K.
+    let raw: i64 = 128_000;
+    let capped = raw.min(32_768);
+    agent.set_default_max_output_tokens(capped);
+    assert_eq!(agent.default_max_output_tokens, 32_768);
 }

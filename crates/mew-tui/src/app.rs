@@ -1,4 +1,4 @@
-use mew_agent::AgentEvent;
+use mew_agent::{AgentEvent, AskUserQuestion};
 use mew_message::{Message, MessageId, Part, PartId, Role, ToolState};
 use mew_provider::ProviderEvent;
 use ratatui::layout::Rect;
@@ -187,6 +187,11 @@ pub struct App {
     pub chat_rows: Vec<String>,
     /// Temporary alert text to display (e.g. "copied 42 chars").
     pub alert: Option<(String, Instant)>,
+    /// Toast queue: small notifications that stack in the bottom-right.
+    /// Each toast has a 3s TTL. Up to 3 visible at once; older ones
+    /// are dropped. `set_alert` pushes to this queue (and also sets
+    /// `alert` for backward compat with the existing render path).
+    pub toasts: Vec<(String, Instant)>,
     /// Plugin UI content pushed via PluginHost::set_ui. Keys are namespaced
     /// as "plugin-name/key". Rendered beside the input prompt.
     pub plugin_ui: std::collections::HashMap<String, String>,
@@ -207,6 +212,24 @@ pub struct App {
     /// Background shell jobs, kept in sync via `AgentEvent::JobUpdate`.
     /// Each entry represents either a running or recently-finished job.
     pub background_jobs: Vec<BackgroundJobState>,
+    /// Undo stack for the input editor. Each entry is a snapshot of the
+    /// input buffer + cursor before a mutation. Capped at 100 entries.
+    pub undo_stack: Vec<(String, usize)>,
+    /// Redo stack for the input editor. Populated on undo, cleared on
+    /// any new mutation.
+    pub redo_stack: Vec<(String, usize)>,
+    /// Timestamp of the last undo-push. Used for coalescing consecutive
+    /// same-type edits within a 500ms window into one undo entry.
+    pub last_undo_push: Option<Instant>,
+    /// Search query for Ctrl+R history search.
+    pub history_search_query: String,
+    /// Index into filtered history results for Ctrl+R search.
+    pub history_search_index: Option<usize>,
+    /// Saved input before entering history search (restored on cancel).
+    pub history_search_saved: Option<(String, usize)>,
+    /// Pending large paste awaiting user confirmation. When set, the TUI
+    /// shows "paste N chars? [y/N]" and only inserts on 'y'.
+    pub pending_paste: Option<String>,
 }
 
 /// A running or completed subagent task shown in the sidebar.
@@ -260,6 +283,16 @@ pub enum Mode {
     /// Modal showing the diff between the active persona and a target
     /// persona. The user must confirm or cancel before any switch happens.
     PersonaSwitchConfirm,
+    /// Keyboard shortcuts overlay. Toggled by pressing `?`. Shows all
+    /// available shortcuts grouped by category.
+    Help,
+    /// Reverse search through input history. Entered via Ctrl+R.
+    /// Shows a search prompt; typing filters history. Enter inserts
+    /// the match. Esc cancels.
+    HistorySearch,
+    /// Confirmation prompt for a large paste (>2000 chars). Shows
+    /// "paste N chars? [y/N]". 'y' inserts, any other key cancels.
+    PasteConfirm,
 }
 
 /// A single item in the command palette.
@@ -378,15 +411,26 @@ pub struct PersonaSummary {
     pub skills: Option<Vec<String>>,
 }
 
-/// A pending `ask_user_question` prompt shown to the user as a modal with one
-/// free-text input per question.
+/// A pending `ask_user_question` prompt. Shown as a one-question-per-page
+/// inline overlay replacing the input box, with multiple-choice options
+/// and an implicit "type your own" final option.
 #[derive(Debug)]
 pub struct UserQuestionState {
     pub call_id: String,
-    pub questions: Vec<String>,
+    pub questions: Vec<AskUserQuestion>,
+    /// One entry per question; populated as the user commits each page.
     pub answers: Vec<String>,
-    /// Index of the question currently accepting input.
-    pub current: usize,
+    /// Index of the question currently being shown.
+    pub page: usize,
+    /// Index of the highlighted row in the current question (0..=options+1).
+    /// The final index is the implicit "type your own" freeform option.
+    pub selected: usize,
+    /// In-progress text when `selected` points at the freeform row.
+    pub freeform_text: String,
+    /// True when the user has committed all questions and is reviewing.
+    pub review: bool,
+    /// Selected action on the review page: 0 = Submit, 1 = Cancel.
+    pub review_selected: usize,
     pub tx: Option<tokio::sync::oneshot::Sender<Vec<String>>>,
 }
 
@@ -458,6 +502,7 @@ impl App {
             sel_end_col: None,
             chat_rows: Vec::new(),
             alert: None,
+            toasts: Vec::new(),
             plugin_ui: std::collections::HashMap::new(),
             dynamic_slash_commands: Vec::new(),
             companion_bubble_since: None,
@@ -468,6 +513,13 @@ impl App {
             short_cwd: short_cwd(),
             subagents: Vec::new(),
             background_jobs: Vec::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_undo_push: None,
+            history_search_query: String::new(),
+            history_search_index: None,
+            history_search_saved: None,
+            pending_paste: None,
         }
     }
 
@@ -537,7 +589,11 @@ impl App {
     pub fn open_permission_mode_picker(&mut self) {
         let active = self.permission_mode;
         let marker = |m: mew_hooks::PermissionMode| -> &'static str {
-            if m == active { " ● active" } else { "" }
+            if m == active {
+                " ● active"
+            } else {
+                ""
+            }
         };
         let items = vec![
             PickerItem {
@@ -547,7 +603,10 @@ impl App {
             },
             PickerItem {
                 id: mew_hooks::PermissionMode::Permissive.id().into(),
-                label: format!("Permissive{}", marker(mew_hooks::PermissionMode::Permissive)),
+                label: format!(
+                    "Permissive{}",
+                    marker(mew_hooks::PermissionMode::Permissive)
+                ),
                 description: "Auto-allows Mutating tools (write/edit/etc.). \
                               Still prompts for bash and respects your deny rules, \
                               ask rules, and secret-file guard."
@@ -610,9 +669,18 @@ impl App {
         self.mode = Mode::Normal;
     }
 
-    /// Show a temporary alert that auto-clears on the next render.
+    /// Show a temporary alert that auto-clears after 3 seconds. Pushes
+    /// to the toast queue (bottom-right, stacks up to 3). Also sets
+    /// `alert` for backward compat with the existing centered render.
     pub fn set_alert(&mut self, text: impl Into<String>) {
-        self.alert = Some((text.into(), Instant::now()));
+        let text = text.into();
+        let now = Instant::now();
+        self.alert = Some((text.clone(), now));
+        self.toasts.push((text, now));
+        // Keep at most 3 toasts.
+        while self.toasts.len() > 3 {
+            self.toasts.remove(0);
+        }
     }
 
     /// Mark companion bubble as just-updated (for auto-dismiss timer).
@@ -626,13 +694,188 @@ impl App {
         char_ttl.max(Duration::from_secs(3))
     }
 
-    /// Clear expired alerts (older than 3 seconds).
+    /// Clear expired alerts (older than 3 seconds) and expired toasts.
     pub fn clear_expired_alerts(&mut self) {
         if let Some((_, at)) = &self.alert {
             if at.elapsed() > Duration::from_secs(3) {
                 self.alert = None;
             }
         }
+        // Expire toasts older than 3 seconds.
+        self.toasts
+            .retain(|(_, at)| at.elapsed() < Duration::from_secs(3));
+    }
+
+    // -- Input undo/redo --
+
+    /// Push the current input state to the undo stack. Called before every
+    /// input mutation. Coalesces consecutive edits within 500ms into one
+    /// undo entry so Ctrl+Z undoes word-by-word, not char-by-char.
+    pub fn push_undo(&mut self) {
+        let now = Instant::now();
+        let should_coalesce = self
+            .last_undo_push
+            .map(|t| now.duration_since(t) < Duration::from_millis(500))
+            .unwrap_or(false);
+        if !should_coalesce {
+            self.undo_stack.push((self.input.clone(), self.cursor));
+            if self.undo_stack.len() > 100 {
+                self.undo_stack.remove(0);
+            }
+        }
+        self.last_undo_push = Some(now);
+        // Any new mutation clears the redo stack.
+        self.redo_stack.clear();
+    }
+
+    /// Undo the last input mutation. Restores the previous state and pushes
+    /// the current state to the redo stack.
+    pub fn undo(&mut self) {
+        if let Some((prev_input, prev_cursor)) = self.undo_stack.pop() {
+            self.redo_stack.push((self.input.clone(), self.cursor));
+            self.input = prev_input;
+            self.cursor = prev_cursor;
+            self.last_undo_push = None;
+        }
+    }
+
+    /// Redo the last undone input mutation.
+    pub fn redo(&mut self) {
+        if let Some((next_input, next_cursor)) = self.redo_stack.pop() {
+            self.undo_stack.push((self.input.clone(), self.cursor));
+            self.input = next_input;
+            self.cursor = next_cursor;
+            self.last_undo_push = None;
+        }
+    }
+
+    // -- Ctrl+R history search --
+
+    /// Start a reverse history search. Saves current input state.
+    pub fn start_history_search(&mut self) {
+        self.history_search_saved = Some((self.input.clone(), self.cursor));
+        self.history_search_query.clear();
+        self.history_search_index = None;
+        self.mode = Mode::HistorySearch;
+    }
+
+    /// Filtered history entries matching the current search query (newest first).
+    pub fn history_search_matches(&self) -> Vec<String> {
+        if self.history_search_query.is_empty() {
+            return self.history.iter().rev().cloned().collect();
+        }
+        let q = self.history_search_query.to_lowercase();
+        self.history
+            .iter()
+            .rev()
+            .filter(|h| h.to_lowercase().contains(&q))
+            .cloned()
+            .collect()
+    }
+
+    /// The current match text, if any.
+    pub fn history_search_current_match(&self) -> Option<String> {
+        let matches = self.history_search_matches();
+        let idx = self.history_search_index?;
+        matches.get(idx).cloned()
+    }
+
+    /// Cycle to the next (older) match.
+    pub fn history_search_next(&mut self) {
+        let count = self.history_search_matches().len();
+        if count == 0 {
+            return;
+        }
+        let idx = match self.history_search_index {
+            Some(i) if i + 1 < count => i + 1,
+            _ => 0,
+        };
+        self.history_search_index = Some(idx);
+    }
+
+    /// Cycle to the previous (newer) match.
+    pub fn history_search_prev(&mut self) {
+        let count = self.history_search_matches().len();
+        if count == 0 {
+            return;
+        }
+        let idx = match self.history_search_index {
+            Some(0) | None => count - 1,
+            Some(i) => i - 1,
+        };
+        self.history_search_index = Some(idx);
+    }
+
+    /// Confirm the search: insert the current match into the input and
+    /// return to Normal mode.
+    pub fn history_search_confirm(&mut self) {
+        if let Some(match_text) = self.history_search_current_match() {
+            self.input = match_text;
+            self.cursor = self.input.len();
+        }
+        self.history_search_query.clear();
+        self.history_search_index = None;
+        self.history_search_saved = None;
+        self.mode = Mode::Normal;
+    }
+
+    /// Cancel the search: restore the saved input state.
+    pub fn history_search_cancel(&mut self) {
+        if let Some((saved_input, saved_cursor)) = self.history_search_saved.take() {
+            self.input = saved_input;
+            self.cursor = saved_cursor;
+        }
+        self.history_search_query.clear();
+        self.history_search_index = None;
+        self.mode = Mode::Normal;
+    }
+
+    /// Whether the UI needs a redraw on this tick. Returns false when the
+    /// app is idle (not streaming, no animations, no expiring alerts, no
+    /// spinner, no status marquee). Input events and agent events always
+    /// trigger a draw regardless of this flag — the main loop only consults
+    /// it on `Event::Tick`.
+    ///
+    /// The conditions here mirror what `tick()` mutates: if `tick()` would
+    /// change any visible state, we need a redraw. If `tick()` is a no-op,
+    /// we can skip the draw and let the terminal stay as-is.
+    pub fn needs_redraw(&self) -> bool {
+        // Streaming text: always redraw (the spinner advances + text
+        // may have new deltas from the drain loop).
+        if self.streaming {
+            return true;
+        }
+        // Any tool running (not streaming but a tool is executing): the
+        // spinner should animate. We check tool_states for any Running
+        // entry.
+        if self
+            .tool_states
+            .values()
+            .any(|s| matches!(s, ToolDisplayState::Running))
+        {
+            return true;
+        }
+        // Alert or toasts visible and may expire.
+        if self.alert.is_some() || !self.toasts.is_empty() {
+            return true;
+        }
+        // Companion bubble visible (has a TTL → may expire).
+        if self.companion_bubble_since.is_some() {
+            return true;
+        }
+        // Status marquee scrolling.
+        if self.status_ticker_at.is_some() {
+            return true;
+        }
+        // Esc-cancel or Ctrl-C-quit pending hint (has a TTL).
+        if self.esc_cancel_pending.is_some() || self.ctrl_c_quit_pending.is_some() {
+            return true;
+        }
+        // Any modal/picker open (always interactive, always redraw).
+        if !matches!(self.mode, Mode::Normal | Mode::Settings) {
+            return true;
+        }
+        false
     }
 
     /// Return the selected text accounting for row and column ranges.
@@ -896,12 +1139,14 @@ impl App {
 
     /// Insert a character at the cursor position.
     pub fn insert_char(&mut self, c: char) {
+        self.push_undo();
         self.input.insert(self.cursor, c);
         self.cursor += c.len_utf8();
     }
 
     /// Insert a newline at cursor position.
     pub fn insert_newline(&mut self) {
+        self.push_undo();
         self.input.insert(self.cursor, '\n');
         self.cursor += 1;
     }
@@ -909,6 +1154,7 @@ impl App {
     /// Delete the character before the cursor.
     pub fn backspace(&mut self) {
         if self.cursor > 0 {
+            self.push_undo();
             let prev = self.input[..self.cursor]
                 .char_indices()
                 .last()
@@ -922,6 +1168,7 @@ impl App {
     /// Delete the character at the cursor.
     pub fn delete_char(&mut self) {
         if self.cursor < self.input.len() {
+            self.push_undo();
             self.input.remove(self.cursor);
         }
     }
@@ -966,6 +1213,84 @@ impl App {
         } else {
             self.cursor = self.input.len();
         }
+    }
+
+    /// Move the cursor up one visual line (respecting word wrap). Returns
+    /// true if the cursor moved (i.e. we weren't on the first visual line).
+    /// Returns false if already on the first visual line — the caller can
+    /// then fall through to history navigation.
+    pub fn cursor_visual_up(&mut self, content_width: u16) -> bool {
+        let (row, col) = self.cursor_visual_row_col(content_width);
+        if row == 0 {
+            return false;
+        }
+        // Move to the same column on the previous visual row.
+        let target_row = row - 1;
+        if let Some(offset) = self.visual_to_byte_offset_opt(target_row, col, content_width) {
+            self.cursor = offset;
+        }
+        true
+    }
+
+    /// Move the cursor down one visual line. Returns true if the cursor
+    /// moved (i.e. we weren't on the last visual line). Returns false if
+    /// already on the last visual line — the caller can fall through to
+    /// history navigation.
+    pub fn cursor_visual_down(&mut self, content_width: u16) -> bool {
+        let (row, col) = self.cursor_visual_row_col(content_width);
+        let total = self.input_visual_line_count(content_width);
+        if row >= total.saturating_sub(1) {
+            return false;
+        }
+        let target_row = row + 1;
+        if let Some(offset) = self.visual_to_byte_offset_opt(target_row, col, content_width) {
+            self.cursor = offset;
+        }
+        true
+    }
+
+    /// Like `visual_to_byte_offset` but returns `None` instead of clamping
+    /// to the last valid position when the target row is out of range.
+    /// Used by `cursor_visual_up` / `cursor_visual_down` which need to
+    /// detect edge cases.
+    fn visual_to_byte_offset_opt(
+        &self,
+        visual_row: usize,
+        visual_col: usize,
+        content_width: u16,
+    ) -> Option<usize> {
+        let w = content_width.max(1) as usize;
+        let mut current_row = 0;
+        for (line_idx, line) in self.input.split('\n').enumerate() {
+            let dw = unicode_width::UnicodeWidthStr::width(line);
+            let rows_in_line = if w == 0 { 1 } else { dw.div_ceil(w).max(1) };
+            if current_row + rows_in_line > visual_row {
+                // Target is within this logical line.
+                let row_in_line = visual_row - current_row;
+                let target_byte_col = (row_in_line * w) + visual_col;
+                // Find the byte offset at this display column.
+                let mut display_col = 0;
+                let mut byte_offset = 0;
+                for (byte_idx, ch) in line.char_indices() {
+                    if display_col >= target_byte_col {
+                        break;
+                    }
+                    let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                    display_col += ch_w;
+                    byte_offset = byte_idx + ch.len_utf8();
+                }
+                // Compute the start of this logical line in the full input.
+                let line_start = self
+                    .input
+                    .split('\n')
+                    .take(line_idx)
+                    .map(|l| l.len() + 1) // +1 for the '\n'
+                    .sum::<usize>();
+                return Some(line_start + byte_offset);
+            }
+            current_row += rows_in_line;
+        }
+        None
     }
 
     /// Number of lines in the input.
@@ -1177,7 +1502,7 @@ impl App {
         }
     }
 
-    fn push_synthetic_message(&mut self, text: String) {
+    pub fn push_synthetic_message(&mut self, text: String) {
         let msg_id = ulid::Ulid::new();
         self.messages.push(Message {
             id: msg_id,
@@ -1266,20 +1591,29 @@ impl App {
             }
         }
         // Advance the status-bar marquee when pills overflow the width.
+        // Only tick if the marquee is active (set when overflow is detected
+        // during render). When not overflowing, `status_ticker_at` stays
+        // `None` and this is a no-op.
         if let Some(last) = self.status_ticker_at {
             if last.elapsed() > Duration::from_millis(300) {
                 self.status_ticker_offset = self.status_ticker_offset.wrapping_add(1);
                 self.status_ticker_at = Some(Instant::now());
             }
-        } else {
-            self.status_ticker_at = Some(Instant::now());
         }
         // Advance the thinking spinner only while the agent is streaming.
-        // The tick fires every ~50ms (the main event loop's tick rate);
-        // the spinner itself renders 1 frame per tick, which lands around
-        // 20fps — fast enough to feel alive, slow enough to read.
         if self.streaming {
             self.spinner_frame = self.spinner_frame.wrapping_add(1);
+        }
+        // Expire alerts.
+        self.clear_expired_alerts();
+        // Expire companion bubble.
+        if let Some(since) = self.companion_bubble_since {
+            // The TTL depends on the bubble text length, which we don't
+            // have here. Use a conservative 10s upper bound; the render
+            // path re-checks with the actual TTL.
+            if since.elapsed() > Duration::from_secs(10) {
+                self.companion_bubble_since = None;
+            }
         }
     }
 
@@ -1759,17 +2093,17 @@ impl App {
                 questions,
                 tx,
             } => {
-                let prompts: Vec<String> = questions.iter().map(|q| q.prompt.clone()).collect();
-                let answers: Vec<String> = questions
-                    .iter()
-                    .map(|q| q.default.clone().unwrap_or_default())
-                    .collect();
+                let answers = vec![String::new(); questions.len()];
                 self.mode = Mode::UserQuestion;
                 self.user_question = Some(UserQuestionState {
                     call_id,
-                    questions: prompts,
+                    questions,
                     answers,
-                    current: 0,
+                    page: 0,
+                    selected: 0,
+                    freeform_text: String::new(),
+                    review: false,
+                    review_selected: 0,
                     tx: Some(tx),
                 });
             }
@@ -1950,11 +2284,7 @@ impl App {
                     // "cancelled" or any unrecognized value.
                     _ => BackgroundJobStatus::Cancelled,
                 };
-                if let Some(job) = self
-                    .background_jobs
-                    .iter_mut()
-                    .find(|j| j.job_id == job_id)
-                {
+                if let Some(job) = self.background_jobs.iter_mut().find(|j| j.job_id == job_id) {
                     // Existing entry: transition its state. Preserve the
                     // original started_at so the elapsed counter is stable.
                     job.status = status;
@@ -1999,7 +2329,161 @@ impl App {
         }
     }
 
-    /// Submit the user's answers and return them to the blocked tool.
+    /// Number of selectable rows on the current question page: author-supplied
+    /// options + 1 implicit freeform row.
+    fn user_question_row_count(uq: &UserQuestionState) -> usize {
+        uq.questions
+            .get(uq.page)
+            .map(|q| q.options.len() + 1)
+            .unwrap_or(1)
+    }
+
+    /// Move the highlight down by one row on the current page (wraps).
+    pub fn user_question_select_next(&mut self) {
+        if let Some(ref mut uq) = self.user_question {
+            if uq.review {
+                uq.review_selected = (uq.review_selected + 1) % 2;
+            } else {
+                let n = Self::user_question_row_count(uq);
+                uq.selected = (uq.selected + 1) % n;
+            }
+        }
+    }
+
+    /// Move the highlight up by one row on the current page (wraps).
+    pub fn user_question_select_prev(&mut self) {
+        if let Some(ref mut uq) = self.user_question {
+            if uq.review {
+                uq.review_selected = if uq.review_selected == 0 { 1 } else { 0 };
+            } else {
+                let n = Self::user_question_row_count(uq);
+                uq.selected = if uq.selected == 0 {
+                    n - 1
+                } else {
+                    uq.selected - 1
+                };
+            }
+        }
+    }
+
+    /// Move the highlight right on the review page (Submit / Cancel only).
+    pub fn user_question_review_next(&mut self) {
+        if let Some(ref mut uq) = self.user_question {
+            if uq.review {
+                uq.review_selected = (uq.review_selected + 1) % 2;
+            }
+        }
+    }
+
+    /// Move the highlight left on the review page.
+    pub fn user_question_review_prev(&mut self) {
+        if let Some(ref mut uq) = self.user_question {
+            if uq.review {
+                uq.review_selected = if uq.review_selected == 0 { 1 } else { 0 };
+            }
+        }
+    }
+
+    /// Jump directly to row N (1-indexed, for digit shortcuts).
+    pub fn user_question_jump(&mut self, n: usize) {
+        if let Some(ref mut uq) = self.user_question {
+            let rows = Self::user_question_row_count(uq);
+            if n >= 1 && n <= rows {
+                uq.selected = n - 1;
+            }
+        }
+    }
+
+    /// Append a character to the freeform text when the freeform row is
+    /// selected. No-op otherwise.
+    pub fn user_question_type_char(&mut self, c: char) {
+        if let Some(ref mut uq) = self.user_question {
+            if !uq.review {
+                let freeform_index = uq
+                    .questions
+                    .get(uq.page)
+                    .map(|q| q.options.len())
+                    .unwrap_or(0);
+                if uq.selected == freeform_index {
+                    uq.freeform_text.push(c);
+                }
+            }
+        }
+    }
+
+    /// Delete the last character from the freeform text when the freeform row
+    /// is selected. No-op otherwise.
+    pub fn user_question_backspace(&mut self) {
+        if let Some(ref mut uq) = self.user_question {
+            if !uq.review {
+                let freeform_index = uq
+                    .questions
+                    .get(uq.page)
+                    .map(|q| q.options.len())
+                    .unwrap_or(0);
+                if uq.selected == freeform_index {
+                    uq.freeform_text.pop();
+                }
+            }
+        }
+    }
+
+    /// Commit the current selection. On the question page this saves the
+    /// answer and advances (or goes to review for multi-question calls). On
+    /// the review page this activates the highlighted action.
+    pub fn user_question_confirm(&mut self) {
+        enum Next {
+            Advance,
+            Submit,
+        }
+        let next = if let Some(ref mut uq) = self.user_question {
+            if uq.review {
+                match uq.review_selected {
+                    0 => Next::Submit,
+                    _ => {
+                        // Cancel: drop without sending.
+                        self.user_question = None;
+                        self.mode = Mode::Normal;
+                        return;
+                    }
+                }
+            } else {
+                let question = match uq.questions.get(uq.page) {
+                    Some(q) => q,
+                    None => return,
+                };
+                let answer = if uq.selected < question.options.len() {
+                    question.options[uq.selected].label.clone()
+                } else if !uq.freeform_text.is_empty() {
+                    std::mem::take(&mut uq.freeform_text)
+                } else {
+                    // Freeform row picked but no text entered — ignore.
+                    return;
+                };
+                uq.answers[uq.page] = answer;
+                uq.freeform_text.clear();
+                if uq.page + 1 < uq.questions.len() {
+                    uq.page += 1;
+                    uq.selected = 0;
+                    Next::Advance
+                } else if uq.questions.len() > 1 {
+                    uq.review = true;
+                    uq.review_selected = 0;
+                    Next::Advance
+                } else {
+                    Next::Submit
+                }
+            }
+        } else {
+            return;
+        };
+
+        if matches!(next, Next::Submit) {
+            self.submit_user_question();
+        }
+    }
+
+    /// Final submit: send the answers and clear state.
     pub fn submit_user_question(&mut self) {
         if let Some(uq) = self.user_question.take() {
             if let Some(tx) = uq.tx {
@@ -2015,46 +2499,6 @@ impl App {
     pub fn cancel_user_question(&mut self) {
         self.user_question = None;
         self.mode = Mode::Normal;
-    }
-
-    /// Move focus to the next question (wraps).
-    pub fn user_question_next(&mut self) {
-        if let Some(ref mut uq) = self.user_question {
-            if !uq.questions.is_empty() {
-                uq.current = (uq.current + 1) % uq.questions.len();
-            }
-        }
-    }
-
-    /// Move focus to the previous question (wraps).
-    pub fn user_question_prev(&mut self) {
-        if let Some(ref mut uq) = self.user_question {
-            if !uq.questions.is_empty() {
-                uq.current = if uq.current == 0 {
-                    uq.questions.len() - 1
-                } else {
-                    uq.current - 1
-                };
-            }
-        }
-    }
-
-    /// Append a character to the currently-focused answer.
-    pub fn user_question_type_char(&mut self, c: char) {
-        if let Some(ref mut uq) = self.user_question {
-            if let Some(answer) = uq.answers.get_mut(uq.current) {
-                answer.push(c);
-            }
-        }
-    }
-
-    /// Delete the last character from the currently-focused answer.
-    pub fn user_question_backspace(&mut self) {
-        if let Some(ref mut uq) = self.user_question {
-            if let Some(answer) = uq.answers.get_mut(uq.current) {
-                answer.pop();
-            }
-        }
     }
 }
 
@@ -2245,13 +2689,7 @@ mod tests {
         let ids: Vec<&str> = picker.items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec![
-                "standard",
-                "permissive",
-                "auto",
-                "auto_plus",
-                "dangerous",
-            ],
+            vec!["standard", "permissive", "auto", "auto_plus", "dangerous",],
             "modes ordered from most-restrictive to least"
         );
     }
@@ -2312,11 +2750,7 @@ mod tests {
             picker.selected, 1,
             "Permissive should pre-select index 1 (middle item)"
         );
-        let permissive = picker
-            .items
-            .iter()
-            .find(|i| i.id == "permissive")
-            .unwrap();
+        let permissive = picker.items.iter().find(|i| i.id == "permissive").unwrap();
         assert!(
             permissive.label.contains("● active"),
             "active marker on Permissive row: {:?}",
@@ -2456,7 +2890,7 @@ mod tests {
         }]);
         app.input = "/bud".to_string();
         let filtered = app.filtered_slash_commands();
-        assert!(filtered.len() >= 1);
+        assert!(!filtered.is_empty());
         assert!(filtered.iter().any(|c| c.name == "/buddy"));
     }
 
@@ -2610,7 +3044,7 @@ mod tests {
 
     #[test]
     fn test_ask_user_event_stores_state_and_sets_mode() {
-        use mew_agent::{AgentEvent, AskUserQuestion};
+        use mew_agent::{AgentEvent, AskUserQuestion, QuestionOption};
         let mut app = App::new();
         let (tx, _rx) = tokio::sync::oneshot::channel::<Vec<String>>();
         app.handle_agent_event(AgentEvent::AskUser {
@@ -2618,29 +3052,78 @@ mod tests {
             questions: vec![
                 AskUserQuestion {
                     prompt: "which branch?".into(),
-                    default: Some("main".into()),
+                    options: vec![
+                        QuestionOption {
+                            label: "main".into(),
+                            description: "production".into(),
+                        },
+                        QuestionOption {
+                            label: "dev".into(),
+                            description: "".into(),
+                        },
+                    ],
                 },
                 AskUserQuestion {
                     prompt: "confirm?".into(),
-                    default: None,
+                    options: vec![
+                        QuestionOption {
+                            label: "yes".into(),
+                            description: "".into(),
+                        },
+                        QuestionOption {
+                            label: "no".into(),
+                            description: "".into(),
+                        },
+                    ],
                 },
             ],
             tx,
         });
         assert_eq!(app.mode, Mode::UserQuestion);
         let uq = app.user_question.as_ref().expect("question stored");
-        assert_eq!(uq.questions, vec!["which branch?", "confirm?"]);
-        assert_eq!(
-            uq.answers,
-            vec!["main", ""],
-            "default prefilled, rest empty"
-        );
-        assert_eq!(uq.current, 0);
+        assert_eq!(uq.questions.len(), 2);
+        assert_eq!(uq.questions[0].prompt, "which branch?");
+        assert_eq!(uq.questions[0].options[0].label, "main");
+        assert!(uq.answers.iter().all(|a| a.is_empty()));
+        assert_eq!(uq.page, 0);
+        assert_eq!(uq.selected, 0);
+        assert!(!uq.review);
     }
 
     #[test]
-    fn test_submit_user_question_returns_answers() {
-        use mew_agent::{AgentEvent, AskUserQuestion};
+    fn test_single_question_picks_option_and_submits() {
+        use mew_agent::{AgentEvent, AskUserQuestion, QuestionOption};
+        let mut app = App::new();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+        app.handle_agent_event(AgentEvent::AskUser {
+            call_id: "c1".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "branch?".into(),
+                options: vec![
+                    QuestionOption {
+                        label: "main".into(),
+                        description: "".into(),
+                    },
+                    QuestionOption {
+                        label: "dev".into(),
+                        description: "".into(),
+                    },
+                ],
+            }],
+            tx,
+        });
+        // Move highlight to "dev" and confirm. Single question auto-submits.
+        app.user_question_select_next();
+        app.user_question_confirm();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.user_question.is_none());
+        let answers = rx.try_recv().expect("answers sent");
+        assert_eq!(answers, vec!["dev"]);
+    }
+
+    #[test]
+    fn test_multi_question_goes_to_review_before_submit() {
+        use mew_agent::{AgentEvent, AskUserQuestion, QuestionOption};
         let mut app = App::new();
         let (tx, mut rx) = tokio::sync::oneshot::channel::<Vec<String>>();
         app.handle_agent_event(AgentEvent::AskUser {
@@ -2648,39 +3131,213 @@ mod tests {
             questions: vec![
                 AskUserQuestion {
                     prompt: "branch?".into(),
-                    default: Some("main".into()),
+                    options: vec![
+                        QuestionOption {
+                            label: "main".into(),
+                            description: "".into(),
+                        },
+                        QuestionOption {
+                            label: "dev".into(),
+                            description: "".into(),
+                        },
+                    ],
                 },
                 AskUserQuestion {
                     prompt: "scope?".into(),
-                    default: None,
+                    options: vec![
+                        QuestionOption {
+                            label: "minimal".into(),
+                            description: "".into(),
+                        },
+                        QuestionOption {
+                            label: "wide".into(),
+                            description: "".into(),
+                        },
+                    ],
                 },
             ],
             tx,
         });
-        // Append to the first answer, switch, type two chars and delete one.
-        app.user_question_type_char('-');
-        app.user_question_type_char('x');
-        app.user_question_next();
-        app.user_question_type_char('a');
-        app.user_question_type_char('b');
+        // First question: pick "dev" (next from 0), confirm.
+        app.user_question_select_next();
+        app.user_question_confirm();
+        let uq = app.user_question.as_ref().expect("still active");
+        assert_eq!(uq.page, 1);
+        assert_eq!(uq.selected, 0);
+        assert!(!uq.review);
+        // Second question: pick "wide" (next twice), confirm. Multi-question
+        // should now go to the review page rather than submit.
+        app.user_question_select_next();
+        app.user_question_confirm();
+        let uq = app.user_question.as_ref().expect("still active");
+        assert!(uq.review, "should be on the review page");
+        assert_eq!(uq.review_selected, 0);
+        assert_eq!(uq.answers, vec!["dev", "wide"]);
+        assert!(rx.try_recv().is_err(), "should not have submitted yet");
+        // Confirm Submit on the review page.
+        app.user_question_confirm();
+        assert_eq!(app.mode, Mode::Normal);
+        let answers = rx.try_recv().expect("answers sent");
+        assert_eq!(answers, vec!["dev", "wide"]);
+    }
+
+    #[test]
+    fn test_freeform_text_commits_via_typing() {
+        use mew_agent::{AgentEvent, AskUserQuestion, QuestionOption};
+        let mut app = App::new();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+        app.handle_agent_event(AgentEvent::AskUser {
+            call_id: "c1".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "branch?".into(),
+                options: vec![
+                    QuestionOption {
+                        label: "main".into(),
+                        description: "".into(),
+                    },
+                    QuestionOption {
+                        label: "dev".into(),
+                        description: "".into(),
+                    },
+                ],
+            }],
+            tx,
+        });
+        // Two options + freeform = 3 rows. Jump to row 3.
+        app.user_question_jump(3);
+        app.user_question_type_char('f');
+        app.user_question_type_char('o');
+        app.user_question_type_char('o');
         app.user_question_backspace();
-        app.submit_user_question();
+        app.user_question_confirm();
+        let answers = rx.try_recv().expect("answers sent");
+        assert_eq!(answers, vec!["fo"]);
+    }
+
+    #[test]
+    fn test_freeform_does_not_advance_with_empty_text() {
+        use mew_agent::{AgentEvent, AskUserQuestion, QuestionOption};
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+        app.handle_agent_event(AgentEvent::AskUser {
+            call_id: "c1".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "branch?".into(),
+                options: vec![
+                    QuestionOption {
+                        label: "main".into(),
+                        description: "".into(),
+                    },
+                    QuestionOption {
+                        label: "dev".into(),
+                        description: "".into(),
+                    },
+                ],
+            }],
+            tx,
+        });
+        app.user_question_jump(3);
+        app.user_question_confirm();
+        // Should still be on the same page; nothing sent.
+        let uq = app.user_question.as_ref().expect("still active");
+        assert_eq!(uq.page, 0);
+        assert_eq!(uq.selected, 2);
+    }
+
+    #[test]
+    fn test_review_cancel_drops_state() {
+        use mew_agent::{AgentEvent, AskUserQuestion, QuestionOption};
+        let mut app = App::new();
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+        app.handle_agent_event(AgentEvent::AskUser {
+            call_id: "c1".into(),
+            questions: vec![
+                AskUserQuestion {
+                    prompt: "a".into(),
+                    options: vec![
+                        QuestionOption {
+                            label: "x".into(),
+                            description: "".into(),
+                        },
+                        QuestionOption {
+                            label: "y".into(),
+                            description: "".into(),
+                        },
+                    ],
+                },
+                AskUserQuestion {
+                    prompt: "b".into(),
+                    options: vec![
+                        QuestionOption {
+                            label: "x".into(),
+                            description: "".into(),
+                        },
+                        QuestionOption {
+                            label: "y".into(),
+                            description: "".into(),
+                        },
+                    ],
+                },
+            ],
+            tx,
+        });
+        app.user_question_confirm();
+        app.user_question_confirm();
+        // Now on the review page. Move to Cancel and confirm.
+        app.user_question_review_next();
+        app.user_question_confirm();
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.user_question.is_none());
-        let answers = rx.try_recv().expect("answers sent");
-        assert_eq!(answers, vec!["main-x", "a"]);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_typing_only_affects_freeform_row() {
+        use mew_agent::{AgentEvent, AskUserQuestion, QuestionOption};
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+        app.handle_agent_event(AgentEvent::AskUser {
+            call_id: "c1".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "branch?".into(),
+                options: vec![
+                    QuestionOption {
+                        label: "main".into(),
+                        description: "".into(),
+                    },
+                    QuestionOption {
+                        label: "dev".into(),
+                        description: "".into(),
+                    },
+                ],
+            }],
+            tx,
+        });
+        // With the first option highlighted, typing should be a no-op.
+        app.user_question_type_char('z');
+        let uq = app.user_question.as_ref().unwrap();
+        assert!(uq.freeform_text.is_empty());
     }
 
     #[test]
     fn test_cancel_user_question_drops_without_sending() {
-        use mew_agent::{AgentEvent, AskUserQuestion};
+        use mew_agent::{AgentEvent, AskUserQuestion, QuestionOption};
         let mut app = App::new();
         let (tx, mut rx) = tokio::sync::oneshot::channel::<Vec<String>>();
         app.handle_agent_event(AgentEvent::AskUser {
             call_id: "c1".into(),
             questions: vec![AskUserQuestion {
                 prompt: "q".into(),
-                default: None,
+                options: vec![
+                    QuestionOption {
+                        label: "a".into(),
+                        description: "".into(),
+                    },
+                    QuestionOption {
+                        label: "b".into(),
+                        description: "".into(),
+                    },
+                ],
             }],
             tx,
         });
@@ -2815,7 +3472,7 @@ mod tests {
 
     #[test]
     fn test_persona_slash_command_default_returns_direct_clear() {
-        let mut app = App::new();
+        let app = App::new();
         // "default" / "none" bypass the confirm modal — they're idempotent.
         let result = app.handle_slash("/persona default");
         assert!(matches!(result, crate::app::SlashResult::SwitchPersona(ref n) if n == "default"));
@@ -2865,14 +3522,14 @@ mod tests {
 
     #[test]
     fn test_rewind_slash_command_returns_rewind() {
-        let mut app = App::new();
+        let app = App::new();
         let result = app.handle_slash("/rewind 2");
         assert!(matches!(result, SlashResult::Rewind(2)));
     }
 
     #[test]
     fn test_rewind_slash_command_invalid_arg() {
-        let mut app = App::new();
+        let app = App::new();
         let result = app.handle_slash("/rewind abc");
         match result {
             SlashResult::Message(msg) => assert!(msg.contains("usage")),
@@ -2976,5 +3633,162 @@ mod tests {
         });
         app.rewind_to(10);
         assert_eq!(app.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_undo_redo_basic() {
+        let mut app = App::new();
+        assert!(app.input.is_empty());
+
+        // Type "hello" — coalesces into one undo entry.
+        app.insert_char('h');
+        app.insert_char('e');
+        app.insert_char('l');
+        app.insert_char('l');
+        app.insert_char('o');
+        assert_eq!(app.input, "hello");
+
+        // Undo restores to empty (coalesced entry).
+        app.undo();
+        assert_eq!(app.input, "");
+        assert!(app.undo_stack.is_empty());
+
+        // Redo restores "hello".
+        app.redo();
+        assert_eq!(app.input, "hello");
+    }
+
+    #[test]
+    fn test_undo_after_backspace() {
+        let mut app = App::new();
+        app.insert_char('a');
+        app.insert_char('b');
+        // Wait past the coalesce window so backspace is its own entry.
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        app.backspace(); // removes 'b'
+        assert_eq!(app.input, "a");
+
+        app.undo();
+        assert_eq!(app.input, "ab");
+    }
+
+    #[test]
+    fn test_redo_cleared_on_new_edit() {
+        let mut app = App::new();
+        app.insert_char('x');
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        app.insert_char('y');
+        app.undo();
+        app.undo();
+        assert_eq!(app.input, "");
+        assert!(!app.redo_stack.is_empty());
+
+        // New edit clears redo stack.
+        app.insert_char('z');
+        assert!(app.redo_stack.is_empty());
+        assert_eq!(app.input, "z");
+    }
+
+    #[test]
+    fn test_undo_paste_single_entry() {
+        let mut app = App::new();
+        // Simulate a paste by pushing undo once then inserting multiple chars.
+        app.push_undo();
+        for c in "pasted".chars() {
+            app.input.insert(app.cursor, c);
+            app.cursor += c.len_utf8();
+        }
+        assert_eq!(app.input, "pasted");
+        assert_eq!(app.undo_stack.len(), 1); // single entry, not 6
+
+        app.undo();
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn test_toast_queue_pushes_and_expires() {
+        let mut app = App::new();
+        assert!(app.toasts.is_empty());
+
+        app.set_alert("copied 42 chars");
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(app.toasts[0].0, "copied 42 chars");
+
+        app.set_alert("model switched");
+        assert_eq!(app.toasts.len(), 2);
+
+        app.set_alert("third toast");
+        app.set_alert("fourth toast");
+        // Cap at 3 visible.
+        assert_eq!(app.toasts.len(), 3);
+        assert_eq!(app.toasts[0].0, "model switched"); // oldest dropped
+
+        // Expiry: simulate passage of time by manually setting old timestamps.
+        let old = Instant::now() - Duration::from_secs(5);
+        for toast in &mut app.toasts {
+            toast.1 = old;
+        }
+        app.clear_expired_alerts();
+        assert!(app.toasts.is_empty());
+    }
+
+    #[test]
+    fn test_history_search_finds_matches() {
+        let mut app = App::new();
+        app.history.push("cargo build".into());
+        app.history.push("cargo test".into());
+        app.history.push("git status".into());
+
+        app.start_history_search();
+        assert_eq!(app.mode, Mode::HistorySearch);
+
+        // Search for "cargo" → 2 matches (newest first).
+        for c in "cargo".chars() {
+            app.history_search_query.push(c);
+        }
+        app.history_search_index = Some(0);
+        let matches = app.history_search_matches();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0], "cargo test"); // newest first
+
+        // Current match should be "cargo test".
+        assert_eq!(
+            app.history_search_current_match(),
+            Some("cargo test".to_string())
+        );
+
+        // Confirm: input should be set to the match.
+        app.history_search_confirm();
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.input, "cargo test");
+    }
+
+    #[test]
+    fn test_history_search_cancel_restores() {
+        let mut app = App::new();
+        app.input = "partial text".into();
+        app.cursor = app.input.len();
+
+        app.start_history_search();
+        assert_eq!(app.mode, Mode::HistorySearch);
+
+        // Cancel restores saved input.
+        app.history_search_cancel();
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.input, "partial text");
+    }
+
+    #[test]
+    fn test_history_search_no_match() {
+        let mut app = App::new();
+        app.history.push("hello world".into());
+
+        app.start_history_search();
+        app.history_search_query = "xyz".into();
+        app.history_search_index = Some(0);
+
+        let matches = app.history_search_matches();
+        assert!(matches.is_empty());
+        assert_eq!(app.history_search_current_match(), None);
     }
 }

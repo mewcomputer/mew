@@ -46,6 +46,7 @@ impl mew_tools::Tool for DynamicTool {
             output: result,
             error: String::new(),
             diff: None,
+            metadata: None,
         })
     }
 }

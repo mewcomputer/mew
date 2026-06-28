@@ -27,7 +27,11 @@ impl ClassifierDecision {
     /// Parse the classifier's text response. Tolerant of surrounding
     /// whitespace and common punctuation; case-insensitive on the verb.
     pub fn parse(text: &str) -> Option<Self> {
-        let t = text.trim().trim_end_matches('.').trim_end_matches('!').to_lowercase();
+        let t = text
+            .trim()
+            .trim_end_matches('.')
+            .trim_end_matches('!')
+            .to_lowercase();
         match t.as_str() {
             "allow" | "approved" | "yes" => Some(Self::Allow),
             "deny" | "denied" | "no" | "block" => Some(Self::Deny),
@@ -87,17 +91,38 @@ mod tests {
 
     #[test]
     fn test_classifier_decision_parse_allow() {
-        assert_eq!(ClassifierDecision::parse("allow"), Some(ClassifierDecision::Allow));
-        assert_eq!(ClassifierDecision::parse("Allow"), Some(ClassifierDecision::Allow));
-        assert_eq!(ClassifierDecision::parse("allow."), Some(ClassifierDecision::Allow));
-        assert_eq!(ClassifierDecision::parse("  approved"), Some(ClassifierDecision::Allow));
+        assert_eq!(
+            ClassifierDecision::parse("allow"),
+            Some(ClassifierDecision::Allow)
+        );
+        assert_eq!(
+            ClassifierDecision::parse("Allow"),
+            Some(ClassifierDecision::Allow)
+        );
+        assert_eq!(
+            ClassifierDecision::parse("allow."),
+            Some(ClassifierDecision::Allow)
+        );
+        assert_eq!(
+            ClassifierDecision::parse("  approved"),
+            Some(ClassifierDecision::Allow)
+        );
     }
 
     #[test]
     fn test_classifier_decision_parse_deny() {
-        assert_eq!(ClassifierDecision::parse("deny"), Some(ClassifierDecision::Deny));
-        assert_eq!(ClassifierDecision::parse("denied"), Some(ClassifierDecision::Deny));
-        assert_eq!(ClassifierDecision::parse("block"), Some(ClassifierDecision::Deny));
+        assert_eq!(
+            ClassifierDecision::parse("deny"),
+            Some(ClassifierDecision::Deny)
+        );
+        assert_eq!(
+            ClassifierDecision::parse("denied"),
+            Some(ClassifierDecision::Deny)
+        );
+        assert_eq!(
+            ClassifierDecision::parse("block"),
+            Some(ClassifierDecision::Deny)
+        );
     }
 
     #[test]
@@ -106,8 +131,14 @@ mod tests {
             ClassifierDecision::parse("escalate"),
             Some(ClassifierDecision::Escalate)
         );
-        assert_eq!(ClassifierDecision::parse("ask"), Some(ClassifierDecision::Escalate));
-        assert_eq!(ClassifierDecision::parse("unsure"), Some(ClassifierDecision::Escalate));
+        assert_eq!(
+            ClassifierDecision::parse("ask"),
+            Some(ClassifierDecision::Escalate)
+        );
+        assert_eq!(
+            ClassifierDecision::parse("unsure"),
+            Some(ClassifierDecision::Escalate)
+        );
     }
 
     #[test]

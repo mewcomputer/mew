@@ -1,0 +1,20 @@
+{
+  "name": "mew-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "pnpm workspace root for mew's TypeScript packages (mew-web-client + site).",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r --filter './mew-web-client' build",
+    "test": "pnpm -r --workspace-concurrency=1 test"
+  },
+  "devDependencies": {
+    "typescript": "^5.6",
+    "vitest": "^1.6"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=10"
+  }
+}

@@ -283,9 +283,14 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
         if pwidth <= left_area.width {
             // Fits: render the pill row, reset the ticker.
             app.status_ticker_offset = 0;
+            app.status_ticker_at = None;
             segments_line(&build_segments(&pills, 0))
         } else {
             // Overflow: color-preserving marquee with a trailing cycle gap.
+            // Activate the ticker so `tick()` knows to advance it.
+            if app.status_ticker_at.is_none() {
+                app.status_ticker_at = Some(std::time::Instant::now());
+            }
             let marquee_segs = build_segments(&pills, 3);
             segments_window(
                 &marquee_segs,
@@ -482,8 +487,14 @@ mod tests {
         );
         // Auto's purple pill is distinct from amber Permissive and red
         // Dangerous — the visual cue should communicate "LLM is the gate."
-        assert!(pills[0].bg != Color::Rgb(245, 200, 80), "Auto must not be amber");
-        assert!(pills[0].bg != Color::Rgb(140, 30, 30), "Auto must not be red");
+        assert!(
+            pills[0].bg != Color::Rgb(245, 200, 80),
+            "Auto must not be amber"
+        );
+        assert!(
+            pills[0].bg != Color::Rgb(140, 30, 30),
+            "Auto must not be red"
+        );
     }
 
     #[test]
@@ -505,7 +516,15 @@ mod tests {
             Color::Rgb(95, 50, 130),
             "Auto+ must not be the same shade as Auto — should be deeper"
         );
-        assert_ne!(pills[0].bg, Color::Rgb(245, 200, 80), "Auto+ must not be amber");
-        assert_ne!(pills[0].bg, Color::Rgb(140, 30, 30), "Auto+ must not be red");
+        assert_ne!(
+            pills[0].bg,
+            Color::Rgb(245, 200, 80),
+            "Auto+ must not be amber"
+        );
+        assert_ne!(
+            pills[0].bg,
+            Color::Rgb(140, 30, 30),
+            "Auto+ must not be red"
+        );
     }
 }

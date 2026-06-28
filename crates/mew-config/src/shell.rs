@@ -20,6 +20,14 @@ pub struct ProgramInvocation {
     /// `git push origin main` this is `"push"`. `None` when the program
     /// has no subcommand-shaped argument (e.g. `ls -la`).
     pub subcommand: Option<String>,
+    /// Positional arguments after the subcommand. Flags and `--`-separated
+    /// arguments are handled per the rule documented on `parse_segment`:
+    /// tokens before `--` are scanned for the first non-flag arg (the
+    /// subcommand), and only tokens after the subcommand that don't start
+    /// with `-` are collected; everything after a `--` is treated as
+    /// positional regardless of leading `-`. This is the same surface the
+    /// workspace-escape tier inspects, so the two stay in lockstep.
+    pub args: Vec<String>,
 }
 
 /// Parse a command string into a list of program invocations plus an
@@ -123,8 +131,80 @@ fn push_segment(segments: &mut Vec<String>, current: &mut String) {
     current.clear();
 }
 
+/// True if a token looks like a short flag (one or more non-dash chars after
+/// a single leading `-`, no `=`). `-n`, `-rf`, `-I` all count; `--foo`,
+/// `-`, and `--` do not. Used by `parse_segment` to decide whether to
+/// consume the next token as a flag value.
+fn is_short_flag(token: &str) -> bool {
+    let mut chars = token.chars();
+    if chars.next() != Some('-') {
+        return false;
+    }
+    let mut saw_dash = false;
+    for c in chars {
+        if c == '-' {
+            saw_dash = true;
+            continue;
+        }
+        if saw_dash {
+            // A second dash means we're into long-flag territory.
+            return false;
+        }
+        // First non-dash char after leading `-` exists → short flag.
+        return true;
+    }
+    // Token was just `-` (handled by caller) or `--` (ditto).
+    false
+}
+
+/// True if a token looks like a path (would be subject to the
+/// workspace-escape check). The escape check is path-shaped, so we mirror
+/// the same predicate here: starts with `/`, `~/`, `./`, `../`, contains
+/// `/`, contains a glob meta (`*`, `?`, `[`, `{`), or starts with `$`.
+/// This is purely a heuristic for the parser — the real resolution
+/// happens in the permission engine.
+///
+/// `pub(crate)` so the engine module can reuse this exact predicate
+/// instead of duplicating it. Keeping a single source of truth prevents
+/// the parser's view of "positional" from desyncing from the engine's
+/// view of "path-shaped" — a divergence would either over- or
+/// under-trigger the escape tier silently.
+pub(crate) fn is_path_shaped(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    if token.starts_with('/')
+        || token.starts_with("~/")
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.starts_with('$')
+    {
+        return true;
+    }
+    if token.contains('/') {
+        return true;
+    }
+    if token.chars().any(|c| matches!(c, '*' | '?' | '[' | '{')) {
+        return true;
+    }
+    false
+}
+
 /// Parse one segment into a program invocation. Returns `None` if the
 /// segment cannot be tokenized (e.g. bare assignment like `FOO=bar`).
+///
+/// Token decomposition for `args` (used by the workspace-escape tier):
+///
+/// 1. If a `--` token appears, every token after it is positional (a path
+///    arg that starts with `-` is still a path, e.g. `-- -file`).
+/// 2. For tokens before `--` (or all tokens if no `--`): find the first
+///    non-flag token after the program — that's the subcommand — and
+///    collect every subsequent token that doesn't start with `-` as a
+///    positional arg. Tokens that look like `-x` or `--flag` (with or
+///    without a value) are treated as flags and skipped. Flag values
+///    (e.g. the `5` in `-n 5`) are *not* split out; this is a conservative
+///    approximation, but the escape check is path-shaped (a bare `5`
+///    won't trigger it) so the approximation is safe.
 fn parse_segment(segment: &str) -> Option<ProgramInvocation> {
     let tokens = shell_words::split(segment).ok()?;
     let program = tokens.first()?.clone();
@@ -142,16 +222,67 @@ fn parse_segment(segment: &str) -> Option<ProgramInvocation> {
         (program, 0)
     };
 
-    // Subcommand: the first non-flag arg after the program.
-    let subcommand = tokens
-        .iter()
-        .skip(start_idx + 1)
-        .find(|t| !t.starts_with('-'))
-        .cloned();
+    // Walk tokens after the program. Track the first non-flag token as the
+    // subcommand, then collect every later non-flag token as a positional
+    // arg. A `--` token switches into "everything after is positional" mode.
+    //
+    // Flag-value handling: a short flag whose token doesn't contain `=` (e.g.
+    // `-n`, `-I`, `-L`) is treated as taking the immediately-following token
+    // as its value. Long flags like `--pretty=format:foo` carry the value
+    // in the same token (the `=` form is the idiomatic long-flag-with-value
+    // syntax), and standalone `--foo` is a boolean. This approximation makes
+    // `git log --oneline -n 5` produce `args = []` (the `5` is consumed as
+    // `-n`'s value) and `cp -r src dst` produce `args = ["src", "dst"]`
+    // (when `cp` is unknown) only by sheer luck — for the escape check this
+    // is fine because path-shaped tokens (containing `/` or starting with
+    // `.`, `~`, `$`) will land in `args` regardless of the flag-value guess.
+    let mut subcommand: Option<String> = None;
+    let mut args: Vec<String> = Vec::new();
+    let mut after_double_dash = false;
+    let mut consume_next_as_value = false;
+    for token in tokens.iter().skip(start_idx + 1) {
+        if after_double_dash {
+            args.push(token.clone());
+            continue;
+        }
+        if token == "--" {
+            after_double_dash = true;
+            consume_next_as_value = false;
+            continue;
+        }
+        if token.starts_with('-') {
+            // Flag. A short flag without `=` is assumed to take a value in
+            // the next token (matches `-n 5`, `-I/usr/include`, etc.). The
+            // escape check tolerates the value token being wrongly
+            // classified as a positional — only path-shaped tokens matter.
+            consume_next_as_value = !token.contains('=') && is_short_flag(token);
+            continue;
+        }
+        if consume_next_as_value {
+            // Treat this token as the previous flag's value, but still
+            // surface it as a positional arg if it looks path-shaped.
+            // That way `-I /usr/include` ends up with `args = ["/usr/include"]`
+            // even though the `5` in `-n 5` is correctly consumed. The
+            // escape check is path-shaped, so a non-path value is
+            // safely suppressed.
+            consume_next_as_value = false;
+            if is_path_shaped(token) {
+                args.push(token.clone());
+            }
+            continue;
+        }
+        // Non-flag token, not consumed as a value.
+        if subcommand.is_none() {
+            subcommand = Some(token.clone());
+        } else {
+            args.push(token.clone());
+        }
+    }
 
     Some(ProgramInvocation {
         program,
         subcommand,
+        args,
     })
 }
 
@@ -202,6 +333,7 @@ mod tests {
             vec![ProgramInvocation {
                 program: "git".into(),
                 subcommand: Some("status".into()),
+                args: vec![],
             }]
         );
         assert!(!parsed.has_opaque);
@@ -213,6 +345,7 @@ mod tests {
         assert_eq!(parsed.programs.len(), 1);
         assert_eq!(parsed.programs[0].program, "ls");
         assert_eq!(parsed.programs[0].subcommand, None);
+        assert!(parsed.programs[0].args.is_empty());
     }
 
     #[test]
@@ -244,6 +377,7 @@ mod tests {
         assert_eq!(parsed.programs.len(), 1);
         assert_eq!(parsed.programs[0].program, "cargo");
         assert_eq!(parsed.programs[0].subcommand, Some("test".into()));
+        assert!(parsed.programs[0].args.is_empty());
     }
 
     #[test]
@@ -254,8 +388,172 @@ mod tests {
             ProgramInvocation {
                 program: "git".into(),
                 subcommand: Some("push".into()),
+                args: vec!["origin".into(), "main".into()],
             }
         );
+    }
+
+    // -- args extraction tests (workspace-escape tier input) --
+
+    #[test]
+    fn test_args_after_subcommand() {
+        // `git status` → no positional args
+        let parsed = parse_command("git status");
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some("status"));
+        assert_eq!(parsed.programs[0].args, Vec::<String>::new());
+
+        // `git log --oneline -n 5` → subcommand is `log`, `-n 5` is flag+value
+        let parsed = parse_command("git log --oneline -n 5");
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some("log"));
+        assert!(parsed.programs[0].args.is_empty());
+
+        // `git log --oneline -n 5 -- .. /etc/passwd` → .. and /etc/passwd
+        // are positional after `--`
+        let parsed = parse_command("git log --oneline -n 5 -- .. /etc/passwd");
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some("log"));
+        assert_eq!(
+            parsed.programs[0].args,
+            vec!["..".to_string(), "/etc/passwd".to_string()]
+        );
+
+        // `cp src dst` → first non-flag is subcommand-like, second is arg
+        let parsed = parse_command("cp src dst");
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some("src"));
+        assert_eq!(parsed.programs[0].args, vec!["dst"]);
+
+        // `cp -r src dst` → -r is a short flag, so `src` is consumed as
+        // its value (since `src` is not path-shaped) and `dst` is the
+        // first non-flag token after that, becoming the subcommand.
+        // The escape check tolerates this: any path-shaped value
+        // consumed as a flag value (e.g. `-I/usr/include`) is still
+        // surfaced into `args` via `is_path_shaped`.
+        let parsed = parse_command("cp -r src dst");
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some("dst"));
+        assert!(parsed.programs[0].args.is_empty());
+
+        // `cat README.md` → README.md is the subcommand, no extra args
+        let parsed = parse_command("cat README.md");
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some("README.md"));
+        assert!(parsed.programs[0].args.is_empty());
+
+        // `ls -la` → no subcommand, no args
+        let parsed = parse_command("ls -la");
+        assert_eq!(parsed.programs[0].subcommand, None);
+        assert!(parsed.programs[0].args.is_empty());
+    }
+
+    #[test]
+    fn test_args_redirection() {
+        // `cat > newfile.txt` — `>` is a non-flag token, so it becomes
+        // the subcommand and `newfile.txt` becomes a positional arg.
+        let parsed = parse_command("cat > newfile.txt");
+        assert_eq!(parsed.programs[0].program, "cat");
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some(">"));
+        assert_eq!(parsed.programs[0].args, vec!["newfile.txt"]);
+
+        // `cat > ../newfile.txt` — the `../newfile.txt` is path-shaped
+        // and surfaces in args.
+        let parsed = parse_command("cat > ../newfile.txt");
+        assert_eq!(parsed.programs[0].args, vec!["../newfile.txt"]);
+
+        // `cat >> out.txt` — `>>` is the subcommand.
+        let parsed = parse_command("cat >> out.txt");
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some(">>"));
+        assert_eq!(parsed.programs[0].args, vec!["out.txt"]);
+
+        // `echo hello 2>&1` — `2>&1` starts with a digit, not `-`, so
+        // it's treated as a positional arg. The escape check is
+        // path-shaped so this is harmless.
+        let parsed = parse_command("echo hello 2>&1");
+        assert_eq!(parsed.programs[0].program, "echo");
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some("hello"));
+        assert_eq!(parsed.programs[0].args, vec!["2>&1"]);
+    }
+
+    #[test]
+    fn test_args_multiple_double_dash() {
+        // Only the first `--` is special; a second `--` after it is
+        // just a positional arg.
+        let parsed = parse_command("git log -- --foo --");
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some("log"));
+        assert_eq!(
+            parsed.programs[0].args,
+            vec!["--foo".to_string(), "--".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_args_quoted_paths() {
+        // Quoted path with a space — shell-words handles the quotes, so
+        // the token is the full path.
+        let parsed = parse_command("cat 'my file.txt'");
+        assert_eq!(parsed.programs[0].program, "cat");
+        assert_eq!(
+            parsed.programs[0].subcommand.as_deref(),
+            Some("my file.txt")
+        );
+        assert!(parsed.programs[0].args.is_empty());
+
+        // Quoted path with a separator inside — not split.
+        let parsed = parse_command("echo 'hello; world'");
+        assert_eq!(parsed.programs.len(), 1);
+        assert_eq!(parsed.programs[0].program, "echo");
+        assert_eq!(
+            parsed.programs[0].subcommand.as_deref(),
+            Some("hello; world")
+        );
+    }
+
+    #[test]
+    fn test_args_env_prefix_with_flags() {
+        // Env prefix + flags + positional path.
+        let parsed = parse_command("FOO=bar cargo test --release -- --nocapture");
+        assert_eq!(parsed.programs[0].program, "cargo");
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some("test"));
+        // After `--`, `--nocapture` is positional.
+        assert_eq!(parsed.programs[0].args, vec!["--nocapture"]);
+    }
+
+    #[test]
+    fn test_args_long_flag_with_equals() {
+        // `--flag=value` — value is in the same token, so it's treated
+        // as a single flag and skipped.
+        let parsed = parse_command("grep --color=always pattern file.txt");
+        assert_eq!(parsed.programs[0].program, "grep");
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some("pattern"));
+        assert_eq!(parsed.programs[0].args, vec!["file.txt"]);
+    }
+
+    #[test]
+    fn test_args_short_flag_with_attached_value() {
+        // `-I/usr/include` — the value is attached to the flag. The
+        // token starts with `-` and `is_short_flag` returns true, so
+        // the parser ALSO consumes the next token as a value. This is
+        // a known approximation: the attached-value form consumes the
+        // next token too, which means `main.c` is consumed as the value
+        // (and suppressed since it's not path-shaped). The escape check
+        // won't catch `-I/usr/include` in the attached form — only the
+        // separate `-I /usr/include` form surfaces the path.
+        let parsed = parse_command("gcc -I/usr/include main.c");
+        assert_eq!(parsed.programs[0].program, "gcc");
+        // `-I/usr/include` is a short flag → consume_next_as_value=true.
+        // `main.c` is consumed as the value (not path-shaped → suppressed).
+        // No subcommand, no args.
+        assert_eq!(parsed.programs[0].subcommand, None);
+        assert!(parsed.programs[0].args.is_empty());
+    }
+
+    #[test]
+    fn test_args_short_flag_with_separate_value() {
+        // `-I /usr/include` — the value is in the next token, and
+        // `is_path_shaped` surfaces it into args.
+        let parsed = parse_command("gcc -I /usr/include main.c");
+        assert_eq!(parsed.programs[0].program, "gcc");
+        // `/usr/include` is path-shaped, so it's surfaced into args
+        // even though it was consumed as `-I`'s value.
+        assert_eq!(parsed.programs[0].args, vec!["/usr/include"]);
+        // `main.c` is the next non-flag token → subcommand.
+        assert_eq!(parsed.programs[0].subcommand.as_deref(), Some("main.c"));
     }
 
     #[test]

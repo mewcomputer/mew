@@ -98,7 +98,7 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn config_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("ai", "mew", "mew").map(|d| d.config_dir().to_path_buf())
+    directories::ProjectDirs::from("computer", "mew", "mew").map(|d| d.config_dir().to_path_buf())
 }
 
 fn find_git_root(dir: &Path) -> Result<PathBuf, ContextError> {

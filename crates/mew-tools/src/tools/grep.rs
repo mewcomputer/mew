@@ -78,6 +78,7 @@ impl Tool for Grep {
                         output: filter_output(&stdout, &ctx.secrets),
                         error: String::new(),
                         diff: None,
+                        metadata: None,
                     })
                 } else {
                     Err(ToolError::Execution(format!("rg failed: {}", stderr)))
@@ -105,6 +106,7 @@ impl Tool for Grep {
                     output: filter_output(&format_output(&output.stdout, MAX_OUTPUT), &ctx.secrets),
                     error: String::new(),
                     diff: None,
+                    metadata: None,
                 })
             }
         }

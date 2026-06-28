@@ -20,10 +20,7 @@ use crate::{AgentEvent, SessionWriter};
 /// `(tool_name, serialized_input)`; values are the classifier's parsed
 /// decisions. Cleared on `/clear`.
 pub type ClassifierCache = std::sync::Mutex<
-    std::collections::HashMap<
-        (String, String),
-        mew_prompts::classifier::ClassifierDecision,
-    >,
+    std::collections::HashMap<(String, String), mew_prompts::classifier::ClassifierDecision>,
 >;
 
 /// Status of a background subagent task.
@@ -97,6 +94,21 @@ pub struct Agent {
     pub system: String,
     pub cancel_token: CancellationToken,
     pub permission_engine: Option<Arc<mew_config::permissions::PermissionEngine>>,
+    /// Truncates long reasoning traces and forces a tool call on the
+    /// next turn. See `ReasoningTruncator` for the rationale.
+    pub reasoning_truncator: crate::reasoning_truncator::ReasoningTruncator,
+    /// Master switch for the truncation behaviour. When false, the
+    /// truncator is a no-op (its threshold is ignored and its
+    /// force-tool flag is never consumed).
+    pub reasoning_truncation_enabled: bool,
+    /// Default value for `params.max_tokens` when neither the user
+    /// nor a dispatcher plugin has set one. 0 = no override (let
+    /// the provider pick its own default, e.g. 4096 for Anthropic).
+    /// Stored as `i64` to accommodate future heuristic-derived
+    /// values; the cast to the wire-level `i32` is saturating — see
+    /// the call site in `turn.rs` (clamp happens there, not in the
+    /// setter).
+    pub default_max_output_tokens: i64,
     pub supports_vision: bool,
     pub input_price: f64,
     pub output_price: f64,
@@ -232,6 +244,12 @@ impl Agent {
             max_turns: None,
             max_subagent_depth: 3,
             subagent_defs: Vec::new(),
+            // Defaults to enabled with the 5k-token threshold recommended
+            // in the publish that motivated this feature. Use
+            // `set_reasoning_truncation_threshold(0)` to disable.
+            reasoning_truncator: crate::reasoning_truncator::ReasoningTruncator::default(),
+            reasoning_truncation_enabled: true,
+            default_max_output_tokens: 0,
             subagent_runner: None,
             subagent_tasks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             shell_jobs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -292,6 +310,61 @@ impl Agent {
         }
     }
 
+    /// Build a serializable snapshot of the agent's current state. Used
+    /// for the per-turn state dump at `<session_dir>/mew.state.json`.
+    /// Returned synchronously — no I/O; the caller writes the file.
+    pub fn state_snapshot(&self) -> serde_json::Value {
+        let msg_count = self.messages.try_lock().map(|m| m.len()).unwrap_or(0);
+        let flagged_count = self.flagged_files.try_lock().map(|f| f.len()).unwrap_or(0);
+        let todo_count = self.todos.try_lock().map(|t| t.items.len()).unwrap_or(0);
+        let classifier_cache_size = self
+            .classifier_cache
+            .as_ref()
+            .and_then(|c| c.try_lock().ok())
+            .map(|c| c.len())
+            .unwrap_or(0);
+
+        serde_json::json!({
+            "session_id": self.session_id.to_string(),
+            "permission_mode": self.permission_mode().id(),
+            "active_persona": self.persona_name,
+            "plan_path": self.plan_path,
+            "classifier": {
+                "provider": self.classifier_provider.as_ref().map(|p| p.name().to_string()),
+                "model": self.classifier_model,
+                "cache_size": classifier_cache_size,
+            },
+            "message_count": msg_count,
+            "flagged_files": flagged_count,
+            "todo_count": todo_count,
+            "tools_registered": self.tools.len(),
+        })
+    }
+
+    /// Write the state snapshot to `<session_dir>/mew.state.json` for
+    /// external introspection (e.g. `cat` from another terminal). No-op if
+    /// there's no active session. Atomic write: serializes to a temp file
+    /// then renames, so other processes never see a half-written state.
+    pub async fn dump_state_to(&self, session_dir: &std::path::Path) {
+        let snapshot = self.state_snapshot();
+        let path = session_dir.join("mew.state.json");
+        let tmp = session_dir.join(".mew.state.json.tmp");
+        let bytes = match serde_json::to_vec_pretty(&snapshot) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to serialize state snapshot");
+                return;
+            }
+        };
+        if let Err(e) = tokio::fs::write(&tmp, &bytes).await {
+            tracing::warn!(error = %e, path = %tmp.display(), "failed to write state dump temp");
+            return;
+        }
+        if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+            tracing::warn!(error = %e, "failed to rename state dump temp");
+        }
+    }
+
     /// Set the provider (and optional model id) used by Auto mode to classify
     /// tool calls. If a provider isn't set when Auto mode is active,
     /// `classify_permission` returns `None` and the call falls through to
@@ -300,11 +373,7 @@ impl Agent {
     /// Also initializes the session-scoped classifier cache. Subagents share
     /// the parent's cache via the agent reference (no per-subagent provider
     /// today).
-    pub fn set_classifier_provider(
-        &mut self,
-        provider: Arc<dyn Provider>,
-        model: Option<String>,
-    ) {
+    pub fn set_classifier_provider(&mut self, provider: Arc<dyn Provider>, model: Option<String>) {
         self.classifier_provider = Some(provider);
         self.classifier_model = model;
         self.classifier_cache = Some(Arc::new(std::sync::Mutex::new(
@@ -575,8 +644,62 @@ impl Agent {
         self.reasoning = config;
     }
 
+    /// Set the approximate-token threshold above which reasoning traces
+    /// are truncated. Pass `0` to disable truncation entirely.
+    pub fn set_reasoning_truncation_threshold(&mut self, threshold: u32) {
+        self.reasoning_truncator.threshold = threshold;
+    }
+
+    /// Enable or disable the reasoning-truncation behaviour entirely.
+    pub fn set_reasoning_truncation_enabled(&mut self, enabled: bool) {
+        self.reasoning_truncation_enabled = enabled;
+    }
+
+    /// Set the default `max_output_tokens` used when no plugin
+    /// dispatches one. `value < 0` is clamped to 0 (which disables
+    /// the override — let the provider pick). Values exceeding
+    /// `i32::MAX` are stored verbatim and saturated to `i32::MAX` at
+    /// the `turn.rs` call site.
+    pub fn set_default_max_output_tokens(&mut self, value: i64) {
+        self.default_max_output_tokens = if value < 0 { 0 } else { value };
+    }
+
+    /// Walk `msg`'s parts; for each `ReasoningPart`, ask the truncator
+    /// whether the text exceeds its threshold and (if so) replace it
+    /// in place with the truncated form. Returns `true` if any part
+    /// was truncated — the caller is responsible for forging an
+    /// acknowledgement message and marking the truncator.
+    pub fn maybe_truncate_reasoning_in_place(&mut self, msg: &mut mew_message::Message) -> bool {
+        let mut truncated_any = false;
+        for part in msg.parts.iter_mut() {
+            if let mew_message::Part::Reasoning(rp) = part {
+                if let Some(new_text) = self.reasoning_truncator.maybe_truncate(&rp.text) {
+                    rp.text = new_text;
+                    truncated_any = true;
+                }
+            }
+        }
+        truncated_any
+    }
+
+    /// Consume the truncator's "force tool call next" flag. Returns
+    /// `true` if the next model request should set `tool_choice: required`.
+    pub fn take_force_tool_choice(&mut self) -> bool {
+        self.reasoning_truncator.take_force_tool_choice()
+    }
+
     pub async fn load_messages(&self, messages: Vec<Message>) {
         *self.messages.lock().await = messages;
+    }
+
+    /// Return a clone of this agent's persisted session metadata, if any.
+    pub async fn session_meta(&self) -> Option<mew_session::Meta> {
+        if let Some(session) = &self.session {
+            let guard = session.lock().await;
+            Some(guard.meta().clone())
+        } else {
+            None
+        }
     }
 
     pub async fn force_compact(&self) {
@@ -651,13 +774,17 @@ impl Agent {
     }
 
     pub fn run(&self, prompt: String) -> mpsc::Receiver<AgentEvent> {
-        self.run_with_parts(prompt, vec![])
+        self.run_with_parts(prompt, vec![], None)
     }
 
+    /// Start a turn with an optional per-turn cancellation token. If no token
+    /// is supplied, a fresh one is created. Shared-session callers pass a token
+    /// so that cancelling one turn does not poison all future turns.
     pub fn run_with_parts(
         &self,
         prompt: String,
         attachments: Vec<Part>,
+        cancel_token: Option<CancellationToken>,
     ) -> mpsc::Receiver<AgentEvent> {
         // Auto-flag the plan file as important if it exists. This guarantees
         // the plan survives context compaction without the model having to
@@ -666,9 +793,7 @@ impl Agent {
             let path = if plan_path.is_absolute() {
                 plan_path.clone()
             } else {
-                std::env::current_dir()
-                    .unwrap_or_default()
-                    .join(plan_path)
+                std::env::current_dir().unwrap_or_default().join(plan_path)
             };
             if path.exists() {
                 let path = path.clone();
@@ -687,8 +812,24 @@ impl Agent {
             }
         }
 
+        // Write a state snapshot to <session_dir>/mew.state.json for
+        // external introspection. Spawned as a background task so it
+        // doesn't block the turn loop.
+        if let Some(ref session) = self.session {
+            if let Ok(w) = session.try_lock() {
+                let dir = w.path().parent().map(|p| p.to_path_buf());
+                if let Some(dir) = dir {
+                    let agent = self.clone();
+                    tokio::spawn(async move {
+                        agent.dump_state_to(&dir).await;
+                    });
+                }
+            }
+        }
+
         let (tx, rx) = mpsc::channel(256);
-        let agent = self.clone();
+        let mut agent = self.clone();
+        agent.cancel_token = cancel_token.unwrap_or_default();
 
         tokio::spawn(async move {
             if let Err(e) = agent.run_loop(prompt, attachments, tx).await {
@@ -1133,6 +1274,7 @@ impl mew_tools::Tool for PluginTool {
             output: result,
             error: String::new(),
             diff: None,
+            metadata: None,
         })
     }
 }

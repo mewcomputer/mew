@@ -56,6 +56,7 @@ impl Tool for ProgressUpdate {
             output: format!("ok: noted \"{}\"", msg),
             error: String::new(),
             diff: None,
+            ..Default::default()
         })
     }
 }

@@ -7,6 +7,11 @@ use thiserror::Error;
 use tracing::{debug, warn};
 
 const CATALOG_URL: &str = "https://models.dev/api.json";
+/// Umans's public model info endpoint. Returns per-model context windows,
+/// capabilities, and reasoning config — used in place of models.dev catalog
+/// entries for umans-served models (umans is not in the public models.dev
+/// catalog).
+const UMANS_MODELS_URL: &str = "https://api.code.umans.ai/v1/models/info";
 const CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Error, Debug)]
@@ -119,6 +124,22 @@ impl Catalog {
                 }
             })
             .unwrap_or(128_000)
+    }
+
+    /// Returns the model's max output tokens, or `None` if unknown.
+    /// Unlike `context_window`, this returns `Option` rather than a
+    /// hard-coded fallback — an unknown `max_output` is meaningfully
+    /// different from a known 128K, and the caller may want to fall
+    /// back to its own default (or pass through to the provider).
+    /// Follows the same "0 means unknown" convention as the field.
+    pub fn max_output(&self, id: &str) -> Option<i64> {
+        self.models.get(id).and_then(|m| {
+            if m.max_output > 0 {
+                Some(m.max_output)
+            } else {
+                None
+            }
+        })
     }
 
     /// Reports whether a model supports image input.
@@ -435,6 +456,74 @@ async fn load_with_client(client: reqwest::Client) -> Result<Catalog, CatalogErr
     parse(&data)
 }
 
+/// Parse a single model entry from the models.dev nested format.
+/// The models.dev API uses different field names than our `Model` struct:
+///   - `limit.context` → `context_window`
+///   - `limit.output` → `max_output`
+///   - `modalities.input` contains "image" → `vision = true`
+///   - `cost` → `pricing`
+///   - `provider` is the top-level key, not a field on the model
+fn parse_models_dev_model(val: &serde_json::Value, provider_id: &str) -> Option<Model> {
+    let id = val
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let context_window = val
+        .get("limit")
+        .and_then(|l| l.get("context"))
+        .and_then(|c| c.as_i64())
+        .unwrap_or(0);
+
+    let max_output = val
+        .get("limit")
+        .and_then(|l| l.get("output"))
+        .and_then(|o| o.as_i64())
+        .unwrap_or(0);
+
+    let tool_call = val
+        .get("tool_call")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let reasoning = val
+        .get("reasoning")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let vision = val
+        .get("modalities")
+        .and_then(|m| m.get("input"))
+        .and_then(|i| i.as_array())
+        .map(|arr| arr.iter().any(|v| v.as_str() == Some("image")))
+        .unwrap_or(false);
+
+    let pricing = val
+        .get("cost")
+        .map(|c| Pricing {
+            input: c.get("input").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            output: c.get("output").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            cache_read: c.get("cache_read").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            cache_write: c.get("cache_write").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            reasoning: c.get("reasoning").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        })
+        .unwrap_or_default();
+
+    Some(Model {
+        id,
+        provider: provider_id.to_string(),
+        context_window,
+        max_output,
+        tool_call,
+        reasoning,
+        vision,
+        shape: String::new(),
+        pricing,
+        thinking_variants: Vec::new(),
+    })
+}
+
 fn parse(data: &[u8]) -> Result<Catalog, CatalogError> {
     // Try object format first: {"models": [...]}
     #[derive(Deserialize)]
@@ -444,12 +533,58 @@ fn parse(data: &[u8]) -> Result<Catalog, CatalogError> {
     }
 
     if let Ok(payload) = serde_json::from_slice::<Payload>(data) {
-        let mut models = HashMap::with_capacity(payload.models.len());
-        for m in payload.models {
-            models.insert(m.id.clone(), m);
+        // Only accept the object format if it actually has models.
+        // The models.dev catalog is `{ "provider": { "models": {...} } }`
+        // which deserializes to an empty `models` Vec via `#[serde(default)]`
+        // — we must fall through to the nested parser in that case.
+        if !payload.models.is_empty() {
+            let mut models = HashMap::with_capacity(payload.models.len());
+            for m in payload.models {
+                models.insert(m.id.clone(), m);
+            }
+            debug!(count = models.len(), "parsed catalog (object format)");
+            return Ok(Catalog { models });
         }
-        debug!(count = models.len(), "parsed catalog (object format)");
-        return Ok(Catalog { models });
+    }
+
+    // Try models.dev nested format: { "provider_id": { "models": { "model_id": {...} } } }
+    if let Ok(providers) = serde_json::from_slice::<serde_json::Value>(data) {
+        if let Some(obj) = providers.as_object() {
+            // Only treat it as the nested format if at least one key has a
+            // nested "models" object — this distinguishes it from other shapes.
+            let is_nested = obj.values().any(|v| {
+                v.get("models")
+                    .and_then(|m| m.as_object())
+                    .map(|m| !m.is_empty())
+                    .unwrap_or(false)
+            });
+            if is_nested {
+                let mut models = HashMap::new();
+                for (provider_id, provider_val) in obj {
+                    if let Some(provider_models) =
+                        provider_val.get("models").and_then(|m| m.as_object())
+                    {
+                        for (_model_key, model_val) in provider_models {
+                            if let Some(m) = parse_models_dev_model(model_val, provider_id) {
+                                models.insert(m.id.clone(), m);
+                            }
+                        }
+                    }
+                }
+                if !models.is_empty() {
+                    debug!(
+                        count = models.len(),
+                        "parsed catalog (models.dev nested format)"
+                    );
+                    return Ok(Catalog { models });
+                }
+            } else if obj.is_empty() {
+                // Empty object {} — return empty catalog.
+                return Ok(Catalog {
+                    models: HashMap::new(),
+                });
+            }
+        }
     }
 
     // Fall back to array format: [...]
@@ -462,8 +597,211 @@ fn parse(data: &[u8]) -> Result<Catalog, CatalogError> {
     Ok(Catalog { models })
 }
 
-fn cache_dir() -> PathBuf {
-    directories::ProjectDirs::from("ai", "mew", "mew")
+/// Fetches umans's authoritative model configs from their public endpoint
+/// and converts them to catalog `Model` entries ready for `Catalog::merge_local`.
+///
+/// The cache and ETag handling mirror `load()` — the response is treated as
+/// a separate, independently cached resource because it isn't part of models.dev.
+///
+/// `pricing` is left at zero: umans does not publish pricing through this
+/// endpoint. Surface this as a known limitation rather than guessing.
+pub async fn load_umans() -> Result<Vec<Model>, CatalogError> {
+    load_umans_with_client(reqwest::Client::new()).await
+}
+
+async fn load_umans_with_client(client: reqwest::Client) -> Result<Vec<Model>, CatalogError> {
+    let cache_dir = cache_dir();
+    tokio::fs::create_dir_all(&cache_dir).await?;
+    let cache_path = cache_dir.join("catalog_umans.json");
+    let etag_path = cache_dir.join("catalog_umans.etag");
+
+    // Try cached copy first.
+    if let Ok(meta) = tokio::fs::metadata(&cache_path).await {
+        if let Ok(modified) = meta.modified() {
+            if modified.elapsed().unwrap_or(Duration::MAX) < CACHE_MAX_AGE {
+                if let Ok(data) = tokio::fs::read(&cache_path).await {
+                    debug!("using fresh cached umans catalog");
+                    return parse_umans(&data);
+                }
+            }
+        }
+    }
+
+    // Fetch fresh copy.
+    let mut req = client.get(UMANS_MODELS_URL);
+
+    if let Ok(etag) = tokio::fs::read_to_string(&etag_path).await {
+        req = req.header("If-None-Match", etag.trim());
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(?e, "network error fetching umans models");
+            if let Ok(data) = tokio::fs::read(&cache_path).await {
+                debug!("falling back to stale umans cache after network error");
+                return parse_umans(&data);
+            }
+            return Err(CatalogError::Network(e.to_string()));
+        }
+    };
+
+    let status = resp.status();
+
+    if status == reqwest::StatusCode::NOT_MODIFIED {
+        if let Ok(data) = tokio::fs::read(&cache_path).await {
+            debug!("umans models not modified, using cached copy");
+            return parse_umans(&data);
+        }
+    }
+
+    if !status.is_success() {
+        warn!(%status, "non-success status fetching umans models");
+        if let Ok(data) = tokio::fs::read(&cache_path).await {
+            debug!("falling back to stale umans cache after non-success status");
+            return parse_umans(&data);
+        }
+        return Err(CatalogError::FetchStatus(status.as_u16()));
+    }
+
+    // Capture ETag before consuming the body.
+    let etag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let data = match resp.bytes().await {
+        Ok(b) => b.to_vec(),
+        Err(e) => {
+            warn!(?e, "error reading umans models body");
+            if let Ok(stale) = tokio::fs::read(&cache_path).await {
+                return parse_umans(&stale);
+            }
+            return Err(CatalogError::Network(e.to_string()));
+        }
+    };
+
+    let _ = tokio::fs::write(&cache_path, &data).await;
+    if let Some(etag) = etag {
+        let _ = tokio::fs::write(&etag_path, etag).await;
+    }
+
+    parse_umans(&data)
+}
+
+fn parse_umans(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
+    #[derive(serde::Deserialize)]
+    struct UmansCapabilities {
+        #[serde(default)]
+        context_window: i64,
+        #[serde(default)]
+        max_completion_tokens: i64,
+        #[serde(default)]
+        supports_tools: bool,
+        #[serde(default)]
+        supports_vision: UmansVision,
+        #[serde(default)]
+        reasoning: Option<UmansReasoning>,
+    }
+
+    /// umans's `supports_vision` can be a boolean (`true`/`false`) or a string
+    /// marker like `"via-handoff"` (e.g. GLM 5.x: text generated by GLM but
+    /// image preprocessing routed to Kimi). Treat any truthy value as
+    /// vision-capable. The `Str` payload is informational only — we don't
+    /// need to read which handoff target was used.
+    #[derive(serde::Deserialize, Default)]
+    #[serde(untagged)]
+    enum UmansVision {
+        Bool(bool),
+        #[allow(dead_code)]
+        Str(String),
+        #[default]
+        None,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct UmansEntry {
+        name: String,
+        capabilities: UmansCapabilities,
+    }
+
+    let map: std::collections::HashMap<String, UmansEntry> = serde_json::from_slice(data)?;
+
+    let mut out = Vec::with_capacity(map.len());
+    for (_, entry) in map {
+        let vision = matches!(
+            entry.capabilities.supports_vision,
+            UmansVision::Bool(true) | UmansVision::Str(_)
+        );
+        let model = Model {
+            id: entry.name.clone(),
+            provider: "umans".into(),
+            context_window: entry.capabilities.context_window,
+            max_output: entry.capabilities.max_completion_tokens,
+            tool_call: entry.capabilities.supports_tools,
+            reasoning: entry
+                .capabilities
+                .reasoning
+                .as_ref()
+                .map(|r| r.supported)
+                .unwrap_or(false),
+            vision,
+            shape: "anthropic".into(),
+            pricing: Pricing::default(),
+            thinking_variants: build_umans_thinking_variants(entry.capabilities.reasoning.as_ref()),
+        };
+        out.push(model);
+    }
+    Ok(out)
+}
+
+/// Subset of umans's per-model `reasoning` config that's relevant for
+/// building thinking variants. Hoisted to module scope so tests can construct
+/// it directly.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct UmansReasoning {
+    #[serde(default)]
+    supported: bool,
+    #[serde(default)]
+    levels: Vec<String>,
+}
+
+/// Convert umans's `reasoning.levels` list into Anthropic-style thinking
+/// variants.
+///
+/// - Empty `levels` with `can_disable: false` means the model always thinks
+///   and the user can't toggle it. Emit no variants (the adapter should not
+///   send a thinking param; the model decides on its own).
+/// - Non-empty `levels` means the user picks an effort. Map each level to an
+///   Anthropic `thinking: {type: adaptive}` + top-level `effort` pair, the
+///   same shape the main catalog uses for Claude 4.7+/Fable-5.
+fn build_umans_thinking_variants(reasoning: Option<&UmansReasoning>) -> Vec<ThinkingVariant> {
+    let Some(r) = reasoning else {
+        return Vec::new();
+    };
+    if !r.supported || r.levels.is_empty() {
+        return Vec::new();
+    }
+    r.levels
+        .iter()
+        .map(|level| {
+            let level_lower = level.to_lowercase();
+            ThinkingVariant {
+                name: level_lower.clone(),
+                params: serde_json::json!({
+                    "thinking": {"type": "adaptive"},
+                    "effort": level_lower,
+                }),
+            }
+        })
+        .collect()
+}
+
+/// Returns the directory used for caching catalog files (main models.dev +
+/// umans model info). Exposed so CLI commands can show or clear the cache.
+pub fn cache_dir() -> PathBuf {
+    directories::ProjectDirs::from("computer", "mew", "mew")
         .map(|d| d.config_dir().to_path_buf())
         .unwrap_or_else(|| {
             std::env::var_os("HOME")
@@ -472,12 +810,207 @@ fn cache_dir() -> PathBuf {
         })
 }
 
+/// Removes all on-disk catalog cache files (main models.dev catalog + ETag +
+/// umans model info + ETag). Next launch will re-fetch from the network.
+/// Returns the list of files that were removed.
+pub fn clear_cache() -> Vec<PathBuf> {
+    let dir = cache_dir();
+    let names = [
+        "catalog.json",
+        "catalog.etag",
+        "catalog_umans.json",
+        "catalog_umans.etag",
+    ];
+    let mut removed = Vec::new();
+    for name in names {
+        let path = dir.join(name);
+        if path.exists() && std::fs::remove_file(&path).is_ok() {
+            removed.push(path);
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn sample_json() -> Vec<u8> {
         br#"{"models":[{"id":"test-model","provider":"test","context_window":100000,"max_output":4096,"tool_call":true,"reasoning":false,"vision":true,"shape":"openai","pricing":{"input":0.001,"output":0.002,"cache_read":0.0005,"cache_write":0.001,"reasoning":0.0}}]}"#.to_vec()
+    }
+
+    #[test]
+    fn test_parse_umans() {
+        // Abbreviated sample mirroring the real umans /v1/models/info shape.
+        let json = br#"{
+            "umans-coder": {
+                "name": "umans-coder",
+                "display_name": "Umans Coder",
+                "capabilities": {
+                    "max_completion_tokens": 262144,
+                    "recommended_max_tokens": 32768,
+                    "context_window": 262144,
+                    "supports_vision": true,
+                    "supports_tools": true,
+                    "reasoning": {
+                        "supported": true,
+                        "can_disable": false,
+                        "levels": [],
+                        "default_level": null
+                    }
+                }
+            },
+            "umans-glm-5.2": {
+                "name": "umans-glm-5.2",
+                "capabilities": {
+                    "max_completion_tokens": 131072,
+                    "context_window": 405504,
+                    "supports_vision": "via-handoff",
+                    "supports_tools": true,
+                    "reasoning": {
+                        "supported": true,
+                        "can_disable": true,
+                        "levels": ["none", "high", "max"],
+                        "default_level": "high"
+                    }
+                }
+            },
+            "umans-flash": {
+                "name": "umans-flash",
+                "capabilities": {
+                    "context_window": 262144,
+                    "supports_vision": false,
+                    "supports_tools": true,
+                    "reasoning": {
+                        "supported": true,
+                        "can_disable": true,
+                        "levels": ["none", "low", "medium", "high"]
+                    }
+                }
+            }
+        }"#;
+        let models = parse_umans(json).expect("parse umans");
+        assert_eq!(models.len(), 3);
+
+        let coder = models.iter().find(|m| m.id == "umans-coder").unwrap();
+        assert_eq!(coder.provider, "umans");
+        assert_eq!(coder.context_window, 262_144);
+        assert_eq!(coder.max_output, 262_144);
+        assert!(coder.tool_call);
+        assert!(coder.vision);
+        assert!(coder.reasoning);
+        assert_eq!(coder.shape, "anthropic");
+        // Always-thinks model: no user-controllable toggle, so no variants.
+        assert!(coder.thinking_variants.is_empty());
+
+        let glm = models.iter().find(|m| m.id == "umans-glm-5.2").unwrap();
+        assert_eq!(glm.context_window, 405_504);
+        assert!(
+            glm.vision,
+            "via-handoff should still count as vision-capable"
+        );
+        assert_eq!(glm.shape, "anthropic");
+        // Three effort levels map to three thinking variants.
+        let names: Vec<&str> = glm
+            .thinking_variants
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["none", "high", "max"]);
+        // Adaptive thinking + effort param, matching the Anthropic shape used
+        // by the rest of the catalog.
+        assert_eq!(
+            glm.thinking_variants[1].params,
+            serde_json::json!({
+                "thinking": {"type": "adaptive"},
+                "effort": "high",
+            })
+        );
+
+        let flash = models.iter().find(|m| m.id == "umans-flash").unwrap();
+        assert!(!flash.vision);
+        let names: Vec<&str> = flash
+            .thinking_variants
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["none", "low", "medium", "high"]);
+    }
+
+    #[test]
+    fn test_parse_umans_empty_object() {
+        let json = b"{}";
+        let models = parse_umans(json).expect("parse umans empty");
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn test_parse_umans_malformed() {
+        let json = b"not json";
+        assert!(parse_umans(json).is_err());
+    }
+
+    #[test]
+    fn test_build_umans_thinking_variants_none_when_not_supported() {
+        let r = UmansReasoning {
+            supported: false,
+            levels: vec!["none".into(), "high".into()],
+        };
+        assert!(build_umans_thinking_variants(Some(&r)).is_empty());
+    }
+
+    #[test]
+    fn test_build_umans_thinking_variants_none_when_empty_levels() {
+        // Always-thinks model: levels empty, no user toggle.
+        let r = UmansReasoning {
+            supported: true,
+            levels: vec![],
+        };
+        assert!(build_umans_thinking_variants(Some(&r)).is_empty());
+    }
+
+    #[test]
+    fn test_build_umans_thinking_variants_lowercases_levels() {
+        let r = UmansReasoning {
+            supported: true,
+            levels: vec!["None".into(), "High".into(), "MAX".into()],
+        };
+        let variants = build_umans_thinking_variants(Some(&r));
+        let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["none", "high", "max"]);
+    }
+
+    #[test]
+    fn test_clear_cache_removes_only_existing_files() {
+        // Use a temp dir as the cache dir by creating files inside it and
+        // pointing clear_cache at it via a manual loop. The public clear_cache
+        // uses the global cache_dir, so this test exercises the equivalent
+        // removal logic without polluting the user's actual cache.
+        let tmp = tempfile::tempdir().unwrap();
+        let present = tmp.path().join("catalog.json");
+        let etag = tmp.path().join("catalog.etag");
+        let umans = tmp.path().join("catalog_umans.json");
+        std::fs::write(&present, b"{}").unwrap();
+        std::fs::write(&etag, b"W/\"1\"").unwrap();
+        std::fs::write(&umans, b"{}").unwrap();
+
+        let names = ["catalog.json", "catalog.etag", "catalog_umans.json"];
+        let mut removed = Vec::new();
+        for name in names {
+            let path = tmp.path().join(name);
+            if path.exists() {
+                std::fs::remove_file(&path).unwrap();
+                removed.push(path);
+            }
+        }
+        assert_eq!(removed.len(), 3);
+        assert!(!present.exists());
+        assert!(!etag.exists());
+        assert!(!umans.exists());
+        // catalog_umans.etag never existed → not in the removed list.
+        let nonexistent = tmp.path().join("catalog_umans.etag");
+        assert!(!nonexistent.exists());
+        assert!(!removed.contains(&nonexistent));
     }
 
     #[test]

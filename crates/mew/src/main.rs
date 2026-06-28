@@ -14,7 +14,7 @@ use mew_config::Config;
 use mew_hooks::{Dispatcher, NopDispatcher, PluginHost};
 use mew_hooks_runtime::SubprocessDispatcher;
 use mew_mcp::McpClient;
-use mew_message::{Finish, Part, PartId, Role};
+use mew_message::{Finish, Part, PartId, Role, SessionId};
 use mew_provider::Provider;
 use mew_provider_anthropic::Adapter as AnthropicAdapter;
 use mew_provider_openai::Adapter as OpenAIAdapter;
@@ -132,12 +132,53 @@ enum Commands {
         #[arg(long, short = 'D', env = "MEW_DANGEROUS")]
         dangerously_skip_permissions: bool,
 
-        /// Connect to an external ACP agent
+        /// Connect to a mew daemon at the given WebSocket URL
+        /// (e.g. "ws://unix:/tmp/mew.sock")
         #[arg(long)]
-        acp_agent: Option<String>,
+        connect: Option<String>,
     },
-    /// Run as an ACP server (exposes agent core over stdio ACP)
-    Acp {
+    /// Run as a daemon (WebSocket server). Frontends connect to run sessions.
+    Daemon {
+        /// Unix socket path (default: $XDG_RUNTIME_DIR/mew.sock or /tmp/mew.sock)
+        #[arg(long)]
+        socket: Option<String>,
+
+        /// TCP address to listen on, e.g. 127.0.0.1:9847. Browser-based
+        /// frontends connect to this. Defaults to off — pass explicitly
+        /// to enable. May be combined with --socket to listen on both.
+        #[arg(long)]
+        port: Option<String>,
+
+        /// Detach from the terminal and run in the background. The daemon
+        /// survives logout. Writes its PID to the pidfile (default:
+        /// $XDG_RUNTIME_DIR/mew.pid). Combine with --log to redirect
+        /// output to a file instead of /dev/null.
+        #[arg(long)]
+        background: bool,
+
+        /// Redirect logs to this file (implies --background behavior for
+        /// stdio redirection). Defaults to /dev/null when --background
+        /// is set without --log.
+        #[arg(long)]
+        log: Option<String>,
+
+        /// Path to write the daemon PID. Defaults to
+        /// $XDG_RUNTIME_DIR/mew.pid or /tmp/mew.pid.
+        #[arg(long)]
+        pidfile: Option<String>,
+
+        /// Stop a running background daemon. Reads the PID from the
+        /// pidfile and sends SIGTERM. Exits 0 on success.
+        #[arg(long)]
+        stop: bool,
+
+        /// Use the bundled `FakeProvider` instead of a real model.
+        /// Responds to any prompt with a fixed streaming text. Intended
+        /// for tests, demos, and offline experimentation — do not use
+        /// in production. Overrides `--provider` and `--model`.
+        #[arg(long)]
+        fake_provider: bool,
+
         /// Provider ID (defaults to last-used or opencode-zen)
         #[arg(long)]
         provider: Option<String>,
@@ -171,6 +212,11 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Debug tools: permission simulator, VFS inspector.
+    Debug {
+        #[command(subcommand)]
+        command: DebugCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -185,13 +231,107 @@ enum ConfigCommands {
     Path,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[derive(Subcommand)]
+enum DebugCommands {
+    /// Simulate a permission check for a tool call. Shows the decision the
+    /// engine would make without running the agent.
+    Permissions {
+        /// Tool name (e.g. "bash", "read", "write").
+        tool: String,
+        /// Tool input as JSON (e.g. '{"command": "rm -rf /"}').
+        /// Defaults to empty object `{}`.
+        input: Option<String>,
+        /// Sensitivity tier: readonly, mutating, or dangerous.
+        /// Defaults to "dangerous" (the strictest — worst-case check).
+        #[arg(long, default_value = "dangerous")]
+        sensitivity: String,
+    },
+    /// Inspect built-in resources via the mew:// virtual filesystem.
+    Vfs {
+        #[command(subcommand)]
+        command: VfsCommands,
+    },
+    /// Inspect or clear the on-disk model catalog cache.
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCommands {
+    /// Print the directory that holds cached catalog files.
+    Path,
+    /// Remove the cached catalog files (main + umans). The next launch will
+    /// re-fetch from the network. Use this when a provider added or removed
+    /// models and the picker hasn't picked it up yet.
+    Clear,
+}
+
+#[derive(Subcommand)]
+enum VfsCommands {
+    /// List resources at a path (or top-level if no path given).
+    Ls {
+        /// Path relative to the VFS root (e.g. "personas", "subagents").
+        /// Omit to list top-level directories.
+        path: Option<String>,
+    },
+    /// Print a resource's contents.
+    Cat {
+        /// Path relative to the VFS root (e.g. "personas/builder").
+        path: String,
+    },
+}
+
+fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
-    tracing_subscriber::fmt::init();
-
+    // Parse CLI args in a sync context — before any tokio runtime starts.
+    // This lets us handle --stop and --background before the runtime's FDs
+    // exist, so daemonize()'s dup2 calls can't clobber tokio internals.
     let cli = Cli::parse();
+
+    // Handle --stop before anything else: read PID, send SIGTERM, exit.
+    if let Some(Commands::Daemon {
+        stop: true,
+        pidfile,
+        ..
+    }) = &cli.command
+    {
+        let pidfile = pidfile.clone().unwrap_or_else(default_pidfile);
+        return stop_daemon(&pidfile);
+    }
+
+    // Handle --background: double-fork + setsid before the runtime starts.
+    // The parent exits immediately; the child continues into the runtime.
+    // Returns true if we daemonized (and already inited tracing).
+    let daemonized = if let Some(Commands::Daemon {
+        background: true,
+        log,
+        pidfile,
+        ..
+    }) = &cli.command
+    {
+        let pidfile = pidfile.clone().unwrap_or_else(default_pidfile);
+        daemonize(log.as_deref(), &pidfile)?;
+        true
+    } else {
+        false
+    };
+
+    // Now safe to start the tokio runtime.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    runtime.block_on(async_main(cli, daemonized))
+}
+
+async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
+    // Only init tracing here if daemonize() didn't already do it.
+    if !daemonized {
+        tracing_subscriber::fmt().init();
+    }
 
     // Load runtime state for fallback defaults.
     let state = mew_config::load_state().unwrap_or_default();
@@ -229,18 +369,25 @@ async fn main() -> Result<()> {
             auto,
             auto_plus,
             dangerously_skip_permissions,
-            acp_agent,
+            connect,
         }) => {
             let mode = resolve_mode(permissive, auto, auto_plus, dangerously_skip_permissions);
-            if let Some(agent_cmd) = acp_agent {
-                chat_with_acp(&agent_cmd, mode).await
+            if let Some(connect_url) = connect {
+                chat_with_daemon(&connect_url).await
             } else {
                 let provider = resolve_provider(provider, &state);
                 let model = resolve_model_opt(model, &state);
                 chat_cmd(provider, model, variant, raw, mode).await
             }
         }
-        Some(Commands::Acp {
+        Some(Commands::Daemon {
+            socket,
+            port,
+            background: _,
+            log: _,
+            pidfile: _,
+            stop: _,
+            fake_provider,
             provider,
             model,
             raw,
@@ -249,15 +396,13 @@ async fn main() -> Result<()> {
             auto_plus,
             dangerously_skip_permissions,
         }) => {
+            // --background and --stop are handled before the tokio runtime
+            // starts (in main()). By the time we reach here, we're already
+            // in the background daemon process (or running foreground).
             let provider = resolve_provider(provider, &state);
             let model = resolve_model_opt(model, &state);
-            run_acp_server(
-                &provider,
-                model,
-                raw,
-                resolve_mode(permissive, auto, auto_plus, dangerously_skip_permissions),
-            )
-            .await
+            let mode = resolve_mode(permissive, auto, auto_plus, dangerously_skip_permissions);
+            run_daemon(socket, port, fake_provider, &provider, model, raw, mode).await
         }
         None => {
             let provider = resolve_provider(None, &state);
@@ -275,6 +420,7 @@ async fn main() -> Result<()> {
             config_cmd(command)?;
             Ok(())
         }
+        Some(Commands::Debug { command }) => debug_cmd(command).await,
     }
 }
 
@@ -327,6 +473,25 @@ async fn load_catalog(cfg: &Config) -> Option<Catalog> {
         })
         .collect();
     cat.merge_local(custom);
+
+    // Umans publishes its own model configs at /v1/models/info — fetch and
+    // merge them in only when the umans provider is both configured and has
+    // a credential set. Without a credential, every model would be a dead
+    // entry in the picker, so we hide the whole provider until a key shows up.
+    if provider_has_credential(cfg, "umans") {
+        match mew_catalog::load_umans().await {
+            Ok(umans_models) => {
+                tracing::info!("loaded {} umans model configs", umans_models.len());
+                cat.merge_local(umans_models);
+            }
+            Err(e) => {
+                tracing::warn!(?e, "umans models fetch failed; continuing without");
+            }
+        }
+    } else if cfg.providers.contains_key("umans") {
+        tracing::debug!("umans provider configured but no credential set; skipping model fetch");
+    }
+
     Some(cat)
 }
 
@@ -347,6 +512,101 @@ fn resolve_reasoning(
     };
     let params = variant.params.as_object().cloned().unwrap_or_default();
     Some(mew_provider::ReasoningConfig { params })
+}
+
+/// Handle `mew debug` subcommands.
+async fn debug_cmd(command: DebugCommands) -> Result<()> {
+    match command {
+        DebugCommands::Permissions {
+            tool,
+            input,
+            sensitivity,
+        } => {
+            let cfg = mew_config::load().context("load config")?;
+            let engine = build_permission_engine(&cfg, mew_hooks::PermissionMode::Standard);
+
+            let input_json: serde_json::Value = match input {
+                Some(s) => serde_json::from_str(&s).context("failed to parse input JSON")?,
+                None => serde_json::json!({}),
+            };
+
+            let sens = match sensitivity.as_str() {
+                "readonly" | "ReadOnly" => mew_tools::Sensitivity::ReadOnly,
+                "mutating" | "Mutating" => mew_tools::Sensitivity::Mutating,
+                "dangerous" | "Dangerous" => mew_tools::Sensitivity::Dangerous,
+                other => anyhow::bail!(
+                    "unknown sensitivity '{other}'; expected readonly|mutating|dangerous"
+                ),
+            };
+
+            let decision = engine
+                .check(
+                    &tool,
+                    &input_json,
+                    sens,
+                    &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                )
+                .await;
+
+            println!("Tool:        {tool}");
+            println!("Input:       {input_json}");
+            println!("Sensitivity: {sens:?}");
+            println!();
+            println!("Decision:    {decision:?}");
+            Ok(())
+        }
+        DebugCommands::Vfs { command } => match command {
+            VfsCommands::Ls { path } => {
+                match path {
+                    None => {
+                        let entries = mew_prompts::vfs::top_level();
+                        for e in entries {
+                            println!("{e}/");
+                        }
+                    }
+                    Some(p) => {
+                        let entries = mew_prompts::vfs::list_dir(&p);
+                        if entries.is_empty() {
+                            println!("(empty or not found: {p})");
+                        }
+                        for e in entries {
+                            println!("{e}");
+                        }
+                    }
+                }
+                Ok(())
+            }
+            VfsCommands::Cat { path } => match mew_prompts::vfs::read_builtin(&path) {
+                Some(contents) => {
+                    print!("{contents}");
+                    Ok(())
+                }
+                None => {
+                    println!("not found: {path}");
+                    Ok(())
+                }
+            },
+        },
+        DebugCommands::Cache { command } => match command {
+            CacheCommands::Path => {
+                println!("{}", mew_catalog::cache_dir().display());
+                Ok(())
+            }
+            CacheCommands::Clear => {
+                let removed = mew_catalog::clear_cache();
+                if removed.is_empty() {
+                    println!("no catalog cache files to remove");
+                } else {
+                    println!("removed {} file(s):", removed.len());
+                    for p in &removed {
+                        println!("  {}", p.display());
+                    }
+                    println!("next launch will re-fetch the catalog from the network");
+                }
+                Ok(())
+            }
+        },
+    }
 }
 
 fn config_cmd(command: ConfigCommands) -> Result<()> {
@@ -569,10 +829,15 @@ fn build_permission_engine(
         .iter()
         .flat_map(|f| f.paths.iter().cloned())
         .collect();
+    // Default cwd for the escape tier: the process's current directory.
+    // The 4 call sites all hand the same `cfg` to this helper, so the
+    // escape tier gets the same default cwd everywhere.
+    let default_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     Arc::new(
         mew_config::permissions::PermissionEngine::new(cfg.permissions.rules.clone())
             .with_secret_files(secret_globs)
-            .with_mode(mode),
+            .with_mode(mode)
+            .with_workspace_roots(cfg.workspace.roots.clone(), default_cwd),
     )
 }
 
@@ -589,10 +854,7 @@ fn maybe_set_classifier_provider(
         let model_id = cfg.permissions.classifier_model.as_deref().unwrap_or("");
         match build_provider(cfg, cat, provider_id, model_id, raw) {
             Ok(provider) => {
-                agent.set_classifier_provider(
-                    provider,
-                    cfg.permissions.classifier_model.clone(),
-                );
+                agent.set_classifier_provider(provider, cfg.permissions.classifier_model.clone());
                 tracing::info!(
                     provider = %provider_id,
                     model = ?cfg.permissions.classifier_model,
@@ -802,180 +1064,39 @@ fn load_mcp_configs() -> Vec<mew_mcp::McpServerConfig> {
     configs
 }
 
-async fn chat_with_acp(agent_cmd: &str, _mode: mew_hooks::PermissionMode) -> Result<()> {
-    use std::sync::Arc;
+// ACP client and server were removed as part of the daemon architecture
+// migration. See DAEMON_PLAN.md — `mew daemon` + `mew chat --connect` is
+// the single transport now. The TUI daemon-client mode covers the
+// previous "drive an external agent" use case by spawning a second mew
+// daemon for that agent's model and connecting locally.
 
-    let parts: Vec<&str> = agent_cmd.split_whitespace().collect();
-    if parts.is_empty() {
-        anyhow::bail!("empty acp agent command");
-    }
-    let command = parts[0];
-    let args: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let cwd_str = cwd.to_string_lossy().to_string();
-
-    let acp_client = mew_acp::AcpClient::connect(command, &args, &cwd_str).await?;
-    let acp_client = Arc::new(tokio::sync::Mutex::new(acp_client));
-
-    let session_id = {
-        let client = acp_client.lock().await;
-        client.session_id().to_string()
-    };
-
-    // Setup terminal and run the TUI.
-    let mut app = mew_tui::App::new();
-    app.status.model = "acp-agent".to_string();
-    app.status.provider = "acp".to_string();
-    app.status.session_id = session_id;
-
-    crossterm::terminal::enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    crossterm::execute!(
-        stdout,
-        crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture,
-        crossterm::event::EnableBracketedPaste,
-    )?;
-    let backend = ratatui::backend::CrosstermBackend::new(stdout);
-    let mut terminal = ratatui::Terminal::new(backend)?;
-
-    let (event_loop, mut event_rx) = mew_tui::EventLoop::new();
-    event_loop.spawn();
-    let event_loop = Arc::new(event_loop);
-
-    let result = loop {
-        if let Err(e) = terminal.draw(|f| mew_tui::ui::draw(f, &mut app)) {
-            break Err(anyhow::anyhow!("draw error: {}", e));
-        }
-
-        let event = match event_rx.recv().await {
-            Some(e) => e,
-            None => break Ok(()),
-        };
-
-        let mut should_break = false;
-        match event {
-            mew_tui::Event::Input(crossterm_event) => {
-                if let Some(action) = mew_tui::events::handle_input_event(&mut app, crossterm_event)
-                {
-                    match action {
-                        mew_tui::events::Action::Submit(text) => {
-                            let cwd = std::env::current_dir().unwrap_or_default();
-                            let (enriched, display, attachments) =
-                                process_mentions(&text, &cwd, &mut app.context_files).await;
-                            app.messages
-                                .push(user_message(display, attachments.clone()));
-                            app.streaming = true;
-                            let client = acp_client.clone();
-                            let ev_loop = event_loop.clone();
-                            tokio::spawn(async move {
-                                match client.lock().await.run_turn(&enriched).await {
-                                    Ok(rx) => ev_loop.forward_agent_events(rx),
-                                    Err(e) => tracing::error!("acp turn failed: {e}"),
-                                }
-                            });
-                        }
-                        mew_tui::events::Action::Quit => should_break = true,
-                        mew_tui::events::Action::Cancel => {
-                            app.streaming = false;
-                            let client = acp_client.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = client.lock().await.cancel().await {
-                                    tracing::error!("acp cancel failed: {e}");
-                                }
-                            });
-                        }
-                        mew_tui::events::Action::Clear => {
-                            app.clear_messages();
-                        }
-                        mew_tui::events::Action::ToggleSidebarContext => {
-                            app.toggle_sidebar_section("context");
-                        }
-                        mew_tui::events::Action::ToggleSidebarTools => {
-                            app.toggle_sidebar_section("tools");
-                        }
-                        mew_tui::events::Action::ToggleSidebarMcp => {
-                            app.toggle_sidebar_section("mcp");
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            mew_tui::Event::Agent(event) => {
-                // No local agent in the ACP client path; nothing to drain.
-                app.handle_agent_event(event);
-            }
-            mew_tui::Event::Tick => {
-                app.tick();
-            }
-            mew_tui::Event::Quit => should_break = true,
-        }
-
-        // Drain remaining events.
-        loop {
-            let ok = match event_rx.try_recv() {
-                Ok(mew_tui::Event::Agent(event)) => {
-                    // No local agent in the ACP client path; nothing to
-                    // drain.
-                    app.handle_agent_event(event);
-                    true
-                }
-                Ok(mew_tui::Event::Tick) => {
-                    app.tick();
-                    true
-                }
-                Ok(mew_tui::Event::Quit) => {
-                    should_break = true;
-                    false
-                }
-                _ => false,
-            };
-            if !ok {
-                break;
-            }
-        }
-
-        if should_break || app.should_quit {
-            break Ok(());
-        }
-    };
-
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
-        terminal.backend_mut(),
-        crossterm::terminal::LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture,
-        crossterm::event::DisableBracketedPaste,
-    )?;
-    terminal.show_cursor()?;
-
-    result
-}
-
-async fn run_acp_server(
-    provider_flag: &str,
-    model_flag: Option<String>,
+/// Build a full agent for a session. Used by `run_daemon` (and the TUI's
+/// `--connect` daemon-client mode goes through the daemon side). Sets up
+/// the provider, tools, MCP, personas, skills, subagents, context files,
+/// and pricing.
+///
+/// `writer` / `session_id` come from the daemon's `SessionManager`, which
+/// owns the session directory. The agent is wired to append to that writer.
+#[allow(clippy::too_many_arguments)]
+fn build_session_agent(
+    cfg: &Config,
+    cat: Option<&Catalog>,
+    provider_id: &str,
+    model_id: &str,
     raw: bool,
     mode: mew_hooks::PermissionMode,
-) -> Result<()> {
-    let cfg = mew_config::load().context("load config")?;
-    let cat = load_catalog(&cfg).await;
-    let cat_for_resolver = cat.clone();
-    let cat_ref = cat.as_ref();
-
-    let (provider_id, model_id) = resolve_model(&cfg, cat_ref, provider_flag, model_flag);
-
+    writer: Option<mew_session::Writer>,
+    session_id: Option<mew_message::SessionId>,
+) -> Result<Agent> {
     let provider =
-        build_provider(&cfg, cat_ref, &provider_id, &model_id, raw).context("build provider")?;
+        build_provider(cfg, cat, provider_id, model_id, raw).context("build provider")?;
 
     let dispatcher = Arc::new(NopDispatcher);
-    let skills_loader = mew_skills::Loader::new(std::env::current_dir().unwrap_or_default());
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let skills_loader = mew_skills::Loader::new(cwd.clone());
     let skills = Arc::new(skills_loader.load().unwrap_or_default());
     let skill_filter = Arc::new(tokio::sync::RwLock::new(None));
-    // The ACP server has no inline persona UI, so we still load personas
-    // for the switch_persona tool but no `loaded_personas` is needed
-    // beyond that.
-    let persona_loader = mew_personas::Loader::new(std::env::current_dir().unwrap_or_default());
+    let persona_loader = mew_personas::Loader::new(cwd.clone());
     let personas_arc = Arc::new(persona_loader.load().unwrap_or_default());
     let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
     let tools = build_tools(
@@ -990,17 +1111,22 @@ async fn run_acp_server(
     let mut tools = tools;
     tools.push(Arc::new(FlagImportant::new(flagged_files.clone())));
 
-    let permission_engine = build_permission_engine(&cfg, mode);
+    let permission_engine = build_permission_engine(cfg, mode);
 
-    let mut agent = Agent::new(provider, dispatcher.clone(), None, tools, None);
+    let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
     agent.flagged_files = flagged_files;
-    agent.secrets = build_secret_set(&cfg);
+    agent.secrets = build_secret_set(cfg);
     agent.set_permission_engine(permission_engine);
-    maybe_set_classifier_provider(&mut agent, &cfg, cat.as_ref(), raw);
+    maybe_set_classifier_provider(&mut agent, cfg, cat, raw);
     agent.set_plan_path(&cfg.plan_path);
     agent.set_personas((*personas_arc).clone());
     agent.set_pending_persona_switch(pending_persona_switch.clone());
-    agent.register_plugin_tools().await;
+    // Plugin tools: register_plugin_tools is async but we're in a sync
+    // builder. The daemon's agent builder closure must be sync. Plugin tool
+    // registration is a no-op for NopDispatcher (the default), so skipping
+    // the call is safe. When a real dispatcher is wired, this will need to
+    // become async — at which point the AgentBuilder type should change.
+    // agent.register_plugin_tools().await;
     // Apply the default persona on startup (non-interactive path — no TUI app).
     if cfg.default_persona != "none" && cfg.default_persona != "default" {
         if let Some(persona) = personas_arc.iter().find(|p| p.name == cfg.default_persona) {
@@ -1009,21 +1135,21 @@ async fn run_acp_server(
         }
     }
     if cfg.workspace.roots.is_empty() {
-        agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
+        agent.workspace_roots = vec![cwd.clone()];
     } else {
         agent.workspace_roots = cfg.workspace.roots.clone();
     }
 
     // Wire up subagent infrastructure.
     let subagent_defs = {
-        let loader = mew_subagents::Loader::new(std::env::current_dir().unwrap_or_default());
+        let loader = mew_subagents::Loader::new(cwd.clone());
         Arc::new(loader.load().unwrap_or_default())
     };
     if !subagent_defs.is_empty() {
         let resolver = Arc::new(MainModelResolver {
             cfg: Arc::new(cfg.clone()),
-            cat: cat_for_resolver.map(Arc::new),
-            default_provider_id: provider_id.clone(),
+            cat: cat.cloned().map(Arc::new),
+            default_provider_id: provider_id.to_string(),
             raw,
         });
         let runner = mew_agent::runner::SimpleRunner::new(
@@ -1047,22 +1173,27 @@ async fn run_acp_server(
     }
 
     // Load project context and skills for system prompt.
-    let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());
+    let ctx_loader = mew_context::Loader::new(cwd);
     let ctx_files = ctx_loader.load().unwrap_or_default();
     if !ctx_files.is_empty() {
         agent.set_system(mew_context::build_system_prompt(&ctx_files));
     }
-    // set_skills appends the filtered skills XML to the system prompt via
-    // rebuild_system. The filter is None here, so all discovered skills are
-    // visible until a persona narrows the list.
     if !skills.is_empty() {
         agent.set_skills((*skills).clone());
     }
 
-    if let Some(c) = cat_ref {
-        agent.supports_vision = c.supports_vision(&model_id);
-        agent.context_window = c.context_window(&model_id).max(0) as u32;
-        if let Some(m) = c.lookup(&model_id) {
+    if let Some(c) = cat {
+        agent.supports_vision = c.supports_vision(model_id);
+        agent.context_window = c.context_window(model_id).max(0) as u32;
+        // Default `max_output_tokens` from the catalog, capped at 32K so
+        // models with very large total context (e.g. GPT-5-Codex at 400K
+        // with 128K max output) leave more room for input. 0 means
+        // "unknown" — the agent keeps its existing default of 0 (no
+        // override) so the provider's own default applies.
+        if let Some(raw_max_output) = c.max_output(model_id) {
+            agent.default_max_output_tokens = raw_max_output.min(32_768);
+        }
+        if let Some(m) = c.lookup(model_id) {
             agent.input_price = m.pricing.input;
             agent.output_price = m.pricing.output;
             agent.cache_read_price = m.pricing.cache_read;
@@ -1071,8 +1202,487 @@ async fn run_acp_server(
         }
     }
 
-    info!("mew acp server starting, model={model_id}");
-    mew_acp::run_server(agent).await
+    Ok(agent)
+}
+
+/// Run the daemon. Builds an agent per connection via `build_session_agent`.
+/// Listens on the Unix socket (if `--socket` is set or by default) AND/OR
+/// the TCP address (if `--port` is set). With neither flag, listens on the
+/// default Unix socket.
+///
+/// If `fake_provider` is true, all real-provider setup is bypassed and
+/// every connection gets a `FakeProvider`-backed agent. Used for tests
+/// and offline demos.
+async fn run_daemon(
+    socket: Option<String>,
+    port: Option<String>,
+    fake_provider: bool,
+    provider_flag: &str,
+    model_flag: Option<String>,
+    raw: bool,
+    mode: mew_hooks::PermissionMode,
+) -> Result<()> {
+    let cfg = mew_config::load().context("load config")?;
+    let cat = load_catalog(&cfg).await;
+
+    // Default to Unix socket at $XDG_RUNTIME_DIR/mew.sock or /tmp/mew.sock,
+    // unless `--port` was given and `--socket` was not (in which case the
+    // daemon is TCP-only).
+    let socket_path = socket.clone().unwrap_or_else(|| {
+        std::env::var("XDG_RUNTIME_DIR")
+            .map(|d| format!("{d}/mew.sock"))
+            .unwrap_or_else(|_| "/tmp/mew.sock".to_string())
+    });
+    let use_unix = socket.is_some() || port.is_none();
+
+    let cfg = Arc::new(cfg);
+    let cat = Arc::new(cat);
+
+    // Clone Arcs for the model switcher/lister before the builder closure
+    // moves them. These are only used when !fake_provider.
+    let cfg_for_models = Arc::clone(&cfg);
+    let cat_for_models = Arc::clone(&cat);
+
+    // The agent-builder closure. `fake_provider=true` skips all real-
+    // provider setup and wires in `FakeProvider` so the daemon runs
+    // without network access.
+    let builder: mew_daemon::AgentBuilder = if fake_provider {
+        Arc::new(|params: mew_daemon::AgentBuildParams| {
+            use mew_provider_fake::FakeProvider;
+            let provider = Arc::new(FakeProvider::new(FakeProvider::text_response(
+                "hello from fake provider",
+            )));
+            let dispatcher = Arc::new(mew_hooks::NopDispatcher);
+            let session_id: Option<SessionId> = params
+                .session_id
+                .strip_prefix("sess_")
+                .and_then(|s| ulid::Ulid::from_string(s).ok());
+            Ok((
+                Agent::new(
+                    provider,
+                    dispatcher,
+                    Some(params.writer),
+                    Vec::new(),
+                    session_id,
+                ),
+                Some("fake".to_string()),
+                Some("fake".to_string()),
+            ))
+        })
+    } else {
+        let (provider_id, model_id) =
+            resolve_model(&cfg, (*cat).as_ref(), provider_flag, model_flag);
+        let provider_id = Arc::new(provider_id);
+        let model_id = Arc::new(model_id);
+        let model_id_display = model_id.clone();
+        let provider_id_display = Arc::clone(&provider_id);
+        info!(
+            "mew daemon starting, model={}, unix={}, tcp={:?}",
+            model_id_display, use_unix, port
+        );
+        Arc::new(move |params: mew_daemon::AgentBuildParams| {
+            let cfg = (*cfg).clone();
+            let cat = (*cat).clone();
+            let provider_id = (*provider_id).clone();
+            let model_id = (*model_id).clone();
+            let session_id: Option<SessionId> = params
+                .session_id
+                .strip_prefix("sess_")
+                .and_then(|s| ulid::Ulid::from_string(s).ok());
+            let agent = build_session_agent(
+                &cfg,
+                cat.as_ref(),
+                &provider_id,
+                &model_id,
+                raw,
+                mode,
+                Some(params.writer),
+                session_id,
+            )?;
+            Ok((
+                agent,
+                Some((*model_id_display).clone()),
+                Some((*provider_id_display).clone()),
+            ))
+        })
+    };
+
+    // Two listeners can run concurrently via `tokio::try_join!`. The builder
+    // closure is wrapped in an Arc (so the daemon API takes Arc<dyn Fn>),
+    // letting both servers share the same one.
+    let mut server = mew_daemon::DaemonServer::new(builder);
+
+    // Enable model switching for non-fake providers.
+    if !fake_provider {
+        let raw2 = raw;
+
+        // Clone Arcs for each closure before either captures them.
+        let cfg_lister = Arc::clone(&cfg_for_models);
+        let cat_lister = Arc::clone(&cat_for_models);
+        let cfg_switcher = Arc::clone(&cfg_for_models);
+        let cat_switcher = Arc::clone(&cat_for_models);
+
+        // Model lister: returns all catalog models that belong to
+        // configured providers with credentials.
+        let lister: mew_daemon::ModelLister = Arc::new(move || {
+            let cfg = &*cfg_lister;
+            let mut models = Vec::new();
+
+            // Collect provider IDs that have credentials. Only show models
+            // the user can actually call.
+            let cred_pids: Vec<String> = cfg
+                .providers
+                .keys()
+                .filter(|pid| provider_has_credential(cfg, pid))
+                .cloned()
+                .collect();
+
+            if let Some(cat) = cat_lister.as_ref() {
+                for m in cat.models.values() {
+                    if cred_pids.contains(&m.provider) {
+                        models.push(mew_protocol::ModelInfo {
+                            id: format!("{}/{}", m.provider, m.id),
+                            provider: m.provider.clone(),
+                            model: m.id.clone(),
+                            description: Some(format!(
+                                "{} ctx · {}",
+                                m.context_window,
+                                if m.reasoning { "reasoning" } else { "standard" }
+                            )),
+                        });
+                    }
+                }
+            }
+
+            models.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.model.cmp(&b.model)));
+            models
+        });
+
+        // Model switcher: rebuilds the provider on the agent.
+        let switcher: mew_daemon::ModelSwitcher = Arc::new(
+            move |agent: &mut Agent, provider_id: &str, model_id: &str| {
+                let cat_ref = (*cat_switcher).as_ref();
+                let new_provider =
+                    build_provider(&cfg_switcher, cat_ref, provider_id, model_id, raw2)
+                        .context("build provider for model switch")?;
+                agent.provider = new_provider;
+                if let Some(c) = cat_ref {
+                    agent.supports_vision = c.supports_vision(model_id);
+                    agent.context_window = c.context_window(model_id).max(0) as u32;
+                    if let Some(raw_max) = c.max_output(model_id) {
+                        agent.set_default_max_output_tokens(raw_max.min(32768));
+                    }
+                }
+                Ok((provider_id.to_string(), model_id.to_string()))
+            },
+        );
+
+        server = server.with_model_management(switcher, lister);
+    }
+
+    match (use_unix, port.as_deref()) {
+        (true, Some(addr)) => {
+            let parsed: std::net::SocketAddr = addr
+                .parse()
+                .with_context(|| format!("invalid --port address: {addr}"))?;
+            let server_unix = mew_daemon::DaemonServer::new(Arc::clone(&server.builder))
+                .with_model_management(
+                    Arc::clone(server.model_switcher.as_ref().unwrap()),
+                    Arc::clone(server.model_lister.as_ref().unwrap()),
+                );
+            tokio::try_join!(
+                async move { server_unix.run(&socket_path).await },
+                async move { server.run_tcp(parsed).await }
+            )
+            .map(|_| ())
+        }
+        (true, None) => server.run(&socket_path).await,
+        (false, Some(addr)) => {
+            let parsed: std::net::SocketAddr = addr
+                .parse()
+                .with_context(|| format!("invalid --port address: {addr}"))?;
+            server.run_tcp(parsed).await
+        }
+        (false, None) => unreachable!("use_unix implies socket_path is meaningful"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Daemonization
+// ---------------------------------------------------------------------------
+
+/// Default PID file path: `$XDG_RUNTIME_DIR/mew.pid` or `/tmp/mew.pid`.
+fn default_pidfile() -> String {
+    std::env::var("XDG_RUNTIME_DIR")
+        .map(|d| format!("{d}/mew.pid"))
+        .unwrap_or_else(|_| "/tmp/mew.pid".to_string())
+}
+
+/// Detach from the controlling terminal via the standard double-fork +
+/// setsid pattern. After this returns, the process is a session leader
+/// with no controlling terminal, immune to SIGHUP from logout.
+///
+/// If `log_file` is given, stdio is redirected there; otherwise to
+/// `/dev/null`. The PID is written to `pidfile`.
+fn daemonize(log_file: Option<&str>, pidfile: &str) -> Result<()> {
+    use nix::unistd::{dup2, fork, setsid, ForkResult};
+    use std::os::fd::AsRawFd;
+
+    // Redirect stdio BEFORE forking. This way all processes (parent,
+    // intermediate, daemon) have consistent FDs.
+    let devnull = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null")
+        .context("open /dev/null")?;
+
+    let logfile = match log_file {
+        Some(path) => std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .context("open log file")?,
+        None => devnull.try_clone().context("clone /dev/null for stderr")?,
+    };
+
+    let null_fd = devnull.as_raw_fd();
+    let log_fd = logfile.as_raw_fd();
+
+    dup2(null_fd, 0).context("dup2 stdin")?;
+    dup2(log_fd, 1).context("dup2 stdout")?;
+    dup2(log_fd, 2).context("dup2 stderr")?;
+
+    // Close the originals (they're now duplicated into 0/1/2).
+    drop(devnull);
+    drop(logfile);
+
+    // First fork: parent exits, child continues.
+    match unsafe { fork() }? {
+        ForkResult::Parent { child } => {
+            let _ = std::fs::write(pidfile, child.as_raw().to_string());
+            std::process::exit(0);
+        }
+        ForkResult::Child => {}
+    }
+
+    // Become session leader.
+    setsid()?;
+
+    // Second fork: the real daemon can never re-acquire a terminal.
+    match unsafe { fork() }? {
+        ForkResult::Parent { child } => {
+            let _ = std::fs::write(pidfile, child.as_raw().to_string());
+            std::process::exit(0);
+        }
+        ForkResult::Child => {}
+    }
+
+    // Re-init tracing so logs go to stderr (which is now the log file).
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
+
+    Ok(())
+}
+
+/// Read a PID from the pidfile and send SIGTERM. Returns an error if the
+/// file is missing or the process doesn't exist.
+fn stop_daemon(pidfile: &str) -> Result<()> {
+    let pid_str =
+        std::fs::read_to_string(pidfile).with_context(|| format!("read pidfile {pidfile}"))?;
+    let pid: i32 = pid_str
+        .trim()
+        .parse()
+        .with_context(|| format!("parse PID from {pidfile}: {pid_str:?}"))?;
+
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .context("send SIGTERM")?;
+
+    // Remove the pidfile.
+    let _ = std::fs::remove_file(pidfile);
+
+    println!("daemon (PID {pid}) stopped");
+    Ok(())
+}
+
+/// Run the TUI connected to a mew daemon. The daemon owns the agent;
+/// the TUI is a pure frontend that sends prompts and receives AgentEvents.
+async fn chat_with_daemon(connect_url: &str) -> Result<()> {
+    use std::sync::Arc;
+
+    let client = mew_daemon::DaemonClient::connect(connect_url).await?;
+    let client = Arc::new(client);
+
+    client.new_session().await?;
+
+    let mut app = mew_tui::App::new();
+    app.status.model = "daemon".to_string();
+    app.status.provider = "mewd".to_string();
+
+    crossterm::terminal::enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    crossterm::execute!(
+        stdout,
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture,
+        crossterm::event::EnableBracketedPaste,
+    )?;
+    let backend = ratatui::backend::CrosstermBackend::new(stdout);
+    let mut terminal = ratatui::Terminal::new(backend)?;
+
+    let (event_loop, mut event_rx) = mew_tui::EventLoop::new();
+    event_loop.spawn();
+    let event_loop = Arc::new(event_loop);
+
+    let mut last_event_was_tick = false;
+    let result = loop {
+        if !last_event_was_tick || app.needs_redraw() {
+            if let Err(e) = terminal.draw(|f| mew_tui::ui::draw(f, &mut app)) {
+                break Err(anyhow::anyhow!("draw error: {}", e));
+            }
+        }
+
+        let event = match event_rx.recv().await {
+            Some(e) => e,
+            None => break Ok(()),
+        };
+
+        last_event_was_tick = matches!(event, mew_tui::Event::Tick);
+
+        let mut should_break = false;
+        match event {
+            mew_tui::Event::Input(crossterm_event) => {
+                if let Some(action) = mew_tui::events::handle_input_event(&mut app, crossterm_event)
+                {
+                    match action {
+                        mew_tui::events::Action::Submit(text) => {
+                            let (enriched, display, attachments) = process_mentions(
+                                &text,
+                                &std::env::current_dir().unwrap_or_default(),
+                                &mut app.context_files,
+                            )
+                            .await;
+                            app.messages.push(user_message(display, attachments));
+                            app.streaming = true;
+                            let client = client.clone();
+                            let ev_loop = event_loop.clone();
+                            tokio::spawn(async move {
+                                let rx = client.prompt(enriched).await;
+                                ev_loop.forward_agent_events(rx);
+                            });
+                        }
+                        mew_tui::events::Action::Quit => should_break = true,
+                        mew_tui::events::Action::Cancel => {
+                            let client = client.clone();
+                            tokio::spawn(async move {
+                                client.cancel().await;
+                            });
+                        }
+                        mew_tui::events::Action::SlashCommand(text) => {
+                            // Forward slash commands that mutate agent state
+                            // to the daemon. Built-in display commands
+                            // (/help, /cost) are handled locally by the TUI.
+                            let (cmd, _arg) = match text.split_once(' ') {
+                                Some((c, a)) => (c, Some(a)),
+                                None => (text.as_str(), None),
+                            };
+                            match cmd {
+                                "/clear" | "/compact" => {
+                                    let client = client.clone();
+                                    tokio::spawn(async move {
+                                        client.slash_command(text.clone()).await;
+                                    });
+                                }
+                                _ => {
+                                    // Let the TUI handle it locally.
+                                    let result = app.handle_slash(&text);
+                                    handle_slash_result_local(&mut app, result);
+                                }
+                            }
+                        }
+                        mew_tui::events::Action::Clear => {
+                            let client = client.clone();
+                            tokio::spawn(async move {
+                                client.slash_command("/clear".into()).await;
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            mew_tui::Event::Agent(agent_event) => {
+                app.handle_agent_event(agent_event);
+            }
+            mew_tui::Event::Quit => should_break = true,
+            mew_tui::Event::Tick => {
+                app.tick();
+                app.clear_expired_alerts();
+            }
+        }
+
+        if should_break {
+            break Ok(());
+        }
+    };
+
+    crossterm::terminal::disable_raw_mode()?;
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste,
+    )?;
+    result
+}
+
+/// Handle slash command results that the TUI processes locally (when
+/// connected to a daemon). Only display-oriented commands — the
+/// state-mutating ones are forwarded to the daemon.
+fn handle_slash_result_local(app: &mut mew_tui::App, result: mew_tui::app::SlashResult) {
+    use mew_tui::app::SlashResult;
+    match result {
+        SlashResult::Message(msg) => {
+            app.push_synthetic_message(msg);
+        }
+        SlashResult::OpenModelPicker => {
+            app.set_alert("model switching not available in daemon mode");
+        }
+        SlashResult::SwitchModel(_) => {
+            app.set_alert("use the daemon's --model flag to switch models");
+        }
+        SlashResult::PermissionModeMenu => {
+            app.open_permission_mode_picker();
+        }
+        SlashResult::SetPermissionMode(m) => {
+            app.permission_mode = m;
+            app.set_alert(format!("permission mode: {}", m.id()));
+        }
+        SlashResult::PersonaSwitchConfirm(_) => {
+            app.set_alert("persona switching not available in daemon mode");
+        }
+        SlashResult::SwitchPersona(_) => {
+            app.set_alert("persona switching not available in daemon mode");
+        }
+        SlashResult::ResumeSession(_) => {
+            app.set_alert("session resume not available in daemon mode");
+        }
+        SlashResult::Rewind(_) => {
+            app.set_alert("rewind not available in daemon mode");
+        }
+        SlashResult::ToggleMouseCapture => {
+            app.set_alert("toggle mouse capture");
+        }
+        SlashResult::Todo => {
+            // TodosUpdated events come from the daemon.
+        }
+        SlashResult::Clear | SlashResult::Compact | SlashResult::Continue | SlashResult::Quit => {}
+        SlashResult::PluginCommand { .. } => {
+            app.set_alert("plugin commands not available in daemon mode");
+        }
+    }
 }
 
 async fn connect_mcp_servers(
@@ -1455,7 +2065,10 @@ async fn run_tui(
     // system prompt and tool set are configured now; `app` state is synced
     // below after the App is created.
     let startup_persona = if cfg.default_persona != "none" && cfg.default_persona != "default" {
-        match loaded_personas.iter().find(|p| p.name == cfg.default_persona) {
+        match loaded_personas
+            .iter()
+            .find(|p| p.name == cfg.default_persona)
+        {
             Some(persona) => {
                 agent.apply_persona(persona);
                 tracing::info!(persona = %persona.name, "applied default persona on startup");
@@ -1606,6 +2219,10 @@ async fn run_tui(
 
     // Main loop.
     let mut settings_editor: Option<config_editor::ConfigEditor> = None;
+    // Tracks whether the most recently received event was a pure tick.
+    // Used by the idle-aware render skip: if the event was a tick and
+    // `app.needs_redraw()` is false, we skip the draw to save CPU.
+    let mut last_event_was_tick = false;
     let result = loop {
         // Drain plugin UI updates before each render.
         while let Ok((key, value)) = plugin_ui_rx.try_recv() {
@@ -1615,14 +2232,19 @@ async fn run_tui(
             }
         }
 
-        // Render.
-        if let Err(e) = terminal.draw(|f| {
-            mew_tui::ui::draw(f, &mut app);
-            if let Some(ref editor) = settings_editor {
-                editor.draw(f);
+        // Render. Skip the draw when idle (tick with no visible changes)
+        // to avoid burning CPU on a static screen. Input and agent events
+        // always trigger a draw; ticks only draw when `needs_redraw()`
+        // returns true (streaming, spinner, alerts, modals, etc).
+        if !last_event_was_tick || app.needs_redraw() {
+            if let Err(e) = terminal.draw(|f| {
+                mew_tui::ui::draw(f, &mut app);
+                if let Some(ref editor) = settings_editor {
+                    editor.draw(f);
+                }
+            }) {
+                break Err(anyhow::anyhow!("draw error: {}", e));
             }
-        }) {
-            break Err(anyhow::anyhow!("draw error: {}", e));
         }
 
         // Wait for at least one event.
@@ -1630,6 +2252,10 @@ async fn run_tui(
             Some(e) => e,
             None => break Ok(()),
         };
+
+        // Track whether this event is a pure tick (for idle-aware rendering).
+        // If the drain loop processes any non-tick events, we'll reset this.
+        last_event_was_tick = matches!(event, mew_tui::Event::Tick);
 
         // Process the first event.
         let mut should_break = false;
@@ -1663,7 +2289,7 @@ async fn run_tui(
                             app.messages
                                 .push(user_message(display, attachments.clone()));
                             app.streaming = true;
-                            let agent_rx = agent.run_with_parts(enriched, attachments);
+                            let agent_rx = agent.run_with_parts(enriched, attachments, None);
                             event_loop.forward_agent_events(agent_rx);
                         }
                         mew_tui::events::Action::SlashCommand(text) => {
@@ -2113,6 +2739,10 @@ async fn run_tui(
         const STREAMING_DRAIN_LIMIT: u32 = 4;
         let mut pending_drain_submit: Option<String> = None;
         'drain: while let Ok(event) = event_rx.try_recv() {
+            // Any non-tick event in the drain means we need a redraw.
+            if !matches!(event, mew_tui::Event::Tick) {
+                last_event_was_tick = false;
+            }
             match event {
                 mew_tui::Event::Input(crossterm_event) => {
                     // Settings mode: delegate to ConfigEditor
@@ -2204,8 +2834,7 @@ async fn run_tui(
                                 app.permission_mode = mode;
                                 let alert = match mode {
                                     mew_hooks::PermissionMode::Standard => {
-                                        "Standard permission mode — prompts restored."
-                                            .to_string()
+                                        "Standard permission mode — prompts restored.".to_string()
                                     }
                                     mew_hooks::PermissionMode::Permissive => {
                                         "Permissive mode — Mutating tools auto-allow; \
@@ -2382,7 +3011,7 @@ async fn run_tui(
             app.messages
                 .push(user_message(display, attachments.clone()));
             app.streaming = true;
-            let agent_rx = agent.run_with_parts(enriched, attachments);
+            let agent_rx = agent.run_with_parts(enriched, attachments, None);
             event_loop.forward_agent_events(agent_rx);
         }
 
@@ -2607,10 +3236,33 @@ async fn discover_models(cfg: &Config, cat: Option<&Catalog>, raw: bool) -> Vec<
         }
     }
 
+    // Pull umans models from the catalog. umans only documents an OpenAI-shaped
+    // /v1/models/info (used by load_catalog above) and does not expose an
+    // Anthropic-shaped /v1/models endpoint, so `provider.list_models()` for
+    // umans returns nothing. The catalog has the authoritative entries
+    // (context windows, capabilities) — seed the picker from there.
+    //
+    // Gated on credential presence for the same reason as the catalog load:
+    // no key, no picker entries.
+    if provider_has_credential(cfg, "umans") {
+        if let Some(c) = cat {
+            for (model_id, model_info) in &c.models {
+                if model_info.provider != "umans" {
+                    continue;
+                }
+                let full_id = format!("umans/{}", model_id);
+                if seen.insert(full_id.clone()) {
+                    let desc = format!("umans · anthropic · {} ctx", model_info.context_window);
+                    models.push((full_id, desc));
+                }
+            }
+        }
+    }
+
     // Add hardcoded fallbacks if nothing discovered.
     if models.is_empty() {
         tracing::warn!("discovery: no models from any provider, using fallbacks");
-        let fallbacks: Vec<(String, String)> = vec![
+        let mut fallbacks: Vec<(String, String)> = vec![
             (
                 "opencode-zen/deepseek-v4-flash".into(),
                 "opencode-zen · openai".into(),
@@ -2621,6 +3273,10 @@ async fn discover_models(cfg: &Config, cat: Option<&Catalog>, raw: bool) -> Vec<
                 "opencode-go · anthropic".into(),
             ),
         ];
+        // Only advertise umans in the fallback list when a credential is set.
+        if provider_has_credential(cfg, "umans") {
+            fallbacks.push(("umans/umans-coder".into(), "umans · anthropic".into()));
+        }
         for (id, desc) in fallbacks {
             if seen.insert(id.clone()) {
                 models.push((id, desc));
@@ -2635,7 +3291,7 @@ async fn discover_models(cfg: &Config, cat: Option<&Catalog>, raw: bool) -> Vec<
 fn provider_name_to_shape(pid: &str) -> &'static str {
     match pid {
         "opencode-zen" | "opencode-go" => "openai",
-        "z-ai" => "anthropic",
+        "z-ai" | "umans" => "anthropic",
         _ => "openai",
     }
 }
@@ -2964,6 +3620,20 @@ fn resolve_model(
 
 fn is_known_provider(cfg: &Config, provider_id: &str) -> bool {
     cfg.providers.contains_key(provider_id)
+}
+
+/// Returns true if a credential is configured for the given provider.
+///
+/// Used to gate built-in providers on credential presence so the model picker
+/// doesn't advertise models the user can't actually call. Silent on miss —
+/// `get_credential` logs at debug level only, so this is cheap to call from
+/// startup paths without spamming the log for users who never use a given
+/// provider.
+fn provider_has_credential(cfg: &Config, provider_id: &str) -> bool {
+    match cfg.providers.get(provider_id) {
+        Some(pc) => mew_config::get_credential(&pc.credential_ref).is_ok(),
+        None => false,
+    }
 }
 
 fn build_provider(

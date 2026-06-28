@@ -36,6 +36,19 @@ pub struct ChatParams {
     pub top_p: Option<f64>,
     /// Max tokens for the response. `None` = provider default.
     pub max_tokens: Option<i32>,
+    /// Force / forbid / allow tool use on the next call. `None` = Auto
+    /// (model decides). Providers that don't support this field ignore it.
+    pub tool_choice: Option<ToolChoice>,
+}
+
+/// Mirrors `mew_hooks::ToolChoice` so the provider crate doesn't depend
+/// on mew-hooks. Values map to OpenAI / Anthropic's `tool_choice` JSON.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    Required,
+    None_,
 }
 
 #[derive(Debug, Clone, Default)]

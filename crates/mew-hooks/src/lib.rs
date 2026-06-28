@@ -138,6 +138,24 @@ pub struct ChatParams {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub max_tokens: Option<i32>,
+    /// Force / forbid / allow tool use on the next model call.
+    /// `None` or `Auto` = model decides. `Required` = must call a tool.
+    /// `None_` = must not call a tool (just emit text/final answer).
+    pub tool_choice: Option<ToolChoice>,
+}
+
+/// Forces or forbids tool use on the next model call. Mirrors the
+/// `tool_choice` field on OpenAI / Anthropic APIs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolChoice {
+    /// Model decides whether to call a tool. Default.
+    #[default]
+    Auto,
+    /// Model must call a tool on its next response.
+    Required,
+    /// Model must not call a tool. Emit text / final answer only.
+    None_,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,11 +165,16 @@ pub struct ToolCall {
     pub input: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolOutput {
     pub output: String,
     pub error: String,
     pub diff: Option<String>,
+    /// Optional structured metadata. Used by tools like `present_artifact` to
+    /// carry data the frontend reads (e.g. artifact content for rendering).
+    /// Ignored by frontends that don't understand it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -817,9 +840,18 @@ mod tests {
             matchers,
             ..Default::default()
         };
-        assert!(!cfg.matches("on_tool_execute_before", "bash"), "!bash must exclude bash");
-        assert!(cfg.matches("on_tool_execute_before", "read"), "!bash must include read");
-        assert!(cfg.matches("on_tool_execute_before", "write"), "!bash must include write");
+        assert!(
+            !cfg.matches("on_tool_execute_before", "bash"),
+            "!bash must exclude bash"
+        );
+        assert!(
+            cfg.matches("on_tool_execute_before", "read"),
+            "!bash must include read"
+        );
+        assert!(
+            cfg.matches("on_tool_execute_before", "write"),
+            "!bash must include write"
+        );
     }
 
     #[test]
@@ -848,7 +880,10 @@ mod tests {
         assert!(cfg.matches("on_tool_execute_before", "bash"));
         assert!(cfg.matches("on_tool_execute_before", "write"));
         assert!(!cfg.matches("on_tool_execute_before", "rm"));
-        assert!(!cfg.matches("on_tool_execute_before", "read"), "read not in positives");
+        assert!(
+            !cfg.matches("on_tool_execute_before", "read"),
+            "read not in positives"
+        );
     }
 
     #[test]

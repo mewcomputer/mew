@@ -104,10 +104,91 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
         crate::app::Mode::UserQuestion => handle_user_question_key(app, key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
         crate::app::Mode::PersonaSwitchConfirm => handle_persona_confirm_key(app, key),
+        crate::app::Mode::Help => handle_help_key(app, key),
+        crate::app::Mode::HistorySearch => handle_history_search_key(app, key),
+        crate::app::Mode::PasteConfirm => handle_paste_confirm_key(app, key),
         crate::app::Mode::Normal | crate::app::Mode::SlashCommand => handle_normal_key(app, key),
         // Settings mode key handling is done by ConfigEditor in main.rs
         crate::app::Mode::Settings => None,
     }
+}
+
+/// Handle keys while the help overlay is open.
+fn handle_help_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Char(' ') => {
+            app.mode = crate::app::Mode::Normal;
+        }
+        _ => {}
+    }
+    let _ = KeyModifiers::empty();
+    None
+}
+
+/// Handle keys during Ctrl+R history search.
+fn handle_history_search_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match key.code {
+        KeyCode::Esc => {
+            app.history_search_cancel();
+        }
+        KeyCode::Enter => {
+            app.history_search_confirm();
+        }
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+R again: cycle to next match.
+            app.history_search_next();
+        }
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+S: cycle to previous match.
+            app.history_search_prev();
+        }
+        KeyCode::Up => {
+            app.history_search_prev();
+        }
+        KeyCode::Down => {
+            app.history_search_next();
+        }
+        KeyCode::Char(c) => {
+            app.history_search_query.push(c);
+            // Reset to first match.
+            app.history_search_index = if app.history_search_matches().is_empty() {
+                None
+            } else {
+                Some(0)
+            };
+        }
+        KeyCode::Backspace => {
+            app.history_search_query.pop();
+            app.history_search_index = if app.history_search_matches().is_empty() {
+                None
+            } else {
+                Some(0)
+            };
+        }
+        _ => {}
+    }
+    None
+}
+
+/// Handle keys during large-paste confirmation.
+fn handle_paste_confirm_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    use crossterm::event::KeyCode;
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            if let Some(pending) = app.pending_paste.take() {
+                insert_paste(app, &pending);
+            }
+            app.mode = crate::app::Mode::Normal;
+        }
+        _ => {
+            // Any other key cancels the paste.
+            app.pending_paste = None;
+            app.mode = crate::app::Mode::Normal;
+        }
+    }
+    None
 }
 
 /// Handle keys while the persona-switch confirm modal is open. The modal
@@ -178,13 +259,29 @@ fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action>
     } else {
         text
     };
+
+    // Large paste confirmation: if >2000 chars, ask the user first.
+    const PASTE_CONFIRM_THRESHOLD: usize = 2000;
+    if content.len() > PASTE_CONFIRM_THRESHOLD {
+        app.pending_paste = Some(content);
+        app.mode = crate::app::Mode::PasteConfirm;
+        return None;
+    }
+
+    insert_paste(app, &content);
+    None
+}
+
+/// Insert pasted content into the input buffer (single undo entry).
+fn insert_paste(app: &mut crate::app::App, content: &str) {
+    app.push_undo();
     for c in content.chars() {
-        app.insert_char(c);
+        app.input.insert(app.cursor, c);
+        app.cursor += c.len_utf8();
     }
     if app.input.starts_with('/') {
         app.mode = crate::app::Mode::SlashCommand;
     }
-    None
 }
 
 fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
@@ -333,29 +430,89 @@ fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Act
 }
 
 fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    let on_review = app
+        .user_question
+        .as_ref()
+        .map(|uq| uq.review)
+        .unwrap_or(false);
+
     match key.code {
         KeyCode::Enter => {
-            app.submit_user_question();
+            app.user_question_confirm();
             None
         }
         KeyCode::Esc => {
             app.cancel_user_question();
             None
         }
-        KeyCode::Tab | KeyCode::Down => {
-            app.user_question_next();
+        KeyCode::Tab => {
+            if on_review {
+                app.user_question_review_next();
+            } else {
+                app.user_question_select_next();
+            }
             None
         }
-        KeyCode::Up => {
-            app.user_question_prev();
+        KeyCode::BackTab => {
+            if on_review {
+                app.user_question_review_prev();
+            } else {
+                app.user_question_select_prev();
+            }
+            None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if !on_review {
+                app.user_question_select_next();
+            }
+            None
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if !on_review {
+                app.user_question_select_prev();
+            }
+            None
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            if on_review {
+                app.user_question_review_next();
+            }
+            None
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            if on_review {
+                app.user_question_review_prev();
+            }
+            None
+        }
+        KeyCode::Char('y') => {
+            if on_review {
+                app.submit_user_question();
+            }
+            None
+        }
+        KeyCode::Char('n') => {
+            if on_review {
+                app.cancel_user_question();
+            }
             None
         }
         KeyCode::Backspace => {
-            app.user_question_backspace();
+            if !on_review {
+                app.user_question_backspace();
+            }
+            None
+        }
+        KeyCode::Char(c) if !on_review && c.is_ascii_digit() && c != '0' => {
+            if let Some(n) = c.to_digit(10) {
+                app.user_question_jump(n as usize);
+            }
             None
         }
         KeyCode::Char(c) => {
-            app.user_question_type_char(c);
+            if !on_review {
+                app.user_question_type_char(c);
+            }
             None
         }
         _ => None,
@@ -432,6 +589,12 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.open_command_palette();
             return None;
         }
+        // `?` opens the keyboard shortcuts overlay (when input is empty
+        // so it doesn't shadow literal `?` in chat messages).
+        KeyCode::Char('?') if app.input.is_empty() => {
+            app.mode = crate::app::Mode::Help;
+            return None;
+        }
         KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.toggle_bash_expanded();
             return None;
@@ -499,8 +662,28 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.cursor_left();
             None
         }
+        // Ctrl+R: reverse search through input history.
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.start_history_search();
+            None
+        }
+        // Ctrl+Z: undo. Coalesces consecutive edits within 500ms.
+        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.undo();
+            None
+        }
+        // Ctrl+Shift+Z (or Ctrl+Y): redo.
+        KeyCode::Char('Z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.redo();
+            None
+        }
+        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.redo();
+            None
+        }
         // Ctrl+U: clear to beginning of line (macOS Cmd+Backspace sends this).
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.push_undo();
             app.input.clear();
             app.cursor = 0;
             app.mode = crate::app::Mode::Normal;
@@ -508,6 +691,7 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         }
         // Ctrl+W: delete word backward (macOS Option+Delete sends this).
         KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.push_undo();
             // Delete back to the previous word boundary.
             let before = &app.input[..app.cursor];
             let new_cursor = before
@@ -539,6 +723,7 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             None
         }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+            app.push_undo();
             app.delete_word_left();
             if !app.input.starts_with('/') {
                 app.mode = crate::app::Mode::Normal;
@@ -546,6 +731,7 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             None
         }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::META) => {
+            app.push_undo();
             app.input.clear();
             app.cursor = 0;
             app.mode = crate::app::Mode::Normal;
@@ -607,10 +793,20 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 && !app.filtered_slash_commands().is_empty()
             {
                 app.slash_prev();
-            } else if app.input.is_empty() {
-                app.scroll_up(1);
             } else {
-                app.history_up();
+                // If input is multi-line, move cursor between visual lines.
+                // Only navigate history when on the first visual line.
+                let content_width = app.input_area.width.saturating_sub(2);
+                if app.input_visual_line_count(content_width) > 1
+                    && !app.input.is_empty()
+                    && app.cursor_visual_up(content_width)
+                {
+                    // Cursor moved up within the input.
+                } else if app.input.is_empty() {
+                    app.scroll_up(1);
+                } else {
+                    app.history_up();
+                }
             }
             None
         }
@@ -619,10 +815,20 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 && !app.filtered_slash_commands().is_empty()
             {
                 app.slash_next();
-            } else if app.input.is_empty() {
-                app.scroll_down(1);
             } else {
-                app.history_down();
+                // If input is multi-line, move cursor between visual lines.
+                // Only navigate history when on the last visual line.
+                let content_width = app.input_area.width.saturating_sub(2);
+                if app.input_visual_line_count(content_width) > 1
+                    && !app.input.is_empty()
+                    && app.cursor_visual_down(content_width)
+                {
+                    // Cursor moved down within the input.
+                } else if app.input.is_empty() {
+                    app.scroll_down(1);
+                } else {
+                    app.history_down();
+                }
             }
             None
         }

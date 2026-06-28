@@ -81,7 +81,7 @@ impl ToolCtx {
     }
 
     /// Test helper: build a minimal ToolCtx with empty shared state.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn test_new(cwd: PathBuf) -> Self {
         Self::new(
             Arc::new(ToolCtxShared {

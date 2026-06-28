@@ -98,6 +98,7 @@ impl Tool for Write {
             output: format!("wrote {} bytes to {}", content.len(), path.display()),
             error: String::new(),
             diff,
+            ..Default::default()
         })
     }
 }

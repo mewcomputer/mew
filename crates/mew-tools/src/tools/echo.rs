@@ -44,6 +44,7 @@ impl Tool for Echo {
             output: format!("echo: {}", s),
             error: String::new(),
             diff: None,
+            ..Default::default()
         })
     }
 }

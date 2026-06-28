@@ -63,8 +63,7 @@ pub fn inventory() -> Vec<PromptSource> {
             id: "persona_body",
             location: "mew_prompts::persona",
             kind: PromptKind::System,
-            description:
-                "Active persona's markdown body, optionally rendered through minijinja.",
+            description: "Active persona's markdown body, optionally rendered through minijinja.",
             preview: "You are {{ persona_name }}. Vision: {{ supports_vision }}.",
         },
         PromptSource {
@@ -78,10 +77,10 @@ pub fn inventory() -> Vec<PromptSource> {
     for (name, body) in crate::subagent::builtin_bodies() {
         let preview = body.lines().next().unwrap_or("").trim();
         let id_static: &'static str = Box::leak(format!("subagent:{name}").into_boxed_str());
-        let location_static: &'static str = Box::leak("mew_prompts::subagent".to_string().into_boxed_str());
+        let location_static: &'static str =
+            Box::leak("mew_prompts::subagent".to_string().into_boxed_str());
         let description_static: &'static str = Box::leak(
-            format!("Built-in system prompt for the `{name}` subagent.")
-                .into_boxed_str(),
+            format!("Built-in system prompt for the `{name}` subagent.").into_boxed_str(),
         );
         out.push(PromptSource {
             id: id_static,
@@ -131,8 +130,7 @@ mod tests {
         let inv = inventory();
         assert!(inv
             .iter()
-            .any(|p| p.id == "classifier_permission_decision"
-                && p.kind == PromptKind::Classifier));
+            .any(|p| p.id == "classifier_permission_decision" && p.kind == PromptKind::Classifier));
     }
 
     #[test]

@@ -22,5 +22,10 @@ ignore = { workspace = true }
 similar = { workspace = true }
 ulid = { workspace = true }
 
+[features]
+default = []
+test-utils = []
+
 [dev-dependencies]
+mew-tools = { path = ".", features = ["test-utils"] }
 tempfile = "3"

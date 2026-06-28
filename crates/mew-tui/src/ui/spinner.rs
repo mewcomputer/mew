@@ -42,10 +42,12 @@ impl Spinner {
     }
 }
 
-/// The default spinner frame sequence (braille). Returned as a `&'static str`
-/// so callers can index into it by character for cheap frame lookup.
+/// The default spinner frame sequence (braille dots). 10 frames — short
+/// enough for a ~160ms full cycle at 16ms/tick (~62fps), which feels
+/// snappy and alive without being distracting. The classic braille
+/// spinner used by most CLI tools.
 pub fn spinner_frames() -> &'static str {
-    UNICODE_SPINNER_FRAMES
+    "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 }
 
 // Ratatui component that displays a spinner animation, and automatically starts. The spinner should be non-blocking and update on each tick of the UI.

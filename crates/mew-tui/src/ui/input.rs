@@ -86,6 +86,49 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         + cursor_visual_col.min(content_area.width as usize) as u16;
     let cursor_y = content_area.y + cursor_visual_row.min(content_area.height as usize) as u16;
     f.set_cursor_position((cursor_x, cursor_y));
+
+    // History search prompt (Ctrl+R).
+    if app.mode == Mode::HistorySearch {
+        let match_text = app.history_search_current_match().unwrap_or_default();
+        let matches = app.history_search_matches();
+        let match_count = matches.len();
+        let prompt = format!(
+            "reverse-i-search: {}  →  {}",
+            app.history_search_query,
+            if match_text.is_empty() {
+                "(no match)".to_string()
+            } else {
+                match_text
+            }
+        );
+        let search_y = input_area.y + input_area.height;
+        let search_area = Rect::new(input_area.x, search_y, input_area.width, 1);
+        let search_style = if match_count > 0 {
+            Style::default().fg(Color::Green).bg(STATUS_BG)
+        } else {
+            Style::default().fg(Color::Red).bg(STATUS_BG)
+        };
+        let text = Text::from(Line::from(Span::styled(prompt, search_style)));
+        f.render_widget(Paragraph::new(text), search_area);
+        // Move cursor to end of search query.
+        let query_cursor_x = input_area.x
+            + 1
+            + "reverse-i-search: ".len() as u16
+            + app.history_search_query.len() as u16;
+        f.set_cursor_position((query_cursor_x, search_y));
+    }
+
+    // Large paste confirmation prompt.
+    if app.mode == Mode::PasteConfirm {
+        if let Some(ref pending) = app.pending_paste {
+            let prompt = format!("paste {} chars? [y/N]", pending.len());
+            let confirm_y = input_area.y + input_area.height;
+            let confirm_area = Rect::new(input_area.x, confirm_y, input_area.width, 1);
+            let style = Style::default().fg(Color::Yellow).bg(STATUS_BG);
+            let text = Text::from(Line::from(Span::styled(prompt, style)));
+            f.render_widget(Paragraph::new(text), confirm_area);
+        }
+    }
 }
 
 /// Compact companion render when chat content would be overlapped.

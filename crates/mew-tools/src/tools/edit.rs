@@ -59,16 +59,29 @@ impl Tool for Edit {
         let path = ctx.cwd.join(path);
         let content = tokio::fs::read_to_string(&path)
             .await
-            .map_err(|e| ToolError::Execution(format!("read failed: {}", e)))?;
+            .map_err(|e| ToolError::Execution(format!("read failed: {}: {}", path.display(), e)))?;
 
         let count = content.matches(old).count();
         if count == 0 {
-            return Err(ToolError::Execution("old_string not found".into()));
+            let line_count = content.lines().count();
+            let first_line = content.lines().next().unwrap_or("(empty file)");
+            let last_line = content.lines().last().unwrap_or("(empty file)");
+            return Err(ToolError::Execution(format!(
+                "old_string not found in {} ({} lines). \
+                 First: {:?}. Last: {:?}. \
+                 The file may have changed since it was last read — try reading it again.",
+                path.display(),
+                line_count,
+                first_line.chars().take(120).collect::<String>(),
+                last_line.chars().take(120).collect::<String>(),
+            )));
         }
         if count > 1 {
             return Err(ToolError::Execution(format!(
-                "old_string matched {} times; ambiguous",
-                count
+                "old_string matched {} times in {}; ambiguous — \
+                 include more surrounding context to make the match unique",
+                count,
+                path.display(),
             )));
         }
 
@@ -91,6 +104,7 @@ impl Tool for Edit {
             output: "replaced 1 occurrence".to_string(),
             error: String::new(),
             diff: Some(diff),
+            ..Default::default()
         })
     }
 }
@@ -163,7 +177,11 @@ mod tests {
         });
         let result = tool.execute(ctx, input).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"));
+        assert!(err.contains("test.txt"));
+        // "hello world" is one line.
+        assert!(err.contains("1 lines"));
     }
 
     #[tokio::test]
@@ -181,7 +199,9 @@ mod tests {
         });
         let result = tool.execute(ctx, input).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("ambiguous"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("ambiguous"));
+        assert!(err.contains("test.txt"));
     }
 
     #[tokio::test]
@@ -202,5 +222,74 @@ mod tests {
         let diff = result.diff.unwrap();
         assert!(diff.contains("-hello world"));
         assert!(diff.contains("+hello mew"));
+    }
+
+    /// Regression: the "old_string not found" error must include first/last
+    /// line snippets and a recovery hint, not just "not found". Caught a bug
+    /// where the model had no way to figure out why its old_string was wrong.
+    #[tokio::test]
+    async fn test_edit_not_found_includes_first_last_line_and_recovery_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("multi.txt");
+        tokio::fs::write(
+            &path,
+            "alpha line one\nbeta line two\ngamma line three\ndelta line four\n",
+        )
+        .await
+        .unwrap();
+
+        let tool = Edit;
+        let ctx = dummy_ctx(dir.path().to_path_buf());
+        let input = serde_json::json!({
+            "path": "multi.txt",
+            "old_string": "this string is not in the file",
+            "new_string": "replacement"
+        });
+        let result = tool.execute(ctx, input).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"));
+        assert!(err.contains("multi.txt"));
+        assert!(err.contains("4 lines"), "expected line count: {err}");
+        assert!(
+            err.contains("First:"),
+            "expected 'First:' snippet in error: {err}"
+        );
+        assert!(
+            err.contains("Last:"),
+            "expected 'Last:' snippet in error: {err}"
+        );
+        assert!(err.contains("alpha line one"));
+        assert!(err.contains("delta line four"));
+        assert!(
+            err.contains("try reading it again"),
+            "expected recovery hint: {err}"
+        );
+    }
+
+    /// Regression: the ambiguous-match error must suggest including more
+    /// context to disambiguate.
+    #[tokio::test]
+    async fn test_edit_ambiguous_error_suggests_more_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dup.txt");
+        tokio::fs::write(&path, "x x y x").await.unwrap();
+
+        let tool = Edit;
+        let ctx = dummy_ctx(dir.path().to_path_buf());
+        let input = serde_json::json!({
+            "path": "dup.txt",
+            "old_string": "x",
+            "new_string": "z"
+        });
+        let result = tool.execute(ctx, input).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("ambiguous"));
+        assert!(
+            err.contains("more surrounding context") || err.contains("include more context"),
+            "expected suggestion to include more context: {err}"
+        );
+        assert!(err.contains("dup.txt"));
     }
 }

@@ -145,9 +145,8 @@ where
     let mut results: Vec<T> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    let root = find_git_root(cwd).unwrap_or_else(|| {
-        dirs_home().unwrap_or_else(|| cwd.to_path_buf())
-    });
+    let root =
+        find_git_root(cwd).unwrap_or_else(|| dirs_home().unwrap_or_else(|| cwd.to_path_buf()));
     let project_dirs = paths_between(&root, cwd);
 
     // Project paths: walk cwd → git root (reverse), so project-local beats
@@ -256,10 +255,7 @@ where
             LoadFileSpec::FlatMd => {
                 // Look for .md files at the top level.
                 let path = entry.path();
-                let is_md = path
-                    .extension()
-                    .map(|e| e == "md")
-                    .unwrap_or(false);
+                let is_md = path.extension().map(|e| e == "md").unwrap_or(false);
                 if !is_md {
                     continue;
                 }
@@ -376,7 +372,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         // SAFETY: tests run single-threaded for this crate; setting HOME
         // here is the standard pattern for env isolation in Rust tests.
-        unsafe { std::env::set_var("HOME", home.path()); }
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
         let tmp = tempfile::tempdir().unwrap();
         // Set up `.mew/skills/alpha/SKILL.md` and `.mew/skills/beta/SKILL.md`
         // with `name: alpha` and `name: beta` respectively. Also a misnamed
@@ -403,7 +401,10 @@ mod tests {
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            Ok(Loaded { name, value: path.display().to_string() })
+            Ok(Loaded {
+                name,
+                value: path.display().to_string(),
+            })
         });
         let loaded = result.unwrap();
         // alpha + beta loaded; delta skipped because name mismatch.
@@ -416,7 +417,9 @@ mod tests {
     #[test]
     fn test_load_markdown_dirs_flat_md() {
         let home = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("HOME", home.path()); }
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
         let tmp = tempfile::tempdir().unwrap();
         // Set up `.mew/agents/researcher.md` with `name: researcher`.
         // Plus a misnamed entry to verify the name-match check.
@@ -438,10 +441,17 @@ mod tests {
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            Ok(Loaded { name, value: path.file_name().unwrap().to_string_lossy().to_string() })
+            Ok(Loaded {
+                name,
+                value: path.file_name().unwrap().to_string_lossy().to_string(),
+            })
         });
         let loaded = result.unwrap();
-        assert_eq!(loaded.len(), 1, "researcher.md loads; reviewer.md skipped (name mismatch)");
+        assert_eq!(
+            loaded.len(),
+            1,
+            "researcher.md loads; reviewer.md skipped (name mismatch)"
+        );
         assert_eq!(loaded[0], "researcher.md");
     }
 }

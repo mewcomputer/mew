@@ -179,9 +179,22 @@ impl Adapter {
             }
         }
 
+        // Baseline `max_tokens` from the request if the dispatcher
+        // provided one, otherwise default to 4096. Anthropic requires
+        // `max_tokens >= 1`; we honour `Some(0)` as a request-level
+        // override (the thinking-budget bump below will rescue it
+        // when thinking is on) and fall back to 4096 only when
+        // thinking is off — the API would reject 0 otherwise.
+        let max_tokens = req
+            .params
+            .as_ref()
+            .and_then(|p| p.max_tokens)
+            .map(|v| v as i64)
+            .unwrap_or(4096);
+
         let mut body = json!({
             "model": self.model,
-            "max_tokens": 4096,
+            "max_tokens": max_tokens,
             "messages": messages,
             "stream": true,
         });
@@ -206,6 +219,14 @@ impl Adapter {
             }
         }
 
+        // If max_tokens ended up at 0 (dispatcher dispatched Some(0)
+        // and thinking wasn't on), the API would reject the request.
+        // The thinking-budget bump above only fires when reasoning is
+        // configured; otherwise we have to floor explicitly.
+        if body["max_tokens"].as_i64() == Some(0) {
+            body["max_tokens"] = json!(4096);
+        }
+
         if !req.system.is_empty() {
             body["system"] = json!(req.system);
         }
@@ -223,6 +244,21 @@ impl Adapter {
                 })
                 .collect();
             body["tools"] = json!(tools);
+        }
+
+        // `tool_choice` is an Anthropic top-level field. Values:
+        //   "auto" → model decides, "any" → must call a tool,
+        //   "tool" → must call a specific named tool, "none" → no tools.
+        // We map our 3-variant enum onto "auto"/"any"/"none".
+        if let Some(ref params) = req.params {
+            if let Some(tc) = params.tool_choice {
+                let v = match tc {
+                    mew_provider::ToolChoice::Auto => json!("auto"),
+                    mew_provider::ToolChoice::Required => json!("any"),
+                    mew_provider::ToolChoice::None_ => json!("none"),
+                };
+                body["tool_choice"] = v;
+            }
         }
 
         serde_json::to_vec(&body).map_err(ProviderError::Json)
@@ -1119,5 +1155,164 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
+    }
+
+    // -- max_output_tokens wire-format tests -------------------------------
+    //
+    // Verify that the Anthropic adapter actually honours
+    // `req.params.max_tokens`. The previous version hard-coded 4096 and
+    // silently ignored the field, which made the agent's
+    // `default_max_output_tokens` a no-op on this provider.
+    //
+    // Verify that the Anthropic adapter actually honours
+    // `req.params.max_tokens`. The previous version hard-coded 4096 and
+    // silently ignored the field, which made the agent's
+    // `default_max_output_tokens` a no-op on this provider.
+
+    use mew_provider::{ChatParams, ReasoningConfig};
+
+    fn sample_request(
+        max_tokens: Option<i32>,
+        thinking: Option<mew_provider::ReasoningConfig>,
+    ) -> Request {
+        Request {
+            model: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            system: String::new(),
+            reasoning: thinking,
+            params: max_tokens.map(|m| ChatParams {
+                temperature: None,
+                top_p: None,
+                max_tokens: Some(m),
+                tool_choice: None,
+            }),
+            headers: reqwest::header::HeaderMap::new(),
+        }
+    }
+
+    fn body_max_tokens(body: &[u8]) -> Option<i64> {
+        let v: serde_json::Value = serde_json::from_slice(body).unwrap();
+        v.get("max_tokens").and_then(|x| x.as_i64())
+    }
+
+    fn body_thinking_enabled(body: &[u8]) -> bool {
+        let v: serde_json::Value = serde_json::from_slice(body).unwrap();
+        v.get("thinking")
+            .and_then(|t| t.get("type"))
+            .and_then(|x| x.as_str())
+            == Some("enabled")
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_adapter_uses_params_max_tokens() {
+        // params.max_tokens = Some(32_768), no thinking → wire body
+        // has max_tokens: 32_768.
+        let adapter = Adapter::new(
+            "anthropic".into(),
+            "https://example.com".into(),
+            "test-model".into(),
+            "test-key".into(),
+        );
+        let body = adapter
+            .build_request_body(&sample_request(Some(32_768), None))
+            .await
+            .unwrap();
+        assert_eq!(body_max_tokens(&body), Some(32_768));
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_thinking_bump_uses_max_of_both() {
+        // params.max_tokens = Some(32_768) + thinking.budget_tokens = 8_000
+        // → wire body has max_tokens: 32_768 (default wins; the
+        // required min is 8_000 + 4096 = 12_096, well below 32_768).
+        let adapter = Adapter::new(
+            "anthropic".into(),
+            "https://example.com".into(),
+            "test-model".into(),
+            "test-key".into(),
+        );
+        let mut thinking = ReasoningConfig::default();
+        thinking.params.insert(
+            "thinking".into(),
+            json!({"type": "enabled", "budget_tokens": 8_000}),
+        );
+        let body = adapter
+            .build_request_body(&sample_request(Some(32_768), Some(thinking)))
+            .await
+            .unwrap();
+        assert!(body_thinking_enabled(&body));
+        assert_eq!(body_max_tokens(&body), Some(32_768));
+
+        // params.max_tokens = Some(32_768) + thinking.budget_tokens = 64_000
+        // → wire body has max_tokens: 68_096 (thinking wins; required
+        // min is 64_000 + 4096 = 68_096, above the 32_768 default).
+        let mut thinking2 = ReasoningConfig::default();
+        thinking2.params.insert(
+            "thinking".into(),
+            json!({"type": "enabled", "budget_tokens": 64_000}),
+        );
+        let body2 = adapter
+            .build_request_body(&sample_request(Some(32_768), Some(thinking2)))
+            .await
+            .unwrap();
+        assert_eq!(body_max_tokens(&body2), Some(68_096));
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_adapter_some_zero_without_thinking_falls_back_to_4096() {
+        // Some(0) without thinking → API floor (4096). The agent's
+        // dispatcher can dispatch Some(0); the adapter must not crash
+        // and must not send 0 (Anthropic rejects).
+        let adapter = Adapter::new(
+            "anthropic".into(),
+            "https://example.com".into(),
+            "test-model".into(),
+            "test-key".into(),
+        );
+        let body = adapter
+            .build_request_body(&sample_request(Some(0), None))
+            .await
+            .unwrap();
+        assert_eq!(body_max_tokens(&body), Some(4096));
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_adapter_some_zero_with_thinking_lets_bump_handle_it() {
+        // Some(0) WITH thinking → the thinking-budget bump handles the
+        // floor naturally (max(0, budget + 4096)). No silent 0 leak.
+        let adapter = Adapter::new(
+            "anthropic".into(),
+            "https://example.com".into(),
+            "test-model".into(),
+            "test-key".into(),
+        );
+        let mut thinking = ReasoningConfig::default();
+        thinking.params.insert(
+            "thinking".into(),
+            json!({"type": "enabled", "budget_tokens": 30_000}),
+        );
+        let body = adapter
+            .build_request_body(&sample_request(Some(0), Some(thinking)))
+            .await
+            .unwrap();
+        assert!(body_thinking_enabled(&body));
+        assert_eq!(body_max_tokens(&body), Some(34_096));
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_adapter_no_params_uses_4096_default() {
+        // No params at all → 4096 (backward-compatible default).
+        let adapter = Adapter::new(
+            "anthropic".into(),
+            "https://example.com".into(),
+            "test-model".into(),
+            "test-key".into(),
+        );
+        let body = adapter
+            .build_request_body(&sample_request(None, None))
+            .await
+            .unwrap();
+        assert_eq!(body_max_tokens(&body), Some(4096));
     }
 }

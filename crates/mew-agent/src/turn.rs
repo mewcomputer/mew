@@ -15,7 +15,7 @@ use crate::AgentEvent;
 
 impl Agent {
     pub(crate) async fn run_loop(
-        &self,
+        &mut self,
         prompt: String,
         attachments: Vec<Part>,
         ev_tx: mpsc::Sender<AgentEvent>,
@@ -69,7 +69,7 @@ impl Agent {
     }
 
     pub(crate) async fn turn_loop(
-        &self,
+        &mut self,
         ev_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut turn_count: u32 = 0;
@@ -112,6 +112,8 @@ impl Agent {
             for msg in &mut messages {
                 *msg = self.dispatcher.on_chat_message(msg.clone()).await;
             }
+
+            strip_empty_text_parts(&mut messages);
 
             // Check if compaction is needed (forced or auto).
             let force = {
@@ -241,12 +243,33 @@ impl Agent {
             // before the request goes out. Defaults are "use the provider's
             // own defaults" — plugins can set specific values when they
             // know what works.
+            //
+            // If the reasoning truncator flagged the previous turn's
+            // reasoning as over-length, force this request to call a
+            // tool. This breaks the "But.. Wait.. Actually.." loop that
+            // open models fall into without external pressure.
+            let force_tool_choice = self.take_force_tool_choice();
+            // Default `max_output_tokens` from the agent's configured
+            // value. Saturation to i32 is safe — 32K is well within range
+            // and i32::MAX is 2.1B, so the only thing saturation affects
+            // is pathologically-large values (which is fine — those
+            // saturate to "lots of output" intent).
+            let default_max_tokens: Option<i32> = if self.default_max_output_tokens > 0 {
+                Some(self.default_max_output_tokens.clamp(1, i32::MAX as i64) as i32)
+            } else {
+                None
+            };
             let params = self
                 .dispatcher
                 .on_chat_params(ChatParams {
                     temperature: None,
                     top_p: None,
-                    max_tokens: None,
+                    max_tokens: default_max_tokens,
+                    tool_choice: if force_tool_choice {
+                        Some(mew_hooks::ToolChoice::Required)
+                    } else {
+                        None
+                    },
                 })
                 .await;
             let headers = self
@@ -264,6 +287,11 @@ impl Agent {
                     temperature: params.temperature,
                     top_p: params.top_p,
                     max_tokens: params.max_tokens,
+                    tool_choice: params.tool_choice.map(|c| match c {
+                        mew_hooks::ToolChoice::Auto => mew_provider::ToolChoice::Auto,
+                        mew_hooks::ToolChoice::Required => mew_provider::ToolChoice::Required,
+                        mew_hooks::ToolChoice::None_ => mew_provider::ToolChoice::None_,
+                    }),
                 }),
                 headers,
             };
@@ -349,6 +377,43 @@ impl Agent {
                     .send(AgentEvent::Error("no assistant message received".into()))
                     .await;
                 return Ok(());
+            }
+
+            // Reasoning-truncation hook: if any reasoning trace in this
+            // turn exceeded the configured threshold, truncate the part
+            // in place, forge a short acknowledgement assistant message
+            // into history, and flag the next request to force a tool
+            // call. Provider-agnostic — no stream mutation needed.
+            if self.reasoning_truncation_enabled {
+                if let Some(msg) = assistant_msg.as_mut() {
+                    if self.maybe_truncate_reasoning_in_place(msg) {
+                        let ack_msg = Message {
+                            id: Ulid::new(),
+                            session_id: self.session_id,
+                            role: Role::Assistant,
+                            parts: vec![Part::Text(TextPart {
+                                base: PartBase {
+                                    id: Ulid::new(),
+                                    message_id: Ulid::new(),
+                                    session_id: self.session_id,
+                                },
+                                text: crate::reasoning_truncator::TRUNCATION_ACK_TEXT.to_string(),
+                                synthetic: true,
+                            })],
+                            time: Time {
+                                created: Utc::now().timestamp_millis(),
+                                completed: Some(Utc::now().timestamp_millis()),
+                            },
+                            assistant: None,
+                        };
+                        tracing::info!(
+                            threshold = self.reasoning_truncator.threshold,
+                            "reasoning truncated; forging acknowledgement + forcing tool_choice"
+                        );
+                        self.append_message(ack_msg).await;
+                        self.reasoning_truncator.mark_truncated();
+                    }
+                }
             }
 
             if self.cancel_token.is_cancelled() {
@@ -438,5 +503,108 @@ impl Agent {
                 dispatcher.on_turn_end(&messages).await;
             });
         }
+    }
+}
+
+/// Strip empty text parts from assistant messages so providers don't choke on
+/// spurious empty content blocks before tool calls.
+pub(crate) fn strip_empty_text_parts(messages: &mut [Message]) {
+    for msg in messages.iter_mut() {
+        if msg.role == Role::Assistant {
+            msg.parts.retain(|p| match p {
+                Part::Text(pt) => !pt.text.is_empty(),
+                _ => true,
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mew_message::{PartBase, TextPart, ToolCallPart, ToolState, ToolStateCompleted, ToolTime};
+
+    fn text_part(text: &str) -> Part {
+        Part::Text(TextPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+            },
+            text: text.to_string(),
+            synthetic: false,
+        })
+    }
+
+    fn tool_call_part() -> Part {
+        Part::ToolCall(ToolCallPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+            },
+            tool_name: "bash".to_string(),
+            call_id: "call_1".to_string(),
+            state: ToolState::Completed(ToolStateCompleted {
+                input: serde_json::json!({"command": "ls"}),
+                output: "ok".to_string(),
+                metadata: None,
+                diff: None,
+                time: ToolTime {
+                    start: 0,
+                    end: Some(0),
+                },
+            }),
+            raw_input: "{}".to_string(),
+        })
+    }
+
+    fn make_msg(role: Role, parts: Vec<Part>) -> Message {
+        Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role,
+            parts,
+            time: Time {
+                created: 0,
+                completed: Some(0),
+            },
+            assistant: None,
+        }
+    }
+
+    #[test]
+    fn strips_empty_text_from_assistant_messages() {
+        let mut messages = vec![make_msg(
+            Role::Assistant,
+            vec![text_part(""), tool_call_part()],
+        )];
+        strip_empty_text_parts(&mut messages);
+        assert_eq!(messages[0].parts.len(), 1);
+        assert!(matches!(&messages[0].parts[0], Part::ToolCall(_)));
+    }
+
+    #[test]
+    fn keeps_nonempty_text_in_assistant_messages() {
+        let mut messages = vec![make_msg(
+            Role::Assistant,
+            vec![text_part("let me check"), tool_call_part()],
+        )];
+        strip_empty_text_parts(&mut messages);
+        assert_eq!(messages[0].parts.len(), 2);
+    }
+
+    #[test]
+    fn does_not_touch_user_messages() {
+        let mut messages = vec![make_msg(Role::User, vec![text_part("")])];
+        strip_empty_text_parts(&mut messages);
+        assert_eq!(messages[0].parts.len(), 1);
+    }
+
+    #[test]
+    fn handles_empty_parts_vec() {
+        let mut messages = vec![make_msg(Role::Assistant, vec![])];
+        strip_empty_text_parts(&mut messages);
+        assert!(messages[0].parts.is_empty());
     }
 }

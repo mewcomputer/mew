@@ -1,0 +1,4 @@
+packages:
+  - mew-web-client
+  - mew-web-ui
+  - site

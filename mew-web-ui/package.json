@@ -1,0 +1,46 @@
+{
+  "name": "mew-web-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@mew/web-client": "workspace:*",
+    "@shikijs/langs": "^4.3.0",
+    "@tanstack/react-router": "^1.95",
+    "@tanstack/react-virtual": "^3.13",
+    "clsx": "^2.1",
+    "lucide-react": "^0.460",
+    "react": "^19.1",
+    "react-dom": "^19.1",
+    "react-markdown": "^9.0",
+    "remark-gfm": "^4.0",
+    "shiki": "^4.3.0",
+    "sonner": "^1.7",
+    "tailwind-merge": "^2.6",
+    "zustand": "^5.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@tailwindcss/postcss": "^4.3.1",
+    "@tailwindcss/typography": "^0.5.20",
+    "@tanstack/router-devtools": "^1.95",
+    "@testing-library/jest-dom": "^6.6",
+    "@testing-library/react": "^16.1",
+    "@types/react": "^19.1",
+    "@types/react-dom": "^19.1",
+    "@vitejs/plugin-react": "^4.3",
+    "jsdom": "^26.0",
+    "postcss": "^8.4",
+    "tailwindcss": "^4.3.1",
+    "typescript": "^5.9",
+    "vite": "^6.0",
+    "vitest": "^3.0"
+  }
+}

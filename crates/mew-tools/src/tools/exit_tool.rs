@@ -57,6 +57,7 @@ impl Tool for ExitTool {
             output: answer.to_string(),
             error: String::new(),
             diff: None,
+            metadata: None,
         })
     }
 }
