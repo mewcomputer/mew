@@ -3,6 +3,7 @@ import react from "@astrojs/react";
 import tailwindcss from "@tailwindcss/vite";
 import starlight from "@astrojs/starlight";
 import starlightDotMd from "starlight-dot-md";
+import lucode from "lucode-starlight";
 
 // Starlight docs live at /docs. The landing page stays at /.
 // Starlight uses its own routing under /docs and doesn't interfere
@@ -16,7 +17,7 @@ export default defineConfig({
         src: "./src/assets/mew-logo.svg",
         replacesTitle: false,
       },
-      plugins: [starlightDotMd({ includeFrontmatter: false })],
+      plugins: [starlightDotMd({ includeFrontmatter: false }), lucode()],
       customCss: [
         // Relative path to your @font-face CSS file.
         "./src/styles/banga.css",
