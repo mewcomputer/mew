@@ -1,5 +1,65 @@
 # Progress — 2026-06-29
 
+## TUI UX improvements — terminal title, /thinking, Ctrl+P variant cycle — COMPLETE
+
+**Terminal title** (`mew-tui/src/title.rs`):
+- Sets terminal tab title to `mew — thinking…` while streaming, `mew` when idle.
+- Uses xterm OSC 0 escape sequence on stderr. Restored to `mew` on exit.
+- Called from both TUI main loops (daemon-client + local) after each draw.
+
+**`/thinking` slash command**:
+- `/thinking high`, `/thinking max`, `/thinking off` — resolves variant via
+  catalog's `resolve_reasoning()` and calls `agent.set_reasoning()`.
+- Added `SlashResult::SetThinkingVariant(String)` variant.
+- Added `/thinking` to builtin slash command list (autofills in autocomplete).
+- Handled in local TUI main loop, drain path, and daemon-client path.
+
+**Thinking variant picker** (Ctrl+P command palette):
+- Added "Thinking Variant" entry to the command palette.
+- `open_thinking_variant_picker()` shows Off/high/max/thinking options.
+- Enter applies the selected variant via `Action::SetThinkingVariant`.
+- **Ctrl+P cycling**: when the thinking variant picker is open, pressing
+  Ctrl+P cycles to the next variant and applies it immediately.
+- Added `Action::SetThinkingVariant(String)` to the events Action enum.
+
+**Esc-cancel verification**: already working correctly — first Esc shows
+"esc again to stop agent" in status bar, second Esc cancels immediately,
+2s timeout, cleared on stream end/error. No changes needed.
+
+`just ci` fully green (fmt + clippy + all tests + web build + e2e).
+
+---
+
+## Thinking variant + session title — full protocol/daemon/TS wiring — COMPLETE
+
+Wired thinking variant switching and session title broadcasting end-to-end
+through the protocol, daemon, TS client, and web UI store.
+
+**Protocol** (`mew-protocol`):
+- `ClientMessage::SetThinkingVariant { variant: String }`
+- `ServerMessage::ThinkingVariantChanged { variant: Option<String> }`
+- `ServerMessage::SessionTitleChanged { session_id, title }`
+- `ThinkingVariantInfo { name }` + `thinking_variants` field on `ModelInfo`
+- 7 new roundtrip tests
+
+**Daemon** (`mew-daemon`):
+- `ThinkingSetter` type, `DaemonServer::with_thinking_setter()`
+- `SetThinkingVariant` handler in `handle_connection`
+- Client translation handles new `ServerMessage` variants
+
+**main.rs**: lister populates `thinking_variants` from catalog; thinking
+setter closure wired to `resolve_reasoning()` + `agent.set_reasoning()`.
+
+**TS client** (`mew-web-client`): `ThinkingVariantInfo` type,
+`setThinkingVariant()` method, `thinking-variant-changed` +
+`session-title-changed` events.
+
+**TS store** (`mew-web-ui`): `currentThinkingVariant`, `sessionTitles`
+state + actions. Bridge wires both events. `ModelPill.tsx` and
+`TitleStrip.tsx` now compile and work end-to-end.
+
+---
+
 ## Daemon concurrency test fix — COMPLETE
 
 Fixed 2 pre-existing test failures in `mew-daemon/tests/concurrency.rs`

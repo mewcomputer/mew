@@ -69,6 +69,12 @@ pub type ModelSwitcher =
 /// List available models. Returns `Vec<ModelInfo>` for the picker UI.
 pub type ModelLister = Arc<dyn Fn() -> Vec<mew_protocol::ModelInfo> + Send + Sync>;
 
+/// Set the thinking/reasoning variant on an agent. Takes the agent,
+/// current model ID, and variant name (or empty/"none" to disable).
+/// Returns the resolved variant name, or None if thinking was disabled.
+pub type ThinkingSetter =
+    Arc<dyn Fn(&mut Agent, &str, &str) -> Result<Option<String>> + Send + Sync>;
+
 /// The daemon server. Binds a Unix socket and accepts WebSocket connections.
 pub struct DaemonServer {
     /// Public so callers (e.g. `mew daemon` main) can clone it for dual
@@ -78,6 +84,8 @@ pub struct DaemonServer {
     pub model_switcher: Option<ModelSwitcher>,
     /// Optional model lister for `ListModels` client messages.
     pub model_lister: Option<ModelLister>,
+    /// Optional thinking variant setter for `SetThinkingVariant` client messages.
+    pub thinking_setter: Option<ThinkingSetter>,
     /// Owns active sessions and resume-from-disk.
     pub session_manager: Arc<SessionManager>,
 }
@@ -112,6 +120,7 @@ impl DaemonServer {
             builder,
             model_switcher: None,
             model_lister: None,
+            thinking_setter: None,
             session_manager,
         }
     }
@@ -132,6 +141,12 @@ impl DaemonServer {
         self
     }
 
+    /// Enable thinking variant switching.
+    pub fn with_thinking_setter(mut self, setter: ThinkingSetter) -> Self {
+        self.thinking_setter = Some(setter);
+        self
+    }
+
     /// Run the daemon, listening on the given Unix socket path.
     /// Blocks until the listener is closed, a signal (SIGINT/SIGTERM) is
     /// received, or an unrecoverable error occurs.
@@ -144,6 +159,7 @@ impl DaemonServer {
         info!(socket = socket_path, "mew daemon listening");
 
         let session_manager = self.session_manager.clone();
+        let thinking_setter = self.thinking_setter.clone();
         let mut id_counter = 0u64;
 
         let mut sig_term =
@@ -162,9 +178,10 @@ impl DaemonServer {
                             id_counter += 1;
                             let conn_id = id_counter;
                             let session_manager = session_manager.clone();
+                            let thinking_setter = thinking_setter.clone();
                             tokio::spawn(async move {
                                 info!(conn_id, "connection accepted");
-                                if let Err(e) = handle_connection(stream, session_manager).await {
+                                if let Err(e) = handle_connection(stream, session_manager, thinking_setter).await {
                                     if !e.to_string().contains("connection reset") {
                                         warn!(conn_id, error = %e, "connection ended with error");
                                     }
@@ -193,6 +210,7 @@ impl DaemonServer {
         info!(%addr, "mew daemon listening (tcp)");
 
         let session_manager = self.session_manager.clone();
+        let thinking_setter = self.thinking_setter.clone();
         let mut id_counter = 0u64;
 
         let mut sig_term =
@@ -211,9 +229,10 @@ impl DaemonServer {
                             id_counter += 1;
                             let conn_id = id_counter;
                             let session_manager = session_manager.clone();
+                            let thinking_setter = thinking_setter.clone();
                             tokio::spawn(async move {
                                 info!(conn_id, %peer, "connection accepted (tcp)");
-                                if let Err(e) = handle_connection(stream, session_manager).await {
+                                if let Err(e) = handle_connection(stream, session_manager, thinking_setter).await {
                                     if !e.to_string().contains("connection reset") {
                                         warn!(conn_id, error = %e, "connection ended with error");
                                     }
@@ -237,7 +256,11 @@ impl DaemonServer {
 // Per-connection handler
 // ---------------------------------------------------------------------------
 
-async fn handle_connection<S>(stream: S, session_manager: Arc<SessionManager>) -> Result<()>
+async fn handle_connection<S>(
+    stream: S,
+    session_manager: Arc<SessionManager>,
+    thinking_setter: Option<ThinkingSetter>,
+) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -499,6 +522,38 @@ where
                         Err(e) => {
                             let _ = client_tx.send(ServerMessage::Error {
                                 message: format!("failed to switch model: {e}"),
+                            });
+                        }
+                    }
+                });
+            }
+            ClientMessage::SetThinkingVariant { variant } => {
+                let Some(session) = attached_session.clone() else {
+                    reply(ServerMessage::Error {
+                        message: "no session".into(),
+                    });
+                    continue;
+                };
+                let client_tx = client_tx.clone();
+                let thinking_setter = thinking_setter.clone();
+                tokio::spawn(async move {
+                    let _guard = session.turn_lock.lock().await;
+                    let result = match &thinking_setter {
+                        Some(setter) => {
+                            let model = session.model.lock().await.clone().unwrap_or_default();
+                            let mut agent = session.agent.lock().await;
+                            setter(&mut agent, &model, &variant)
+                        }
+                        None => Err(anyhow::anyhow!("thinking variant switching not available")),
+                    };
+                    match result {
+                        Ok(resolved) => {
+                            let _ = client_tx
+                                .send(ServerMessage::ThinkingVariantChanged { variant: resolved });
+                        }
+                        Err(e) => {
+                            let _ = client_tx.send(ServerMessage::Error {
+                                message: format!("failed to set thinking variant: {e}"),
                             });
                         }
                     }

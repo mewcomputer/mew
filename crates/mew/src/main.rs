@@ -335,9 +335,7 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
         // Daemon and non-TUI commands keep the default stderr writer.
         let is_tui = matches!(
             cli.command,
-            Some(Commands::Run { .. })
-                | Some(Commands::Chat { connect: None, .. })
-                | None
+            Some(Commands::Run { .. }) | Some(Commands::Chat { connect: None, .. }) | None
         );
         if is_tui {
             let log_path = std::env::temp_dir().join(format!("mew-{}.log", std::process::id()));
@@ -346,7 +344,9 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
                 .append(true)
                 .open(&log_path)
                 .map(std::io::BufWriter::new)
-                .map_err(|e| anyhow::anyhow!("failed to open log file {}: {}", log_path.display(), e))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("failed to open log file {}: {}", log_path.display(), e)
+                })?;
             eprintln!("logging to {}", log_path.display());
             tracing_subscriber::fmt()
                 .with_writer(std::sync::Mutex::new(file))
@@ -1363,6 +1363,11 @@ async fn run_daemon(
             if let Some(cat) = cat_lister.as_ref() {
                 for m in cat.models.values() {
                     if cred_pids.contains(&m.provider) {
+                        let thinking_variants = cat
+                            .thinking_variants(&m.id)
+                            .into_iter()
+                            .map(|v| mew_protocol::ThinkingVariantInfo { name: v.name })
+                            .collect();
                         models.push(mew_protocol::ModelInfo {
                             id: format!("{}/{}", m.provider, m.id),
                             provider: m.provider.clone(),
@@ -1372,6 +1377,7 @@ async fn run_daemon(
                                 m.context_window,
                                 if m.reasoning { "reasoning" } else { "standard" }
                             )),
+                            thinking_variants,
                         });
                     }
                 }
@@ -1401,6 +1407,23 @@ async fn run_daemon(
         );
 
         server = server.with_model_management(switcher, lister);
+
+        // Thinking variant setter: resolves a variant name via the catalog
+        // and applies it to the agent's reasoning config.
+        let cat_thinking = Arc::clone(&cat_for_models);
+        let thinking_setter: mew_daemon::ThinkingSetter =
+            Arc::new(move |agent: &mut Agent, model_id: &str, variant: &str| {
+                let cat_ref = (*cat_thinking).as_ref();
+                if variant.is_empty() || variant == "none" {
+                    agent.set_reasoning(None);
+                    return Ok(None);
+                }
+                let config = resolve_reasoning(cat_ref, model_id, Some(variant));
+                let resolved = config.is_some().then(|| variant.to_string());
+                agent.set_reasoning(config);
+                Ok(resolved)
+            });
+        server = server.with_thinking_setter(thinking_setter);
     }
 
     match (use_unix, port.as_deref()) {
@@ -1412,7 +1435,8 @@ async fn run_daemon(
                 .with_model_management(
                     Arc::clone(server.model_switcher.as_ref().unwrap()),
                     Arc::clone(server.model_lister.as_ref().unwrap()),
-                );
+                )
+                .with_thinking_setter(Arc::clone(server.thinking_setter.as_ref().unwrap()));
             tokio::try_join!(
                 async move { server_unix.run(&socket_path).await },
                 async move { server.run_tcp(parsed).await }
@@ -1566,6 +1590,7 @@ async fn chat_with_daemon(connect_url: &str) -> Result<()> {
             if let Err(e) = terminal.draw(|f| mew_tui::ui::draw(f, &mut app)) {
                 break Err(anyhow::anyhow!("draw error: {}", e));
             }
+            mew_tui::title::set_terminal_title(mew_tui::title::title_for_streaming(app.streaming));
         }
 
         let event = match event_rx.recv().await {
@@ -1598,6 +1623,11 @@ async fn chat_with_daemon(connect_url: &str) -> Result<()> {
                             });
                         }
                         mew_tui::events::Action::Quit => should_break = true,
+                        mew_tui::events::Action::SetThinkingVariant(_) => {
+                            app.set_alert(
+                                "thinking variant switching not available in daemon mode",
+                            );
+                        }
                         mew_tui::events::Action::Cancel => {
                             let client = client.clone();
                             tokio::spawn(async move {
@@ -1658,6 +1688,7 @@ async fn chat_with_daemon(connect_url: &str) -> Result<()> {
         crossterm::event::DisableMouseCapture,
         crossterm::event::DisableBracketedPaste,
     )?;
+    mew_tui::title::set_terminal_title("mew");
     result
 }
 
@@ -1675,6 +1706,9 @@ fn handle_slash_result_local(app: &mut mew_tui::App, result: mew_tui::app::Slash
         }
         SlashResult::SwitchModel(_) => {
             app.set_alert("use the daemon's --model flag to switch models");
+        }
+        SlashResult::SetThinkingVariant(_) => {
+            app.set_alert("thinking variant switching not available in daemon mode");
         }
         SlashResult::PermissionModeMenu => {
             app.open_permission_mode_picker();
@@ -2268,6 +2302,7 @@ async fn run_tui(
             }) {
                 break Err(anyhow::anyhow!("draw error: {}", e));
             }
+            mew_tui::title::set_terminal_title(mew_tui::title::title_for_streaming(app.streaming));
         }
 
         // Wait for at least one event.
@@ -2386,6 +2421,33 @@ async fn run_tui(
                                                 "failed to switch: {}",
                                                 e
                                             )));
+                                        }
+                                    }
+                                }
+                                mew_tui::SlashResult::SetThinkingVariant(ref variant) => {
+                                    let model_id = &app.status.model;
+                                    let variant_name = variant.as_str();
+                                    if variant_name.is_empty()
+                                        || variant_name == "off"
+                                        || variant_name == "none"
+                                    {
+                                        agent.set_reasoning(None);
+                                        app.messages
+                                            .push(synthetic_message("thinking disabled".into()));
+                                    } else {
+                                        match resolve_reasoning(cat, model_id, Some(variant_name)) {
+                                            Some(config) => {
+                                                agent.set_reasoning(Some(config));
+                                                app.messages.push(synthetic_message(format!(
+                                                    "thinking variant: {}",
+                                                    variant_name
+                                                )));
+                                            }
+                                            None => {
+                                                app.messages.push(synthetic_message(format!(
+                                                    "unknown thinking variant '{variant_name}' for model '{model_id}'"
+                                                )));
+                                            }
                                         }
                                     }
                                 }
@@ -2724,6 +2786,26 @@ async fn run_tui(
                             // Handled by ConfigEditor in settings mode — ignore here
                         }
                         mew_tui::events::Action::Quit => should_break = true,
+                        mew_tui::events::Action::SetThinkingVariant(variant) => {
+                            let model_id = &app.status.model;
+                            if variant == "off" || variant == "none" {
+                                agent.set_reasoning(None);
+                                app.set_alert("thinking disabled");
+                            } else {
+                                match resolve_reasoning(cat, model_id, Some(&variant)) {
+                                    Some(config) => {
+                                        agent.set_reasoning(Some(config));
+                                        app.set_alert(format!("thinking: {}", variant));
+                                    }
+                                    None => {
+                                        app.set_alert(format!(
+                                            "unknown thinking variant '{}' for model '{}'",
+                                            variant, model_id
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2924,6 +3006,9 @@ async fn run_tui(
                                     mew_tui::SlashResult::SwitchModel(_) => {
                                         // Model switches are deferred; handled in main loop.
                                     }
+                                    mew_tui::SlashResult::SetThinkingVariant(_) => {
+                                        // Deferred; handled in main loop.
+                                    }
                                     mew_tui::SlashResult::SwitchPersona(_) => {
                                         // Handled inline above (direct clear).
                                     }
@@ -2962,6 +3047,9 @@ async fn run_tui(
                                 // requires mode=CommandPalette. The palette is never
                                 // open during heavy streaming, so this branch is
                                 // effectively unreachable in the drain path.
+                            }
+                            mew_tui::events::Action::SetThinkingVariant(_) => {
+                                // Deferred to main loop; ignored during drain.
                             }
                             mew_tui::events::Action::SaveSettings
                             | mew_tui::events::Action::SettingsEditStart
@@ -3071,6 +3159,7 @@ async fn run_tui(
         crossterm::event::DisableBracketedPaste,
     )?;
     terminal.show_cursor()?;
+    mew_tui::title::set_terminal_title("mew");
 
     // Note: MCP client shutdown is best-effort. Subprocess cleanup
     // on exit is handled by the transport's Drop implementation.

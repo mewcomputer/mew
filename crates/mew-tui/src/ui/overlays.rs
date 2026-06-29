@@ -849,7 +849,7 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("  Ctrl+D     ", key_style),
-            Span::styled("quit (when input empty)", desc_style),
+            Span::styled("delete char forward / quit (when input empty)", desc_style),
         ]),
         Line::from(""),
         Line::from(Span::styled("Input Editing", header_style)),
@@ -868,6 +868,10 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(vec![
             Span::styled("  Ctrl+W     ", key_style),
             Span::styled("delete word backward", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+K     ", key_style),
+            Span::styled("delete from cursor to end of line", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  Ctrl+U     ", key_style),

@@ -451,7 +451,9 @@ async fn translate_server_message(
         | ServerMessage::SessionList { .. }
         | ServerMessage::SessionHistory { .. }
         | ServerMessage::RequestResolved { .. }
-        | ServerMessage::SessionCleared => {
+        | ServerMessage::SessionCleared
+        | ServerMessage::ThinkingVariantChanged { .. }
+        | ServerMessage::SessionTitleChanged { .. } => {
             // These are handled by the DaemonClient directly or are web-UI
             // specific; they don't map to AgentEvents for the TUI.
             Vec::new()

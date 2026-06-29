@@ -200,13 +200,14 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         if msg.role == Role::Assistant {
             if let Some(ref meta) = msg.assistant {
                 if !meta.provider_id.is_empty() && !meta.model_id.is_empty() {
-                    sel_ctx.push_line(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(
-                            format!("{} / {}", meta.provider_id, meta.model_id),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]));
+                    let header = format!("{} / {}", meta.provider_id, meta.model_id);
+                    let header_w = chat_inner.width.saturating_sub(2);
+                    for chunk in wrap_text_to_width(&header, header_w) {
+                        sel_ctx.push_line(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(chunk, Style::default().fg(Color::DarkGray)),
+                        ]));
+                    }
                     message_had_content = true;
                 }
             }
@@ -950,5 +951,22 @@ mod tests {
     fn test_wrap_text_to_width_hard_break() {
         let chunks = wrap_text_to_width("aaaaaaaaaa", 5);
         assert_eq!(chunks, vec!["aaaaa", "aaaaa"]);
+    }
+
+    #[test]
+    fn test_em_dash_expansion_fits_within_width() {
+        // Em-dash (U+2014, width 1) is expanded to "— " (width 2) before
+        // wrapping. Verify that the expanded text wraps to chunks that each
+        // fit within the target width — no post-wrap overflow.
+        let text = "hello — world — this is a test of em-dash expansion";
+        let expanded = text.replace('\u{2014}', "— ");
+        let width = 20u16;
+        for chunk in wrap_text_to_width(&expanded, width) {
+            let w = super::display_width(&chunk);
+            assert!(
+                w <= width as usize,
+                "chunk width {w} exceeds {width}: {chunk:?}"
+            );
+        }
     }
 }

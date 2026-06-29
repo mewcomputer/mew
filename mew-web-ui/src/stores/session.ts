@@ -149,10 +149,14 @@ interface SessionState {
   availableModels: ModelInfo[];
   currentModel: string | null;
   currentProvider: string | null;
+  currentThinkingVariant: string | null;
 
   // Session list
   availableSessions: SessionInfo[];
   sessionsLoading: boolean;
+
+  // Session titles (session_id → title)
+  sessionTitles: Map<string, string>;
 
   // Subagents
   subagents: Map<string, SubagentInfo>;
@@ -182,6 +186,8 @@ interface SessionState {
 
   setAvailableModels: (models: ModelInfo[]) => void;
   setCurrentModel: (provider: string, model: string) => void;
+  setCurrentThinkingVariant: (variant: string | null) => void;
+  onSessionTitleChanged: (sessionId: string, title: string) => void;
 
   // Shared-session actions
   setAvailableSessions: (sessions: SessionInfo[]) => void;
@@ -221,8 +227,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   availableModels: [],
   currentModel: null,
   currentProvider: null,
+  currentThinkingVariant: null,
   availableSessions: [],
   sessionsLoading: false,
+  sessionTitles: new Map(),
   subagents: new Map(),
   pendingAskUser: [],
   todos: [],
@@ -566,6 +574,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setCurrentModel: (provider, model) =>
     set({ currentProvider: provider, currentModel: model }),
 
+  setCurrentThinkingVariant: (variant) =>
+    set({ currentThinkingVariant: variant }),
+
+  onSessionTitleChanged: (sessionId, title) =>
+    set((state) => {
+      const sessionTitles = new Map(state.sessionTitles);
+      sessionTitles.set(sessionId, title);
+      return { sessionTitles };
+    }),
+
   setAvailableSessions: (sessions) => set({ availableSessions: sessions }),
 
   setSessionsLoading: (loading) => set({ sessionsLoading: loading }),
@@ -703,8 +721,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       availableModels: [],
       currentModel: null,
       currentProvider: null,
+      currentThinkingVariant: null,
       availableSessions: [],
       sessionsLoading: false,
+      sessionTitles: new Map(),
     }),
 }));
 
@@ -766,6 +786,12 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("model-list", (data) => store.getState().setAvailableModels(data.models));
   client.on("model-switched", (data) =>
     store.getState().setCurrentModel(data.provider, data.model),
+  );
+  client.on("thinking-variant-changed", (data) =>
+    store.getState().setCurrentThinkingVariant(data.variant),
+  );
+  client.on("session-title-changed", (data) =>
+    store.getState().onSessionTitleChanged(data.session_id, data.title),
   );
 
   client.on("session-list", (data) => {

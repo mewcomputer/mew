@@ -34,6 +34,9 @@ export type ClientMessage = {
     type: "SwitchModel";
     provider: string;
     model: string;
+} | {
+    type: "SetThinkingVariant";
+    variant: string;
 };
 export type ProviderEventWire = {
     type: "PartStart";
@@ -171,6 +174,12 @@ export interface ModelInfo {
     model: string;
     /** Human-readable description for the picker UI. */
     description?: string;
+    /** Available thinking/reasoning variants for this model. */
+    thinking_variants?: ThinkingVariantInfo[];
+}
+/** A named thinking/reasoning variant (e.g. "high", "max", "thinking"). */
+export interface ThinkingVariantInfo {
+    name: string;
 }
 /** Session lifecycle state. */
 export type SessionState = "active" | "idle";
@@ -314,6 +323,13 @@ export type ServerMessage = {
     type: "ModelSwitched";
     provider: string;
     model: string;
+} | {
+    type: "ThinkingVariantChanged";
+    variant?: string;
+} | {
+    type: "SessionTitleChanged";
+    session_id: string;
+    title: string;
 };
 export interface MewWebSocket {
     send(data: string): void;
@@ -416,6 +432,13 @@ export interface MewClientEvents {
         provider: string;
         model: string;
     }) => void;
+    "thinking-variant-changed": (data: {
+        variant: string | null;
+    }) => void;
+    "session-title-changed": (data: {
+        session_id: string;
+        title: string;
+    }) => void;
     errorMessage: (data: {
         message: string;
     }) => void;
@@ -482,6 +505,11 @@ export declare class MewClient {
         provider: string;
         model: string;
     }>;
+    /** Set or clear the thinking/reasoning variant. Pass empty string or
+     *  "none" to disable. Resolves when the daemon confirms via
+     *  `thinking-variant-changed`. Returns the resolved variant name, or
+     *  null if thinking was disabled. */
+    setThinkingVariant(variant: string): Promise<string | null>;
     on<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     off<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     private emit;

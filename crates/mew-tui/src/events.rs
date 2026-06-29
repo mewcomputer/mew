@@ -721,6 +721,27 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             }
             None
         }
+        // Ctrl+K: kill from cursor to end of line (readline convention).
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.cursor < app.input.len() {
+                app.push_undo();
+                app.input.truncate(app.cursor);
+                if !app.input.starts_with('/') {
+                    app.mode = crate::app::Mode::Normal;
+                }
+            }
+            None
+        }
+        // Ctrl+D: delete char forward (readline convention). Also quits
+        // on empty input when not streaming (matching shell behavior).
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.input.is_empty() && !app.streaming {
+                app.should_quit = true;
+                return Some(Action::Quit);
+            }
+            app.delete_char();
+            None
+        }
         KeyCode::Char(c) => {
             app.insert_char(c);
             if app.input.starts_with('/') {
@@ -860,6 +881,30 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
 }
 
 fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    // Ctrl+P in the thinking variant picker cycles to the next variant.
+    if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(ref picker) = app.picker {
+            if picker.kind == "thinking_variant" {
+                let items_len = picker.items.len();
+                if items_len > 0 {
+                    let next = (picker.selected + 1) % items_len;
+                    if let Some(ref mut picker) = app.picker {
+                        picker.selected = next;
+                        picker.adjust_scroll();
+                    }
+                    // Return the selected variant as an action.
+                    let item = app
+                        .picker
+                        .as_ref()
+                        .and_then(|p| p.selected_item().map(|i| i.id.clone()));
+                    if let Some(variant) = item {
+                        return Some(Action::SetThinkingVariant(variant));
+                    }
+                }
+            }
+        }
+        return None;
+    }
     match key.code {
         KeyCode::Esc => {
             app.close_picker();
@@ -878,6 +923,10 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                             app.open_model_picker();
                             None
                         }
+                        "thinking-variant" => {
+                            app.open_thinking_variant_picker();
+                            None
+                        }
                         "settings" => Some(Action::OpenSettings),
                         "clear" => Some(Action::Clear),
                         "quit" => {
@@ -888,6 +937,8 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     }
                 } else if kind == "model" {
                     Some(Action::SwitchModel(id))
+                } else if kind == "thinking_variant" {
+                    Some(Action::SetThinkingVariant(id))
                 } else if kind == "permission_mode" {
                     mew_hooks::PermissionMode::from_id(&id).map(Action::SetPermissionMode)
                 } else if kind == "file" {
@@ -981,4 +1032,7 @@ pub enum Action {
     /// Apply a permission mode change. Fires from `/permissions <mode>` and
     /// from the permission-mode picker.
     SetPermissionMode(mew_hooks::PermissionMode),
+    /// Set or clear the thinking variant. Fires from `/thinking <variant>`,
+    /// the thinking variant picker, or Ctrl+P cycling.
+    SetThinkingVariant(String),
 }

@@ -46,7 +46,8 @@ export type ClientMessage =
   | { type: "AskUserResponse"; request_id: number; answers: string[] }
   | { type: "SlashCommand"; command: string }
   | { type: "ListModels" }
-  | { type: "SwitchModel"; provider: string; model: string };
+  | { type: "SwitchModel"; provider: string; model: string }
+  | { type: "SetThinkingVariant"; variant: string };
 
 // Provider events — see mew_message::ProviderEventWire.
 export type ProviderEventWire =
@@ -170,6 +171,13 @@ export interface ModelInfo {
   model: string;
   /** Human-readable description for the picker UI. */
   description?: string;
+  /** Available thinking/reasoning variants for this model. */
+  thinking_variants?: ThinkingVariantInfo[];
+}
+
+/** A named thinking/reasoning variant (e.g. "high", "max", "thinking"). */
+export interface ThinkingVariantInfo {
+  name: string;
 }
 
 /** Session lifecycle state. */
@@ -281,7 +289,9 @@ export type ServerMessage =
   | { type: "SessionList"; sessions: SessionInfo[] }
   | { type: "SessionHistory"; messages: Message[] }
   | { type: "ModelList"; models: ModelInfo[] }
-  | { type: "ModelSwitched"; provider: string; model: string };
+  | { type: "ModelSwitched"; provider: string; model: string }
+  | { type: "ThinkingVariantChanged"; variant?: string }
+  | { type: "SessionTitleChanged"; session_id: string; title: string };
 
 // ---------------------------------------------------------------------------
 // Minimal WebSocket interface — lets Node users pass `ws` while browsers
@@ -386,6 +396,8 @@ export interface MewClientEvents {
   "session-history": (data: { messages: Message[] }) => void;
   "model-list": (data: { models: ModelInfo[] }) => void;
   "model-switched": (data: { provider: string; model: string }) => void;
+  "thinking-variant-changed": (data: { variant: string | null }) => void;
+  "session-title-changed": (data: { session_id: string; title: string }) => void;
 
   errorMessage: (data: { message: string }) => void;
   errorEvent: (data: { message: string }) => void;
@@ -605,6 +617,21 @@ export class MewClient {
     });
   }
 
+  /** Set or clear the thinking/reasoning variant. Pass empty string or
+   *  "none" to disable. Resolves when the daemon confirms via
+   *  `thinking-variant-changed`. Returns the resolved variant name, or
+   *  null if thinking was disabled. */
+  setThinkingVariant(variant: string): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
+      const onChanged = (data: { variant: string | null }) => {
+        this.off("thinking-variant-changed", onChanged);
+        resolve(data.variant ?? null);
+      };
+      this.on("thinking-variant-changed", onChanged);
+      this.send({ type: "SetThinkingVariant", variant });
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Event registration
   // -------------------------------------------------------------------------
@@ -752,6 +779,17 @@ export class MewClient {
         this.emit("model-switched", {
           provider: msg.provider,
           model: msg.model,
+        });
+        break;
+      case "ThinkingVariantChanged":
+        this.emit("thinking-variant-changed", {
+          variant: msg.variant ?? null,
+        });
+        break;
+      case "SessionTitleChanged":
+        this.emit("session-title-changed", {
+          session_id: msg.session_id,
+          title: msg.title,
         });
         break;
       case "Error":

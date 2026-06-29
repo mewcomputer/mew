@@ -214,6 +214,20 @@ export class MewClient {
             this.send({ type: "SwitchModel", provider, model });
         });
     }
+    /** Set or clear the thinking/reasoning variant. Pass empty string or
+     *  "none" to disable. Resolves when the daemon confirms via
+     *  `thinking-variant-changed`. Returns the resolved variant name, or
+     *  null if thinking was disabled. */
+    setThinkingVariant(variant) {
+        return new Promise((resolve) => {
+            const onChanged = (data) => {
+                this.off("thinking-variant-changed", onChanged);
+                resolve(data.variant ?? null);
+            };
+            this.on("thinking-variant-changed", onChanged);
+            this.send({ type: "SetThinkingVariant", variant });
+        });
+    }
     // -------------------------------------------------------------------------
     // Event registration
     // -------------------------------------------------------------------------
@@ -347,6 +361,17 @@ export class MewClient {
                 this.emit("model-switched", {
                     provider: msg.provider,
                     model: msg.model,
+                });
+                break;
+            case "ThinkingVariantChanged":
+                this.emit("thinking-variant-changed", {
+                    variant: msg.variant ?? null,
+                });
+                break;
+            case "SessionTitleChanged":
+                this.emit("session-title-changed", {
+                    session_id: msg.session_id,
+                    title: msg.title,
                 });
                 break;
             case "Error":

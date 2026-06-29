@@ -1,5 +1,6 @@
 pub mod app;
 pub mod events;
+pub mod title;
 pub mod ui;
 pub mod widgets;
 

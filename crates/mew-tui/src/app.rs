@@ -65,6 +65,9 @@ pub enum SlashResult {
     /// Apply a permission-mode selection directly (used by `/permissions
     /// <mode>` and by the picker).
     SetPermissionMode(mew_hooks::PermissionMode),
+    /// Set or clear the thinking variant (used by `/thinking <variant>`
+    /// and `/thinking off`).
+    SetThinkingVariant(String),
 }
 
 /// The application's main state.
@@ -547,6 +550,11 @@ impl App {
                 description: "Change the active LLM".into(),
             },
             PickerItem {
+                id: "thinking-variant".into(),
+                label: "Thinking Variant".into(),
+                description: "Set reasoning effort (high, max, off)".into(),
+            },
+            PickerItem {
                 id: "settings".into(),
                 label: "Settings".into(),
                 description: "Configure mew (providers, plugins)".into(),
@@ -682,6 +690,40 @@ impl App {
     pub fn close_picker(&mut self) {
         self.picker = None;
         self.mode = Mode::Normal;
+    }
+
+    /// Open a thinking variant picker. Shows available variants for the
+    /// current model, plus an "Off" option.
+    pub fn open_thinking_variant_picker(&mut self) {
+        let mut items = vec![PickerItem {
+            id: "off".into(),
+            label: "Off".into(),
+            description: "Disable thinking/reasoning".into(),
+        }];
+        // Variant names come from the model list; we stored them as
+        // "provider/model" → thinking_variants in the models vec.
+        // The models vec stores (id, description) pairs. We need to find
+        // the current model's variants. Since we don't have direct access
+        // to the catalog here, we rely on the daemon/main loop having
+        // populated app.models with variant info encoded in the description.
+        // For now, use common variant names as static options.
+        for name in &["high", "max", "thinking"] {
+            items.push(PickerItem {
+                id: name.to_string(),
+                label: name.to_string(),
+                description: format!("{} thinking effort", name),
+            });
+        }
+        self.mode = Mode::CommandPalette;
+        self.picker = Some(PickerState {
+            kind: "thinking_variant".into(),
+            items,
+            filter: String::new(),
+            selected: 0,
+            cursor: 0,
+            scroll: 0,
+            visible_items: PICKER_VISIBLE_ITEMS,
+        });
     }
 
     /// Show a temporary alert that auto-clears after 3 seconds. Pushes
@@ -1459,6 +1501,8 @@ impl App {
         self.input.clear();
         self.cursor = 0;
         self.mode = Mode::Normal;
+        // Re-attach auto-scroll so the user sees the response.
+        self.auto_scroll = true;
         Some(result)
     }
 
@@ -1673,6 +1717,10 @@ impl App {
                 description: "switch model (e.g. /model deepseek-v4-flash)".into(),
             },
             SlashCommand {
+                name: "/thinking".into(),
+                description: "set thinking variant (e.g. /thinking high)".into(),
+            },
+            SlashCommand {
                 name: "/persona".into(),
                 description: "switch persona (e.g. /persona researcher)".into(),
             },
@@ -1733,6 +1781,15 @@ impl App {
                     SlashResult::SwitchModel(id.to_string())
                 } else {
                     SlashResult::OpenModelPicker
+                }
+            }
+            "/thinking" => {
+                if let Some(variant) = arg {
+                    SlashResult::SetThinkingVariant(variant.trim().to_string())
+                } else {
+                    SlashResult::Message(
+                        "usage: /thinking <variant> — e.g. /thinking high, /thinking max, /thinking off".into(),
+                    )
                 }
             }
             "/persona" => {

@@ -74,6 +74,13 @@ pub enum ClientMessage {
         /// Model ID within that provider.
         model: String,
     },
+
+    /// Set or clear the thinking/reasoning variant for the active session.
+    /// Pass an empty string or "none" to disable thinking.
+    SetThinkingVariant {
+        /// Variant name (e.g. "high", "max", "thinking") or empty/none to disable.
+        variant: String,
+    },
 }
 
 /// Info about a single available model, returned by `ListModels`.
@@ -88,6 +95,17 @@ pub struct ModelInfo {
     /// Human-readable description for the picker UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Available thinking/reasoning variants for this model. Empty if the
+    /// model doesn't support configurable thinking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thinking_variants: Vec<ThinkingVariantInfo>,
+}
+
+/// A named thinking/reasoning variant (e.g. "high", "max", "thinking").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThinkingVariantInfo {
+    /// Display name (e.g. "high", "max", "thinking").
+    pub name: String,
 }
 
 /// Session lifecycle state as exposed by the daemon.
@@ -293,6 +311,17 @@ pub enum ServerMessage {
 
     /// Response to `SwitchModel`: confirms the switch succeeded.
     ModelSwitched { provider: String, model: String },
+
+    /// Response to `SetThinkingVariant`: confirms the variant was applied.
+    /// `variant` is `None` when thinking was disabled.
+    ThinkingVariantChanged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<String>,
+    },
+
+    /// The daemon generated a title for the session. Frontends should update
+    /// their session title display.
+    SessionTitleChanged { session_id: String, title: String },
 }
 
 /// A question for `AskUserRequest`.
@@ -1418,5 +1447,95 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn test_roundtrip_set_thinking_variant() {
+        let m = ClientMessage::SetThinkingVariant {
+            variant: "high".into(),
+        };
+        match round_trip(&m) {
+            ClientMessage::SetThinkingVariant { variant } => {
+                assert_eq!(variant, "high");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_thinking_variant_changed() {
+        let m = ServerMessage::ThinkingVariantChanged {
+            variant: Some("max".into()),
+        };
+        match round_trip(&m) {
+            ServerMessage::ThinkingVariantChanged { variant } => {
+                assert_eq!(variant.as_deref(), Some("max"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_thinking_variant_changed_none() {
+        let m = ServerMessage::ThinkingVariantChanged { variant: None };
+        let j = encode_json(&m).unwrap();
+        // variant=None should be skipped in serialization.
+        assert!(!j.contains(r#""variant":null"#));
+        match round_trip(&m) {
+            ServerMessage::ThinkingVariantChanged { variant } => {
+                assert!(variant.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_session_title_changed() {
+        let m = ServerMessage::SessionTitleChanged {
+            session_id: "sess_123".into(),
+            title: "hello world".into(),
+        };
+        match round_trip(&m) {
+            ServerMessage::SessionTitleChanged { session_id, title } => {
+                assert_eq!(session_id, "sess_123");
+                assert_eq!(title, "hello world");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_model_info_with_thinking_variants() {
+        let m = ModelInfo {
+            id: "deepseek/deepseek-v4-flash".into(),
+            provider: "deepseek".into(),
+            model: "deepseek-v4-flash".into(),
+            description: Some("Fast model".into()),
+            thinking_variants: vec![
+                ThinkingVariantInfo {
+                    name: "high".into(),
+                },
+                ThinkingVariantInfo { name: "max".into() },
+            ],
+        };
+        let j = encode_json(&m).unwrap();
+        assert!(j.contains(r#""thinking_variants""#));
+        let parsed: ModelInfo = serde_json::from_str(&j).unwrap();
+        assert_eq!(parsed.thinking_variants.len(), 2);
+        assert_eq!(parsed.thinking_variants[0].name, "high");
+    }
+
+    #[test]
+    fn test_model_info_without_thinking_variants_skips_field() {
+        let m = ModelInfo {
+            id: "test/model".into(),
+            provider: "test".into(),
+            model: "model".into(),
+            description: None,
+            thinking_variants: vec![],
+        };
+        let j = encode_json(&m).unwrap();
+        // Empty vec should be skipped in serialization.
+        assert!(!j.contains(r#""thinking_variants""#));
     }
 }
