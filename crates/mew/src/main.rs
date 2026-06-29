@@ -654,7 +654,7 @@ fn config_cmd(command: ConfigCommands) -> Result<()> {
 
             if !config_path.exists() {
                 let template = "# mew configuration file\n\
-                    # Docs: https://github.com/anomalyco/mew\n\n\
+                    # Docs: https://github.com/mewcomputer/mew\n\n\
                     # default_model = \"deepseek-v4-flash\"\n\n\
                     # [providers.my-provider]\n\
                     # shape = \"openai\"\n\
@@ -1137,6 +1137,7 @@ fn build_session_agent(
     let permission_engine = build_permission_engine(cfg, mode);
 
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
+    agent.set_model_info(model_id, provider_id);
     agent.flagged_files = flagged_files;
     agent.secrets = build_secret_set(cfg);
     agent.set_permission_engine(permission_engine);
@@ -1281,13 +1282,17 @@ async fn run_daemon(
                 .strip_prefix("sess_")
                 .and_then(|s| ulid::Ulid::from_string(s).ok());
             Ok((
-                Agent::new(
-                    provider,
-                    dispatcher,
-                    Some(params.writer),
-                    Vec::new(),
-                    session_id,
-                ),
+                {
+                    let mut a = Agent::new(
+                        provider,
+                        dispatcher,
+                        Some(params.writer),
+                        Vec::new(),
+                        session_id,
+                    );
+                    a.set_model_info("fake", "fake");
+                    a
+                },
                 Some("fake".to_string()),
                 Some("fake".to_string()),
             ))
@@ -2103,6 +2108,7 @@ async fn run_tui(
         tools,
         None,
     );
+    agent.set_model_info(&model_id, &provider_id);
     agent.flagged_files = flagged_files;
     agent.set_pending_persona_switch(pending_persona_switch.clone());
     agent.set_personas(loaded_personas.clone());
@@ -2391,6 +2397,7 @@ async fn run_tui(
                                     ) {
                                         Ok(new_provider) => {
                                             agent.provider = new_provider;
+                                            agent.set_model_info(new_model_id, new_provider_id);
                                             app.status.model = new_model_id.to_string();
                                             app.status.provider = new_provider_id.to_string();
                                             if let Some(c) = cat {
@@ -2636,6 +2643,7 @@ async fn run_tui(
                             match build_provider(cfg, cat, new_provider_id, new_model_id, raw) {
                                 Ok(new_provider) => {
                                     agent.provider = new_provider;
+                                    agent.set_model_info(new_model_id, new_provider_id);
                                     app.status.model = new_model_id.to_string();
                                     app.status.provider = new_provider_id.to_string();
                                     if let Some(c) = cat {
@@ -3486,6 +3494,7 @@ async fn build_and_run(
         tools,
         None,
     );
+    agent.set_model_info(&model_id, &provider_id);
     agent.set_pending_persona_switch(pending_persona_switch.clone());
     agent.set_personas(loaded_personas.clone());
     agent.set_pending_persona_switch(pending_persona_switch.clone());

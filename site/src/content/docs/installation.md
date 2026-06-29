@@ -18,7 +18,7 @@ API calls to your chosen provider.
 If you have Rust installed, the fastest path:
 
 ```sh
-cargo install --git https://github.com/natalie/mew mew
+cargo install --git https://github.com/mewcomputer/mew mew
 ```
 
 This builds and installs the `mew` binary to `~/.cargo/bin/mew`. Make sure
@@ -29,7 +29,7 @@ This builds and installs the `mew` binary to `~/.cargo/bin/mew`. Make sure
 Clone and build:
 
 ```sh
-git clone https://github.com/natalie/mew.git
+git clone https://github.com/mewcomputer/mew.git
 cd mew
 cargo build --release -p mew
 ```
