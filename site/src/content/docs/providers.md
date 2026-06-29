@@ -125,6 +125,8 @@ Available variants depend on the model:
 | MiniMax M3 | `thinking`, `none` |
 | Grok-3-mini | `low`, `high` |
 
+Note that if you use a supported provider that provides thinking variants (e.g. umans), we will use those.
+
 Set a variant with:
 
 ```
