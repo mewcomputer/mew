@@ -27,7 +27,7 @@ export default defineConfig({
       social: [
         {
           label: "GitHub",
-          href: "https://github.com/natalie/mew",
+          href: "https://github.com/mewcomputer/mew",
           icon: "github",
         },
       ],
