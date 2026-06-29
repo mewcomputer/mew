@@ -141,6 +141,64 @@ Build, clippy, 130 tests pass.
 
 ---
 
+# Progress — 2026-06-29
+
+## omp.sh inspiration doc — COMPLETE
+
+Researched `omp` (oh-my-pi / `omp.sh`) and produced a comprehensive
+compare-and-contrast document cataloging improvements mew could adopt.
+
+**Doc:** `docs/omp_inspirations.md`
+- Executive summary of the three highest-leverage themes.
+- Feature catalog organized by domain, each with:
+  - What omp does
+  - mew's current state
+  - Pro-adoption and anti-adoption arguments
+  - Verdict / effort assessment
+- Prioritized shortlist (P0–P3) for roadmap planning.
+- Appendix linking omp sources and relevant mew source files.
+
+**Key themes identified:**
+1. Move core tools in-process (grep, bash, file cache) instead of forking external binaries.
+2. Improve the edit format to be model-friendly and stale-file safe.
+3. Add durable cross-session memory and runtime rule/guardrail injection.
+
+**Highest-priority quick wins flagged:** in-process `grep`, shell completions,
+and safer `edit` anchoring. Debugger/LSP integrations were included but
+down-ranked as heavier bets per your feedback.
+
+---
+
+# Progress — 2026-06-29
+
+## Polytoken inspiration doc — COMPLETE
+
+Researched Polytoken docs and compared them to mew's templates, personas,
+skills, subagents, tools, and VFS. Noted that this repo already contains
+`.polytoken/permissions.local.yaml`, so the team is already exploring
+Polytoken.
+
+**Doc:** `docs/polytoken_inspirations.md`
+- Compare-and-contrast catalog organized by templates, facets/personas,
+  skills, subagents, tools, project context, VFS, and project variables.
+- Each entry includes pro-adoption and anti-adoption arguments.
+- Prioritized shortlist (P0–P3) for roadmap planning.
+
+**Key themes identified:**
+1. Extend MiniJinja templating from personas to skills, subagents, and
+   AGENTS.md (opt-in).
+2. Expand template context variables and functions (`model_variant`,
+   `has_tool`, `source_control`, `project_vars`).
+3. Formalize the planner/builder workflow with plan-specific tools
+   (`write_plan`, `edit_plan`, `handoff_plan`).
+4. Add `web_fetch` as a smaller first step toward web capabilities.
+
+**Highest-priority quick wins:** accept `polytoken:` frontmatter alias,
+opt-in skill/subagent templating, expand persona template variables, and
+project variables file.
+
+---
+
 # Progress — 2026-06-27
 
 ## B1 web UI polish — COMPLETE

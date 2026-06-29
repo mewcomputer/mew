@@ -1,0 +1,14 @@
+:root {
+  /* base font */
+  --sl-font: "MiSans", sans-serif;
+  --sl-font-mono: "Ioskeley Mono", monospace;
+}
+/* title fonts (h1-h6) should be banga */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: "Banga", sans-serif !important;
+}

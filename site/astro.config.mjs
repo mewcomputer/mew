@@ -2,6 +2,7 @@ import { defineConfig } from "astro/config";
 import react from "@astrojs/react";
 import tailwindcss from "@tailwindcss/vite";
 import starlight from "@astrojs/starlight";
+import starlightDotMd from "starlight-dot-md";
 
 // Starlight docs live at /docs. The landing page stays at /.
 // Starlight uses its own routing under /docs and doesn't interfere
@@ -15,8 +16,20 @@ export default defineConfig({
         src: "./src/assets/mew-logo.svg",
         replacesTitle: false,
       },
+      plugins: [starlightDotMd({ includeFrontmatter: false })],
+      customCss: [
+        // Relative path to your @font-face CSS file.
+        "./src/styles/banga.css",
+        "./src/styles/ioskeley.css",
+        "./src/styles/misans.css",
+        "./src/styles/starlight.css",
+      ],
       social: [
-        { label: "GitHub", href: "https://github.com/natalie/mew", icon: "github" },
+        {
+          label: "GitHub",
+          href: "https://github.com/natalie/mew",
+          icon: "github",
+        },
       ],
       sidebar: [
         {
@@ -25,6 +38,8 @@ export default defineConfig({
             { label: "Installation", slug: "installation" },
             { label: "Quick Start", slug: "quick-start" },
             { label: "Configuration", slug: "configuration" },
+            { label: "Context Files", slug: "context-files" },
+            { label: "Sessions", slug: "sessions" },
           ],
         },
         {
@@ -32,8 +47,14 @@ export default defineConfig({
           items: [
             { label: "Slash Commands", slug: "slash-commands" },
             { label: "Keyboard Shortcuts", slug: "keyboard-shortcuts" },
+            { label: "Tips & Tricks", slug: "tips-and-tricks" },
             { label: "Providers", slug: "providers" },
+            { label: "Permissions", slug: "permissions" },
+            { label: "Tools", slug: "tools" },
             { label: "Personas", slug: "personas" },
+            { label: "Skills", slug: "skills" },
+            { label: "Subagents", slug: "subagents" },
+            { label: "Plugins", slug: "plugins" },
             { label: "MCP Servers", slug: "mcp-servers" },
             { label: "Web UI", slug: "web-ui" },
           ],

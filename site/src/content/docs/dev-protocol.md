@@ -6,60 +6,156 @@ description: Wire protocol between the daemon and frontends.
 The daemon communicates with frontends (TUI, web UI) over WebSocket using
 JSON-encoded messages. The protocol is defined in `mew-protocol`.
 
-## Message types
+## Wire format
 
-### Client → Server (`ClientMessage`)
+Messages are tagged enums serialized with `serde(tag = "type")`:
 
-| Message | Purpose |
-|---------|---------|
-| `NewSession` | Create a fresh session |
-| `AttachSession` | Attach to an existing session by ID |
-| `ListSessions` | List all known sessions |
-| `Prompt` | Send a user prompt (with optional attachments) |
-| `Cancel` | Cancel the current turn |
-| `PermissionResponse` | Respond to a permission request |
-| `AskUserResponse` | Respond to an ask-user question |
-| `SlashCommand` | Run a slash command on the daemon |
-| `ListModels` | List available models |
-| `SwitchModel` | Switch to a different model |
-| `SetThinkingVariant` | Set or clear the thinking variant |
+```json
+{"type": "Prompt", "text": "hello", "attachments": []}
+```
 
-### Server → Client (`ServerMessage`)
+```json
+{"type": "SessionReady", "session_id": "sess_01J...", "model": "deepseek-v4-flash"}
+```
 
-| Message | Purpose |
-|---------|---------|
-| `SessionReady` | Session created/attached, ready for prompts |
-| `Error` | Error before or outside a session turn |
-| `Provider` | Raw provider streaming event (text, tool calls, etc.) |
-| `ToolStart` / `ToolEnd` | Tool execution lifecycle |
-| `ToolProgress` | Intermediate tool output while running |
-| `PartUpdated` | A part's content or state changed |
-| `PermissionRequest` | Request user approval for a tool call |
-| `AskUserRequest` | Ask the user free-text questions |
-| `SubagentStart` / `SubagentStatus` / `SubagentEnd` | Subagent lifecycle |
-| `TodosUpdated` | Session todo list changed |
-| `SessionList` | Response to `ListSessions` |
-| `SessionHistory` | Full message replay for a resumed session |
-| `SessionCleared` | Context cleared (broadcast to all clients) |
-| `ModelList` | Response to `ListModels` |
-| `ModelSwitched` | Confirms model switch |
-| `ThinkingVariantChanged` | Confirms thinking variant change |
-| `SessionTitleChanged` | Daemon generated a session title |
-| `SlashResult` | Slash command produced text output |
-| `RequestResolved` | A pending request was resolved by any client |
+Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
+
+## Client → Server messages
+
+| Message | Fields | Purpose |
+|---------|--------|---------|
+| `NewSession` | `cwd?: String` | Create a fresh session |
+| `AttachSession` | `session_id: String` | Attach to an existing session |
+| `ListSessions` | | List all known sessions |
+| `Prompt` | `text: String`, `attachments: Vec<Attachment>` | Send a user prompt |
+| `Cancel` | | Cancel the current turn |
+| `PermissionResponse` | `request_id: u64`, `decision: PermissionDecision` | Respond to a permission prompt |
+| `AskUserResponse` | `request_id: u64`, `answers: Vec<String>` | Respond to an ask-user question |
+| `SlashCommand` | `command: String` | Run `/clear`, `/compact`, etc. on the daemon |
+| `ListModels` | | Request the available model list |
+| `SwitchModel` | `provider: String`, `model: String` | Switch to a different model |
+| `SetThinkingVariant` | `variant: String` | Set or clear thinking variant ("off" or "none" disables) |
+
+## Server → Client messages
+
+### Session lifecycle
+
+| Message | Fields | Purpose |
+|---------|--------|---------|
+| `SessionReady` | `session_id`, `model?`, `provider?` | Session ready for prompts |
+| `SessionHistory` | `messages: Vec<Message>` | Full message replay on resume |
+| `SessionList` | `sessions: Vec<SessionInfo>` | Response to `ListSessions` |
+| `SessionCleared` | | Context cleared (broadcast to all clients) |
+| `SessionTitleChanged` | `session_id`, `title` | Daemon generated a title |
+
+### Streaming events
+
+| Message | Fields | Purpose |
+|---------|--------|---------|
+| `Provider` | `event: ProviderEventWire` | Raw provider event (PartStart, PartDelta, etc.) |
+| `ToolStart` | `call_id` | Tool execution started |
+| `ToolEnd` | `call_id`, `success` | Tool execution finished |
+| `ToolProgress` | `call_id`, `chunk` | Intermediate tool output |
+| `PartUpdated` | `part_id`, `part` | A part's content or state changed |
+
+### Request/response pairs
+
+| Message | Fields | Purpose |
+|---------|--------|---------|
+| `PermissionRequest` | `request_id`, `tool_name`, `input` | Ask user to approve a tool call |
+| `AskUserRequest` | `request_id`, `call_id`, `questions` | Ask user free-text questions |
+| `RequestResolved` | `request_id` | A pending request was resolved by any client |
+
+### Subagent events
+
+| Message | Fields | Purpose |
+|---------|--------|---------|
+| `SubagentStart` | `parent_call_id`, `name`, `child_session_id`, `display_name?` | Subagent spawned |
+| `SubagentStatus` | `parent_call_id`, `tool_name`, `message` | Subagent progress update |
+| `SubagentEnd` | `parent_call_id`, `child_session_id`, `outcome` | Subagent finished |
+
+### Other
+
+| Message | Fields | Purpose |
+|---------|--------|---------|
+| `ModelList` | `models: Vec<ModelInfo>` | Response to `ListModels` |
+| `ModelSwitched` | `provider`, `model` | Confirms model switch |
+| `ThinkingVariantChanged` | `variant?: String` | Confirms thinking variant (null = disabled) |
+| `TodosUpdated` | `todos: Vec<Todo>` | Session todo list changed |
+| `PersonaSwitchRequested` | `name` | `switch_persona` tool was called |
+| `JobUpdate` | `job_id`, `command`, `state` | Background shell job changed |
+| `SlashResult` | `text` | Slash command produced text output |
+| `Error` | `message` | Error before or outside a turn |
+| `ErrorEvent` | `message` | Terminal error during a turn |
 
 ## Session model
 
 The daemon owns sessions via `SessionManager`. Connections attach to
-sessions. A `Session` broadcasts events to all attached clients via
-per-client `mpsc::UnboundedSender<ServerMessage>`.
+sessions. Key fields on `Session`:
 
-Only one turn runs at a time per session (serialized via `turn_lock`).
-A fresh `CancellationToken` is created per turn so cancelling one turn
-does not poison future turns.
+```rust
+pub struct Session {
+    pub id: String,
+    pub agent: Mutex<Agent>,
+    pub turn_lock: Mutex<()>,           // serializes turns
+    pub clients: Mutex<Vec<(u64, Sender<ServerMessage>)>>,  // broadcast targets
+    pub pending_permissions: Mutex<HashMap<u64, oneshot::Sender<PermissionDecision>>>,
+    pub pending_ask_user: Mutex<HashMap<u64, oneshot::Sender<Vec<String>>>>,
+    pub current_turn_cancel: Mutex<Option<CancellationToken>>,
+    pub model: Mutex<Option<String>>,
+    pub provider: Mutex<Option<String>>,
+}
+```
 
-Permission and ask-user requests go to all clients. Any client can
-respond. `RequestResolved` dismisses the modal on all frontends.
+- **Broadcasting**: `session.broadcast(msg)` sends to all attached clients
+  and removes any that have disconnected.
+- **Turn serialization**: `turn_lock` ensures only one turn runs at a time.
+  A second `Prompt` while a turn is in progress receives an error.
+- **Cancellation**: each turn gets a fresh `CancellationToken`. `Cancel`
+  from any client cancels the current turn.
+- **Permission/ask-user requests**: go to all clients. Any client can
+  respond. `RequestResolved` dismisses the modal everywhere.
+
+## Connection lifecycle
+
+```
+Client connects
+  → NewSession or AttachSession
+  → SessionReady + SessionHistory
+  → Prompt
+  → Provider events stream (PartStart → PartDelta → ... → MessageEnd)
+  → (optional) PermissionRequest → PermissionResponse → RequestResolved
+  → (optional) ToolStart → ToolProgress → ToolEnd
+  → (optional) more turns
+Client disconnects
+  → detach_client
+  → if last client: cancel turn, remove session from active
+```
+
+Idle sessions can be resumed from disk. The session writer persists every
+message to `~/.local/share/mew/sessions/<id>/session.jsonl`. On resume,
+`Agent::load_messages` replays the history.
+
+## AgentEvent → ServerMessage translation
+
+`translate_event` (`mew-daemon/src/lib.rs`) converts each `AgentEvent` into
+zero or more `ServerMessage`s:
+
+- `AgentEvent::Provider(pe)` → `ServerMessage::Provider { event: ProviderEventWire::from(pe) }`
+- `AgentEvent::PermissionRequest { call, tx }` → assigns a `request_id`,
+  stashes the `oneshot::Sender` in `session.pending_permissions`, emits
+  `ServerMessage::PermissionRequest`
+- `AgentEvent::AskUser { questions, tx }` → same pattern with `pending_ask_user`
+
+## ServerMessage → AgentEvent translation
+
+For the TUI daemon-client (`mew-daemon/src/client.rs`), `translate_server_message`
+reverses the translation. Channel-bearing messages reconstruct `oneshot`
+channels and return `AgentEvent::PermissionRequest { call, tx }` with a
+fresh `oneshot::Sender` that the client maps to `ClientMessage::PermissionResponse`.
+
+Messages that don't map to `AgentEvent` (model list, session list, etc.)
+return `Vec::new()` and are handled by the `DaemonClient` directly.
 
 ## Adding a new message type
 
@@ -67,19 +163,6 @@ respond. `RequestResolved` dismisses the modal on all frontends.
 2. Add a roundtrip test in the protocol test module
 3. Handle the new message in `handle_connection` (`mew-daemon/src/lib.rs`)
 4. Update `translate_server_message` in `mew-daemon/src/client.rs` if it's
-   a `ServerMessage` that the TUI daemon-client needs to handle
+   a `ServerMessage` the TUI daemon-client needs to handle
 5. Add the TypeScript type + dispatch to `mew-web-client/src/index.ts`
 6. Wire the store action in `mew-web-ui/src/stores/session.ts`
-
-## Connection lifecycle
-
-```
-Client connects → NewSession/AttachSession → SessionReady + SessionHistory
-  → Prompt → Provider events stream → MessageEnd
-  → (optional) PermissionRequest → PermissionResponse → RequestResolved
-  → (optional) more turns
-Client disconnects → detach_client → if last client: cancel turn, remove session
-```
-
-Idle sessions can be resumed from disk via `Agent::load_messages`. The
-session writer persists every message to `~/.local/share/mew/sessions/<id>/session.jsonl`.

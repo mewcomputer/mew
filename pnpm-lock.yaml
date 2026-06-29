@@ -135,6 +135,9 @@ importers:
       react-dom:
         specifier: ^19.2.7
         version: 19.2.7(react@19.2.7)
+      starlight-dot-md:
+        specifier: ^0.2.1
+        version: 0.2.1(astro@7.0.3(@astrojs/markdown-remark@7.2.0)(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)(@types/node@24.13.2)(jiti@2.7.0)(rollup@4.62.2)(yaml@2.9.0))
       tailwindcss:
         specifier: ^4.3.1
         version: 4.3.1
@@ -3331,6 +3334,11 @@ packages:
   stackback@0.0.2:
     resolution: {integrity: sha512-1XMJE5fQo1jGH6Y/7ebnwPOBEkIEnT4QF32d5R1+VXdXveM0IBMJt8zfaxX1P3QhVwrYe+576+jkANtSS2mBbw==}
 
+  starlight-dot-md@0.2.1:
+    resolution: {integrity: sha512-HipXD0DIaeNldvih+gJpIRhFlH2VdYJYnCG7GzeZNkYnUXAanAMSMAgYW9OZW6ZR0SL3+OdN8U1NhX7bjXloMw==}
+    peerDependencies:
+      astro: '>=5.0.0'
+
   std-env@3.10.0:
     resolution: {integrity: sha512-5GS12FdOZNliM5mAOxFRg7Ir0pWz8MdpYm6AY6VPkGpbA7ZzmbzNcBJQ0GPvvyWgcY7QAhCgf9Uy89I03faLkg==}
 
@@ -4013,6 +4021,11 @@ packages:
   yaml@2.7.1:
     resolution: {integrity: sha512-10ULxpnOCQXxJvBgxsn9ptjq6uviG/htZKk9veJGhlqn3w/DxQ631zFF+nlQXLwmImeS5amR2dl2U8sg6U9jsQ==}
     engines: {node: '>= 14'}
+    hasBin: true
+
+  yaml@2.8.3:
+    resolution: {integrity: sha512-AvbaCLOO2Otw/lW5bmh9d/WEdcDFdQp2Z2ZUH3pX9U2ihyUY0nvLv7J6TrWowklRGPYbB/IuIMfYgxaCPg5Bpg==}
+    engines: {node: '>= 14.6'}
     hasBin: true
 
   yaml@2.9.0:
@@ -7661,6 +7674,12 @@ snapshots:
 
   stackback@0.0.2: {}
 
+  starlight-dot-md@0.2.1(astro@7.0.3(@astrojs/markdown-remark@7.2.0)(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)(@types/node@24.13.2)(jiti@2.7.0)(rollup@4.62.2)(yaml@2.9.0)):
+    dependencies:
+      astro: 7.0.3(@astrojs/markdown-remark@7.2.0)(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)(@types/node@24.13.2)(jiti@2.7.0)(rollup@4.62.2)(yaml@2.9.0)
+      picomatch: 4.0.4
+      yaml: 2.8.3
+
   std-env@3.10.0: {}
 
   stream-replace-string@2.0.0: {}
@@ -8231,6 +8250,8 @@ snapshots:
       yaml: 2.7.1
 
   yaml@2.7.1: {}
+
+  yaml@2.8.3: {}
 
   yaml@2.9.0: {}
 

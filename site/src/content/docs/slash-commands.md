@@ -9,11 +9,14 @@ Type any of these in the input box (they autocomplete as you type).
 
 | Command | Description |
 |---------|-------------|
-| `/clear` | Clear all messages from the current session |
+| `/clear` | Clear the current context (persists to disk) |
 | `/compact` | Force context compaction on the next turn |
 | `/rewind <n>` | Rewind to keep only the first N messages |
-| `/sessions` | List previous sessions |
+| `/rewind` | List recent messages with indices |
+| `/sessions` | List previous sessions (up to 20) |
 | `/resume <id>` | Resume a previous session by ID |
+
+See [Sessions](/docs/sessions/) for details on persistence, resume, and rewind.
 
 ## Model & reasoning
 
@@ -38,6 +41,8 @@ Type any of these in the input box (they autocomplete as you type).
 |---------|-------------|
 | `/permissions` | Open the permission mode picker |
 | `/permissions <mode>` | Switch directly: `standard`, `permissive`, `auto`, `auto_plus`, `dangerous` |
+
+See [Permissions](/docs/permissions/) for mode details, rules, and sandboxing.
 
 ## Other
 
