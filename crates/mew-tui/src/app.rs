@@ -1381,7 +1381,7 @@ impl App {
             if li == logical_line {
                 let dw = unicode_width::UnicodeWidthStr::width(line);
                 let col_clamped = col_in_line.min(dw);
-                let row_in_line = if w == 0 { 0 } else { col_clamped / w };
+                let row_in_line = col_clamped.checked_div(w).unwrap_or(0);
                 return (visual_row + row_in_line, col_clamped - row_in_line * w);
             }
             let dw = unicode_width::UnicodeWidthStr::width(line);
