@@ -38,6 +38,17 @@ export default defineConfig({
             { label: "Web UI", slug: "web-ui" },
           ],
         },
+        {
+          label: "Development",
+          items: [
+            { label: "Architecture", slug: "dev-architecture" },
+            { label: "Adding a Provider", slug: "dev-providers" },
+            { label: "Adding a Tool", slug: "dev-tools" },
+            { label: "Daemon Protocol", slug: "dev-protocol" },
+            { label: "Testing", slug: "dev-testing" },
+            { label: "Web UI Development", slug: "dev-web" },
+          ],
+        },
       ],
     }),
     react(),

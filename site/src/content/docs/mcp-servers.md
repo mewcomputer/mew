@@ -9,8 +9,10 @@ registered alongside the built-in tools.
 
 ## Configuration
 
-MCP servers are configured in `mcp.json` in your working directory (Claude
-Code format):
+MCP servers are configured in `mcp.json` in your working directory. The
+code also checks `.mcp.json`, `.mew/mcp.json`, and `.mew/.mcp.json`.
+
+### Stdio transport
 
 ```json
 {
@@ -18,13 +20,21 @@ Code format):
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-    },
-    "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": {
-        "GITHUB_TOKEN": "ghp_..."
-      }
+    }
+  }
+}
+```
+
+### HTTP transport
+
+For servers reachable over HTTP, use `type` and `url` instead of `command`:
+
+```json
+{
+  "mcpServers": {
+    "remote": {
+      "type": "http",
+      "url": "https://example.com/mcp"
     }
   }
 }
@@ -32,8 +42,9 @@ Code format):
 
 ## How it works
 
-1. At startup, mew reads `mcp.json` and spawns each server as a subprocess.
-2. Each server communicates via stdin/stdout using the MCP JSON-RPC protocol.
+1. At startup, mew reads `mcp.json` and connects to each server.
+2. Stdio servers are spawned as subprocesses communicating via stdin/stdout
+   using the MCP JSON-RPC protocol. HTTP servers are contacted directly.
 3. The server's tools are discovered and registered in the agent's tool map.
 4. When the model calls an MCP tool, mew forwards the request to the server
    and streams the response back.
@@ -45,6 +56,5 @@ The sidebar shows MCP server connection status and tool count. Press
 
 ## Permissions
 
-MCP tools follow the same permission system as built-in tools. The
-`sensitivity()` returned by the MCP server determines whether a tool is
-auto-allowed (`ReadOnly`) or requires a prompt (`Mutating`/`Dangerous`).
+All MCP tools are treated as `Mutating` sensitivity, meaning they always
+require a permission prompt (subject to your permission mode and rules).

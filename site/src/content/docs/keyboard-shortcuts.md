@@ -30,7 +30,8 @@ Press `?` in the TUI to toggle the shortcuts overlay at any time.
 | `Ctrl+K` | Delete from cursor to end of line |
 | `Ctrl+U` | Clear entire input |
 | `Ctrl+Z` | Undo |
-| `Ctrl+Shift+Z` | Redo |
+| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo |
+| `Ctrl+S` | Forward search through input history |
 | `Alt+Left` / `Alt+Right` | Move word left / right |
 | `Alt+Backspace` | Delete word backward |
 | `Up` / `Down` | Navigate between input lines / history |
@@ -45,6 +46,8 @@ Press `?` in the TUI to toggle the shortcuts overlay at any time.
 | `Ctrl+T` | Toggle reasoning/thinking block expansion |
 | `Ctrl+O` | Toggle bash output expansion |
 | `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | Toggle sidebar sections (context / tools / MCP) |
+| `x` | Cancel most recently started subagent (when input empty) |
+| `@` | Open file picker for @-mentions |
 
 ## Mouse
 

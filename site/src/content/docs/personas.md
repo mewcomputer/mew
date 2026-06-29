@@ -9,10 +9,29 @@ restrict which tools are available. They're loaded at startup from
 
 ## Discovery
 
-Personas are discovered from (earlier wins on duplicate name):
+Personas are searched in project-scoped and global-scoped directories.
+Project paths are walked from cwd up to the git root. Earlier paths win
+on duplicate names.
 
-1. `<cwd→git-root>/.mew/personas/<name>/PERSONA.md`
-2. `~/.config/mew/personas/<name>/PERSONA.md`
+**Project paths** (walked cwd to git root):
+
+1. `.mew/personas/<name>/PERSONA.md`
+2. `.opencode/personas/<name>/PERSONA.md`
+3. `.claude/personas/<name>/PERSONA.md`
+4. `.agents/personas/<name>/PERSONA.md`
+
+**Global paths:**
+
+5. `~/.config/mew/personas/<name>/PERSONA.md`
+6. `~/.config/opencode/personas/<name>/PERSONA.md`
+7. `~/.claude/personas/<name>/PERSONA.md`
+8. `~/.agents/personas/<name>/PERSONA.md`
+
+## Built-in personas
+
+mew ships with two built-in personas: `planner` and `builder`. User-defined
+personas with the same name override them. Both are always available even
+without any persona files on disk.
 
 ## Format
 
@@ -40,10 +59,12 @@ synthesizing findings. Be thorough but concise.
 | Field | Required | Description |
 |-------|----------|-------------|
 | `name` | Yes | Persona identifier (used in `/persona <name>`) |
-| `description` | Yes | Short description shown in the persona list |
+| `description` | No | Short description shown in the persona list |
 | `mew.model` | No | Pin a `provider/model` pair (overrides session default) |
 | `mew.tools` | No | Tool allowlist: `[]` (no tools), `[read, bash]` (whitelist), or absent (all tools) |
 | `mew.tools_deny` | No | Tools to exclude from the allowlist |
+| `mew.skills` | No | Skill allowlist: `null` (all skills), `[skill1, skill2]` (whitelist), or `[]` (hide all) |
+| `mew.template` | No | When `true`, render body as a minijinja template. Exposes `supports_vision`, `tools`, `has_tool(name)`, `persona_name` |
 
 ## Switching personas
 

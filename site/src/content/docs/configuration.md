@@ -8,7 +8,7 @@ mew is configured via `~/.config/mew/config.toml` (macOS:
 
 ## Config sources (later wins)
 
-1. Built-in provider defaults (`opencode-zen`, `opencode-go`, `z-ai`, `deepseek`)
+1. Built-in provider defaults (`opencode-zen`, `opencode-go`, `z-ai`, `deepseek`, `umans`)
 2. `config.toml`
 3. Environment variables with `MEW_` prefix (`MEW_DEFAULT_MODEL`,
    `MEW_WORKSPACE__ROOTS`, `__` = nested path)

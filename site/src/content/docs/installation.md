@@ -16,7 +16,7 @@ and connects to LLM providers you configure.
 ```sh
 git clone https://github.com/natalie/mew.git
 cd mew
-cargo build --release
+cargo build --release -p mew
 ```
 
 The binary will be at `target/release/mew`. Copy it to your PATH:

@@ -46,5 +46,5 @@ Type any of these in the input box (they autocomplete as you type).
 | `/help` | Show available commands |
 | `/cost` | Show cost breakdown (tokens, $) |
 | `/todo` | Show the session todo list |
-| `/mouse` | Toggle mouse capture for text selection |
-| `/quit` | Exit mew |
+| `/mouse` `/m` | Toggle mouse capture for text selection |
+| `/quit` `/q` | Exit mew |

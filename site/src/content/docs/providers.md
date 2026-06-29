@@ -81,8 +81,11 @@ variants depend on the model:
 | DeepSeek V4 | `high`, `max` |
 | GLM 5.2 | `high`, `max` |
 | GLM 5/5.1 | `thinking` |
-| GPT-5.2 | `minimal`, `low`, `medium`, `high` |
-| Claude Opus 4.7+ | `low`, `medium`, `high`, `xhigh`, `max` |
+| GPT-5 family | `minimal`, `low`, `medium`, `high` |
+| Claude Opus 4.7+ / Fable | `low`, `medium`, `high`, `xhigh`, `max` |
 | Claude Sonnet 4.6 | `low`, `medium`, `high`, `max` |
+| MiMo v2.5 | `thinking` |
+| MiniMax M3 | `thinking`, `none` |
+| Grok-3-mini | `low`, `high` |
 
 Set with `/thinking <variant>` or `Ctrl+P` → "Thinking Variant".
