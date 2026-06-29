@@ -31,19 +31,22 @@ description: Power-user features and workflows for mew.
 ## Session management
 
 - **History**: `/sessions` lists previous sessions with timestamps.
-  `/resume <id>` resumes one.
+  `/resume <id>` resumes one. See [Sessions](/docs/sessions/).
 - **Rewind**: `/rewind <n>` truncates to the first N messages. Use
   `/rewind` with no args to see a list with snippets.
-- **Clear**: `/clear` wipes the conversation entirely (persists to disk).
+- **Clear**: `/clear` wipes the conversation context (persists to disk).
   `/compact` forces context compaction on the next turn.
+
+Clearing preserves permission grants. If you approved a tool for the
+session, that approval survives `/clear`.
 
 ## Model switching
 
 - **Quick switch**: `/model deepseek-v4-flash` switches without leaving
   the keyboard. `/model` alone opens the picker.
 - **Thinking variants**: `/thinking high` sets the reasoning effort.
-  `/thinking off` disables it. Or use `Ctrl+P` → "Thinking Variant" and
-  press `Ctrl+P` repeatedly to cycle through options.
+  `/thinking off` disables it. Or use `Ctrl+P` and select "Thinking
+  Variant", then press `Ctrl+P` repeatedly to cycle through options.
 - **Cost tracking**: `/cost` shows accumulated token counts and estimated
   cost for the session.
 
@@ -57,7 +60,67 @@ description: Power-user features and workflows for mew.
 
 ## Terminal title
 
-When streaming, the terminal tab title shows `mew — thinking…`. When idle,
-it shows `mew`. This helps you tell when a response is done from another
-tab. Logs are redirected to `/tmp/mew-<pid>.log` so they don't corrupt the
-TUI display.
+When streaming, the terminal tab title shows `mew - thinking...`. When
+idle, it shows `mew`. This helps you tell when a response is done from
+another tab. Logs are redirected to `/tmp/mew-<pid>.log` so they don't
+corrupt the TUI display.
+
+## Prompting patterns
+
+### Be specific about scope
+
+The agent has filesystem access and tools. Tell it what to focus on:
+
+```
+Fix the off-by-one in the pagination logic in src/api/list.rs.
+Don't touch the database layer.
+```
+
+### Ask for investigation first
+
+For unfamiliar code, ask the agent to investigate before making changes:
+
+```
+Find where the session timeout is configured and explain how it works.
+Don't change anything yet.
+```
+
+### Use subagents for heavy research
+
+If a task involves scanning many files, delegate it so the results don't
+fill your main context:
+
+```
+Use the researcher subagent to find all places we construct SQL queries
+and report back which ones use parameterized queries.
+```
+
+See [Subagents](/docs/subagents/) for the built-in options.
+
+### Break work into phases
+
+Use the planner/builder workflow for complex tasks:
+
+1. `/persona planner` to investigate and write a plan
+2. Review the plan in `PLAN.md`
+3. `/persona builder` to execute it
+
+See [Personas](/docs/personas/) for details.
+
+## Permission workflow
+
+If you're doing repetitive work that needs many tool approvals:
+
+1. Start in `standard` mode to review each tool call.
+2. Once you trust the pattern, switch to `permissive` with
+   `/permissions permissive` to auto-allow writes and edits.
+3. For full automation, use `/permissions auto` to let the classifier
+   decide each call.
+
+Switch back to `standard` when you're done:
+
+```
+/permissions standard
+```
+
+See [Permissions](/docs/permissions/) for the full mode reference.

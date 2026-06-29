@@ -1,5 +1,61 @@
 # Progress — 2026-06-29
 
+## Docs site expansion — fill out thin pages, add missing pages
+
+**Problem**: The docs site was a sketch. Pages were accurate but skeletal:
+no field references, no examples, missing pages for features users hit daily.
+
+**New pages** (3):
+- `site/src/content/docs/sessions.md` — session lifecycle, storage format,
+  `/sessions` `/resume` `/rewind` `/clear` `/compact`. Verified against
+  `mew-session` crate, `app.rs` slash handlers, and `main.rs` dispatch.
+- `site/src/content/docs/permissions.md` — full permission mode reference,
+  declarative rules, workspace sandboxing (agent layer + escape tier),
+  secret file guard, secret redaction, auto classifier config. Verified
+  against `mew-config/src/permissions.rs` and `lib.rs`.
+- `site/src/content/docs/tools.md` — user-facing tool reference with every
+  built-in tool, sensitivity, and description. Verified against `mew-tools`
+  and `build_tools()` in `main.rs`.
+
+**Expanded pages** (12):
+- `installation.md` — cargo install, build from source, install recipes,
+  subcommand reference, binary list.
+- `quick-start.md` — TUI layout diagram with ASCII art, orientation for
+  what each area does, cost review step.
+- `configuration.md` — full field reference for every config section,
+  env var table, state.toml fields, credential resolution order.
+- `slash-commands.md` — added `/rewind` (no-arg variant), cross-references
+  to Sessions and Permissions pages.
+- `providers.md` — credential env var per provider, router decision logic,
+  thinking variant meaning, catalog overrides.
+- `permissions.md` — (new, see above)
+- `personas.md` — planner/builder workflow, template variables
+  (`supports_vision`, `persona_name`, `tools`, `denied_tools`), transclusion,
+  worked template example. Verified against `mew-personas` and `mew-prompts`.
+- `skills.md` — when to use a skill vs context file, how the agent decides
+  to load, writing effective descriptions, frontmatter reference. Removed
+  inaccurate "built-in skills" section (those were Polytoken-specific).
+- `subagents.md` — what the parent sees on completion (`SubagentResult`
+  variants), async vs blocking start, turn/time limits, session nesting.
+- `plugins.md` — concrete Python plugin example with full JSON-RPC
+  protocol, host function reference table, discovery paths, key rules.
+- `mcp-servers.md` — common servers table, troubleshooting, qualified tool
+  names, permission rules for MCP tools.
+- `web-ui.md` — feature comparison table (TUI vs web), connection lifecycle,
+  reconnection behavior.
+- `context-files.md` — how context is used (per-turn injection), when to use
+  skills instead, what to include.
+- `tips-and-tricks.md` — prompting patterns section (scope, investigate
+  first, subagents for research, planner/builder workflow), permission
+  workflow guidance.
+
+**Sidebar** (`astro.config.mjs`):
+- Added Sessions to Getting Started.
+- Added Permissions and Tools to Using mew.
+
+**Build**: all 25 pages build cleanly (`pnpm astro build`). Pre-existing
+TypeScript errors in `TerminalDemo.tsx` are unrelated to docs content.
+
 ## TUI UX improvements — terminal title, /thinking, Ctrl+P variant cycle — COMPLETE
 
 **Terminal title** (`mew-tui/src/title.rs`):

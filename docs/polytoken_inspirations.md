@@ -261,7 +261,7 @@ mew:
 - mew's tool surface is small enough that deferred loading is not urgent.
 - Requires provider support for tool search/on-demand loading.
 
-**Verdict.** Large effort, medium value. Defer until tool/MCP count grows.
+**Verdict.** Large effort, medium value. Ideally, defer until tool/MCP count grows.
 
 ---
 
