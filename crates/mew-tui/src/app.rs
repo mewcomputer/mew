@@ -2,7 +2,7 @@ use mew_agent::{AgentEvent, AskUserQuestion};
 use mew_message::{Message, MessageId, Part, PartId, Role, ToolState};
 use mew_provider::ProviderEvent;
 use ratatui::layout::Rect;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -145,12 +145,18 @@ pub struct App {
     pub slash_scroll: usize,
     /// Whether bash output is expanded (shows all lines vs last 10).
     pub bash_expanded: bool,
-    /// Whether reasoning/thinking blocks are expanded in the chat.
-    pub reasoning_expanded: bool,
+    /// Set of reasoning part IDs that are expanded. The currently-streaming
+    /// reasoning block is auto-added; user-toggled blocks persist here.
+    pub reasoning_expanded: HashSet<PartId>,
+    /// PartId of the reasoning block currently being streamed (auto-expanded).
+    pub reasoning_active_id: Option<PartId>,
     /// When the current reasoning block started, for elapsed display.
     pub reasoning_started_at: Option<std::time::Instant>,
     /// Elapsed time of the last completed reasoning block.
     pub reasoning_elapsed: Option<std::time::Duration>,
+    /// Visual rows (indices into chat_rows) of reasoning block headers,
+    /// populated during render so mouse clicks can toggle individual blocks.
+    pub reasoning_header_rows: Vec<(PartId, usize)>,
     /// Message ID pending markdown re-render after streaming completes.
     pub pending_md_rerender: Option<mew_message::MessageId>,
     /// Incremental markdown render state.
@@ -481,9 +487,11 @@ impl App {
             slash_selected: 0,
             slash_scroll: 0,
             bash_expanded: false,
-            reasoning_expanded: false,
+            reasoning_expanded: HashSet::new(),
+            reasoning_active_id: None,
             reasoning_started_at: None,
             reasoning_elapsed: None,
+            reasoning_header_rows: Vec::new(),
             pending_md_rerender: None,
             md_state: mdstream::DocumentState::new(),
             md_stream: None,
@@ -1551,8 +1559,16 @@ impl App {
     }
 
     /// Toggle reasoning/thinking block expansion.
+    /// Toggles the last reasoning block in the chat. If none are visible,
+    /// falls back to toggling all known reasoning blocks.
     pub fn toggle_reasoning_expanded(&mut self) {
-        self.reasoning_expanded = !self.reasoning_expanded;
+        if let Some(&(id, _)) = self.reasoning_header_rows.last() {
+            if self.reasoning_expanded.contains(&id) {
+                self.reasoning_expanded.remove(&id);
+            } else {
+                self.reasoning_expanded.insert(id);
+            }
+        }
     }
 
     /// Insert an @-mention into the input, replacing the trigger `@` that
@@ -1958,17 +1974,18 @@ impl App {
                 // Auto-expand reasoning while streaming, auto-collapse when
                 // the model moves on to text or a tool call.
                 match &part {
-                    Part::Reasoning(_) => {
+                    Part::Reasoning(rp) => {
                         self.reasoning_started_at = Some(std::time::Instant::now());
                         self.reasoning_elapsed = None;
-                        self.reasoning_expanded = true;
+                        self.reasoning_active_id = Some(rp.base.id);
+                        self.reasoning_expanded.insert(rp.base.id);
                     }
                     Part::Text(_) | Part::ToolCall(_) => {
-                        if self.reasoning_expanded {
-                            if let Some(start) = self.reasoning_started_at.take() {
-                                self.reasoning_elapsed = Some(start.elapsed());
-                            }
-                            self.reasoning_expanded = false;
+                        if let Some(start) = self.reasoning_started_at.take() {
+                            self.reasoning_elapsed = Some(start.elapsed());
+                        }
+                        if let Some(id) = self.reasoning_active_id.take() {
+                            self.reasoning_expanded.remove(&id);
                         }
                     }
                     _ => {}

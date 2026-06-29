@@ -170,6 +170,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
 
     let mut chat_rows = std::mem::take(&mut app.chat_rows);
     chat_rows.clear();
+    app.reasoning_header_rows.clear();
     let mut sel_ctx = ChatLineCtx {
         text: &mut text,
         chat_rows: &mut chat_rows,
@@ -286,6 +287,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                 }
                 Part::Reasoning(rp) => {
                     let line_count = rp.text.lines().count();
+                    let is_expanded = app.reasoning_expanded.contains(&rp.base.id);
                     let dur_text = app.reasoning_elapsed.map(|d| {
                         let secs = d.as_secs_f64();
                         if secs < 0.1 {
@@ -294,18 +296,22 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                             format!("{:.1}s", secs)
                         }
                     });
-                    let header = if app.reasoning_expanded {
-                        "\u{25bc} thinking  [Ctrl-T to collapse]".to_string()
+                    let header = if is_expanded {
+                        "\u{25bc} thinking  [click or Ctrl-T to collapse]".to_string()
                     } else if let Some(dur) = dur_text {
                         format!("\u{25b8} thought for {} \u{00b7} {} lines", dur, line_count)
                     } else {
                         format!("\u{25b8} thinking \u{00b7} {} lines", line_count)
                     };
+                    // Record the visual row of this header so mouse clicks
+                    // can map back to this reasoning block.
+                    app.reasoning_header_rows
+                        .push((rp.base.id, sel_ctx.visual_row));
                     sel_ctx.push_line(Line::from(vec![
                         Span::raw("  "),
                         Span::styled(header, Style::default().fg(Color::DarkGray)),
                     ]));
-                    if app.reasoning_expanded {
+                    if is_expanded {
                         for line in rp.text.lines() {
                             sel_ctx.push_line(Line::from(vec![
                                 Span::raw("  "),

@@ -356,6 +356,21 @@ fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Ac
             if app.chat_area.contains((col, row).into()) && !app.chat_rows.is_empty() {
                 let rel_row = row.saturating_sub(app.chat_area.y) as usize;
                 let visual_row = (app.scroll as usize + rel_row).min(app.chat_rows.len() - 1);
+
+                // Check if this click landed on a reasoning block header.
+                if let Some(&(id, _)) = app
+                    .reasoning_header_rows
+                    .iter()
+                    .find(|(_, header_row)| *header_row == visual_row)
+                {
+                    if app.reasoning_expanded.contains(&id) {
+                        app.reasoning_expanded.remove(&id);
+                    } else {
+                        app.reasoning_expanded.insert(id);
+                    }
+                    return None;
+                }
+
                 let rel_col = col.saturating_sub(app.chat_area.x) as usize;
                 app.sel_anchor_row = Some(visual_row);
                 app.sel_anchor_col = Some(rel_col);
