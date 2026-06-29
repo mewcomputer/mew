@@ -1,3 +1,86 @@
+# Progress — 2026-06-29
+
+## Daemon concurrency test fix — COMPLETE
+
+Fixed 2 pre-existing test failures in `mew-daemon/tests/concurrency.rs`
+(`prompt_during_in_flight_turn_is_serialized` and
+`concurrent_prompts_on_same_connection_serialize`).
+
+**Root cause:** The `TurnRotatingProvider` (test-only) pops a script from
+its `Vec` on each `provider.stream()` call. But `spawn_title_generation`
+in `lib.rs` also calls `provider.stream()` directly — consuming a script
+meant for a test prompt. With 3 scripts for 3 prompts, the first prompt
+consumed 2 (response + title generation), leaving only 1 for the second
+prompt, and nothing for the third — causing a 5s timeout (empty script
+= no events = no `MessageEnd` = hang).
+
+**Fix:** When scripts are exhausted, `TurnRotatingProvider` now falls
+back to `FakeProvider::text_response("(no script)")` instead of an empty
+`Vec`, ensuring a valid event sequence with `MessageEnd` so the stream
+always terminates cleanly.
+
+All workspace tests now pass (was: 2 failures in concurrency.rs).
+
+---
+
+## CI + release workflows — COMPLETE
+
+Added three GitHub Actions workflows:
+
+- **`.github/workflows/ci.yml`** — Full CI gate on push/PR to main:
+  - Rust CI matrix (macOS + Ubuntu): `cargo fmt --check`, `cargo clippy
+    --all -- -D warnings`, `cargo test --all`.
+  - Web CI: pnpm install, build `@mew/web-client` (tsc), typecheck +
+    build `mew-web-ui`, run web-client tests.
+- **`.github/workflows/release.yml`** — Tagged releases: on `v*` tag
+  push, cross-compiles release binaries for `aarch64-apple-darwin`,
+  `x86_64-apple-darwin`, and `x86_64-unknown-linux-gnu`, packages them
+  as `.tar.gz`, creates a GitHub Release with auto-generated notes.
+- **`.github/workflows/nightly.yml`** — Nightly builds: daily cron
+  builds the same three targets from `main`, updates a rolling
+  `nightly` pre-release tag.
+
+---
+
+## TUI chat — trailing separator after last message — COMPLETE
+
+The empty separator line after every message was also added after the
+last message, so scrolling to `max_scroll` showed a blank line at the
+bottom instead of the actual last content. Fixed by checking `is_last`
+(already computed for streaming detection) and skipping the separator
+for the final message.
+
+---
+
+## TUI input wrapping — text truncated at right edge — COMPLETE
+
+Same class of bug as the chat scrolling fix: the input renderer wrapped
+text to `content_width` (the content area width after the 1-cell border
+on each side), but each visual row has a 2-character prefix (`"> "` or
+spinner) or indent (`"  "`). So text wrapped at `content_width` columns
+but only `content_width - 2` columns were visible — the right 2
+characters of each wrapped row were truncated and never shown.
+
+**Fix:** Subtract the 2-char prefix/indent from the wrap width at every
+call site that passes `content_width` to `input_visual_line_count`,
+`cursor_visual_row_col`, `visual_to_byte_offset`, `cursor_visual_up`,
+or `cursor_visual_down`. The wrap width is now
+`area.width.saturating_sub(2).saturating_sub(2)` (border + prefix).
+
+**Files changed:**
+- `ui/input.rs` — `draw_input`: compute `text_width` from
+  `content_width - 2`, use it for `input_visual_line_count`,
+  `cursor_visual_row_col`, and `wrap_w`.
+- `ui/mod.rs` — pre-layout height calculation: subtract 2 more for
+  prefix.
+- `ui/welcome.rs` — welcome screen input height: subtract 2 more.
+- `events.rs` — mouse click-to-position, Up/Down visual line
+  navigation: subtract 2 more from `content_width`.
+
+Build, clippy, 130 tests pass.
+
+---
+
 # Progress — 2026-06-27
 
 ## B1 web UI polish — COMPLETE

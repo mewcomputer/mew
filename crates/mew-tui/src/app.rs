@@ -14,6 +14,9 @@ pub const SIDEBAR_MIN_WIDTH: u16 = 120;
 pub const SIDEBAR_WIDTH: u16 = 32;
 /// Number of items visible in the picker list at once.
 pub const PICKER_VISIBLE_ITEMS: usize = 8;
+/// The spinner advances one frame every N ticks. At 16ms/tick, N=5 gives
+/// ~80ms per frame — a ~800ms full cycle for 10 frames. Feels calm but alive.
+const SPINNER_TICK_DIVISOR: u8 = 5;
 
 /// A single slash command definition.
 #[derive(Debug, Clone)]
@@ -111,6 +114,9 @@ pub struct App {
     /// Spinner frame index for the "thinking" indicator. Advances on each
     /// `tick()` while `streaming` is true.
     pub spinner_frame: usize,
+    /// Sub-tick counter used to slow down the spinner. The spinner advances
+    /// every `SPINNER_TICK_DIVISOR` ticks so it doesn't spin too fast.
+    spinner_sub_tick: u8,
     /// Whether to exit the application.
     pub should_quit: bool,
     /// Context files loaded for this session.
@@ -471,6 +477,7 @@ impl App {
             history_draft: None,
             streaming: false,
             spinner_frame: 0,
+            spinner_sub_tick: 0,
             should_quit: false,
             context_files: Vec::new(),
             tools: Vec::new(),
@@ -1617,8 +1624,13 @@ impl App {
             }
         }
         // Advance the thinking spinner only while the agent is streaming.
+        // Throttle to every Nth tick so the spinner doesn't spin too fast.
         if self.streaming {
-            self.spinner_frame = self.spinner_frame.wrapping_add(1);
+            self.spinner_sub_tick = self.spinner_sub_tick.wrapping_add(1);
+            if self.spinner_sub_tick >= SPINNER_TICK_DIVISOR {
+                self.spinner_sub_tick = 0;
+                self.spinner_frame = self.spinner_frame.wrapping_add(1);
+            }
         }
         // Expire alerts.
         self.clear_expired_alerts();

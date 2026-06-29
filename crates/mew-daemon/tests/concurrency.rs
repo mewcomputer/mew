@@ -50,7 +50,10 @@ impl Provider for TurnRotatingProvider {
         let script = {
             let mut scripts = self.scripts.lock().unwrap();
             if scripts.is_empty() {
-                Vec::new()
+                // Scripts exhausted (e.g. by title-generation calls that
+                // also hit the provider). Fall back to a generic response
+                // so the stream still produces a valid MessageEnd.
+                FakeProvider::text_response("(no script)")
             } else {
                 scripts.remove(0)
             }

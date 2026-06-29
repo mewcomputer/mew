@@ -330,7 +330,30 @@ fn main() -> Result<()> {
 async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
     // Only init tracing here if daemonize() didn't already do it.
     if !daemonized {
-        tracing_subscriber::fmt().init();
+        // In TUI mode (Run/Chat without --connect), redirect tracing to
+        // a log file so log output doesn't corrupt the terminal display.
+        // Daemon and non-TUI commands keep the default stderr writer.
+        let is_tui = matches!(
+            cli.command,
+            Some(Commands::Run { .. })
+                | Some(Commands::Chat { connect: None, .. })
+                | None
+        );
+        if is_tui {
+            let log_path = std::env::temp_dir().join(format!("mew-{}.log", std::process::id()));
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .map(std::io::BufWriter::new)
+                .map_err(|e| anyhow::anyhow!("failed to open log file {}: {}", log_path.display(), e))?;
+            eprintln!("logging to {}", log_path.display());
+            tracing_subscriber::fmt()
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+        } else {
+            tracing_subscriber::fmt().init();
+        }
     }
 
     // Load runtime state for fallback defaults.

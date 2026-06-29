@@ -1,0 +1,96 @@
+name: Nightly
+
+on:
+  schedule:
+    # 05:00 UTC daily
+    - cron: "0 5 * * *"
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-${{ matrix.target }}
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} -p mew
+
+      - name: Package binary
+        run: |
+          DATE=$(date +%Y%m%d)
+          TARGET="${{ matrix.target }}"
+          STAGE="mew-nightly-${DATE}-${TARGET}"
+
+          mkdir -p "${STAGE}/bin"
+          cp "target/${TARGET}/release/mew" "${STAGE}/bin/mew"
+          [ -f LICENSE ] && cp LICENSE "${STAGE}/" || true
+          [ -f README.md ] && cp README.md "${STAGE}/" || true
+
+          tar czf "${STAGE}.tar.gz" "${STAGE}"
+          echo "ASSET=${STAGE}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mew-nightly-${{ matrix.target }}
+          path: ${{ env.ASSET }}
+
+  publish:
+    name: Update nightly release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Update nightly release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Nightly Build
+          body: |
+            Automated nightly build from `main`.
+
+            These binaries are built from the latest commit and are **not**
+            stable releases. They may contain bugs or unfinished features.
+          tag_name: nightly
+          prerelease: true
+          files: artifacts/*.tar.gz
