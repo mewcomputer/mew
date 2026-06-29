@@ -3,15 +3,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use mew_hooks::Dispatcher;
 use mew_message::{SessionId, ToolState};
 use mew_provider::Provider;
 use mew_subagents::{
     ModelResolver, SubagentDef, SubagentError, SubagentEvent, SubagentOutcome, SubagentResult,
-    SubagentRunner,
+    SubagentRunOptions, SubagentRunner,
 };
 use mew_tools::Tool;
 
@@ -73,13 +71,17 @@ impl SimpleRunner {
         self
     }
 
-    /// Resolve which provider to use for this subagent invocation. If the
-    /// def has a `model` override and a resolver is configured, build a
-    /// provider for that model; otherwise fall back to the default.
-    async fn resolve_provider(&self, def: &SubagentDef) -> Arc<dyn Provider> {
-        let Some(ref model) = def.model else {
+    /// Resolve which provider to use for this subagent invocation. A
+    /// call-time `model` override beats the def's `model`; either beats the
+    /// default provider. A literal value of `"micro"`, `"deci"`, or `"nano"`
+    /// is resolved by the `ModelResolver` against the active router's tiers.
+    async fn resolve_provider(&self, def: &SubagentDef, model: Option<&str>) -> Arc<dyn Provider> {
+        let model = model.or(def.model.as_deref());
+
+        let Some(model) = model else {
             return self.default_provider.clone();
         };
+
         let Some(ref resolver) = self.model_resolver else {
             tracing::warn!(
                 subagent = %def.name,
@@ -105,15 +107,13 @@ impl SimpleRunner {
 
 #[async_trait]
 impl SubagentRunner for SimpleRunner {
-    async fn run(
-        &self,
-        def: &SubagentDef,
-        prompt: String,
-        _parent_call_id: String,
-        parent_session_id: SessionId,
-        event_tx: mpsc::Sender<SubagentEvent>,
-        cancel: CancellationToken,
-    ) -> Result<SubagentResult, SubagentError> {
+    async fn run(&self, opts: SubagentRunOptions<'_>) -> Result<SubagentResult, SubagentError> {
+        let def = opts.def;
+        let prompt = opts.prompt;
+        let parent_session_id = opts.parent_session_id;
+        let event_tx = opts.event_tx;
+        let cancel = opts.cancel;
+        let model = opts.model.as_deref();
         let session_id = SessionId::new();
 
         // Build tool subset if the subagent restricts tools.
@@ -163,16 +163,36 @@ impl SubagentRunner for SimpleRunner {
         };
 
         let mut agent = crate::Agent::new(
-            self.resolve_provider(def).await,
+            self.resolve_provider(def, model).await,
             self.dispatcher.clone(),
             session_writer,
             tools,
             Some(session_id),
         );
 
-        // Set the subagent's body as the system prompt.
+        // Set the subagent's body as the system prompt. If the def has
+        // `template: true`, render it through minijinja with the subagent's
+        // context (subagent_name, tools, model, etc).
         if !def.body.is_empty() {
-            agent.set_system(def.body.clone());
+            let body = if def.template {
+                let tool_names: Vec<String> = agent.tools.keys().cloned().collect();
+                let ctx = mew_prompts::template::TemplateContext {
+                    subagent_name: def.name.clone(),
+                    model_id: agent.model_id.clone(),
+                    provider_id: agent.provider_id.clone(),
+                    session_id: session_id.to_string(),
+                    cwd: std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    current_date: mew_prompts::template::TemplateContext::today(),
+                    tools: tool_names,
+                    ..Default::default()
+                };
+                mew_prompts::template::render(&def.body, &ctx)
+            } else {
+                def.body.clone()
+            };
+            agent.set_system(body);
         }
 
         // Set max_turns if specified, else apply the built-in default.
@@ -488,13 +508,12 @@ mod tests {
             name: "test-agent".into(),
             description: "test".into(),
             model: None,
-            model_small: None,
-            model_big: None,
             tools: None,
             max_turns,
             max_duration_secs,
             body: String::new(),
             path: PathBuf::from("(test)"),
+            template: false,
         }
     }
 
@@ -549,18 +568,19 @@ mod tests {
     ) -> SubagentResult {
         let provider = Arc::new(ScriptedProvider::new(script));
         let runner = SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher));
-        let (tx, mut rx) = mpsc::channel(64);
-        let cancel = CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let cancel = tokio_util::sync::CancellationToken::new();
         let drain = tokio::spawn(async move { while let Some(_ev) = rx.recv().await {} });
         let result = runner
-            .run(
-                &def,
-                "prompt".into(),
-                "call_0".into(),
-                SessionId::new(),
-                tx,
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "call_0".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
                 cancel,
-            )
+                model: None,
+            })
             .await
             .unwrap();
         drain.abort();
@@ -695,18 +715,19 @@ mod tests {
         let provider = Arc::new(ScriptedProvider::new(script));
         let runner = SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher))
             .with_session_root(root.clone());
-        let (tx, mut rx) = mpsc::channel(64);
-        let cancel = CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let cancel = tokio_util::sync::CancellationToken::new();
         let drain = tokio::spawn(async move { while let Some(_ev) = rx.recv().await {} });
         let result = runner
-            .run(
-                &def,
-                "prompt".into(),
-                "call_0".into(),
-                parent_session_id,
-                tx,
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "call_0".into(),
+                parent_session_id: parent_session_id,
+                event_tx: tx,
                 cancel,
-            )
+                model: None,
+            })
             .await
             .expect("runner ok");
         drain.abort();
@@ -770,18 +791,19 @@ mod tests {
         let provider = Arc::new(ScriptedProvider::new(script));
         let runner = SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher))
             .with_session_root(blocker.clone());
-        let (tx, mut rx) = mpsc::channel(64);
-        let cancel = CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let cancel = tokio_util::sync::CancellationToken::new();
         let drain = tokio::spawn(async move { while let Some(_ev) = rx.recv().await {} });
         let result = runner
-            .run(
-                &def,
-                "prompt".into(),
-                "call_0".into(),
-                parent_session_id,
-                tx,
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "call_0".into(),
+                parent_session_id: parent_session_id,
+                event_tx: tx,
                 cancel,
-            )
+                model: None,
+            })
             .await
             .expect("runner ok");
         drain.abort();
@@ -816,18 +838,19 @@ mod tests {
             vec![exit_tool()],
             Arc::new(mew_hooks::NopDispatcher),
         );
-        let (tx, mut rx) = mpsc::channel(64);
-        let cancel = CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let cancel = tokio_util::sync::CancellationToken::new();
         let drain = tokio::spawn(async move { while let Some(_ev) = rx.recv().await {} });
         let result = runner
-            .run(
-                &def,
-                "prompt".into(),
-                "call_0".into(),
-                SessionId::new(),
-                tx,
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "call_0".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
                 cancel,
-            )
+                model: None,
+            })
             .await
             .unwrap();
         drain.abort();
@@ -901,8 +924,8 @@ mod tests {
             vec![Arc::new(mew_tools::tools::progress_update::ProgressUpdate)],
             Arc::new(mew_hooks::NopDispatcher),
         );
-        let (tx, mut rx) = mpsc::channel(64);
-        let cancel = CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let cancel = tokio_util::sync::CancellationToken::new();
         let drain = tokio::spawn(async move {
             let mut events: Vec<SubagentEvent> = Vec::new();
             while let Some(ev) = rx.recv().await {
@@ -911,14 +934,15 @@ mod tests {
             events
         });
         let result = runner
-            .run(
-                &def,
-                "prompt".into(),
-                "call_0".into(),
-                SessionId::new(),
-                tx,
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "call_0".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
                 cancel,
-            )
+                model: None,
+            })
             .await
             .unwrap();
         drop(result);
@@ -1003,8 +1027,8 @@ mod tests {
             vec![Arc::new(mew_tools::tools::progress_update::ProgressUpdate)],
             Arc::new(mew_hooks::NopDispatcher),
         );
-        let (tx, mut rx) = mpsc::channel(64);
-        let cancel = CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let cancel = tokio_util::sync::CancellationToken::new();
         let drain = tokio::spawn(async move {
             let mut events: Vec<SubagentEvent> = Vec::new();
             while let Some(ev) = rx.recv().await {
@@ -1013,14 +1037,15 @@ mod tests {
             events
         });
         let result = runner
-            .run(
-                &def,
-                "prompt".into(),
-                "call_0".into(),
-                SessionId::new(),
-                tx,
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "call_0".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
                 cancel,
-            )
+                model: None,
+            })
             .await
             .unwrap();
         drop(result);
@@ -1050,8 +1075,8 @@ mod tests {
         let def = make_def(Some(2), Some(60));
         let provider = Arc::new(ScriptedProvider::new(script));
         let runner = SimpleRunner::new(provider, vec![], Arc::new(mew_hooks::NopDispatcher));
-        let (tx, mut rx) = mpsc::channel(64);
-        let cancel = CancellationToken::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let cancel = tokio_util::sync::CancellationToken::new();
         let drain = tokio::spawn(async move {
             let mut events: Vec<SubagentEvent> = Vec::new();
             while let Some(ev) = rx.recv().await {
@@ -1060,14 +1085,15 @@ mod tests {
             events
         });
         let _ = runner
-            .run(
-                &def,
-                "prompt".into(),
-                "call_0".into(),
-                SessionId::new(),
-                tx,
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "call_0".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
                 cancel,
-            )
+                model: None,
+            })
             .await;
         let events = drain.await.unwrap();
 

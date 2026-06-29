@@ -4,44 +4,44 @@ use async_trait::async_trait;
 use mew_message::Part;
 use mew_provider::{EventStream, ModelInfo, Provider, ProviderError, Request};
 
-/// Routes requests between a small (cheap) and big (capable) provider based on
-/// conversation complexity.
+/// Routes requests between `nano` (cheapest), `micro` (medium), and `deci`
+/// (most capable) providers based on conversation complexity.
 pub struct Router {
-    small: Arc<dyn Provider>,
-    big: Arc<dyn Provider>,
-    /// Number of turns before switching to the big model. Default: 3.
-    turn_threshold: usize,
+    nano: Option<Arc<dyn Provider>>,
+    micro: Arc<dyn Provider>,
+    deci: Arc<dyn Provider>,
 }
 
 impl Router {
-    pub fn new(small: Arc<dyn Provider>, big: Arc<dyn Provider>) -> Self {
-        Self {
-            small,
-            big,
-            turn_threshold: 3,
-        }
-    }
-
-    /// Set the turn threshold. After this many messages, the big model is used.
-    pub fn set_turn_threshold(&mut self, n: usize) {
-        self.turn_threshold = n;
+    pub fn new(
+        nano: Option<Arc<dyn Provider>>,
+        micro: Arc<dyn Provider>,
+        deci: Arc<dyn Provider>,
+    ) -> Self {
+        Self { nano, micro, deci }
     }
 
     /// Decide which provider to use based on conversation complexity.
     fn select(&self, req: &Request) -> &Arc<dyn Provider> {
-        // If there are tool results in any assistant message, use big.
+        // If there are tool results in any message, use the most capable model.
         let has_tool_results = req
             .messages
             .iter()
             .any(|m| m.parts.iter().any(|p| matches!(p, Part::ToolResult(_))));
 
-        let is_long = req.messages.len() > self.turn_threshold;
-
-        if has_tool_results || is_long {
-            &self.big
-        } else {
-            &self.small
+        if has_tool_results {
+            return &self.deci;
         }
+
+        // First turn uses nano if configured; otherwise micro. All later turns
+        // without tool results stay on micro.
+        if req.messages.len() <= 1 {
+            if let Some(ref nano) = self.nano {
+                return nano;
+            }
+        }
+
+        &self.micro
     }
 }
 
@@ -62,8 +62,11 @@ impl Provider for Router {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        let mut models = self.big.list_models().await?;
-        models.extend(self.small.list_models().await?);
+        let mut models = self.deci.list_models().await?;
+        models.extend(self.micro.list_models().await?);
+        if let Some(ref nano) = self.nano {
+            models.extend(nano.list_models().await?);
+        }
         Ok(models)
     }
 }
@@ -73,7 +76,7 @@ mod tests {
     use super::*;
     use futures::channel::mpsc;
     use futures::SinkExt;
-    use mew_message::{Message, Part, PartBase, Role, TextPart, Time, ToolResultPart};
+    use mew_message::{Message, Part, PartBase, Role, Time, ToolResultPart};
     use mew_provider::ProviderError;
 
     struct TaggedProvider {
@@ -87,27 +90,7 @@ mod tests {
         }
         async fn stream(&self, _req: Request) -> Result<EventStream, ProviderError> {
             let (mut tx, rx) = mpsc::channel(1);
-            let tag = self.tag;
             tokio::spawn(async move {
-                let msg = mew_message::Message {
-                    id: ulid::Ulid::new(),
-                    session_id: ulid::Ulid::new(),
-                    role: Role::Assistant,
-                    parts: vec![Part::Text(TextPart {
-                        base: PartBase {
-                            id: ulid::Ulid::new(),
-                            message_id: ulid::Ulid::new(),
-                            session_id: ulid::Ulid::new(),
-                        },
-                        text: format!("from {}", tag),
-                        synthetic: false,
-                    })],
-                    time: Time {
-                        created: 0,
-                        completed: None,
-                    },
-                    assistant: None,
-                };
                 let _ = tx
                     .send(mew_provider::ProviderEvent::MessageEnd {
                         finish: mew_message::Finish::Stop,
@@ -120,32 +103,73 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_router_uses_small_for_simple_turn() {
-        let small = Arc::new(TaggedProvider { tag: "small" });
-        let big = Arc::new(TaggedProvider { tag: "big" });
-        let router = Router::new(small, big);
-
-        let req = Request {
+    fn empty_request(messages: Vec<Message>) -> Request {
+        Request {
             model: String::new(),
-            messages: vec![],
+            messages,
             tools: vec![],
             system: String::new(),
             reasoning: None,
             params: None,
             headers: Default::default(),
-        };
+        }
+    }
 
-        // For an empty conversation, the router should select small.
-        let provider = router.select(&req);
-        assert_eq!(provider.name(), "small");
+    fn empty_message() -> Message {
+        Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![],
+            time: Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        }
     }
 
     #[tokio::test]
-    async fn test_router_uses_big_with_tool_results() {
-        let small = Arc::new(TaggedProvider { tag: "small" });
-        let big = Arc::new(TaggedProvider { tag: "big" });
-        let router = Router::new(small, big);
+    async fn test_router_uses_nano_for_first_turn() {
+        let nano = Arc::new(TaggedProvider { tag: "nano" });
+        let micro = Arc::new(TaggedProvider { tag: "micro" });
+        let deci = Arc::new(TaggedProvider { tag: "deci" });
+        let router = Router::new(Some(nano), micro, deci);
+
+        let req = empty_request(vec![empty_message()]);
+        let provider = router.select(&req);
+        assert_eq!(provider.name(), "nano");
+    }
+
+    #[tokio::test]
+    async fn test_router_uses_micro_for_simple_turn_without_nano() {
+        let micro = Arc::new(TaggedProvider { tag: "micro" });
+        let deci = Arc::new(TaggedProvider { tag: "deci" });
+        let router = Router::new(None, micro, deci);
+
+        let req = empty_request(vec![empty_message()]);
+        let provider = router.select(&req);
+        assert_eq!(provider.name(), "micro");
+    }
+
+    #[tokio::test]
+    async fn test_router_uses_micro_for_short_conversation() {
+        let nano = Arc::new(TaggedProvider { tag: "nano" });
+        let micro = Arc::new(TaggedProvider { tag: "micro" });
+        let deci = Arc::new(TaggedProvider { tag: "deci" });
+        let router = Router::new(Some(nano), micro, deci);
+
+        let req = empty_request(vec![empty_message(), empty_message()]);
+        let provider = router.select(&req);
+        assert_eq!(provider.name(), "micro");
+    }
+
+    #[tokio::test]
+    async fn test_router_uses_deci_with_tool_results() {
+        let nano = Arc::new(TaggedProvider { tag: "nano" });
+        let micro = Arc::new(TaggedProvider { tag: "micro" });
+        let deci = Arc::new(TaggedProvider { tag: "deci" });
+        let router = Router::new(Some(nano), micro, deci);
 
         let msg = Message {
             id: ulid::Ulid::new(),
@@ -166,60 +190,33 @@ mod tests {
             assistant: None,
         };
 
-        let req = Request {
-            model: String::new(),
-            messages: vec![msg],
-            tools: vec![],
-            system: String::new(),
-            reasoning: None,
-            params: None,
-            headers: Default::default(),
-        };
-
+        let req = empty_request(vec![msg]);
         let provider = router.select(&req);
-        assert_eq!(provider.name(), "big");
+        assert_eq!(provider.name(), "deci");
     }
 
     #[tokio::test]
-    async fn test_router_uses_big_after_threshold() {
-        let small = Arc::new(TaggedProvider { tag: "small" });
-        let big = Arc::new(TaggedProvider { tag: "big" });
-        let router = Router::new(small, big);
+    async fn test_router_uses_micro_for_long_text_conversation() {
+        let nano = Arc::new(TaggedProvider { tag: "nano" });
+        let micro = Arc::new(TaggedProvider { tag: "micro" });
+        let deci = Arc::new(TaggedProvider { tag: "deci" });
+        let router = Router::new(Some(nano), micro, deci);
 
         let mut messages = Vec::new();
         for _ in 0..5 {
-            messages.push(Message {
-                id: ulid::Ulid::new(),
-                session_id: ulid::Ulid::new(),
-                role: Role::User,
-                parts: vec![],
-                time: Time {
-                    created: 0,
-                    completed: None,
-                },
-                assistant: None,
-            });
+            messages.push(empty_message());
         }
 
-        let req = Request {
-            model: String::new(),
-            messages,
-            tools: vec![],
-            system: String::new(),
-            reasoning: None,
-            params: None,
-            headers: Default::default(),
-        };
-
+        let req = empty_request(messages);
         let provider = router.select(&req);
-        assert_eq!(provider.name(), "big");
+        assert_eq!(provider.name(), "micro");
     }
 }
 
 /// Wraps a Router with a display model name for the TUI status line.
 pub struct Routed {
     inner: Router,
-    /// The model ID to show in the status line (typically the big model).
+    /// The model ID to show in the status line (typically the deci model).
     pub display_model: String,
     /// The provider ID to show in the status line.
     pub display_provider: String,

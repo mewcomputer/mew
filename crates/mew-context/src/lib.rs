@@ -89,8 +89,86 @@ impl Loader {
 fn try_read(path: &Path) -> Option<File> {
     std::fs::read_to_string(path).ok().map(|content| File {
         path: path.to_path_buf(),
-        content,
+        content: expand_includes(&content, path),
     })
+}
+
+/// Expand `@path/to/file` static includes in context file content.
+///
+/// A line starting with `@` followed by a path is treated as a static
+/// include: the referenced file is read and inlined as literal text
+/// (no template rendering). The path is resolved relative to the
+/// directory of the file containing the `@` reference.
+///
+/// `..` path components are rejected to confine includes to the file's
+/// directory subtree. Lines that don't start with `@` or that reference
+/// a non-existent file are left unchanged.
+///
+/// Example: in `/project/AGENTS.md`, the line `@docs/conventions.md`
+/// inlines the contents of `/project/docs/conventions.md`.
+fn expand_includes(content: &str, source: &Path) -> String {
+    if !content.lines().any(|l| l.starts_with('@')) {
+        return content.to_string();
+    }
+
+    let base_dir = match source.parent() {
+        Some(d) => d,
+        None => return content.to_string(),
+    };
+
+    let mut out = String::new();
+    for line in content.lines() {
+        if let Some(include_path) = line.strip_prefix('@') {
+            let include_path = include_path.trim();
+            if include_path.is_empty() {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+
+            // Reject ../ to confine to the file's subtree.
+            let resolved = base_dir.join(include_path);
+            if !resolved.starts_with(base_dir) {
+                tracing::warn!(
+                    include = include_path,
+                    source = %source.display(),
+                    "@include rejected: path escapes file directory"
+                );
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+
+            match std::fs::read_to_string(&resolved) {
+                Ok(included) => {
+                    out.push_str(&included);
+                    if !included.ends_with('\n') {
+                        out.push('\n');
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        include = include_path,
+                        source = %source.display(),
+                        error = %e,
+                        "@include file not found"
+                    );
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
+    // Remove trailing newline if the original didn't have one.
+    if !content.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+
+    out
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -164,6 +242,43 @@ fn escape_xml(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Load project-local template variables from `.mew/project_vars.yaml`.
+///
+/// The file is a flat YAML map of string keys to string values. These are
+/// accessible as `project_vars` in persona/skill/subagent templates.
+///
+/// Search order (first match wins, walked cwd to git root):
+///   1. `<dir>/.mew/project_vars.yaml`
+///   2. `<dir>/.opencode/project_vars.yaml`
+///   3. `<dir>/.claude/project_vars.yaml`
+///   4. `<dir>/.agents/project_vars.yaml`
+///
+/// Returns an empty map if no file is found. Missing keys in the YAML
+/// render as empty strings in templates (minijinja default behavior).
+pub fn load_project_vars(cwd: &Path) -> std::collections::HashMap<String, String> {
+    let root =
+        find_git_root(cwd).unwrap_or_else(|_| home_dir().unwrap_or_else(|| cwd.to_path_buf()));
+
+    for dir in paths_between(&root, cwd) {
+        for prefix in &[".mew", ".opencode", ".claude", ".agents"] {
+            let path = dir.join(prefix).join("project_vars.yaml");
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                match serde_yaml::from_str::<std::collections::HashMap<String, String>>(&content) {
+                    Ok(map) => {
+                        debug!(?path, vars = map.len(), "loaded project_vars");
+                        return map;
+                    }
+                    Err(e) => {
+                        tracing::warn!(?path, error = %e, "failed to parse project_vars.yaml");
+                    }
+                }
+            }
+        }
+    }
+
+    std::collections::HashMap::new()
 }
 
 #[cfg(test)]
@@ -317,5 +432,143 @@ mod tests {
             .filter(|f| f.path.starts_with(dir.path()))
             .collect();
         assert!(local.is_empty(), "expected no project files, got {local:?}");
+    }
+
+    #[test]
+    fn test_expand_includes_inlines_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("conventions.md"), "Use 4 spaces.").unwrap();
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "Project rules.\n@conventions.md\nEnd.",
+        )
+        .unwrap();
+
+        let loader = Loader::new(dir.path());
+        let files = loader.load().unwrap();
+        let agents = files
+            .iter()
+            .find(|f| f.path.ends_with("AGENTS.md"))
+            .expect("AGENTS.md found");
+        assert!(agents.content.contains("Project rules."));
+        assert!(agents.content.contains("Use 4 spaces."));
+        assert!(agents.content.contains("End."));
+    }
+
+    #[test]
+    fn test_expand_includes_subdirectory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs").join("style.md"), "Be concise.").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Rules.\n@docs/style.md\n").unwrap();
+
+        let loader = Loader::new(dir.path());
+        let files = loader.load().unwrap();
+        let agents = files
+            .iter()
+            .find(|f| f.path.ends_with("AGENTS.md"))
+            .expect("AGENTS.md found");
+        assert!(agents.content.contains("Be concise."));
+    }
+
+    #[test]
+    fn test_expand_includes_rejects_parent_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "password").unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "Rules.\n@../secret.txt\n").unwrap();
+
+        let loader = Loader::new(dir.path());
+        let files = loader.load().unwrap();
+        let agents = files
+            .iter()
+            .find(|f| f.path.ends_with("AGENTS.md"))
+            .expect("AGENTS.md found");
+        // The @include line should be left as-is, not inlined.
+        assert!(agents.content.contains("@../secret.txt"));
+        assert!(!agents.content.contains("password"));
+    }
+
+    #[test]
+    fn test_expand_includes_missing_file_left_as_is() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "Rules.\n@nonexistent.md\nEnd.",
+        )
+        .unwrap();
+
+        let loader = Loader::new(dir.path());
+        let files = loader.load().unwrap();
+        let agents = files
+            .iter()
+            .find(|f| f.path.ends_with("AGENTS.md"))
+            .expect("AGENTS.md found");
+        assert!(agents.content.contains("@nonexistent.md"));
+        assert!(agents.content.contains("End."));
+    }
+
+    #[test]
+    fn test_expand_includes_no_at_prefix_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "No includes here.\nJust text.";
+        std::fs::write(dir.path().join("AGENTS.md"), content).unwrap();
+
+        let loader = Loader::new(dir.path());
+        let files = loader.load().unwrap();
+        let agents = files
+            .iter()
+            .find(|f| f.path.ends_with("AGENTS.md"))
+            .expect("AGENTS.md found");
+        assert_eq!(agents.content, content);
+    }
+
+    #[test]
+    fn test_load_project_vars_found() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".mew")).unwrap();
+        std::fs::write(
+            dir.path().join(".mew").join("project_vars.yaml"),
+            "team: platform\nchannel: \"#eng\"\n",
+        )
+        .unwrap();
+
+        let vars = load_project_vars(dir.path());
+        assert_eq!(vars.get("team").unwrap(), "platform");
+        assert_eq!(vars.get("channel").unwrap(), "#eng");
+    }
+
+    #[test]
+    fn test_load_project_vars_missing_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let vars = load_project_vars(dir.path());
+        assert!(vars.is_empty());
+    }
+
+    #[test]
+    fn test_load_project_vars_invalid_yaml_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".mew")).unwrap();
+        std::fs::write(
+            dir.path().join(".mew").join("project_vars.yaml"),
+            "team: [unclosed\n",
+        )
+        .unwrap();
+
+        let vars = load_project_vars(dir.path());
+        assert!(vars.is_empty());
+    }
+
+    #[test]
+    fn test_load_project_vars_opencode_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".opencode")).unwrap();
+        std::fs::write(
+            dir.path().join(".opencode").join("project_vars.yaml"),
+            "framework: astro\n",
+        )
+        .unwrap();
+
+        let vars = load_project_vars(dir.path());
+        assert_eq!(vars.get("framework").unwrap(), "astro");
     }
 }

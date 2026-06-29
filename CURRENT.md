@@ -1,5 +1,83 @@
 # Progress — 2026-06-29
 
+## Polytoken inspirations: templating, skills, includes, web_fetch
+
+Implemented P0 and P1 items from `docs/polytoken_inspirations.md`.
+
+### Shared template context (`crates/mew-prompts/src/template.rs`)
+
+New module with a `TemplateContext` struct and `render()` function shared
+by personas, skills, and subagents. Variables:
+
+- `supports_vision`, `persona_name`, `subagent_name`, `skill_name`
+- `model_id`, `provider_id`, `model_variant` (thinking variant)
+- `session_id`, `cwd`, `current_date`
+- `tools`, `denied_tools` (effective tool list)
+- `skills` (available skill names), `mcp_servers` (connected server names)
+- `project_vars` (project-local variables from `.mew/project_vars.yaml`)
+
+Template functions:
+
+- `transclude("mew://path")` — inline built-in VFS resource
+- `has_tool(name)` — check if a tool is available
+- `has_skill(name)` — check if a skill is available
+- `has_mcp(name)` — check if an MCP server is connected
+- `is_model_variant(variant)` — check provider family ("anthropic",
+  "openai", "deepseek", "z-ai", "umans", "opencode")
+
+48 tests pass.
+
+### Template skills (opt-in)
+
+`mew-skills`: `template: bool` field on `Skill` and frontmatter. When
+true, body is rendered through minijinja before returning from the skill
+tool. Shared `template_ctx` Arc between agent and skill tool.
+
+### Template subagents (opt-in)
+
+`mew-subagents`: `template: bool` field on `SubagentDef` and frontmatter.
+Runner renders body through minijinja with `subagent_name`, `model_id`,
+`provider_id`, `session_id`, `cwd`, `current_date`, `tools`.
+
+### `@file` static includes in AGENTS.md
+
+`mew-context`: `expand_includes()` preprocessor. `@path/to/file` lines
+inlined as literal text. Confined to file's subtree (`../` rejected).
+5 tests.
+
+### `polytoken:` frontmatter alias
+
+`mew-personas`: `polytoken:` accepted as alias for `mew:`. `mew:` wins
+when both present. 2 tests.
+
+### Project variables file
+
+`mew-context`: `load_project_vars(cwd)` loads `.mew/project_vars.yaml`
+(or `.opencode/`, `.claude/`, `.agents/` prefixes). Walked cwd to git
+root, first match wins. Returns `HashMap<String, String>` accessible as
+`project_vars` in templates. 4 tests.
+
+Agent gains `project_vars` field, loaded at all construction sites.
+`apply_persona` includes skills list and project_vars in the template
+context.
+
+### `web_fetch` tool
+
+`mew-tools/src/tools/web_fetch.rs`: fetches a URL via reqwest, converts
+HTML to markdown via `htmd` crate. Content truncated at 128KB. ReadOnly
+sensitivity. Registered in `build_tools()`.
+
+### Blocked on model tier refactor
+
+The model tier refactor (replacing `model_small`/`model_big` with
+`micro`/`deci` on `ProviderConfig`, changing router config) is in
+progress. Errors in `mew/src/main.rs` reference `router`, `turn_threshold`,
+and mismatched types on `ProviderConfig`. My changes don't touch these
+fields and should compile once the refactor lands.
+
+Verified clean: `mew-prompts` (48 tests), `mew-context` (20 tests),
+`mew-personas` (18 tests), all pass clippy `-D warnings`.
+
 ## Docs site expansion — fill out thin pages, add missing pages
 
 **Problem**: The docs site was a sketch. Pages were accurate but skeletal:
@@ -765,3 +843,75 @@ The test **gracefully skips** with a clear message if the binaries aren't built 
 ### Deferred (per the earlier conversation)
 
 - **TS-side e2e**: not yet wired. Once `mew-web-ui` is a real consumer of `mew-web-client`, a Node-side test that spawns the same binaries and uses the compiled `mew-web-client` library to round-trip would be the natural next step. Tracks with the "we have a decent UI" milestone.
+
+---
+
+# Progress — 2026-06-29
+
+## Router tier refactor — removed `turn_threshold`, fixed build
+
+Finished the cleanup pass on the three-tier router work. Removed the
+`turn_threshold` field from the settings UI and fixed two unrelated build
+errors that surfaced in `crates/mew/src/main.rs`.
+
+### Changes
+
+- **`crates/mew/src/config_editor.rs`**: removed the `ProviderTurnThreshold`
+  field from the router provider settings panel. Router providers now only
+  expose `nano`, `micro`, and `deci` in the UI.
+- **`crates/mew/src/main.rs`**:
+  - Reconstructed the `Router` instance before wrapping it in `Routed`
+    (`Router::new(nano, micro, deci)`), fixing the "cannot find value
+    `router`" compile error.
+  - Passed `&cwd` to `mew_context::Loader::new()` so `cwd` remains available
+    for the subsequent `load_project_vars(&cwd)` call, fixing the borrow/move
+    error.
+
+### Verification
+
+- `cargo fmt --check` — clean.
+- `cargo clippy --all -- -D warnings` — clean.
+- `cargo test --all` — all tests pass.
+
+### Notes
+
+The router itself still behaves as implemented: `nano` on the first turn,
+`micro` for later non-tool turns, and `deci` whenever tool results are
+present in the conversation.
+
+---
+
+# Progress — 2026-06-29
+
+## Router tier refactor — router is now task-only
+
+Made the router a task-only primitive. It can no longer be selected as the
+main chat provider, and tool-call turns stay on the user's chosen model.
+The `nano`/`micro`/`deci` tiers are still used for subagents and the
+permission classifier.
+
+### Changes
+
+- **`crates/mew/src/main.rs`**:
+  - Added `find_router_provider(cfg)` to locate the first provider configured
+    as a router, preferring one literally named `router`.
+  - `maybe_set_classifier_provider()` now wires the classifier to the router's
+    `micro` tier whenever any router provider exists, independent of the active
+    chat provider.
+  - `MainModelResolver` gained a `router_provider_id` field; tier keywords
+    (`nano`/`micro`/`deci`) are resolved against the router provider, not the
+    active chat provider.
+  - `build_provider()` now rejects `kind = "router"` providers with a clear
+    error when something tries to use them as the main chat provider.
+  - Removed the router-provider branch from `build_provider()`, the recursive
+    tier construction, and the special-case display logic that showed the
+    `deci` model in the TUI/one-shot status line.
+- **`crates/mew/Cargo.toml`**: removed the `mew-provider-router` dependency.
+- **`CLAUDE.md`**: updated the router description to reflect the task-only
+  design.
+
+### Verification
+
+- `cargo fmt --check` — clean.
+- `cargo clippy --all -- -D warnings` — clean.
+- `cargo test --all` — all tests pass.

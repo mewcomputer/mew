@@ -1885,12 +1885,14 @@ fn test_set_skills_rebuilds_system_with_filter() {
             description: "Create a release".into(),
             body: "...".into(),
             path: std::path::PathBuf::new(),
+            template: false,
         },
         mew_skills::Skill {
             name: "code-review".into(),
             description: "Review code".into(),
             path: std::path::PathBuf::new(),
             body: "...".into(),
+            template: false,
         },
     ];
     agent.set_skills(skills);

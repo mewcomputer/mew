@@ -10,6 +10,7 @@ use mew_tools::{Sensitivity, ToolCtx, ToolProgress};
 
 use crate::agent::{Agent, ShellJobState, ToolInput};
 use crate::AgentEvent;
+use mew_subagents::SubagentRunOptions;
 
 // Track whether the subagent tool returned an error, not whether the
 // output text contains specific substrings.
@@ -694,6 +695,7 @@ impl Agent {
         let input = tc.input().clone();
         let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let prompt = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+        let model = input.get("model").and_then(|v| v.as_str());
 
         let def = match self.subagent_defs.iter().find(|d| d.name == name) {
             Some(d) => d,
@@ -778,6 +780,7 @@ impl Agent {
         let def = def.clone();
         let def_name = def.name.clone();
         let prompt = prompt.to_string();
+        let model = model.map(|s| s.to_string());
         let call_id_clone = call_id.clone();
         let ev_tx_clone = ev_tx.clone();
         let cancel = self.cancel_token.child_token();
@@ -788,14 +791,15 @@ impl Agent {
         let parent_session_id = self.session_id;
         let runner_handle = tokio::spawn(async move {
             runner
-                .run(
-                    &def,
+                .run(SubagentRunOptions {
+                    def: &def,
                     prompt,
-                    call_id_clone.clone(),
+                    parent_call_id: call_id_clone.clone(),
                     parent_session_id,
-                    sa_event_tx,
+                    event_tx: sa_event_tx,
                     cancel,
-                )
+                    model,
+                })
                 .await
         });
 
@@ -1062,13 +1066,14 @@ impl Agent {
             .get("async")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let model = input.get("model").and_then(|v| v.as_str());
 
         // Default (async=false): block until the subagent finishes, return the
         // result inline. This is the common case — the model doesn't have to
         // remember to call subagent_wait.
         // Async mode (async=true): return a task_id; the model calls
         // subagent_wait later. Use this for parallelism.
-        let start_result = self.start_subagent(name, prompt, ev_tx).await;
+        let start_result = self.start_subagent(name, prompt, model, ev_tx).await;
         let (output, success) = match start_result {
             Ok(task_id) if async_mode => (task_id, true),
             Ok(task_id) => {

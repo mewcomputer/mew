@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use mew_hooks::Dispatcher;
 use mew_message::{Message, Part, PartBase, Role, SessionId, TextPart, Time};
 use mew_provider::{Provider, ReasoningConfig};
-use mew_subagents::{SubagentDef, SubagentRunner};
+use mew_subagents::{SubagentDef, SubagentRunOptions, SubagentRunner};
 use mew_tools::tools::flag_important::FlaggedFile;
 use mew_tools::SecretSet;
 use mew_tools::Tool;
@@ -167,6 +167,13 @@ pub struct Agent {
     /// via `Arc` so the tool can gate its `execute` and the agent can
     /// rebuild the system prompt's skills listing.
     pub skill_filter: Arc<tokio::sync::RwLock<Option<HashSet<String>>>>,
+    /// Template context shared with the `Skill` tool so templated skills
+    /// can render with current model/persona/session info. Updated by
+    /// `apply_persona` and `set_model_info`.
+    pub template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>>,
+    /// Project-local variables from `.mew/project_vars.yaml`. Accessible as
+    /// `project_vars` in templates.
+    pub project_vars: std::collections::HashMap<String, String>,
     /// All skills discovered at startup. Used by `rebuild_system` to render
     /// the `<available_skills>` block in the system prompt, filtered by the
     /// current `skill_filter`.
@@ -188,6 +195,12 @@ pub struct Agent {
     pub pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
     /// Active persona name (for display/status). `None` = no persona.
     pub persona_name: Option<String>,
+    /// Current model ID (e.g. "deepseek-v4-flash"). Set by the main loop
+    /// when building or switching the provider. Used in template context.
+    pub model_id: String,
+    /// Current provider ID (e.g. "deepseek"). Derived from the provider
+    /// name. Used in template context.
+    pub provider_id: String,
     /// Provider used by the Auto permission mode to classify tool calls
     /// (the small LLM that decides allow / deny / escalate when the user
     /// has selected Auto mode). `None` → Auto mode falls through to the
@@ -265,16 +278,29 @@ impl Agent {
             active_tool_names: None,
             denied_tool_names: HashSet::new(),
             skill_filter: Arc::new(tokio::sync::RwLock::new(None)),
+            template_ctx: Arc::new(tokio::sync::RwLock::new(None)),
+            project_vars: std::collections::HashMap::new(),
             skills: Vec::new(),
             base_system: String::new(),
             personas: Vec::new(),
             pending_persona_switch: Arc::new(tokio::sync::Mutex::new(None)),
             persona_name: None,
+            model_id: String::new(),
+            provider_id: String::new(),
             classifier_provider: None,
             classifier_model: None,
             classifier_cache: None,
             plan_path: None,
         }
+    }
+
+    /// Set the current model and provider IDs. Used for template context
+    /// (so persona/skill/subagent templates can reference `model_id` and
+    /// `provider_id`). The main loop calls this after constructing the agent
+    /// and whenever the model is switched.
+    pub fn set_model_info(&mut self, model_id: &str, provider_id: &str) {
+        self.model_id = model_id.to_string();
+        self.provider_id = provider_id.to_string();
     }
 
     pub fn set_permission_engine(
@@ -597,21 +623,51 @@ impl Agent {
             .map(|d| d.iter().cloned().collect::<HashSet<_>>())
             .unwrap_or_default();
 
+        // Build the template context once: used for rendering the persona
+        // body (if templated) and shared with the Skill tool for templated
+        // skills.
+        let tool_names: Vec<String> = self.tools.keys().cloned().collect();
+        let (tools, denied_tools) = mew_prompts::template::TemplateContext::compute_tools(
+            &tool_names,
+            &self.active_tool_names,
+            &self.denied_tool_names,
+        );
+        let ctx = mew_prompts::template::TemplateContext {
+            supports_vision: self.supports_vision,
+            persona_name: persona.name.clone(),
+            model_id: self.model_id.clone(),
+            provider_id: self.provider_id.clone(),
+            session_id: self.session_id.to_string(),
+            cwd: std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            current_date: mew_prompts::template::TemplateContext::today(),
+            tools,
+            denied_tools,
+            skills: self.skills.iter().map(|s| s.name.clone()).collect(),
+            project_vars: self.project_vars.clone(),
+            ..Default::default()
+        };
+
         self.persona_prompt = if persona.body.is_empty() {
             None
         } else if persona.config.template == Some(true) {
-            let tool_names: Vec<String> = self.tools.keys().cloned().collect();
-            Some(render_persona_template(
+            Some(mew_prompts::persona::render_with_context(
                 &persona.body,
-                &persona.name,
-                self.supports_vision,
-                &self.active_tool_names,
-                &tool_names,
-                &self.denied_tool_names,
+                &ctx,
             ))
         } else {
             Some(persona.body.clone())
         };
+        // Update the shared template context so templated skills can render
+        // with the same model/persona/session info the persona used.
+        if persona.config.template == Some(true) {
+            if let Ok(mut g) = self.template_ctx.try_write() {
+                *g = Some(ctx);
+            }
+        } else if let Ok(mut g) = self.template_ctx.try_write() {
+            *g = None;
+        }
         // Block in-line to update the shared skill filter. The Skill tool
         // shares the same Arc and reads it on every execute; the system
         // prompt rebuild below picks up the new filter too.
@@ -845,6 +901,7 @@ impl Agent {
         &self,
         name: &str,
         prompt: &str,
+        model: Option<&str>,
         ev_tx: &mpsc::Sender<AgentEvent>,
     ) -> Result<String, String> {
         let def = self
@@ -881,6 +938,7 @@ impl Agent {
         let task_cancel = self.cancel_token.child_token();
         let cancel = task_cancel.clone();
         let prompt = prompt.to_string();
+        let model = model.map(|s| s.to_string());
         let call_id = task_id.clone();
         let name_clone = name.to_string();
         let ev_tx_clone = ev_tx.clone();
@@ -932,7 +990,15 @@ impl Agent {
             });
 
             let result = runner
-                .run(&def, prompt, call_id, parent_session_id, event_tx, cancel)
+                .run(SubagentRunOptions {
+                    def: &def,
+                    prompt,
+                    parent_call_id: call_id,
+                    parent_session_id,
+                    event_tx,
+                    cancel,
+                    model,
+                })
                 .await;
 
             let _ = pump.await;
@@ -1170,27 +1236,6 @@ async fn run_shell_job(
     }
 
     done.notify_waiters();
-}
-
-/// Render a persona body through minijinja. **Moved to
-/// `mew_prompts::persona::render_template`.** Kept here as a thin
-/// re-export so existing call sites continue to compile.
-fn render_persona_template(
-    body: &str,
-    persona_name: &str,
-    supports_vision: bool,
-    active_tool_names: &Option<HashSet<String>>,
-    all_tool_names: &[String],
-    denied_tool_names: &HashSet<String>,
-) -> String {
-    mew_prompts::persona::render_template(
-        body,
-        persona_name,
-        supports_vision,
-        active_tool_names,
-        all_tool_names,
-        denied_tool_names,
-    )
 }
 
 /// Build the `<available_skills>` block for the system prompt. **Moved to

@@ -58,9 +58,10 @@ pub enum SubagentOutcome {
 pub struct SubagentDef {
     pub name: String,
     pub description: String,
+    /// Optional model override. May be a fully-qualified `provider/model` or
+    /// the tier keywords `micro`/`deci`/`nano` when the active provider is a
+    /// router.
     pub model: Option<String>,
-    pub model_small: Option<String>,
-    pub model_big: Option<String>,
     pub tools: Option<Vec<String>>,
     pub max_turns: Option<u32>,
     /// Wall-clock cap for the subagent's full run, in seconds. If `None`, the
@@ -68,6 +69,9 @@ pub struct SubagentDef {
     pub max_duration_secs: Option<u64>,
     pub body: String,
     pub path: PathBuf,
+    /// When true, render the body through minijinja before using it as
+    /// the subagent's system prompt.
+    pub template: bool,
 }
 
 /// Default turn cap applied to any subagent invocation that doesn't set
@@ -135,15 +139,13 @@ struct Frontmatter {
     #[serde(default)]
     model: Option<String>,
     #[serde(default)]
-    model_small: Option<String>,
-    #[serde(default)]
-    model_big: Option<String>,
-    #[serde(default)]
     tools: Option<Vec<String>>,
     #[serde(default)]
     max_turns: Option<u32>,
     #[serde(default)]
     max_duration_secs: Option<u64>,
+    #[serde(default)]
+    template: bool,
 }
 
 static NAME_RE: LazyLock<Regex> =
@@ -191,17 +193,24 @@ pub enum SubagentEvent {
     },
 }
 
+/// Arguments for a single subagent invocation.
+#[derive(Debug, Clone)]
+pub struct SubagentRunOptions<'a> {
+    pub def: &'a SubagentDef,
+    pub prompt: String,
+    pub parent_call_id: String,
+    pub parent_session_id: mew_message::SessionId,
+    pub event_tx: mpsc::Sender<SubagentEvent>,
+    pub cancel: CancellationToken,
+    /// Optional model override chosen by the caller at invocation time. May be
+    /// a fully-qualified `provider/model` or the tier keywords
+    /// `micro`/`deci`/`nano` when the active provider is a router.
+    pub model: Option<String>,
+}
+
 #[async_trait::async_trait]
 pub trait SubagentRunner: Send + Sync {
-    async fn run(
-        &self,
-        def: &SubagentDef,
-        prompt: String,
-        parent_call_id: String,
-        parent_session_id: mew_message::SessionId,
-        event_tx: mpsc::Sender<SubagentEvent>,
-        cancel: CancellationToken,
-    ) -> Result<SubagentResult, SubagentError>;
+    async fn run(&self, opts: SubagentRunOptions<'_>) -> Result<SubagentResult, SubagentError>;
 }
 
 /// Resolves a `provider/model` string into a `Provider`. Used by runners to
@@ -257,8 +266,6 @@ impl Loader {
                 name: "researcher".into(),
                 description: "Researches topics by reading files, searching code, and finding relevant documentation.".into(),
                 model: None,
-                model_small: None,
-                model_big: None,
                 tools: Some(vec!["read".into(), "glob".into(), "grep".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
                 max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
@@ -266,13 +273,12 @@ impl Loader {
                     .unwrap_or("")
                     .to_string(),
                 path: PathBuf::from("(built-in)"),
+                template: false,
             },
             SubagentDef {
                 name: "reviewer".into(),
                 description: "Reviews code changes for issues, style, and correctness.".into(),
                 model: None,
-                model_small: None,
-                model_big: None,
                 tools: Some(vec!["read".into(), "glob".into(), "grep".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
                 max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
@@ -280,13 +286,12 @@ impl Loader {
                     .unwrap_or("")
                     .to_string(),
                 path: PathBuf::from("(built-in)"),
+                template: false,
             },
             SubagentDef {
                 name: "coder".into(),
                 description: "Writes code implementations based on requirements.".into(),
                 model: None,
-                model_small: None,
-                model_big: None,
                 tools: Some(vec!["read".into(), "write".into(), "edit".into(), "glob".into(), "grep".into(), "bash".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
                 max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
@@ -294,6 +299,7 @@ impl Loader {
                     .unwrap_or("")
                     .to_string(),
                 path: PathBuf::from("(built-in)"),
+                template: false,
             },
         ]
     }
@@ -314,63 +320,51 @@ fn load_agent_file(path: &Path) -> Result<SubagentDef, SubagentError> {
         None
     };
 
-    let (
-        name,
-        description,
-        model,
-        model_small,
-        model_big,
-        tools,
-        max_turns,
-        max_duration_secs,
-        body,
-    ) = match parsed {
-        Some((fm, body)) => {
-            validate_name(&fm.name)?;
-            (
-                fm.name,
-                fm.description,
-                fm.model,
-                fm.model_small,
-                fm.model_big,
-                fm.tools,
-                fm.max_turns,
-                fm.max_duration_secs,
-                body,
-            )
-        }
-        None => {
-            let file_stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_string();
-            validate_name(&file_stem)?;
-            (
-                file_stem,
-                String::new(),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                content,
-            )
-        }
-    };
+    let (name, description, model, tools, max_turns, max_duration_secs, body, template) =
+        match parsed {
+            Some((fm, body)) => {
+                validate_name(&fm.name)?;
+                (
+                    fm.name,
+                    fm.description,
+                    fm.model,
+                    fm.tools,
+                    fm.max_turns,
+                    fm.max_duration_secs,
+                    body,
+                    fm.template,
+                )
+            }
+            None => {
+                let file_stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                validate_name(&file_stem)?;
+                (
+                    file_stem,
+                    String::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    content,
+                    false,
+                )
+            }
+        };
 
     Ok(SubagentDef {
         name,
         description,
         model,
-        model_small,
-        model_big,
         tools,
         max_turns,
         max_duration_secs,
         body,
         path: path.to_path_buf(),
+        template,
     })
 }
 
@@ -404,12 +398,6 @@ pub fn apply_config_overrides(
             if let Some(ref model) = ov.model {
                 def.model = Some(model.clone());
             }
-            if let Some(ref model_small) = ov.model_small {
-                def.model_small = Some(model_small.clone());
-            }
-            if let Some(ref model_big) = ov.model_big {
-                def.model_big = Some(model_big.clone());
-            }
             if let Some(max_turns) = ov.max_turns {
                 def.max_turns = Some(max_turns);
             }
@@ -423,8 +411,6 @@ pub fn apply_config_overrides(
 #[derive(Debug, Clone, Default)]
 pub struct AgentConfigOverride {
     pub model: Option<String>,
-    pub model_small: Option<String>,
-    pub model_big: Option<String>,
     pub max_turns: Option<u32>,
     pub max_duration_secs: Option<u64>,
 }
@@ -445,8 +431,6 @@ mod tests {
         name: &str,
         description: &str,
         model: Option<&str>,
-        model_small: Option<&str>,
-        model_big: Option<&str>,
         tools: Option<&[&str]>,
         max_turns: Option<u32>,
         max_duration_secs: Option<u64>,
@@ -457,12 +441,6 @@ mod tests {
         let mut fm = format!("---\nname: {name}\ndescription: {description}\n");
         if let Some(m) = model {
             fm.push_str(&format!("model: \"{m}\"\n"));
-        }
-        if let Some(m) = model_small {
-            fm.push_str(&format!("model_small: \"{m}\"\n"));
-        }
-        if let Some(m) = model_big {
-            fm.push_str(&format!("model_big: \"{m}\"\n"));
         }
         if let Some(t) = tools {
             fm.push_str(&format!("tools: {:?}\n", t));
@@ -511,8 +489,6 @@ mod tests {
             "explore",
             "Fast exploration",
             Some("inherit"),
-            Some("z-ai/glm-4.5-air"),
-            Some("z-ai/glm-4.6"),
             Some(&["read", "glob", "grep"]),
             Some(15),
             Some(120),
@@ -528,8 +504,6 @@ mod tests {
         assert_eq!(user_defs.len(), 1);
         let def = &user_defs[0];
         assert_eq!(def.model.as_deref(), Some("inherit"));
-        assert_eq!(def.model_small.as_deref(), Some("z-ai/glm-4.5-air"));
-        assert_eq!(def.model_big.as_deref(), Some("z-ai/glm-4.6"));
         let tools = def.tools.as_ref().unwrap();
         assert_eq!(tools, &["read", "glob", "grep"].map(String::from));
         assert_eq!(def.max_turns, Some(15));
@@ -631,9 +605,7 @@ mod tests {
     fn test_config_override() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
-        write_agent_full(
-            cwd, "explore", "desc", None, None, None, None, None, None, "body",
-        );
+        write_agent_full(cwd, "explore", "desc", None, None, None, None, "body");
 
         let loader = Loader::new(cwd);
         let mut defs = loader.load().unwrap();
@@ -659,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_override_router_models() {
+    fn test_config_override_router_model() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
         write_agent(cwd, "explore", "desc", "body");
@@ -671,15 +643,13 @@ mod tests {
         overrides.insert(
             "explore".to_string(),
             AgentConfigOverride {
-                model_small: Some("z-ai/glm-4.5-air".to_string()),
-                model_big: Some("z-ai/glm-4.6".to_string()),
+                model: Some("micro".to_string()),
                 ..Default::default()
             },
         );
         apply_config_overrides(&mut defs, &overrides);
 
-        assert_eq!(defs[0].model_small.as_deref(), Some("z-ai/glm-4.5-air"));
-        assert_eq!(defs[0].model_big.as_deref(), Some("z-ai/glm-4.6"));
+        assert_eq!(defs[0].model.as_deref(), Some("micro"));
     }
 
     #[test]

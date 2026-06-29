@@ -61,6 +61,10 @@ struct Frontmatter {
     description: String,
     #[serde(default)]
     mew: Option<MewFrontmatter>,
+    /// Alias for `mew:` so personas authored for Polytoken work without
+    /// modification. `mew:` takes priority when both are present.
+    #[serde(default)]
+    polytoken: Option<MewFrontmatter>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -177,7 +181,7 @@ fn load_persona_file(path: &Path) -> Result<Persona, PersonaError> {
     let (name, description, body, config) = match frontmatter {
         Some((fm, body)) => {
             validate_name(&fm.name)?;
-            let config = match fm.mew {
+            let config = match fm.mew.or(fm.polytoken) {
                 Some(mew) => PersonaConfig {
                     model: mew.model,
                     tools: mew.tools,
@@ -488,6 +492,51 @@ mod tests {
         assert!(
             names.contains(&"builder"),
             "builder should be a built-in default"
+        );
+    }
+
+    #[test]
+    fn test_polytoken_alias_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        let persona_dir = cwd.join(".mew").join("personas").join("via-polytoken");
+        std::fs::create_dir_all(&persona_dir).unwrap();
+        std::fs::write(
+            persona_dir.join("PERSONA.md"),
+            "---\nname: via-polytoken\ndescription: test\npolytoken:\n  model: z-ai/glm-4.5-air\n  tools:\n    - read\n    - grep\n---\nbody",
+        )
+        .unwrap();
+
+        let loader = Loader::new(cwd).without_builtins();
+        let personas = loader.load().unwrap();
+        assert_eq!(personas.len(), 1);
+        assert_eq!(
+            personas[0].config.model.as_deref(),
+            Some("z-ai/glm-4.5-air")
+        );
+        let tools = personas[0].config.tools.as_ref().unwrap();
+        assert_eq!(tools, &vec!["read".to_string(), "grep".to_string()]);
+    }
+
+    #[test]
+    fn test_mew_takes_priority_over_polytoken() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        let persona_dir = cwd.join(".mew").join("personas").join("priority");
+        std::fs::create_dir_all(&persona_dir).unwrap();
+        std::fs::write(
+            persona_dir.join("PERSONA.md"),
+            "---\nname: priority\ndescription: test\nmew:\n  model: deepseek/deepseek-v4-flash\npolytoken:\n  model: z-ai/glm-4.5-air\n---\nbody",
+        )
+        .unwrap();
+
+        let loader = Loader::new(cwd).without_builtins();
+        let personas = loader.load().unwrap();
+        assert_eq!(personas.len(), 1);
+        // mew: takes priority over polytoken:
+        assert_eq!(
+            personas[0].config.model.as_deref(),
+            Some("deepseek/deepseek-v4-flash")
         );
     }
 }

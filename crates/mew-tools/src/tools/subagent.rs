@@ -36,6 +36,10 @@ impl Subagent {
                 "prompt": {
                     "type": "string",
                     "description": "The prompt to send to the subagent."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model override. Use \"micro\" or \"deci\" to select the router's configured tier, or pass a fully-qualified \"provider/model\"."
                 }
             },
             "required": ["name", "prompt"]

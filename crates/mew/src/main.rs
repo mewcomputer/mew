@@ -10,7 +10,7 @@ mod config_editor;
 
 use mew_agent::Agent;
 use mew_catalog::Catalog;
-use mew_config::Config;
+use mew_config::{Config, ProviderConfig};
 use mew_hooks::{Dispatcher, NopDispatcher, PluginHost};
 use mew_hooks_runtime::SubprocessDispatcher;
 use mew_mcp::McpClient;
@@ -33,6 +33,7 @@ use mew_tools::tools::read::Read;
 use mew_tools::tools::skill::Skill;
 use mew_tools::tools::switch_persona::SwitchPersona as SwitchPersonaTool;
 use mew_tools::tools::todo::{TodoComplete, TodoCreate, TodoDelete, TodoListTool, TodoUpdate};
+use mew_tools::tools::web_fetch::WebFetch;
 use mew_tools::tools::write::Write;
 use mew_tools::SecretSet;
 
@@ -693,6 +694,7 @@ fn config_cmd(command: ConfigCommands) -> Result<()> {
 fn build_tools(
     skills: Arc<Vec<mew_skills::Skill>>,
     skill_filter: Arc<tokio::sync::RwLock<Option<std::collections::HashSet<String>>>>,
+    template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>>,
     personas: Arc<Vec<mew_personas::Persona>>,
     pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
 ) -> Vec<Arc<dyn mew_tools::Tool>> {
@@ -717,9 +719,10 @@ fn build_tools(
         Arc::new(TodoComplete),
         Arc::new(TodoDelete),
         Arc::new(TodoListTool),
+        Arc::new(WebFetch),
     ];
     if !skills.is_empty() {
-        tools.push(Arc::new(Skill::new(skills, skill_filter)));
+        tools.push(Arc::new(Skill::new(skills, skill_filter, template_ctx)));
     }
     // The switch_persona tool is only useful when there's at least one
     // persona to switch to. With zero discovered personas the tool would
@@ -864,15 +867,62 @@ fn build_permission_engine(
     )
 }
 
-/// If the config specifies a classifier provider, build it and wire it into
-/// the agent so Auto / Auto+ permission modes can classify tool calls.
-/// Without this, Auto mode falls through to the user modal on every call.
+/// Return the first provider configured as a router.
+///
+/// Prefers a provider literally named `router`, otherwise returns the first
+/// provider whose `kind` is `"router"`. Router providers are task-only and
+/// cannot be selected as the main chat provider.
+fn find_router_provider(cfg: &Config) -> Option<(String, &ProviderConfig)> {
+    if let Some(pc) = cfg.providers.get("router") {
+        if pc.kind == "router" {
+            return Some(("router".to_string(), pc));
+        }
+    }
+    cfg.providers
+        .iter()
+        .find(|(_, pc)| pc.kind == "router")
+        .map(|(id, pc)| (id.clone(), pc))
+}
+
+/// Wire the Auto/Auto+ classifier provider into the agent.
+///
+/// If a router provider is configured, the classifier automatically uses the
+/// router's `micro` tier. Otherwise, falls back to the explicit
+/// `permissions.classifier_provider/classifier_model` config.
 fn maybe_set_classifier_provider(
     agent: &mut mew_agent::Agent,
     cfg: &Config,
     cat: Option<&Catalog>,
     raw: bool,
+    _active_provider_id: &str,
+    _active_model_id: &str,
 ) {
+    // If a router provider is configured, use its micro tier for classification.
+    if let Some((router_id, pc)) = find_router_provider(cfg) {
+        let micro_model = pc.micro_model().to_string();
+        if !micro_model.is_empty() {
+            let (micro_pid, micro_mid) = resolve_model(cfg, cat, &router_id, Some(micro_model));
+            match build_provider(cfg, cat, &micro_pid, &micro_mid, raw) {
+                Ok(provider) => {
+                    agent.set_classifier_provider(provider, Some(micro_mid.clone()));
+                    tracing::info!(
+                        provider = %micro_pid,
+                        model = %micro_mid,
+                        "router micro tier configured as classifier for Auto/Auto+ modes"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to build router micro tier as classifier; Auto/Auto+ will fall through to user"
+                    );
+                }
+            }
+            return;
+        }
+    }
+
+    // Legacy explicit classifier config.
     if let Some(ref provider_id) = cfg.permissions.classifier_provider {
         let model_id = cfg.permissions.classifier_model.as_deref().unwrap_or("");
         match build_provider(cfg, cat, provider_id, model_id, raw) {
@@ -1122,9 +1172,12 @@ fn build_session_agent(
     let persona_loader = mew_personas::Loader::new(cwd.clone());
     let personas_arc = Arc::new(persona_loader.load().unwrap_or_default());
     let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
+    let template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>> =
+        Arc::new(tokio::sync::RwLock::new(None));
     let tools = build_tools(
         skills.clone(),
         skill_filter.clone(),
+        template_ctx.clone(),
         personas_arc.clone(),
         pending_persona_switch.clone(),
     );
@@ -1138,10 +1191,11 @@ fn build_session_agent(
 
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
     agent.set_model_info(model_id, provider_id);
+    agent.template_ctx = template_ctx;
     agent.flagged_files = flagged_files;
     agent.secrets = build_secret_set(cfg);
     agent.set_permission_engine(permission_engine);
-    maybe_set_classifier_provider(&mut agent, cfg, cat, raw);
+    maybe_set_classifier_provider(&mut agent, cfg, cat, raw, provider_id, model_id);
     agent.set_plan_path(&cfg.plan_path);
     agent.set_personas((*personas_arc).clone());
     agent.set_pending_persona_switch(pending_persona_switch.clone());
@@ -1174,6 +1228,7 @@ fn build_session_agent(
             cfg: Arc::new(cfg.clone()),
             cat: cat.cloned().map(Arc::new),
             default_provider_id: provider_id.to_string(),
+            router_provider_id: find_router_provider(cfg).map(|(id, _)| id),
             raw,
         });
         let runner = mew_agent::runner::SimpleRunner::new(
@@ -1197,8 +1252,10 @@ fn build_session_agent(
     }
 
     // Load project context and skills for system prompt.
-    let ctx_loader = mew_context::Loader::new(cwd);
+    let ctx_loader = mew_context::Loader::new(&cwd);
     let ctx_files = ctx_loader.load().unwrap_or_default();
+    let project_vars = mew_context::load_project_vars(&cwd);
+    agent.project_vars = project_vars;
     if !ctx_files.is_empty() {
         agent.set_system(mew_context::build_system_prompt(&ctx_files));
     }
@@ -1895,20 +1952,26 @@ async fn chat_cmd(
 /// Resolves a `provider/model` string into a `Provider`. Used by the
 /// subagent runner to honor per-subagent `model:` overrides. Falls back to
 /// the agent's current `provider_id` when the override has no `/`.
+///
+/// Tier keywords (`nano`, `micro`, `deci`) are resolved against the first
+/// router provider in the config, not the active chat provider.
 struct MainModelResolver {
     cfg: Arc<Config>,
     cat: Option<Arc<Catalog>>,
     default_provider_id: String,
+    router_provider_id: Option<String>,
     raw: bool,
 }
 
 #[async_trait]
 impl mew_subagents::ModelResolver for MainModelResolver {
     async fn resolve(&self, model: &str) -> Result<Arc<dyn Provider>, String> {
-        let (provider_id, model_id) = if let Some(idx) = model.find('/') {
-            (&model[..idx], &model[idx + 1..])
+        let resolved_model = self.resolve_tier_keyword(model);
+
+        let (provider_id, model_id) = if let Some(idx) = resolved_model.find('/') {
+            (&resolved_model[..idx], &resolved_model[idx + 1..])
         } else {
-            (self.default_provider_id.as_str(), model)
+            (self.default_provider_id.as_str(), resolved_model.as_str())
         };
         build_provider(
             &self.cfg,
@@ -1918,6 +1981,34 @@ impl mew_subagents::ModelResolver for MainModelResolver {
             self.raw,
         )
         .map_err(|e| e.to_string())
+    }
+}
+
+impl MainModelResolver {
+    /// If a router provider is configured and `model` is a tier keyword,
+    /// return the configured tier model ID. Falls back to the keyword itself
+    /// so that literal model names still work when no router is configured.
+    fn resolve_tier_keyword(&self, model: &str) -> String {
+        let router_id = match self.router_provider_id.as_ref() {
+            Some(id) => id,
+            None => return model.to_string(),
+        };
+        let pc = match self.cfg.providers.get(router_id) {
+            Some(pc) => pc,
+            None => return model.to_string(),
+        };
+        match model {
+            "nano" => {
+                if pc.nano.is_empty() {
+                    pc.micro_model().to_string()
+                } else {
+                    pc.nano.clone()
+                }
+            }
+            "micro" => pc.micro_model().to_string(),
+            "deci" => pc.deci_model().to_string(),
+            _ => model.to_string(),
+        }
     }
 }
 
@@ -1936,18 +2027,7 @@ async fn run_tui(
     let provider =
         build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
 
-    // For router providers, use the big model for display.
-    let (display_provider, display_model) = if let Some(pc) = cfg.providers.get(&provider_id) {
-        if pc.kind == "router" && !pc.big.is_empty() {
-            let (_, big_mid) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
-            let (big_pid, _) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
-            (big_pid, big_mid)
-        } else {
-            (provider_id.clone(), model_id.clone())
-        }
-    } else {
-        (provider_id.clone(), model_id.clone())
-    };
+    let (display_provider, display_model) = (provider_id.clone(), model_id.clone());
 
     let session_id = ulid::Ulid::new().to_string();
     let session_writer = SessionWriter::open(&session_id)
@@ -2048,10 +2128,13 @@ async fn run_tui(
     let personas_arc = Arc::new(loaded_personas.clone());
 
     let skill_filter = Arc::new(tokio::sync::RwLock::new(None));
+    let template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>> =
+        Arc::new(tokio::sync::RwLock::new(None));
     let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
     let mut tools = build_tools(
         skills.clone(),
         skill_filter.clone(),
+        template_ctx.clone(),
         personas_arc.clone(),
         pending_persona_switch.clone(),
     );
@@ -2109,6 +2192,7 @@ async fn run_tui(
         None,
     );
     agent.set_model_info(&model_id, &provider_id);
+    agent.template_ctx = template_ctx;
     agent.flagged_files = flagged_files;
     agent.set_pending_persona_switch(pending_persona_switch.clone());
     agent.set_personas(loaded_personas.clone());
@@ -2121,7 +2205,7 @@ async fn run_tui(
         }
     }
     agent.set_permission_engine(permission_engine);
-    maybe_set_classifier_provider(&mut agent, cfg, cat, raw);
+    maybe_set_classifier_provider(&mut agent, cfg, cat, raw, &provider_id, &model_id);
     agent.set_plan_path(&cfg.plan_path);
     agent.register_plugin_tools().await;
     // Apply the default persona on startup (builder by default). The agent's
@@ -2161,6 +2245,7 @@ async fn run_tui(
             cfg: Arc::new(cfg.clone()),
             cat: cat_for_resolver.map(Arc::new),
             default_provider_id: provider_id.clone(),
+            router_provider_id: find_router_provider(cfg).map(|(id, _)| id),
             raw,
         });
         let runner = mew_agent::runner::SimpleRunner::new(
@@ -2197,9 +2282,12 @@ async fn run_tui(
         }
     }
 
+    let project_vars = mew_context::load_project_vars(&std::env::current_dir().unwrap_or_default());
+
     if !ctx_files.is_empty() {
         agent.set_system(mew_context::build_system_prompt(&ctx_files));
     }
+    agent.project_vars = project_vars;
 
     // If skills are loaded, push them to the agent. The agent rebuilds its
     // system prompt so the skills XML reflects the active persona's filter.
@@ -3433,17 +3521,7 @@ async fn build_and_run(
     let provider =
         build_provider(cfg, cat, &provider_id, &model_id, raw).context("build provider")?;
 
-    let (_display_provider, display_model) = if let Some(pc) = cfg.providers.get(&provider_id) {
-        if pc.kind == "router" && !pc.big.is_empty() {
-            let (_, big_mid) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
-            let (big_pid, _) = resolve_model(cfg, cat, &provider_id, Some(pc.big.clone()));
-            (big_pid, big_mid)
-        } else {
-            (provider_id.clone(), model_id.clone())
-        }
-    } else {
-        (provider_id.clone(), model_id.clone())
-    };
+    let display_model = model_id.clone();
 
     let session_id = ulid::Ulid::new().to_string();
     let session_writer = SessionWriter::open(&session_id)
@@ -3464,10 +3542,13 @@ async fn build_and_run(
     let personas_arc = Arc::new(loaded_personas.clone());
 
     let skill_filter = Arc::new(tokio::sync::RwLock::new(None));
+    let template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>> =
+        Arc::new(tokio::sync::RwLock::new(None));
     let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
     let mut tools = build_tools(
         skills.clone(),
         skill_filter.clone(),
+        template_ctx.clone(),
         personas_arc.clone(),
         pending_persona_switch.clone(),
     );
@@ -3495,6 +3576,7 @@ async fn build_and_run(
         None,
     );
     agent.set_model_info(&model_id, &provider_id);
+    agent.template_ctx = template_ctx;
     agent.set_pending_persona_switch(pending_persona_switch.clone());
     agent.set_personas(loaded_personas.clone());
     agent.set_pending_persona_switch(pending_persona_switch.clone());
@@ -3508,7 +3590,7 @@ async fn build_and_run(
     }
     agent.register_plugin_tools().await;
     agent.set_permission_engine(permission_engine);
-    maybe_set_classifier_provider(&mut agent, cfg, cat, raw);
+    maybe_set_classifier_provider(&mut agent, cfg, cat, raw, &provider_id, &model_id);
     agent.set_plan_path(&cfg.plan_path);
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![std::env::current_dir().unwrap_or_default()];
@@ -3526,6 +3608,7 @@ async fn build_and_run(
             cfg: Arc::new(cfg.clone()),
             cat: cat_for_resolver.map(Arc::new),
             default_provider_id: provider_id.clone(),
+            router_provider_id: find_router_provider(cfg).map(|(id, _)| id),
             raw,
         });
         let runner = mew_agent::runner::SimpleRunner::new(
@@ -3564,6 +3647,8 @@ async fn build_and_run(
     // Load project context files and prepend to system prompt
     let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());
     let ctx_files = ctx_loader.load().unwrap_or_default();
+    let project_vars = mew_context::load_project_vars(&std::env::current_dir().unwrap_or_default());
+    agent.project_vars = project_vars;
     if !ctx_files.is_empty() {
         agent.set_system(mew_context::build_system_prompt(&ctx_files));
     }
@@ -3757,51 +3842,16 @@ fn provider_has_credential(cfg: &Config, provider_id: &str) -> bool {
     }
 }
 
-fn build_provider(
+/// Build a direct provider adapter from a concrete provider config.
+fn build_direct_provider(
     cfg: &Config,
     cat: Option<&Catalog>,
     provider_id: &str,
+    pc: &ProviderConfig,
     model_override: &str,
     raw: bool,
 ) -> Result<Arc<dyn Provider>> {
-    let pc = cfg
-        .providers
-        .get(provider_id)
-        .cloned()
-        .with_context(|| format!("unknown provider {}", provider_id))?;
-
     let creds = mew_config::get_credential(&pc.credential_ref).context("get credential")?;
-
-    // Router: build a router provider wrapping small + big models.
-    if pc.kind == "router" && !pc.small.is_empty() && !pc.big.is_empty() {
-        let (small_pid, small_mid) = resolve_model(cfg, cat, provider_id, Some(pc.small.clone()));
-        let (big_pid, big_mid) = resolve_model(cfg, cat, provider_id, Some(pc.big.clone()));
-
-        let small = build_provider(cfg, cat, &small_pid, &small_mid, raw)?;
-        let big = build_provider(cfg, cat, &big_pid, &big_mid, raw)?;
-
-        tracing::info!(
-            small_provider = %small_pid,
-            small_model = %small_mid,
-            big_provider = %big_pid,
-            big_model = %big_mid,
-            "built router provider"
-        );
-
-        // Use the big model for display.
-        let model = if model_override.is_empty() {
-            big_mid.clone()
-        } else {
-            model_override.to_string()
-        };
-
-        let mut router = mew_provider_router::Router::new(small, big);
-        router.set_turn_threshold(3);
-
-        return Ok(Arc::new(mew_provider_router::Routed::new(
-            router, big_pid, model,
-        )));
-    }
 
     let model = if model_override.is_empty() {
         if cfg.default_model.is_empty() {
@@ -3813,7 +3863,7 @@ fn build_provider(
         model_override.to_string()
     };
 
-    let mut shape = pc.shape;
+    let mut shape = pc.shape.clone();
     if let Some(c) = cat {
         let s = c.shape_for(&model);
         if !s.is_empty() {
@@ -3821,7 +3871,7 @@ fn build_provider(
         }
     }
 
-    let mut base_url = pc.base_url;
+    let mut base_url = pc.base_url.clone();
     if provider_id == "opencode-go" && model.starts_with("minimax-") {
         shape = "anthropic".to_string();
         base_url = "https://opencode.ai/zen/go/v1".to_string();
@@ -3845,6 +3895,31 @@ fn build_provider(
         }
         _ => anyhow::bail!("unsupported shape {} for provider {}", shape, provider_id),
     }
+}
+
+fn build_provider(
+    cfg: &Config,
+    cat: Option<&Catalog>,
+    provider_id: &str,
+    model_override: &str,
+    raw: bool,
+) -> Result<Arc<dyn Provider>> {
+    let pc = cfg
+        .providers
+        .get(provider_id)
+        .cloned()
+        .with_context(|| format!("unknown provider {}", provider_id))?;
+
+    // Router providers are task-only primitives used by subagents and the
+    // permission classifier. They cannot be selected as the main chat provider.
+    if pc.kind == "router" {
+        anyhow::bail!(
+            "provider '{}' is a router; router providers cannot be used as the main chat provider",
+            provider_id
+        );
+    }
+
+    build_direct_provider(cfg, cat, provider_id, &pc, model_override, raw)
 }
 
 async fn toggle_mouse_capture(

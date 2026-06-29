@@ -47,6 +47,10 @@ impl SubagentStart {
                     "type": "boolean",
                     "description": "If true, return a task ID immediately and run in the background; collect with subagent_wait. Defaults to false (block and return the result inline).",
                     "default": false
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model override. Use \"micro\" or \"deci\" to select the router's configured tier, or pass a fully-qualified \"provider/model\"."
                 }
             },
             "required": ["name", "prompt"]

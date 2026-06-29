@@ -38,6 +38,7 @@ mod tests {
             description: desc.into(),
             body: String::new(),
             path: std::path::PathBuf::from("(test)"),
+            template: false,
         }
     }
 

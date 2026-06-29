@@ -149,17 +149,24 @@ being used as the system prompt. These variables are available:
 | `persona_name` | str | The active persona's name |
 | `model_id` | str | The active model ID (e.g. `deepseek-v4-flash`) |
 | `provider_id` | str | The active provider ID (e.g. `deepseek`) |
+| `model_variant` | str | The active thinking variant (e.g. `high`, empty if none) |
 | `session_id` | str | The session ID |
 | `cwd` | str | The current working directory |
 | `current_date` | str | Today's date in ISO 8601 (e.g. `2026-06-29`) |
 | `tools` | list of str | Tool names available this turn (after allowlist + denylist) |
 | `denied_tools` | list of str | Tools removed by the denylist |
+| `skills` | list of str | Available skill names |
+| `mcp_servers` | list of str | Connected MCP server names |
+| `project_vars` | map | Project-local variables from `.mew/project_vars.yaml` |
 
 Template functions:
 
 | Function | Description |
 |----------|-------------|
 | `has_tool(name)` | Returns true if `name` is in the effective tool list |
+| `has_skill(name)` | Returns true if `name` is an available skill |
+| `has_mcp(name)` | Returns true if `name` is a connected MCP server |
+| `is_model_variant(variant)` | Returns true if the active provider matches a known family: `anthropic` (umans), `openai` (opencode-zen, opencode-go, deepseek, z-ai), `deepseek`, `z-ai`, `umans`, `opencode` |
 | `transclude("mew://path")` | Inline a built-in VFS resource (see below) |
 
 Example:

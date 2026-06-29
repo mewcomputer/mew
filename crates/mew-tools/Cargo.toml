@@ -11,6 +11,7 @@ mew-hooks = { workspace = true }
 mew-skills = { workspace = true }
 mew-subagents = { workspace = true }
 mew-personas = { workspace = true }
+mew-prompts = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -21,6 +22,8 @@ globset = { workspace = true }
 ignore = { workspace = true }
 similar = { workspace = true }
 ulid = { workspace = true }
+reqwest = { workspace = true }
+htmd = "0.5"
 
 [features]
 default = []

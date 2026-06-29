@@ -67,8 +67,9 @@ enum RightField {
     ProviderBaseUrl(String),
     ProviderCredRef(String),
     ProviderKind(String),
-    ProviderSmall(String),
-    ProviderBig(String),
+    ProviderNano(String),
+    ProviderMicro(String),
+    ProviderDeci(String),
     WorkspaceRoots,
 }
 
@@ -81,8 +82,9 @@ impl RightField {
             Self::ProviderBaseUrl(_) => "base_url",
             Self::ProviderCredRef(_) => "credential_ref",
             Self::ProviderKind(_) => "kind",
-            Self::ProviderSmall(_) => "small",
-            Self::ProviderBig(_) => "big",
+            Self::ProviderNano(_) => "nano",
+            Self::ProviderMicro(_) => "micro",
+            Self::ProviderDeci(_) => "deci",
             Self::WorkspaceRoots => "roots (comma-separated)",
         }
     }
@@ -111,15 +113,32 @@ impl RightField {
                 .get(id)
                 .map(|p| p.kind.clone())
                 .unwrap_or_default(),
-            Self::ProviderSmall(id) => config
+            Self::ProviderNano(id) => config
                 .providers
                 .get(id)
-                .map(|p| p.small.clone())
+                .map(|p| p.nano.clone())
                 .unwrap_or_default(),
-            Self::ProviderBig(id) => config
+            Self::ProviderMicro(id) => config
                 .providers
                 .get(id)
-                .map(|p| p.big.clone())
+                .map(|p| {
+                    if p.micro.is_empty() {
+                        p.small.clone()
+                    } else {
+                        p.micro.clone()
+                    }
+                })
+                .unwrap_or_default(),
+            Self::ProviderDeci(id) => config
+                .providers
+                .get(id)
+                .map(|p| {
+                    if p.deci.is_empty() {
+                        p.big.clone()
+                    } else {
+                        p.deci.clone()
+                    }
+                })
                 .unwrap_or_default(),
             Self::WorkspaceRoots => config
                 .workspace
@@ -162,14 +181,19 @@ impl RightField {
                     p.kind = val.into();
                 }
             }
-            Self::ProviderSmall(id) => {
+            Self::ProviderNano(id) => {
                 if let Some(p) = config.providers.get_mut(id) {
-                    p.small = val.into();
+                    p.nano = val.into();
                 }
             }
-            Self::ProviderBig(id) => {
+            Self::ProviderMicro(id) => {
                 if let Some(p) = config.providers.get_mut(id) {
-                    p.big = val.into();
+                    p.micro = val.into();
+                }
+            }
+            Self::ProviderDeci(id) => {
+                if let Some(p) = config.providers.get_mut(id) {
+                    p.deci = val.into();
                 }
             }
             Self::WorkspaceRoots => {
@@ -195,8 +219,9 @@ fn right_fields_for(item: &LeftItem, config: &Config) -> Vec<RightField> {
                 RightField::ProviderKind(id.clone()),
             ];
             if config.providers.get(id).map(|p| p.kind.as_str()) == Some("router") {
-                fields.push(RightField::ProviderSmall(id.clone()));
-                fields.push(RightField::ProviderBig(id.clone()));
+                fields.push(RightField::ProviderNano(id.clone()));
+                fields.push(RightField::ProviderMicro(id.clone()));
+                fields.push(RightField::ProviderDeci(id.clone()));
             }
             fields
         }

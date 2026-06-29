@@ -12,14 +12,24 @@ pub struct Skill {
     /// Shared with the owning `Agent` via `Arc` so the agent can update it on
     /// `apply_persona`.
     filter: Arc<tokio::sync::RwLock<Option<HashSet<String>>>>,
+    /// Template context for rendering templated skills. Shared with the
+    /// owning `Agent` via `Arc` so it stays in sync with persona/model state.
+    /// When `None` (no persona active, or persona has no template context),
+    /// templated skills fall back to their raw body.
+    template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>>,
 }
 
 impl Skill {
     pub fn new(
         skills: Arc<Vec<mew_skills::Skill>>,
         filter: Arc<tokio::sync::RwLock<Option<HashSet<String>>>>,
+        template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>>,
     ) -> Self {
-        Self { skills, filter }
+        Self {
+            skills,
+            filter,
+            template_ctx,
+        }
     }
 }
 
@@ -76,8 +86,25 @@ impl Tool for Skill {
             .find(|s| s.name == name)
             .ok_or_else(|| ToolError::InvalidInput(format!("unknown skill: {name}")))?;
 
+        // If the skill has `template: true`, render it through minijinja
+        // with the current agent context. Falls back to the raw body if
+        // no template context is available or rendering fails.
+        let output = if skill.template {
+            let ctx_guard = self.template_ctx.read().await;
+            match &*ctx_guard {
+                Some(ctx) => {
+                    let mut ctx = ctx.clone();
+                    ctx.skill_name = skill.name.clone();
+                    mew_prompts::template::render(&skill.body, &ctx)
+                }
+                None => skill.body.clone(),
+            }
+        } else {
+            skill.body.clone()
+        };
+
         Ok(ToolOutput {
-            output: skill.body.clone(),
+            output,
             error: String::new(),
             diff: None,
             metadata: None,

@@ -201,16 +201,47 @@ pub struct ProviderConfig {
     /// Provider kind: "direct" (default) or "router".
     #[serde(default = "default_kind")]
     pub kind: String,
-    /// Router: small model ID for simple turns.
+    /// Router: cheapest model ID for very simple turns.
+    #[serde(default)]
+    pub nano: String,
+    /// Router: medium model ID for simple turns.
+    #[serde(default)]
+    pub micro: String,
+    /// Router: most-capable model ID for complex turns.
+    #[serde(default)]
+    pub deci: String,
+    /// Legacy router field; used as a fallback when `micro` is empty so old
+    /// configs keep working. New configs should use `micro`.
     #[serde(default)]
     pub small: String,
-    /// Router: big model ID for complex turns.
+    /// Legacy router field; used as a fallback when `deci` is empty so old
+    /// configs keep working. New configs should use `deci`.
     #[serde(default)]
     pub big: String,
 }
 
 fn default_kind() -> String {
     "direct".into()
+}
+
+impl ProviderConfig {
+    /// Effective `micro` model, falling back to the legacy `small` field.
+    pub fn micro_model(&self) -> &str {
+        if self.micro.is_empty() {
+            &self.small
+        } else {
+            &self.micro
+        }
+    }
+
+    /// Effective `deci` model, falling back to the legacy `big` field.
+    pub fn deci_model(&self) -> &str {
+        if self.deci.is_empty() {
+            &self.big
+        } else {
+            &self.deci
+        }
+    }
 }
 
 impl Default for ProviderConfig {
@@ -220,6 +251,9 @@ impl Default for ProviderConfig {
             base_url: String::new(),
             credential_ref: String::new(),
             kind: default_kind(),
+            nano: String::new(),
+            micro: String::new(),
+            deci: String::new(),
             small: String::new(),
             big: String::new(),
         }

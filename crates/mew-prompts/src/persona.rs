@@ -2,29 +2,23 @@
 //!
 //! Persona bodies live on disk in `PERSONA.md` files (loaded by
 //! `mew-personas`). When a persona's frontmatter sets `template: true`, the
-//! body is rendered through [`minijinja`] with the following variables:
+//! body is rendered through minijinja via [`crate::template`].
 //!
-//! - `supports_vision` (bool) — whether the active model supports image input
-//! - `persona_name` (str) — the active persona's name
-//! - `tools` (list of str) — tool names available to the model this turn
-//!   (after applying the persona's `tools` allowlist and `tools_deny`
-//!   denylist)
-//! - `denied_tools` (list of str) — tools removed by the denylist
-//!
-//! Falls back to the raw body on any render error so a typo in the template
-//! never bricks the persona.
+//! This module is a thin wrapper that builds a [`TemplateContext`] from the
+//! agent's state and delegates to [`crate::template::render`]. The shared
+//! module also serves skills and subagents, so all three prompt types expose
+//! the same variables and functions.
 
 use std::collections::HashSet;
 
-use minijinja::context;
+use crate::template::{render, TemplateContext};
 
 /// Render a persona body through minijinja using the given tool context.
 /// Returns the raw body if rendering fails (with a `tracing::warn!`).
 ///
-/// `all_tool_names` is the full registry of tool names available to the
-/// agent. The function only consults the names — the actual `Tool` trait
-/// objects aren't needed here, which keeps `mew-prompts` free of the
-/// `mew-tools` dependency (avoiding a workspace cycle).
+/// This is the legacy entry point kept for backward compatibility. New
+/// callers should use [`crate::template::render`] directly with a full
+/// [`TemplateContext`].
 pub fn render_template(
     body: &str,
     persona_name: &str,
@@ -33,45 +27,24 @@ pub fn render_template(
     all_tool_names: &[String],
     denied_tool_names: &HashSet<String>,
 ) -> String {
-    // Compute the effective tool list the model will see this turn:
-    // start from the full registry, apply the allowlist if set, then
-    // subtract the denylist.
-    let effective: Vec<String> = all_tool_names
-        .iter()
-        .filter(|name| {
-            let allowed = active_tool_names
-                .as_ref()
-                .is_none_or(|set| set.contains(*name));
-            allowed && !denied_tool_names.contains(*name)
-        })
-        .cloned()
-        .collect();
-
-    let denied: Vec<String> = denied_tool_names.iter().cloned().collect();
-
-    let ctx = context! {
-        supports_vision => supports_vision,
-        persona_name => persona_name,
-        tools => effective,
-        denied_tools => denied,
+    let (tools, denied_tools) =
+        TemplateContext::compute_tools(all_tool_names, active_tool_names, denied_tool_names);
+    let ctx = TemplateContext {
+        supports_vision,
+        persona_name: persona_name.to_string(),
+        tools,
+        denied_tools,
+        current_date: TemplateContext::today(),
+        ..Default::default()
     };
+    render(body, &ctx)
+}
 
-    // Register the transclude function so persona bodies can include
-    // built-in prompt fragments: {{ transclude("mew://system_prompts/base") }}
-    let mut env = minijinja::Environment::new();
-    env.add_function("transclude", |path: String| -> String {
-        let stripped = path.strip_prefix("mew://").unwrap_or(&path);
-        crate::vfs::read_builtin(stripped).unwrap_or("").to_string()
-    });
-
-    env.render_str(body, ctx).unwrap_or_else(|e| {
-        tracing::warn!(
-            error = %e,
-            persona = %persona_name,
-            "persona template render failed, falling back to raw body"
-        );
-        body.to_string()
-    })
+/// Render a persona body with a full [`TemplateContext`] that includes
+/// model, provider, session, and cwd information. This is the preferred
+/// entry point for callers that have access to the agent's full state.
+pub fn render_with_context(body: &str, ctx: &TemplateContext) -> String {
+    render(body, ctx)
 }
 
 #[cfg(test)]

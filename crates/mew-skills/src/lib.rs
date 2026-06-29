@@ -22,6 +22,9 @@ pub struct Skill {
     pub description: String,
     pub body: String,
     pub path: PathBuf,
+    /// When true, render the body through minijinja before returning to
+    /// the model. The skill tool does the rendering.
+    pub template: bool,
 }
 
 /// Frontmatter parsed from a SKILL.md file.
@@ -38,6 +41,10 @@ struct Frontmatter {
     #[serde(default)]
     #[allow(dead_code)]
     metadata: Option<serde_yaml::Value>,
+    /// When true, render the body through minijinja. The skill tool
+    /// handles the rendering with the agent's template context.
+    #[serde(default)]
+    template: bool,
 }
 
 static NAME_RE: LazyLock<Regex> =
@@ -105,10 +112,10 @@ fn load_skill_file(path: &Path) -> Result<Skill, SkillError> {
         None
     };
 
-    let (name, description, body) = match frontmatter {
+    let (name, description, body, template) = match frontmatter {
         Some((fm, body)) => {
             validate_name(&fm.name)?;
-            (fm.name, fm.description, body)
+            (fm.name, fm.description, body, fm.template)
         }
         None => {
             let dir_name = path
@@ -117,7 +124,7 @@ fn load_skill_file(path: &Path) -> Result<Skill, SkillError> {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             validate_name(&dir_name)?;
-            (dir_name, String::new(), content)
+            (dir_name, String::new(), content, false)
         }
     };
 
@@ -126,6 +133,7 @@ fn load_skill_file(path: &Path) -> Result<Skill, SkillError> {
         description,
         body,
         path: path.to_path_buf(),
+        template,
     })
 }
 

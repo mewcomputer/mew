@@ -103,6 +103,34 @@ Missing files leave the `@` line as-is and log a warning. This works in
 both AGENTS.md and CLAUDE.md, and in `.mew/AGENTS.md` additively loaded
 files.
 
+## Project variables
+
+Project-local variables can be stored in `.mew/project_vars.yaml` and
+referenced in persona, skill, and subagent templates as `project_vars`:
+
+```yaml
+# .mew/project_vars.yaml
+team: platform
+channel: "#eng-platform"
+escalation: "#on-call"
+```
+
+```markdown
+---
+name: incident-response
+description: Guides incident response.
+mew:
+  template: true
+---
+
+When responding to incidents, escalate to {{ project_vars.escalation }}.
+Team channel: {{ project_vars.channel }}.
+```
+
+The file is a flat YAML map of string keys to string values. It's
+searched in `.mew/`, `.opencode/`, `.claude/`, and `.agents/` directories
+from cwd up to the git root. First match wins.
+
 ## How context is used
 
 The context file content is injected into the system prompt on every turn.
