@@ -75,6 +75,34 @@ loaded.
 The content format is the same for both. Use whichever name your team
 prefers, or both if you work across different tools.
 
+## `@file` includes
+
+You can split context across multiple files using `@path/to/file` lines.
+When mew loads an AGENTS.md or CLAUDE.md file, any line starting with `@`
+followed by a path is replaced with the contents of that file (as literal
+text, no template rendering).
+
+```markdown
+# Project: my-app
+
+## Build
+@docs/build-commands.md
+
+## Architecture
+@docs/architecture.md
+
+## Conventions
+@docs/coding-style.md
+```
+
+Paths are resolved relative to the directory of the file containing the
+`@` reference. `../` traversal is rejected: includes are confined to the
+file's directory subtree.
+
+Missing files leave the `@` line as-is and log a warning. This works in
+both AGENTS.md and CLAUDE.md, and in `.mew/AGENTS.md` additively loaded
+files.
+
 ## How context is used
 
 The context file content is injected into the system prompt on every turn.

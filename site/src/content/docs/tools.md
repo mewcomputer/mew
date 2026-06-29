@@ -76,6 +76,16 @@ The todo list renders in a panel below the chat. Press `Ctrl+P` and
 select "Todo" to toggle its visibility, or use `/todo` to print it as
 text.
 
+### Web
+
+| Tool | Sensitivity | Description |
+|------|-------------|-------------|
+| `web_fetch` | ReadOnly | Fetch a URL and return its content as markdown. HTML pages are converted to readable markdown. Content is truncated at 128KB. |
+
+`web_fetch` is useful for reading documentation pages, API references,
+and articles without leaving the conversation. It follows up to 5
+redirects and sets a 30-second timeout.
+
 ### Conditional tools
 
 These tools only register when their prerequisites are met:

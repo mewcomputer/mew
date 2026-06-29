@@ -87,6 +87,24 @@ scratch every turn, so the body text is always injected fresh.
 | `mew.skills` | no | Skill allowlist: `null` (all skills), `[skill1, skill2]` (whitelist), or `[]` (hide all) |
 | `mew.template` | no | When `true`, render body as a minijinja template |
 
+### `polytoken:` alias
+
+For compatibility with personas authored for Polytoken, `polytoken:` is
+accepted as an alias for `mew:`. When both are present, `mew:` takes
+priority:
+
+```yaml
+---
+name: researcher
+description: Read-only investigation
+polytoken:
+  model: z-ai/glm-4.5-air
+  tools: [read, grep]
+---
+```
+
+This works identically to using `mew:`. Use whichever you prefer.
+
 ## Tool allowlisting
 
 `mew.tools` controls which tools the model can call. The allowlist
@@ -123,14 +141,26 @@ or to another persona, the model changes again.
 ## Templates
 
 When `mew.template: true`, the body is rendered through minijinja before
-being used as the system prompt. Four variables are available:
+being used as the system prompt. These variables are available:
 
 | Variable | Type | Description |
 |----------|------|-------------|
 | `supports_vision` | bool | Whether the active model supports image input |
 | `persona_name` | str | The active persona's name |
+| `model_id` | str | The active model ID (e.g. `deepseek-v4-flash`) |
+| `provider_id` | str | The active provider ID (e.g. `deepseek`) |
+| `session_id` | str | The session ID |
+| `cwd` | str | The current working directory |
+| `current_date` | str | Today's date in ISO 8601 (e.g. `2026-06-29`) |
 | `tools` | list of str | Tool names available this turn (after allowlist + denylist) |
 | `denied_tools` | list of str | Tools removed by the denylist |
+
+Template functions:
+
+| Function | Description |
+|----------|-------------|
+| `has_tool(name)` | Returns true if `name` is in the effective tool list |
+| `transclude("mew://path")` | Inline a built-in VFS resource (see below) |
 
 Example:
 
@@ -150,7 +180,9 @@ You cannot see images. If the user references an image, ask them to
 describe it.
 {% endif %}
 
+Model: {{ model_id }} on {{ provider_id }}.
 Available tools: {{ tools | join(", ") }}.
+{% if has_tool("bash") %}You can run shell commands.{% endif %}
 {% if denied_tools %}Denied: {{ denied_tools | join(", ") }}.{% endif %}
 ```
 

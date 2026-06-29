@@ -58,7 +58,7 @@ so you can see what the subagent is doing in real time.
 
 ## Defining custom subagents
 
-Create a `SUBAGENT.md` file in `.mew/subagents/<name>/`:
+Create a `.md` file in `.mew/agents/`:
 
 ```markdown
 ---
@@ -86,20 +86,38 @@ Be direct and specific. Reference file paths and line numbers.
 | `name` | yes | Subagent identifier |
 | `description` | yes | When the agent should delegate to this subagent |
 | `tools` | no | Tool allowlist. Inherits all tools if omitted |
-| `model` | no | Pin a `provider/model` pair |
-| `model_small` | no | Router small model |
-| `model_big` | no | Router big model |
+| `model` | no | Pin a `provider/model` pair, or use tier keywords (`micro`, `deci`) when the active provider is a router |
 | `max_turns` | no | Maximum turns before stopping (default: 500) |
 | `max_duration_secs` | no | Wall-clock cap in seconds (default: 300) |
+| `template` | no | When `true`, render the body through minijinja before using it as the system prompt |
+
+### Templated subagents
+
+When `template: true` is set, the subagent body is rendered through
+minijinja before being used as the system prompt. The context includes
+`subagent_name`, `model_id`, `provider_id`, `session_id`, `cwd`,
+`current_date`, and `tools`. See [Personas](/docs/personas/#templates)
+for the full variable reference.
+
+```markdown
+---
+name: context-aware-coder
+description: Writes code with awareness of available tools.
+template: true
+---
+
+You are a coder. Available tools: {{ tools | join(", ") }}.
+{% if has_tool("bash") %}You can run commands.{% endif %}
+```
 
 ### Discovery paths
 
 Discovery paths (walked cwd to git root, earlier wins):
 
-1. `.mew/subagents/<name>/SUBAGENT.md`
-2. `.opencode/subagents/<name>/SUBAGENT.md`
-3. `.claude/subagents/<name>/SUBAGENT.md`
-4. `.agents/subagents/<name>/SUBAGENT.md`
+1. `.mew/agents/*.md`
+2. `.opencode/agents/*.md`
+3. `.claude/agents/*.md`
+4. `.agents/*.md`
 
 ## Limits
 

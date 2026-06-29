@@ -92,8 +92,38 @@ If any step fails, stop and report the error. Don't skip steps.
 |-------|----------|-------------|
 | `name` | yes | Skill identifier. Lowercase letters, digits, and hyphens. Must match `^[a-z0-9]+(-[a-z0-9]+)*$` |
 | `description` | yes | One-line description the model uses to decide when to load this skill |
+| `template` | no | When `true`, render the body through minijinja before returning (see below) |
 | `license` | no | License info (not currently used) |
 | `compatibility` | no | Compatibility info (not currently used) |
+
+### Templated skills
+
+When `template: true` is set in the frontmatter, the skill body is
+rendered through minijinja before being returned to the model. This lets
+skill instructions adapt to the active model, available tools, and
+project state.
+
+```markdown
+---
+name: adaptive-test-runner
+description: Run tests using the appropriate test command for the project.
+template: true
+---
+
+{% if has_tool("bash") %}
+Run tests with: cargo test --all
+{% else %}
+You don't have bash access. Ask the user to run `cargo test --all`.
+{% endif %}
+
+Model: {{ model_id }}
+Date: {{ current_date }}
+```
+
+Templated skills use the same variables and functions as persona
+templates. When no persona is active or the active persona doesn't use
+templating, templated skills fall back to their raw body. See
+[Personas](/docs/personas/#templates) for the full variable reference.
 
 ### Writing effective skills
 

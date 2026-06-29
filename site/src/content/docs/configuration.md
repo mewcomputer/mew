@@ -65,6 +65,12 @@ roots = ["~/code"]
 | `secrets` | table | (empty) | Secret files and words for redaction |
 | `workspace` | table | (empty) | Workspace roots for sandboxing |
 
+:::note
+Personas and skills accept `polytoken:` as an alias for `mew:` in their
+frontmatter. This is for compatibility with personas authored for
+Polytoken. See [Personas](/docs/personas/) for details.
+:::
+
 ### Provider configuration
 
 Each provider is a key under `[providers]`:
