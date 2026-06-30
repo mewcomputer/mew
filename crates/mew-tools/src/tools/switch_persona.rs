@@ -20,14 +20,24 @@ pub struct SwitchPersona {
     /// Shared slot the agent drains at end of turn. `Some(name)` means
     /// "apply this switch when the turn ends".
     pending: Arc<Mutex<Option<String>>>,
+    /// The currently active persona name (shared with the agent). Used to
+    /// look up transition rules — the *current* persona's `transitions`
+    /// field controls which personas it can switch to and whether
+    /// confirmation is required. `None` = no persona active (unrestricted).
+    current_persona: Arc<tokio::sync::RwLock<Option<String>>>,
 }
 
 impl SwitchPersona {
     pub fn new(
         personas: Arc<Vec<mew_personas::Persona>>,
         pending: Arc<Mutex<Option<String>>>,
+        current_persona: Arc<tokio::sync::RwLock<Option<String>>>,
     ) -> Self {
-        Self { personas, pending }
+        Self {
+            personas,
+            pending,
+            current_persona,
+        }
     }
 }
 
@@ -106,6 +116,46 @@ impl Tool for SwitchPersona {
                 ))
             })?;
 
+        // Check transition rules: the *current* persona's `transitions`
+        // field controls which personas it can switch to. If the current
+        // persona has no transitions (None), any switch is allowed.
+        let current_name = self.current_persona.read().await.clone();
+        if let Some(ref current) = current_name {
+            if let Some(current_persona) = self.personas.iter().find(|p| &p.name == current) {
+                if let Some(ref rules) = current_persona.config.transitions {
+                    if let Some(ref allowed) = rules.allowed {
+                        if !allowed.iter().any(|a| a == name) {
+                            return Err(ToolError::InvalidInput(format!(
+                                "persona '{current}' cannot switch to '{name}'. \
+                                 Allowed transitions: [{}]. \
+                                 Use /persona to switch manually.",
+                                allowed.join(", ")
+                            )));
+                        }
+                    }
+                    if rules.confirm {
+                        // Queue the switch but signal that confirmation is
+                        // needed. The main loop's drain path will show a
+                        // confirm modal (same as the /persona slash command).
+                        // For now, we queue it and include a note in the
+                        // output; the main loop checks `confirm` when
+                        // draining.
+                        let mut slot = self.pending.lock().await;
+                        *slot = Some(name.to_string());
+                        return Ok(ToolOutput {
+                            output: format!(
+                                "queued switch to persona '{name}' for end of turn \
+                                 (confirmation required)."
+                            ),
+                            error: String::new(),
+                            diff: None,
+                            metadata: None,
+                        });
+                    }
+                }
+            }
+        }
+
         // Queue the switch. We over-write any earlier queued switch so the
         // most recent request wins. The turn loop drains the slot at end
         // of turn and emits PersonaSwitchRequested for the main loop.
@@ -164,6 +214,17 @@ mod tests {
         ToolCtx::test_new(PathBuf::from("."))
     }
 
+    /// Default current-persona slot: `None` (no persona active, so no
+    /// transition rules apply — all switches allowed).
+    fn no_current() -> Arc<tokio::sync::RwLock<Option<String>>> {
+        Arc::new(tokio::sync::RwLock::new(None))
+    }
+
+    /// Current-persona slot set to `name`.
+    fn current_is(name: &str) -> Arc<tokio::sync::RwLock<Option<String>>> {
+        Arc::new(tokio::sync::RwLock::new(Some(name.to_string())))
+    }
+
     fn persona(name: &str, model: Option<&str>) -> mew_personas::Persona {
         mew_personas::Persona {
             name: name.into(),
@@ -180,11 +241,33 @@ mod tests {
         }
     }
 
+    /// Persona with transition rules: only `allowed` personas, optional
+    /// `confirm`.
+    fn persona_with_transitions(
+        name: &str,
+        allowed: Option<Vec<&str>>,
+        confirm: bool,
+    ) -> mew_personas::Persona {
+        mew_personas::Persona {
+            name: name.into(),
+            description: "test".into(),
+            body: "test body".into(),
+            path: PathBuf::new(),
+            config: mew_personas::PersonaConfig {
+                transitions: Some(mew_personas::TransitionRules {
+                    allowed: allowed.map(|v| v.into_iter().map(String::from).collect()),
+                    confirm,
+                }),
+                ..Default::default()
+            },
+        }
+    }
+
     #[tokio::test]
     async fn test_switch_persona_queues_target() {
         let personas = Arc::new(vec![persona("researcher", Some("glm-4.5-air"))]);
         let pending = Arc::new(Mutex::new(None));
-        let tool = SwitchPersona::new(personas, pending.clone());
+        let tool = SwitchPersona::new(personas, pending.clone(), no_current());
 
         let input = serde_json::json!({"name": "researcher"});
         let result = tool.execute(dummy_ctx(), input).await.unwrap();
@@ -199,7 +282,7 @@ mod tests {
     async fn test_switch_persona_rejects_unknown() {
         let personas = Arc::new(vec![persona("researcher", None)]);
         let pending = Arc::new(Mutex::new(None));
-        let tool = SwitchPersona::new(personas, pending.clone());
+        let tool = SwitchPersona::new(personas, pending.clone(), no_current());
 
         let input = serde_json::json!({"name": "ghost"});
         let result = tool.execute(dummy_ctx(), input).await;
@@ -213,7 +296,7 @@ mod tests {
     async fn test_switch_persona_default_directs_to_slash() {
         let personas = Arc::new(Vec::new());
         let pending = Arc::new(Mutex::new(None));
-        let tool = SwitchPersona::new(personas, pending.clone());
+        let tool = SwitchPersona::new(personas, pending.clone(), no_current());
 
         // "default" doesn't queue a switch — the tool's success message
         // tells the model to use the slash command for clears.
@@ -228,7 +311,7 @@ mod tests {
     async fn test_switch_persona_overwrites_previous_queued() {
         let personas = Arc::new(vec![persona("a", None), persona("b", None)]);
         let pending = Arc::new(Mutex::new(Some("a".to_string())));
-        let tool = SwitchPersona::new(personas, pending.clone());
+        let tool = SwitchPersona::new(personas, pending.clone(), no_current());
 
         // Second call overwrites the first; most recent wins.
         let input = serde_json::json!({"name": "b"});
@@ -239,8 +322,92 @@ mod tests {
 
     #[test]
     fn test_switch_persona_sensitivity_is_mutating() {
-        let tool = SwitchPersona::new(Arc::new(Vec::new()), Arc::new(Mutex::new(None)));
+        let tool = SwitchPersona::new(
+            Arc::new(Vec::new()),
+            Arc::new(Mutex::new(None)),
+            no_current(),
+        );
         assert_eq!(tool.sensitivity(), Sensitivity::Mutating);
         assert_eq!(tool.name(), "switch_persona");
+    }
+
+    #[tokio::test]
+    async fn test_transition_blocks_disallowed_switch() {
+        // Planner with empty allowed list — cannot switch to anything.
+        let personas = Arc::new(vec![
+            persona_with_transitions("planner", Some(vec![]), false),
+            persona("builder", None),
+        ]);
+        let pending = Arc::new(Mutex::new(None));
+        let tool = SwitchPersona::new(personas, pending.clone(), current_is("planner"));
+
+        let input = serde_json::json!({"name": "builder"});
+        let result = tool.execute(dummy_ctx(), input).await;
+        assert!(result.is_err());
+        let guard = pending.lock().await;
+        assert!(guard.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_transition_allows_listed_switch() {
+        // Builder can switch to planner and reviewer.
+        let personas = Arc::new(vec![
+            persona_with_transitions("builder", Some(vec!["planner", "reviewer"]), false),
+            persona("planner", None),
+            persona("reviewer", None),
+        ]);
+        let pending = Arc::new(Mutex::new(None));
+        let tool = SwitchPersona::new(personas, pending.clone(), current_is("builder"));
+
+        let input = serde_json::json!({"name": "planner"});
+        let result = tool.execute(dummy_ctx(), input).await.unwrap();
+        assert!(result.output.contains("queued"));
+        let guard = pending.lock().await;
+        assert_eq!(guard.as_deref(), Some("planner"));
+    }
+
+    #[tokio::test]
+    async fn test_transition_confirm_adds_note() {
+        let personas = Arc::new(vec![
+            persona_with_transitions("builder", Some(vec!["planner"]), true),
+            persona("planner", None),
+        ]);
+        let pending = Arc::new(Mutex::new(None));
+        let tool = SwitchPersona::new(personas, pending.clone(), current_is("builder"));
+
+        let input = serde_json::json!({"name": "planner"});
+        let result = tool.execute(dummy_ctx(), input).await.unwrap();
+        assert!(result.output.contains("confirmation required"));
+        // The switch is still queued — the main loop shows the confirm modal.
+        let guard = pending.lock().await;
+        assert_eq!(guard.as_deref(), Some("planner"));
+    }
+
+    #[tokio::test]
+    async fn test_no_transitions_means_unrestricted() {
+        // Builder with no transitions field — can switch to anything.
+        let personas = Arc::new(vec![persona("builder", None), persona("reviewer", None)]);
+        let pending = Arc::new(Mutex::new(None));
+        let tool = SwitchPersona::new(personas, pending.clone(), current_is("builder"));
+
+        let input = serde_json::json!({"name": "reviewer"});
+        let result = tool.execute(dummy_ctx(), input).await.unwrap();
+        assert!(result.output.contains("queued"));
+        assert!(!result.output.contains("confirmation"));
+    }
+
+    #[tokio::test]
+    async fn test_no_current_persona_means_unrestricted() {
+        // No persona active — transitions don't apply.
+        let personas = Arc::new(vec![
+            persona_with_transitions("planner", Some(vec![]), false),
+            persona("builder", None),
+        ]);
+        let pending = Arc::new(Mutex::new(None));
+        let tool = SwitchPersona::new(personas, pending.clone(), no_current());
+
+        let input = serde_json::json!({"name": "builder"});
+        let result = tool.execute(dummy_ctx(), input).await.unwrap();
+        assert!(result.output.contains("queued"));
     }
 }

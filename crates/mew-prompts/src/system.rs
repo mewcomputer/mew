@@ -56,6 +56,7 @@ mod tests {
         let files = vec![File {
             path: PathBuf::from("/tmp/AGENTS.md"),
             content: "hello".into(),
+            template: false,
         }];
         let out = assemble(&files, "", "");
         assert!(out.contains("<context"));
@@ -67,6 +68,7 @@ mod tests {
         let files = vec![File {
             path: PathBuf::from("/tmp/AGENTS.md"),
             content: "CTX".into(),
+            template: false,
         }];
         let skills = "<available_skills>\nSKILLS\n</available_skills>\n";
         let persona = "PERSONA_BODY";

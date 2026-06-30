@@ -713,7 +713,7 @@ fn build_tool_row(
 /// Word-aware wrap `text` into chunks of at most `max_width` display
 /// columns each. Prefers breaking at whitespace; hard-breaks a single
 /// oversized word across chunks.
-fn wrap_text_to_width(text: &str, max_width: u16) -> Vec<String> {
+pub(super) fn wrap_text_to_width(text: &str, max_width: u16) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
     }

@@ -2,12 +2,12 @@ use crate::{Sensitivity, Tool, ToolCtx, ToolError, ToolOutput};
 use async_trait::async_trait;
 use serde_json::Value;
 
-pub struct Edit;
+pub struct EditStrReplace;
 
 #[async_trait]
-impl Tool for Edit {
+impl Tool for EditStrReplace {
     fn name(&self) -> &str {
-        "edit"
+        "edit_str_replace"
     }
 
     fn description(&self) -> &str {
@@ -66,14 +66,21 @@ impl Tool for Edit {
             let line_count = content.lines().count();
             let first_line = content.lines().next().unwrap_or("(empty file)");
             let last_line = content.lines().last().unwrap_or("(empty file)");
+
+            // Try to find a fuzzy match to help the model understand what
+            // changed. If the old_string is close to something in the file,
+            // show it so the model can adjust.
+            let fuzzy_hint = find_closest_match(&content, old);
+
             return Err(ToolError::Execution(format!(
                 "old_string not found in {} ({} lines). \
                  First: {:?}. Last: {:?}. \
-                 The file may have changed since it was last read — try reading it again.",
+                 The file may have changed since it was last read — try reading it again.{}",
                 path.display(),
                 line_count,
                 first_line.chars().take(120).collect::<String>(),
                 last_line.chars().take(120).collect::<String>(),
+                fuzzy_hint,
             )));
         }
         if count > 1 {
@@ -133,6 +140,98 @@ fn make_unified_diff(old: &str, new: &str, path: &std::path::Path) -> String {
     }
 }
 
+/// Find the substring in `content` that is most similar to `old_string`.
+/// Returns a hint string if a close match is found, or empty string if
+/// nothing is close enough to be helpful.
+///
+/// Uses a simple sliding-window approach: for each line in the file, check
+/// if it contains a substring with a low edit distance to `old_string`.
+/// This catches the common case where the file changed slightly (whitespace,
+/// a renamed variable, a reformatted line) since the model last read it.
+fn find_closest_match(content: &str, old_string: &str) -> String {
+    // Only try fuzzy matching for reasonably-sized old_strings.
+    if old_string.len() < 10 || old_string.len() > 500 {
+        return String::new();
+    }
+
+    let old_lines: Vec<&str> = old_string.lines().collect();
+    if old_lines.is_empty() {
+        return String::new();
+    }
+
+    // Try matching the first line of old_string against each line in the file.
+    let first_old_line = old_lines[0];
+    let mut best_match: Option<(usize, &str)> = None;
+    let mut best_score = 0usize;
+
+    for (i, line) in content.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        // Skip lines that are drastically different in length.
+        if line.len() > first_old_line.len() * 3
+            && !first_old_line.is_empty()
+            && line.len() < first_old_line.len() / 3
+        {
+            continue;
+        }
+
+        let score = similarity_score(first_old_line, line);
+        if score > best_score {
+            best_score = score;
+            best_match = Some((i, line));
+        }
+    }
+
+    if let Some((line_num, matched_line)) = best_match {
+        // Only report if the similarity is above a threshold.
+        let max_len = first_old_line.len().max(matched_line.len());
+        if max_len == 0 {
+            return String::new();
+        }
+        let similarity = best_score as f64 / max_len as f64;
+        if similarity > 0.6 {
+            return format!(
+                "\n\nClosest match (line {}, {:.0}% similar):\n  {}",
+                line_num + 1,
+                similarity * 100.0,
+                matched_line.chars().take(200).collect::<String>(),
+            );
+        }
+    }
+
+    String::new()
+}
+
+/// Compute a simple similarity score between two strings using the
+/// longest common subsequence length. Higher is more similar.
+fn similarity_score(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.is_empty() || b.is_empty() {
+        return 0;
+    }
+
+    // LCS via DP. For long strings this is O(n*m) but we bail early
+    // for strings over 500 chars (guarded by the caller).
+    let mut prev = vec![0usize; b.len() + 1];
+    let mut curr = vec![0usize; b.len() + 1];
+
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            if a[i - 1] == b[j - 1] {
+                curr[j] = prev[j - 1] + 1;
+            } else {
+                curr[j] = prev[j].max(curr[j - 1]);
+            }
+        }
+        std::mem::swap(&mut prev, &mut curr);
+        curr.iter_mut().for_each(|x| *x = 0);
+    }
+
+    prev[b.len()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,7 +247,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         tokio::fs::write(&path, "hello world").await.unwrap();
 
-        let tool = Edit;
+        let tool = EditStrReplace;
         let ctx = dummy_ctx(dir.path().to_path_buf());
         let input = serde_json::json!({
             "path": "test.txt",
@@ -168,7 +267,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         tokio::fs::write(&path, "hello world").await.unwrap();
 
-        let tool = Edit;
+        let tool = EditStrReplace;
         let ctx = dummy_ctx(dir.path().to_path_buf());
         let input = serde_json::json!({
             "path": "test.txt",
@@ -190,7 +289,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         tokio::fs::write(&path, "hello hello world").await.unwrap();
 
-        let tool = Edit;
+        let tool = EditStrReplace;
         let ctx = dummy_ctx(dir.path().to_path_buf());
         let input = serde_json::json!({
             "path": "test.txt",
@@ -210,7 +309,7 @@ mod tests {
         let path = dir.path().join("test.txt");
         tokio::fs::write(&path, "hello world").await.unwrap();
 
-        let tool = Edit;
+        let tool = EditStrReplace;
         let ctx = dummy_ctx(dir.path().to_path_buf());
         let input = serde_json::json!({
             "path": "test.txt",
@@ -238,7 +337,7 @@ mod tests {
         .await
         .unwrap();
 
-        let tool = Edit;
+        let tool = EditStrReplace;
         let ctx = dummy_ctx(dir.path().to_path_buf());
         let input = serde_json::json!({
             "path": "multi.txt",
@@ -275,7 +374,7 @@ mod tests {
         let path = dir.path().join("dup.txt");
         tokio::fs::write(&path, "x x y x").await.unwrap();
 
-        let tool = Edit;
+        let tool = EditStrReplace;
         let ctx = dummy_ctx(dir.path().to_path_buf());
         let input = serde_json::json!({
             "path": "dup.txt",
@@ -291,5 +390,64 @@ mod tests {
             "expected suggestion to include more context: {err}"
         );
         assert!(err.contains("dup.txt"));
+    }
+
+    /// When old_string isn't found but a similar line exists, the error
+    /// should include a "Closest match" hint showing the similar line.
+    #[tokio::test]
+    async fn test_edit_not_found_shows_fuzzy_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("code.rs");
+        tokio::fs::write(
+            &path,
+            "fn calculate_total(items: &[f64]) -> f64 {\n    items.iter().sum()\n}\n",
+        )
+        .await
+        .unwrap();
+
+        let tool = EditStrReplace;
+        let ctx = dummy_ctx(dir.path().to_path_buf());
+        // old_string is slightly different from the actual line.
+        let input = serde_json::json!({
+            "path": "code.rs",
+            "old_string": "fn calculate_total(items: &Vec<f64>) -> f64 {",
+            "new_string": "fn calculate_total(items: &[f64]) -> f64 {"
+        });
+        let result = tool.execute(ctx, input).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Closest match"),
+            "expected fuzzy match hint in error: {err}"
+        );
+        assert!(
+            err.contains("calculate_total"),
+            "expected the similar line in hint: {err}"
+        );
+    }
+
+    /// Short old_strings (under 10 chars) don't get fuzzy matching.
+    #[tokio::test]
+    async fn test_edit_short_old_string_no_fuzzy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short.txt");
+        tokio::fs::write(&path, "hello world\nanother line\n")
+            .await
+            .unwrap();
+
+        let tool = EditStrReplace;
+        let ctx = dummy_ctx(dir.path().to_path_buf());
+        let input = serde_json::json!({
+            "path": "short.txt",
+            "old_string": "hi",
+            "new_string": "hey"
+        });
+        let result = tool.execute(ctx, input).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            !err.contains("Closest match"),
+            "short strings should not get fuzzy hints: {err}"
+        );
     }
 }

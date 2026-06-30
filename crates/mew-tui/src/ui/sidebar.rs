@@ -202,8 +202,12 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     format!(" — {}", desc_clipped)
                 };
+                // Active persona uses its accent color; inactive ones
+                // stay gray.
                 let (name_color, marker_color) = if is_active {
-                    (Color::Rgb(200, 170, 240), Color::Rgb(200, 170, 240))
+                    let accent =
+                        crate::theme::persona_accent(name, app.active_persona_color.as_deref());
+                    (accent.fg, accent.fg)
                 } else {
                     (Color::Gray, Color::DarkGray)
                 };

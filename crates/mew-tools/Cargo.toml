@@ -24,6 +24,8 @@ similar = { workspace = true }
 ulid = { workspace = true }
 reqwest = { workspace = true }
 htmd = "0.5"
+regex = "1"
+grep = "0.4"
 
 [features]
 default = []

@@ -296,13 +296,87 @@ impl Agent {
                 headers,
             };
 
+            let req_for_fallback = req.clone();
             let mut stream = match self.provider.stream(req).await {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = ev_tx
-                        .send(AgentEvent::Error(format!("provider stream: {}", e)))
-                        .await;
-                    return Err(Box::new(e));
+                    // Try fallback models before giving up. Each fallback
+                    // is a "provider/model" string; the provider_builder
+                    // callback (set by the main loop) constructs a new
+                    // provider for it. If any fallback succeeds, we swap
+                    // it in as the active provider and retry the request.
+                    let mut resolved_stream: Option<_> = None;
+                    if let Some(ref fb) = self.fallback_models {
+                        if !fb.is_empty() {
+                            if let Some(ref builder) = self.provider_builder {
+                                let mut last_err = e.to_string();
+                                for model_str in fb.iter() {
+                                    tracing::warn!(
+                                        primary_error = %last_err,
+                                        fallback = %model_str,
+                                        "primary provider failed; trying fallback model"
+                                    );
+                                    let _ = ev_tx
+                                        .send(AgentEvent::Error(format!(
+                                            "provider error ({}); trying fallback: {model_str}",
+                                            last_err
+                                        )))
+                                        .await;
+                                    match (builder.0)(model_str) {
+                                        Ok(new_provider) => {
+                                            self.provider = new_provider;
+                                            match self
+                                                .provider
+                                                .stream(req_for_fallback.clone())
+                                                .await
+                                            {
+                                                Ok(s) => {
+                                                    resolved_stream = Some(s);
+                                                    break;
+                                                }
+                                                Err(e2) => {
+                                                    last_err = e2.to_string();
+                                                    tracing::warn!(
+                                                        fallback = %model_str,
+                                                        error = %last_err,
+                                                        "fallback provider also failed"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(build_err) => {
+                                            tracing::warn!(
+                                                fallback = %model_str,
+                                                error = %build_err,
+                                                "could not build fallback provider"
+                                            );
+                                            last_err = build_err;
+                                        }
+                                    }
+                                }
+                                if resolved_stream.is_none() {
+                                    let _ = ev_tx
+                                        .send(AgentEvent::Error(format!(
+                                            "all fallback models exhausted: {}",
+                                            last_err
+                                        )))
+                                        .await;
+                                    return Err(Box::<dyn std::error::Error + Send + Sync>::from(
+                                        last_err,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    match resolved_stream {
+                        Some(s) => s,
+                        None => {
+                            let _ = ev_tx
+                                .send(AgentEvent::Error(format!("provider stream: {}", e)))
+                                .await;
+                            return Err(Box::new(e));
+                        }
+                    }
                 }
             };
 

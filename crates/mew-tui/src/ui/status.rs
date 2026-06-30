@@ -102,12 +102,13 @@ fn build_pills(app: &App) -> Vec<Pill> {
         });
     }
 
-    // persona — dark purple background, light purple text.
+    // persona — uses the persona's accent color (explicit or deterministic).
     if let Some(ref name) = app.active_persona {
+        let accent = crate::theme::persona_accent(name, app.active_persona_color.as_deref());
         pills.push(Pill {
             text: name.clone(),
-            fg: Color::Rgb(200, 170, 240),
-            bg: Color::Rgb(55, 35, 75),
+            fg: accent.fg,
+            bg: accent.bg,
         });
     }
 

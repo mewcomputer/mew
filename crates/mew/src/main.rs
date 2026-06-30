@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use std::io::Write as _;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -22,7 +22,8 @@ use mew_session::Writer as SessionWriter;
 use mew_tools::tools::ask_user::AskUser;
 use mew_tools::tools::bash::Bash;
 use mew_tools::tools::echo::Echo;
-use mew_tools::tools::edit::Edit;
+use mew_tools::tools::edit_hashline::EditHashline;
+use mew_tools::tools::edit_str_replace::EditStrReplace;
 use mew_tools::tools::exit_tool::ExitTool;
 use mew_tools::tools::flag_important::{FlagImportant, FlaggedFile};
 use mew_tools::tools::glob::Glob;
@@ -217,6 +218,11 @@ enum Commands {
     Debug {
         #[command(subcommand)]
         command: DebugCommands,
+    },
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: Option<String>,
     },
 }
 
@@ -445,6 +451,41 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             Ok(())
         }
         Some(Commands::Debug { command }) => debug_cmd(command).await,
+        Some(Commands::Completions { shell }) => {
+            let shell = shell.as_deref().unwrap_or("");
+            let shell = match shell.to_lowercase().as_str() {
+                "bash" => clap_complete::Shell::Bash,
+                "zsh" => clap_complete::Shell::Zsh,
+                "fish" => clap_complete::Shell::Fish,
+                "elvish" => clap_complete::Shell::Elvish,
+                "powershell" | "pwsh" => clap_complete::Shell::PowerShell,
+                "" => {
+                    // Detect from environment
+                    if let Some(shell_var) = std::env::var_os("SHELL") {
+                        let shell_str = shell_var.to_string_lossy();
+                        if shell_str.contains("zsh") {
+                            clap_complete::Shell::Zsh
+                        } else if shell_str.contains("fish") {
+                            clap_complete::Shell::Fish
+                        } else if shell_str.contains("elvish") {
+                            clap_complete::Shell::Elvish
+                        } else {
+                            clap_complete::Shell::Bash
+                        }
+                    } else {
+                        clap_complete::Shell::Bash
+                    }
+                }
+                other => {
+                    eprintln!("unknown shell: {other}");
+                    eprintln!("supported: bash, zsh, fish, elvish, powershell");
+                    std::process::exit(1);
+                }
+            };
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "mew", &mut std::io::stdout());
+            Ok(())
+        }
     }
 }
 
@@ -697,11 +738,13 @@ fn build_tools(
     template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>>,
     personas: Arc<Vec<mew_personas::Persona>>,
     pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
+    current_persona_name: Arc<tokio::sync::RwLock<Option<String>>>,
 ) -> Vec<Arc<dyn mew_tools::Tool>> {
     let mut tools: Vec<Arc<dyn mew_tools::Tool>> = vec![
         Arc::new(Read),
         Arc::new(Write),
-        Arc::new(Edit),
+        Arc::new(EditStrReplace),
+        Arc::new(EditHashline),
         Arc::new(Bash),
         Arc::new(Glob),
         Arc::new(Grep),
@@ -731,6 +774,7 @@ fn build_tools(
         tools.push(Arc::new(SwitchPersonaTool::new(
             personas,
             pending_persona_switch,
+            current_persona_name,
         )));
     }
     tools
@@ -756,6 +800,7 @@ fn persona_summary(p: &mew_personas::Persona) -> mew_tui::app::PersonaSummary {
         tools: p.config.tools.clone(),
         tools_deny: p.config.tools_deny.clone(),
         skills: p.config.skills.clone(),
+        color: p.config.color.clone(),
     }
 }
 
@@ -774,6 +819,7 @@ fn apply_persona_switch(
 ) {
     let pinned_model = agent.apply_persona(persona);
     app.active_persona = Some(persona.name.clone());
+    app.active_persona_color = persona.config.color.clone();
     if let Some(ref model_str) = pinned_model {
         let (new_provider_id, new_model_id) = if let Some(idx) = model_str.find('/') {
             (&model_str[..idx], &model_str[idx + 1..])
@@ -831,6 +877,28 @@ async fn drain_pending_persona_switch(
         return;
     };
     if let Some(persona) = personas.iter().find(|p| p.name == name) {
+        // Check if the *current* persona's transition rules require
+        // confirmation. If so, open the confirm modal instead of
+        // applying the switch directly. The user confirms via the
+        // PersonaSwitchConfirmed action, which calls apply_persona_switch.
+        let needs_confirm = app
+            .active_persona
+            .as_ref()
+            .and_then(|cur| personas.iter().find(|p| &p.name == cur))
+            .and_then(|p| p.config.transitions.as_ref())
+            .is_some_and(|t| t.confirm);
+
+        if needs_confirm {
+            let target = persona_summary(persona);
+            let current = app
+                .active_persona
+                .as_ref()
+                .and_then(|cur_name| personas.iter().find(|p| &p.name == cur_name))
+                .map(persona_summary);
+            app.request_persona_switch_confirm(target, current);
+            return;
+        }
+
         let old = app.active_persona.clone();
         apply_persona_switch(agent, app, cfg, cat, provider_id, raw, persona);
         agent
@@ -1143,6 +1211,50 @@ fn load_mcp_configs() -> Vec<mew_mcp::McpServerConfig> {
 // previous "drive an external agent" use case by spawning a second mew
 // daemon for that agent's model and connecting locally.
 
+/// Render any context files marked with `template: true` through minijinja
+/// using the agent's template context. Non-templated files are left as-is.
+/// Returns a new Vec with rendered content.
+fn render_templated_context_files(
+    files: &[mew_context::File],
+    agent: &mew_agent::Agent,
+) -> Vec<mew_context::File> {
+    let has_templated = files.iter().any(|f| f.template);
+    if !has_templated {
+        return files.to_vec();
+    }
+
+    // Build a template context from the agent's current state.
+    let tool_names: Vec<String> = agent.tools.keys().cloned().collect();
+    let ctx = mew_prompts::template::TemplateContext {
+        model_id: agent.model_id.clone(),
+        provider_id: agent.provider_id.clone(),
+        session_id: agent.session_id.to_string(),
+        cwd: std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        current_date: mew_prompts::template::TemplateContext::today(),
+        tools: tool_names,
+        skills: agent.skills.iter().map(|s| s.name.clone()).collect(),
+        project_vars: agent.project_vars.clone(),
+        ..Default::default()
+    };
+
+    files
+        .iter()
+        .map(|f| {
+            if f.template {
+                mew_context::File {
+                    path: f.path.clone(),
+                    content: mew_prompts::template::render(&f.content, &ctx),
+                    template: false,
+                }
+            } else {
+                f.clone()
+            }
+        })
+        .collect()
+}
+
 /// Build a full agent for a session. Used by `run_daemon` (and the TUI's
 /// `--connect` daemon-client mode goes through the daemon side). Sets up
 /// the provider, tools, MCP, personas, skills, subagents, context files,
@@ -1172,6 +1284,7 @@ fn build_session_agent(
     let persona_loader = mew_personas::Loader::new(cwd.clone());
     let personas_arc = Arc::new(persona_loader.load().unwrap_or_default());
     let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
+    let current_persona_name = Arc::new(tokio::sync::RwLock::new(None));
     let template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>> =
         Arc::new(tokio::sync::RwLock::new(None));
     let tools = build_tools(
@@ -1180,6 +1293,7 @@ fn build_session_agent(
         template_ctx.clone(),
         personas_arc.clone(),
         pending_persona_switch.clone(),
+        current_persona_name.clone(),
     );
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
@@ -1199,6 +1313,29 @@ fn build_session_agent(
     agent.set_plan_path(&cfg.plan_path);
     agent.set_personas((*personas_arc).clone());
     agent.set_pending_persona_switch(pending_persona_switch.clone());
+    agent.set_current_persona_name(current_persona_name.clone());
+
+    // Enable a persistent shell session so `cd`, `export`, and other
+    // state survive across bash tool calls.
+    let shell_session = mew_tools::tools::shell_session::shared_session(
+        std::env::current_dir().unwrap_or_default(),
+    );
+    agent.set_shell_session(shell_session);
+
+    // Wire the fallback-model provider builder. When the primary provider
+    // returns a stream error and the active persona has `fallback_models`,
+    // the turn loop calls this closure to build a new provider for each
+    // fallback `provider/model` string.
+    let cfg_clone = cfg.clone();
+    let cat_clone = cat.cloned();
+    agent.set_provider_builder(Box::new(move |model_str: &str| {
+        let (pid, mid) = if let Some(idx) = model_str.find('/') {
+            (&model_str[..idx], &model_str[idx + 1..])
+        } else {
+            (model_str, "")
+        };
+        build_provider(&cfg_clone, cat_clone.as_ref(), pid, mid, raw).map_err(|e| e.to_string())
+    }));
     // Plugin tools: register_plugin_tools is async but we're in a sync
     // builder. The daemon's agent builder closure must be sync. Plugin tool
     // registration is a no-op for NopDispatcher (the default), so skipping
@@ -1257,7 +1394,8 @@ fn build_session_agent(
     let project_vars = mew_context::load_project_vars(&cwd);
     agent.project_vars = project_vars;
     if !ctx_files.is_empty() {
-        agent.set_system(mew_context::build_system_prompt(&ctx_files));
+        let rendered_ctx = render_templated_context_files(&ctx_files, &agent);
+        agent.set_system(mew_context::build_system_prompt(&rendered_ctx));
     }
     if !skills.is_empty() {
         agent.set_skills((*skills).clone());
@@ -2131,12 +2269,14 @@ async fn run_tui(
     let template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>> =
         Arc::new(tokio::sync::RwLock::new(None));
     let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
+    let current_persona_name = Arc::new(tokio::sync::RwLock::new(None));
     let mut tools = build_tools(
         skills.clone(),
         skill_filter.clone(),
         template_ctx.clone(),
         personas_arc.clone(),
         pending_persona_switch.clone(),
+        current_persona_name.clone(),
     );
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
@@ -2195,10 +2335,29 @@ async fn run_tui(
     agent.template_ctx = template_ctx;
     agent.flagged_files = flagged_files;
     agent.set_pending_persona_switch(pending_persona_switch.clone());
+    agent.set_current_persona_name(current_persona_name.clone());
     agent.set_personas(loaded_personas.clone());
     agent.set_pending_persona_switch(pending_persona_switch.clone());
+    {
+        let cfg_clone = cfg.clone();
+        let cat_clone = cat.cloned();
+        agent.set_provider_builder(Box::new(move |model_str: &str| {
+            let (pid, mid) = if let Some(idx) = model_str.find('/') {
+                (&model_str[..idx], &model_str[idx + 1..])
+            } else {
+                (model_str, "")
+            };
+            build_provider(&cfg_clone, cat_clone.as_ref(), pid, mid, raw).map_err(|e| e.to_string())
+        }));
+    }
     agent.secrets = build_secret_set(cfg);
     agent.todos_path = todos_path.clone();
+    {
+        let shell_session = mew_tools::tools::shell_session::shared_session(
+            std::env::current_dir().unwrap_or_default(),
+        );
+        agent.set_shell_session(shell_session);
+    }
     if let Some(ref tp) = todos_path {
         if let Ok(list) = mew_agent::TodoList::load(tp).await {
             *agent.todos.lock().await = list;
@@ -2285,7 +2444,8 @@ async fn run_tui(
     let project_vars = mew_context::load_project_vars(&std::env::current_dir().unwrap_or_default());
 
     if !ctx_files.is_empty() {
-        agent.set_system(mew_context::build_system_prompt(&ctx_files));
+        let rendered_ctx = render_templated_context_files(&ctx_files, &agent);
+        agent.set_system(mew_context::build_system_prompt(&rendered_ctx));
     }
     agent.project_vars = project_vars;
 
@@ -3545,12 +3705,14 @@ async fn build_and_run(
     let template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>> =
         Arc::new(tokio::sync::RwLock::new(None));
     let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
+    let current_persona_name = Arc::new(tokio::sync::RwLock::new(None));
     let mut tools = build_tools(
         skills.clone(),
         skill_filter.clone(),
         template_ctx.clone(),
         personas_arc.clone(),
         pending_persona_switch.clone(),
+        current_persona_name.clone(),
     );
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
@@ -3578,9 +3740,28 @@ async fn build_and_run(
     agent.set_model_info(&model_id, &provider_id);
     agent.template_ctx = template_ctx;
     agent.set_pending_persona_switch(pending_persona_switch.clone());
+    agent.set_current_persona_name(current_persona_name.clone());
     agent.set_personas(loaded_personas.clone());
     agent.set_pending_persona_switch(pending_persona_switch.clone());
+    {
+        let cfg_clone = cfg.clone();
+        let cat_clone = cat.cloned();
+        agent.set_provider_builder(Box::new(move |model_str: &str| {
+            let (pid, mid) = if let Some(idx) = model_str.find('/') {
+                (&model_str[..idx], &model_str[idx + 1..])
+            } else {
+                (model_str, "")
+            };
+            build_provider(&cfg_clone, cat_clone.as_ref(), pid, mid, raw).map_err(|e| e.to_string())
+        }));
+    }
     agent.flagged_files = flagged_files;
+    {
+        let shell_session = mew_tools::tools::shell_session::shared_session(
+            std::env::current_dir().unwrap_or_default(),
+        );
+        agent.set_shell_session(shell_session);
+    }
     agent.secrets = build_secret_set(cfg);
     agent.todos_path = todos_path.clone();
     if let Some(ref tp) = todos_path {
@@ -3650,7 +3831,8 @@ async fn build_and_run(
     let project_vars = mew_context::load_project_vars(&std::env::current_dir().unwrap_or_default());
     agent.project_vars = project_vars;
     if !ctx_files.is_empty() {
-        agent.set_system(mew_context::build_system_prompt(&ctx_files));
+        let rendered_ctx = render_templated_context_files(&ctx_files, &agent);
+        agent.set_system(mew_context::build_system_prompt(&rendered_ctx));
     }
     if !skills.is_empty() {
         agent.set_skills((*skills).clone());

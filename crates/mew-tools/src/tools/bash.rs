@@ -53,6 +53,13 @@ impl Tool for Bash {
             .and_then(|v| v.as_u64())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
+        // If a persistent shell session is available, use it instead of
+        // spawning a fresh process. This lets `cd`, `export`, and other
+        // state survive across calls.
+        if let Some(ref session) = ctx.shell_session {
+            return execute_in_session(session, command, &ctx, timeout_secs).await;
+        }
+
         let mut cmd = tokio::process::Command::new("bash");
         cmd.arg("-c")
             .arg(command)
@@ -201,6 +208,68 @@ impl Tool for Bash {
             error_msg,
         ))
     }
+}
+
+/// Execute a command via the persistent shell session.
+async fn execute_in_session(
+    session: &crate::tools::shell_session::SharedShellSession,
+    command: &str,
+    ctx: &ToolCtx,
+    timeout_secs: u64,
+) -> Result<ToolOutput, ToolError> {
+    let mut session = session.lock().await;
+
+    // Check for cancellation before acquiring the session.
+    if ctx.cancel.is_cancelled() {
+        return Err(ToolError::Cancelled);
+    }
+
+    let result = session
+        .execute(command, timeout_secs)
+        .await
+        .map_err(|e| ToolError::Execution(format!("shell session: {}", e)))?;
+
+    // Build combined output: stdout first, then stderr under a separator.
+    let mut combined = result.stdout.clone();
+    if !result.stderr.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str("--- stderr ---\n");
+        combined.push_str(&result.stderr);
+    }
+
+    // Redact secrets before truncation.
+    let (combined, redacted) = crate::secrets::redact_secret_words(&combined, &ctx.secrets);
+
+    let truncated = if combined.len() > OUTPUT_TRUNCATE_AT {
+        format!(
+            "{}...[truncated {} chars]",
+            &combined[..OUTPUT_TRUNCATE_AT],
+            combined.len() - OUTPUT_TRUNCATE_AT
+        )
+    } else {
+        combined
+    };
+    let truncated = crate::secrets::annotate_redaction(truncated, redacted);
+
+    let error_msg = if result.timed_out {
+        Some(format!(
+            "timeout after {}s (partial output shown)",
+            timeout_secs
+        ))
+    } else if result.exit_code != 0 {
+        Some(format!("exit code {}", result.exit_code))
+    } else {
+        None
+    };
+
+    Ok(ToolOutput {
+        output: truncated,
+        error: error_msg.unwrap_or_default(),
+        diff: None,
+        metadata: None,
+    })
 }
 
 /// Merge stdout and stderr lines into a single redacted/truncated output

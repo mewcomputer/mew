@@ -40,6 +40,7 @@ ulid = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 dotenvy = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

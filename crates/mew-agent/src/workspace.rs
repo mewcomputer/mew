@@ -64,7 +64,7 @@ impl Agent {
         input: &serde_json::Value,
     ) -> Option<PathBuf> {
         match tool_name {
-            "read" | "write" | "edit" => input
+            "read" | "write" | "edit_str_replace" | "edit_hashline" => input
                 .get("path")
                 .and_then(|v| v.as_str())
                 .map(PathBuf::from),

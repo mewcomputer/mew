@@ -48,6 +48,11 @@ impl ClassifierDecision {
 /// `cwd` and a short activity hint (`recent_action`) are optional context
 /// the classifier can use to weigh the decision. Pass `None` to omit.
 ///
+/// `autonomous_hint` is persona-specific guidance text injected into the
+/// prompt to steer the classifier (e.g. "this persona is read-only; be
+/// strict about shell commands"). Pass `None` when no persona is active
+/// or the persona doesn't define a hint.
+///
 /// `sensitivity` is the tool's sensitivity tier as a string ("ReadOnly" /
 /// "Mutating" / "Dangerous"). Passed as a string to keep `mew-prompts`
 /// free of the `mew-tools` dependency (avoiding a workspace cycle); the
@@ -58,6 +63,7 @@ pub fn permission_decision(
     sensitivity: &str,
     cwd: Option<&str>,
     recent_action: Option<&str>,
+    autonomous_hint: Option<&str>,
 ) -> String {
     let mut out = String::new();
     out.push_str(
@@ -68,6 +74,9 @@ pub fn permission_decision(
     out.push_str("  allow    — the call is safe and within normal agent operation\n");
     out.push_str("  deny     — the call would cause irreversible harm\n");
     out.push_str("  escalate — you are not sure; ask the user\n\n");
+    if let Some(hint) = autonomous_hint {
+        out.push_str(&format!("Persona guidance: {hint}\n\n"));
+    }
     out.push_str(&format!("Tool: {tool_name}\n"));
     out.push_str(&format!("Sensitivity: {sensitivity}\n"));
     out.push_str(&format!(
@@ -155,6 +164,7 @@ mod tests {
             "Dangerous",
             Some("/home/mew"),
             Some("compiling project"),
+            None,
         );
         assert!(prompt.contains("Tool: bash"));
         assert!(prompt.contains("rm -rf /tmp/foo"));
@@ -172,10 +182,27 @@ mod tests {
             "ReadOnly",
             None,
             None,
+            None,
         );
         assert!(prompt.contains("Tool: read"));
         assert!(prompt.contains("README.md"));
         assert!(!prompt.contains("Working directory"));
         assert!(!prompt.contains("Recent activity"));
+        assert!(!prompt.contains("Persona guidance"));
+    }
+
+    #[test]
+    fn test_permission_decision_includes_autonomous_hint() {
+        let prompt = permission_decision(
+            "bash",
+            &json!({"command": "echo hi"}),
+            "Dangerous",
+            None,
+            None,
+            Some("This persona is read-only. Deny shell commands."),
+        );
+        assert!(
+            prompt.contains("Persona guidance: This persona is read-only. Deny shell commands.")
+        );
     }
 }

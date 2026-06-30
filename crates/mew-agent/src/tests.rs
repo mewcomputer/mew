@@ -1924,6 +1924,7 @@ fn test_apply_persona_template_renders() {
             tools_deny: None,
             skills: None,
             template: Some(true),
+            ..Default::default()
         },
     };
     agent.apply_persona(&persona);
@@ -1955,6 +1956,7 @@ fn test_apply_persona_without_template_is_verbatim() {
             tools_deny: None,
             skills: None,
             template: None, // verbatim — no rendering
+            ..Default::default()
         },
     };
     agent.apply_persona(&persona);
@@ -2733,4 +2735,102 @@ async fn test_default_max_output_caps_at_32k_logic_directly() {
     let capped = raw.min(32_768);
     agent.set_default_max_output_tokens(capped);
     assert_eq!(agent.default_max_output_tokens, 32_768);
+}
+
+// --------------------------------------------------------------------------
+// Fallback models
+// --------------------------------------------------------------------------
+//
+// When the primary provider returns a stream error and the active persona
+// has `fallback_models` configured, the turn loop tries each fallback in
+// order. The first that succeeds is used for the rest of the turn.
+
+/// A provider that always returns an error on `stream`.
+struct ErroringProvider;
+
+#[async_trait::async_trait]
+impl Provider for ErroringProvider {
+    fn name(&self) -> &str {
+        "erroring"
+    }
+    async fn stream(&self, _req: Request) -> Result<EventStream, ProviderError> {
+        Err(ProviderError::Message("primary provider down".into()))
+    }
+}
+
+#[tokio::test]
+async fn test_fallback_model_retries_on_stream_error() {
+    use mew_message::SessionId;
+
+    // Primary provider always errors; the fallback succeeds with a text
+    // response.
+    let fallback_provider = std::sync::Arc::new(FakeProvider::new(FakeProvider::text_response(
+        "fallback response",
+    )));
+    let fallback_clone = fallback_provider.clone();
+
+    let mut agent = Agent::new(
+        std::sync::Arc::new(ErroringProvider),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        Vec::new(),
+        Some(SessionId::default()),
+    );
+    // Configure fallback models + the provider builder.
+    agent.fallback_models = Some(vec!["z-ai/glm-4.5-air".to_string()]);
+    agent.set_provider_builder(Box::new(move |_model_str: &str| {
+        Ok(fallback_clone.clone() as std::sync::Arc<dyn Provider>)
+    }));
+
+    let mut rx = agent.run("hello".into());
+    let mut got_text = String::new();
+    let mut had_error = false;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            crate::AgentEvent::Provider(ProviderEvent::PartDelta { delta, .. }) => {
+                got_text.push_str(&delta);
+            }
+            crate::AgentEvent::Error(msg) if msg.contains("trying fallback") => {
+                had_error = true;
+            }
+            crate::AgentEvent::Provider(ProviderEvent::MessageEnd { .. }) => break,
+            crate::AgentEvent::Error(_) => {}
+            _ => {}
+        }
+    }
+    assert!(
+        had_error,
+        "should have emitted a 'trying fallback' error event"
+    );
+    assert!(
+        got_text.contains("fallback response"),
+        "should have received the fallback response, got: {got_text}"
+    );
+}
+
+#[tokio::test]
+async fn test_no_fallback_models_means_fatal_error() {
+    use mew_message::SessionId;
+
+    let agent = Agent::new(
+        std::sync::Arc::new(ErroringProvider),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        Vec::new(),
+        Some(SessionId::default()),
+    );
+    // No fallback_models configured — the error should be fatal.
+    let mut rx = agent.run("hello".into());
+    let mut got_fatal = false;
+    while let Some(ev) = rx.recv().await {
+        if let crate::AgentEvent::Error(msg) = ev {
+            if msg.contains("provider stream") {
+                got_fatal = true;
+            }
+        }
+    }
+    assert!(
+        got_fatal,
+        "should have emitted a fatal 'provider stream' error"
+    );
 }

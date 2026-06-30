@@ -228,7 +228,7 @@ fn draw_user_question_page(f: &mut Frame, uq: &UserQuestionState, area: Rect) {
         String::new()
     };
 
-    // Line 0: prompt (cyan, bold) + optional page label on the right.
+    // Line 0+: prompt (cyan, bold), wrapped + optional page label on the right.
     let prompt_style = Style::default()
         .fg(Color::Cyan)
         .bg(STATUS_BG)
@@ -237,36 +237,38 @@ fn draw_user_question_page(f: &mut Frame, uq: &UserQuestionState, area: Rect) {
     let label_w = display_width(&page_label) as u16;
     let label_reserve = if n > 1 { label_w + 1 } else { 0 };
     let prompt_max = area.width.saturating_sub(label_reserve) as usize;
-    let mut prompt_line = Line::default();
-    prompt_line.spans.push(Span::styled(
-        truncate(&question.prompt, prompt_max),
-        prompt_style,
-    ));
-    if n > 1 {
-        let used = display_width(&question.prompt).min(prompt_max) as u16;
-        let pad = area.width.saturating_sub(used + label_reserve);
-        if pad > 0 {
-            prompt_line
-                .spans
-                .push(Span::styled(" ".repeat(pad as usize), prompt_style));
+
+    // Wrap the prompt text to the available width.
+    let prompt_lines = wrap_text(&question.prompt, prompt_max);
+    let prompt_height = prompt_lines.len() as u16;
+    for (pi, pl) in prompt_lines.iter().enumerate() {
+        let mut line = Line::default();
+        line.spans.push(Span::styled(pl.clone(), prompt_style));
+        // Append page label on the last prompt line.
+        if n > 1 && pi == prompt_lines.len() - 1 {
+            let used = display_width(pl) as u16;
+            let pad = area.width.saturating_sub(used + label_reserve);
+            if pad > 0 {
+                line.spans
+                    .push(Span::styled(" ".repeat(pad as usize), prompt_style));
+            }
+            line.spans
+                .push(Span::styled(page_label.clone(), label_style));
         }
-        prompt_line
-            .spans
-            .push(Span::styled(page_label, label_style));
+        f.render_widget(
+            Paragraph::new(line),
+            Rect::new(area.x, area.y + pi as u16, area.width, 1),
+        );
     }
-    f.render_widget(
-        Paragraph::new(prompt_line).wrap(Wrap { trim: false }),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
 
     // One line per option + one line for freeform. Each row: number, label,
-    // and (if present) the description underneath. With descriptions, each
-    // option takes 2 lines; without, 1. We compute rows in display order.
+    // and (if present) the description underneath. Labels and descriptions
+    // are wrapped instead of truncated.
     let mut row_index = 0usize;
     let mut cursor_target: Option<(u16, u16)> = None;
 
     // Track the y position as we lay out rows.
-    let mut y = area.y + 2; // leave 1 blank line after the prompt
+    let mut y = area.y + prompt_height + 1; // leave 1 blank line after the prompt
     if y >= area.y + area.height {
         return;
     }
@@ -290,34 +292,49 @@ fn draw_user_question_page(f: &mut Frame, uq: &UserQuestionState, area: Rect) {
         } else {
             Style::default().fg(Color::Gray).bg(STATUS_BG)
         };
-        let line = Line::from(vec![
-            Span::styled(number, number_style),
-            Span::styled(
-                truncate(&opt.label, area.width.saturating_sub(3) as usize),
-                label_style,
-            ),
-        ]);
-        f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
-        y += 1;
+
+        // Wrap the label to the available width (minus number prefix).
+        let label_max = area.width.saturating_sub(number.len() as u16) as usize;
+        let label_lines = wrap_text(&opt.label, label_max);
+        for (li, ll) in label_lines.iter().enumerate() {
+            let mut line = Line::default();
+            // Only show the number on the first line.
+            if li == 0 {
+                line.spans.push(Span::styled(number.clone(), number_style));
+            } else {
+                line.spans
+                    .push(Span::styled(" ".repeat(number.len()), number_style));
+            }
+            line.spans.push(Span::styled(ll.clone(), label_style));
+            f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
+            y += 1;
+            if y >= area.y + area.height {
+                return;
+            }
+        }
         row_index += 1;
 
         if y >= area.y + area.height {
             return;
         }
-        let desc_style = Style::default().fg(Color::DarkGray).bg(STATUS_BG);
-        let indent = "    ";
-        let desc_max = area.width.saturating_sub(indent.len() as u16) as usize;
-        let desc_text = if opt.description.is_empty() {
-            String::new()
-        } else {
-            truncate(&opt.description, desc_max)
-        };
-        let desc_line = Line::from(Span::styled(format!("{}{}", indent, desc_text), desc_style));
-        f.render_widget(
-            Paragraph::new(desc_line),
-            Rect::new(area.x, y, area.width, 1),
-        );
-        y += 1;
+        // Wrap description if present.
+        if !opt.description.is_empty() {
+            let desc_style = Style::default().fg(Color::DarkGray).bg(STATUS_BG);
+            let indent = "    ";
+            let desc_max = area.width.saturating_sub(indent.len() as u16) as usize;
+            let desc_lines = wrap_text(&opt.description, desc_max);
+            for dl in &desc_lines {
+                let desc_line = Line::from(Span::styled(format!("{}{}", indent, dl), desc_style));
+                f.render_widget(
+                    Paragraph::new(desc_line),
+                    Rect::new(area.x, y, area.width, 1),
+                );
+                y += 1;
+                if y >= area.y + area.height {
+                    return;
+                }
+            }
+        }
     }
 
     // Freeform row: "n. Type your own answer" with optional input field.
@@ -412,24 +429,32 @@ fn draw_user_question_review(f: &mut Frame, uq: &UserQuestionState, area: Rect) 
             .bg(STATUS_BG)
             .add_modifier(Modifier::BOLD);
         let prompt_max = area.width.saturating_sub(2) as usize;
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                truncate(&q.prompt, prompt_max),
-                prompt_style,
-            ))),
-            Rect::new(area.x, y, area.width, 1),
-        );
-        y += 1;
+        for pl in wrap_text(&q.prompt, prompt_max) {
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(pl, prompt_style))),
+                Rect::new(area.x, y, area.width, 1),
+            );
+            y += 1;
+            if y >= max_y {
+                return;
+            }
+        }
         let answer = uq.answers.get(i).map(|s| s.as_str()).unwrap_or("");
         let answer_max = area.width.saturating_sub(4) as usize;
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("  ▸ ", Style::default().fg(Color::Cyan).bg(STATUS_BG)),
-                Span::styled(truncate(answer, answer_max), answer_style),
-            ])),
-            Rect::new(area.x, y, area.width, 1),
-        );
-        y += 2; // blank line between pairs
+        for al in wrap_text(answer, answer_max) {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("  ▸ ", Style::default().fg(Color::Cyan).bg(STATUS_BG)),
+                    Span::styled(al, answer_style),
+                ])),
+                Rect::new(area.x, y, area.width, 1),
+            );
+            y += 1;
+            if y >= max_y {
+                return;
+            }
+        }
+        y += 1; // blank line between pairs
     }
 
     // Action row: [ Submit ]  [ Cancel ]
@@ -496,6 +521,13 @@ fn truncate(s: &str, max: usize) -> String {
         w += cw;
     }
     out
+}
+
+/// Wrap a string to `max` display columns, returning one `String` per
+/// visual line. Delegates to [`super::chat::wrap_text_to_width`] which is
+/// the shared wrapping function also used by the chat surface.
+fn wrap_text(s: &str, max: usize) -> Vec<String> {
+    super::chat::wrap_text_to_width(s, max as u16)
 }
 
 pub(super) fn draw_picker(f: &mut Frame, picker: &mut PickerState, area: Rect) {
@@ -632,6 +664,9 @@ pub(super) fn draw_persona_confirm_modal(
 
     f.render_widget(Clear, popup);
 
+    // Use the target persona's accent color for the border and name.
+    let accent = crate::theme::persona_accent(&state.target.name, state.target.color.as_deref());
+
     let block = Block::bordered()
         .title(Span::styled(
             " Switch persona ",
@@ -639,7 +674,7 @@ pub(super) fn draw_persona_confirm_modal(
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ))
-        .border_style(Style::default().fg(Color::Magenta));
+        .border_style(Style::default().fg(accent.bg));
     f.render_widget(block, popup);
 
     let inner = popup.inner(Margin::new(2, 1));
@@ -657,19 +692,22 @@ pub(super) fn draw_persona_confirm_modal(
         Span::styled(" → ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             state.target.name.clone(),
-            Style::default()
-                .fg(Color::Rgb(200, 170, 240))
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(accent.fg).add_modifier(Modifier::BOLD),
         ),
     ]));
 
     if !state.target.description.is_empty() {
-        let max = inner.width.saturating_sub(4) as usize;
-        let desc: String = state.target.description.chars().take(max).collect();
-        text.push_line(Line::from(vec![
-            Span::styled("  desc  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(desc, Style::default().fg(Color::Gray)),
-        ]));
+        let max = inner.width.saturating_sub(8) as usize;
+        let desc_lines = wrap_text(&state.target.description, max);
+        for (di, dl) in desc_lines.iter().enumerate() {
+            text.push_line(Line::from(vec![
+                Span::styled(
+                    if di == 0 { "  desc  " } else { "        " },
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(dl.clone(), Style::default().fg(Color::Gray)),
+            ]));
+        }
     }
 
     text.push_line(Line::from(""));

@@ -193,8 +193,25 @@ pub struct Agent {
     /// actual switch (model pin, provider rebuild) is the main loop's
     /// responsibility, triggered by the `PersonaSwitchRequested` event.
     pub pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Current persona name, shared with the `switch_persona` tool so it
+    /// can look up transition rules for the *active* persona before
+    /// queuing a switch. Updated by `apply_persona` and `clear_persona`.
+    pub current_persona_name: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Active persona name (for display/status). `None` = no persona.
     pub persona_name: Option<String>,
+    /// Active persona's autonomous hint for the Auto/Auto+ permission
+    /// classifier. Injected into the classifier prompt to steer decisions
+    /// (e.g. "this persona is read-only; be strict about shell commands").
+    /// `None` = no hint (classifier uses its default prompt).
+    pub autonomous_hint: Option<String>,
+    /// Active persona's transition rules. Controls which personas this
+    /// one can switch to and whether confirmation is required. `None` =
+    /// unrestricted.
+    pub persona_transitions: Option<mew_personas::TransitionRules>,
+    /// Active persona's fallback models. Tried in order if the primary
+    /// model's provider returns a stream error. `None` or empty = no
+    /// fallbacks.
+    pub fallback_models: Option<Vec<String>>,
     /// Current model ID (e.g. "deepseek-v4-flash"). Set by the main loop
     /// when building or switching the provider. Used in template context.
     pub model_id: String,
@@ -220,7 +237,27 @@ pub struct Agent {
     /// survives context compaction without the model having to remember.
     /// Set from `config.toml: plan_path = "PLAN.md"`.
     pub plan_path: Option<PathBuf>,
+    /// Optional callback that builds a new provider for a given
+    /// `provider/model` string. Used by the turn loop to try fallback
+    /// models when the primary provider returns a stream error. The
+    /// main loop sets this via `set_provider_builder`; when `None`,
+    /// stream errors are fatal (the existing behavior).
+    pub provider_builder: Option<Arc<ProviderBuilder>>,
+    /// Optional persistent shell session shared with the `bash` tool.
+    /// When `Some`, bash commands run in a long-lived shell process so
+    /// `cd`, `export`, and other state survive across calls. When
+    /// `None`, each bash call spawns a fresh process (the existing
+    /// behavior). Set via `set_shell_session`.
+    pub shell_session: Option<mew_tools::tools::shell_session::SharedShellSession>,
 }
+
+/// Builds a new provider for a `provider/model` pair. Used by the turn
+/// loop to retry with fallback models when the primary provider fails.
+pub type ProviderBuilderFn =
+    Box<dyn Fn(&str) -> Result<Arc<dyn mew_provider::Provider>, String> + Send + Sync>;
+
+/// Wrapper around the boxed builder so it can be cloned via `Arc`.
+pub struct ProviderBuilder(pub ProviderBuilderFn);
 
 impl Agent {
     pub fn new(
@@ -284,13 +321,19 @@ impl Agent {
             base_system: String::new(),
             personas: Vec::new(),
             pending_persona_switch: Arc::new(tokio::sync::Mutex::new(None)),
+            current_persona_name: Arc::new(tokio::sync::RwLock::new(None)),
             persona_name: None,
+            autonomous_hint: None,
+            persona_transitions: None,
+            fallback_models: None,
             model_id: String::new(),
             provider_id: String::new(),
             classifier_provider: None,
             classifier_model: None,
             classifier_cache: None,
             plan_path: None,
+            provider_builder: None,
+            shell_session: None,
         }
     }
 
@@ -462,6 +505,7 @@ impl Agent {
             sensitivity_label(sensitivity),
             cwd_str.as_deref(),
             None,
+            self.autonomous_hint.as_deref(),
         );
 
         let request = mew_provider::Request {
@@ -580,6 +624,38 @@ impl Agent {
         self.pending_persona_switch = slot;
     }
 
+    /// Share the current-persona-name slot with the `switch_persona` tool
+    /// so it can look up transition rules for the active persona. The
+    /// agent keeps this in sync via `apply_persona` / `clear_persona`.
+    pub fn set_current_persona_name(&mut self, current: Arc<tokio::sync::RwLock<Option<String>>>) {
+        // Preserve the current value if the agent already has a persona active.
+        if let Some(ref name) = self.persona_name {
+            if let Ok(mut g) = current.try_write() {
+                *g = Some(name.clone());
+            }
+        }
+        self.current_persona_name = current;
+    }
+
+    /// Set the provider builder callback used by the turn loop to try
+    /// fallback models when the primary provider returns a stream error.
+    /// When not set, stream errors are fatal (the existing behavior).
+    /// The builder receives a `provider/model` string and returns a
+    /// new provider, or an error message.
+    pub fn set_provider_builder(&mut self, builder: ProviderBuilderFn) {
+        self.provider_builder = Some(Arc::new(ProviderBuilder(builder)));
+    }
+
+    /// Set the persistent shell session. When set, the `bash` tool uses
+    /// it instead of spawning a fresh process for each command. This
+    /// means `cd`, `export`, and other state survive across calls.
+    pub fn set_shell_session(
+        &mut self,
+        session: mew_tools::tools::shell_session::SharedShellSession,
+    ) {
+        self.shell_session = Some(session);
+    }
+
     /// Rebuild `self.system` from `self.base_system` + the current skills
     /// listing (filtered by the active persona's skill allow-list). Called
     /// automatically by `set_skills`, `apply_persona`, and `clear_persona`.
@@ -608,14 +684,19 @@ impl Agent {
     /// the provider.
     pub fn apply_persona(&mut self, persona: &mew_personas::Persona) -> Option<String> {
         self.persona_name = Some(persona.name.clone());
+        if let Ok(mut g) = self.current_persona_name.try_write() {
+            *g = Some(persona.name.clone());
+        }
+        self.autonomous_hint = persona.config.autonomous_hint.clone();
+        self.persona_transitions = persona.config.transitions.clone();
+        self.fallback_models = persona.config.fallback_models.clone();
 
         // Compute tool filters before rendering the prompt so a templated
         // persona body can reference the effective toolset.
-        self.active_tool_names = persona
-            .config
-            .tools
-            .as_ref()
-            .map(|tools| tools.iter().cloned().collect::<HashSet<_>>());
+        self.active_tool_names = persona.config.tools.as_ref().map(|tools| {
+            let expanded = expand_tool_tags(tools, &self.tools);
+            expanded.into_iter().collect::<HashSet<_>>()
+        });
         self.denied_tool_names = persona
             .config
             .tools_deny
@@ -687,9 +768,15 @@ impl Agent {
     /// default (empty), and the unfiltered skills list.
     pub fn clear_persona(&mut self) {
         self.persona_name = None;
+        if let Ok(mut g) = self.current_persona_name.try_write() {
+            *g = None;
+        }
         self.persona_prompt = None;
         self.active_tool_names = None;
         self.denied_tool_names.clear();
+        self.autonomous_hint = None;
+        self.persona_transitions = None;
+        self.fallback_models = None;
         if let Ok(mut g) = self.skill_filter.try_write() {
             *g = None;
         }
@@ -1243,6 +1330,56 @@ async fn run_shell_job(
 /// existing call site at `rebuild_system()` keeps working.
 fn build_skills_xml(skills: &[&mew_skills::Skill]) -> String {
     mew_prompts::skills::build_xml(skills)
+}
+
+/// Expand persona tool-list tag entries into actual tool names.
+///
+/// Supported tags:
+/// - `tag!ALL` — every registered tool
+/// - `tag!ALL_MCP` — every `mcp__*` tool
+/// - `mcp__<server>` — every tool from the named MCP server (e.g. `mcp__filesystem`)
+///
+/// Plain tool names (e.g. `read`, `bash`) pass through unchanged. Tag
+/// expansion is additive: the result is the union of all expanded tags
+/// plus any plain names. Duplicates are deduplicated.
+fn expand_tool_tags(
+    tools: &[String],
+    registry: &HashMap<String, Arc<dyn mew_tools::Tool>>,
+) -> Vec<String> {
+    let mut result: HashSet<String> = HashSet::new();
+    let all_names: Vec<&String> = registry.keys().collect();
+
+    for entry in tools {
+        match entry.as_str() {
+            "tag!ALL" => {
+                for name in &all_names {
+                    result.insert((*name).clone());
+                }
+            }
+            "tag!ALL_MCP" => {
+                for name in &all_names {
+                    if name.starts_with("mcp__") {
+                        result.insert((*name).clone());
+                    }
+                }
+            }
+            tag if tag.starts_with("mcp__") && tag.matches("__").count() == 1 => {
+                // `mcp__<server>` — expand to all tools from that server.
+                // Tool names are `mcp__<server>__<tool>`, so match the prefix.
+                let prefix = format!("{}__", tag);
+                for name in &all_names {
+                    if name.starts_with(&prefix) {
+                        result.insert((*name).clone());
+                    }
+                }
+            }
+            _ => {
+                result.insert(entry.clone());
+            }
+        }
+    }
+
+    result.into_iter().collect()
 }
 
 /// Map a tool's `Sensitivity` to the label string the classifier prompt

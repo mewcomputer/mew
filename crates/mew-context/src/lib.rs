@@ -14,6 +14,10 @@ pub enum ContextError {
 pub struct File {
     pub path: PathBuf,
     pub content: String,
+    /// When true, the content should be rendered through minijinja before
+    /// being used as a system prompt. Set by `mew: true` or `polytoken: true`
+    /// in the context file's YAML frontmatter.
+    pub template: bool,
 }
 
 /// Discovers and loads project context files.
@@ -87,10 +91,39 @@ impl Loader {
 }
 
 fn try_read(path: &Path) -> Option<File> {
-    std::fs::read_to_string(path).ok().map(|content| File {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let (template, content) = parse_context_frontmatter(&raw);
+    Some(File {
         path: path.to_path_buf(),
         content: expand_includes(&content, path),
+        template,
     })
+}
+
+/// Parse optional YAML frontmatter from a context file. If the file starts
+/// with `---` and contains `mew: true` or `polytoken: true`, the frontmatter
+/// is stripped and `template: true` is returned. Otherwise the content is
+/// returned unchanged with `template: false`.
+fn parse_context_frontmatter(raw: &str) -> (bool, String) {
+    let body = match raw.strip_prefix("---\n") {
+        Some(b) => b,
+        None => return (false, raw.to_string()),
+    };
+    let (yaml, body) = match body.split_once("\n---") {
+        Some(split) => split,
+        None => return (false, raw.to_string()),
+    };
+
+    // Simple check: look for `mew: true` or `polytoken: true` in the YAML.
+    // We don't parse the full YAML here to avoid adding serde_yaml as a dep
+    // just for this. The check is deliberately conservative: it only
+    // matches the exact key-value pair on its own line.
+    let template = yaml
+        .lines()
+        .any(|line| line.trim() == "mew: true" || line.trim() == "polytoken: true");
+
+    let content = body.trim_start_matches('\n').to_string();
+    (template, content)
 }
 
 /// Expand `@path/to/file` static includes in context file content.
@@ -225,6 +258,8 @@ fn paths_between(root: &Path, leaf: &Path) -> Vec<PathBuf> {
 }
 
 /// Concatenates loaded files into a system prompt fragment.
+/// Note: files with `template: true` should be rendered by the caller
+/// before passing to this function. This function inlines content as-is.
 pub fn build_system_prompt(files: &[File]) -> String {
     let mut buf = String::new();
     for f in files {
@@ -301,10 +336,12 @@ mod tests {
             File {
                 path: PathBuf::from("/tmp/AGENTS.md"),
                 content: "hello".to_string(),
+                template: false,
             },
             File {
                 path: PathBuf::from("/tmp/CLAUDE.md"),
                 content: "world".to_string(),
+                template: false,
             },
         ];
         let prompt = build_system_prompt(&files);
@@ -570,5 +607,56 @@ mod tests {
 
         let vars = load_project_vars(dir.path());
         assert_eq!(vars.get("framework").unwrap(), "astro");
+    }
+
+    #[test]
+    fn test_parse_context_frontmatter_mew_true() {
+        let raw = "---\nmew: true\n---\nHello {{ model_id }}";
+        let (template, content) = parse_context_frontmatter(raw);
+        assert!(template);
+        assert_eq!(content, "Hello {{ model_id }}");
+    }
+
+    #[test]
+    fn test_parse_context_frontmatter_polytoken_true() {
+        let raw = "---\npolytoken: true\n---\nHello {{ persona_name }}";
+        let (template, content) = parse_context_frontmatter(raw);
+        assert!(template);
+        assert_eq!(content, "Hello {{ persona_name }}");
+    }
+
+    #[test]
+    fn test_parse_context_frontmatter_no_frontmatter() {
+        let raw = "Just a regular AGENTS.md file.";
+        let (template, content) = parse_context_frontmatter(raw);
+        assert!(!template);
+        assert_eq!(content, raw);
+    }
+
+    #[test]
+    fn test_parse_context_frontmatter_other_keys() {
+        let raw = "---\nauthor: someone\n---\nContent here";
+        let (template, content) = parse_context_frontmatter(raw);
+        assert!(!template);
+        assert_eq!(content, "Content here");
+    }
+
+    #[test]
+    fn test_templated_context_file_detected_via_loader() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "---\nmew: true\n---\nProject: {{ project_vars.name }}",
+        )
+        .unwrap();
+
+        let loader = Loader::new(dir.path());
+        let files = loader.load().unwrap();
+        let agents = files
+            .iter()
+            .find(|f| f.path.ends_with("AGENTS.md"))
+            .expect("AGENTS.md found");
+        assert!(agents.template);
+        assert!(agents.content.contains("{{ project_vars.name }}"));
     }
 }

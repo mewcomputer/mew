@@ -51,6 +51,43 @@ pub struct PersonaConfig {
     /// body (the default, and the safe choice for personas that don't need
     /// dynamic content).
     pub template: Option<bool>,
+    /// Guidance text injected into the Auto/Auto+ permission classifier
+    /// prompt when this persona is active. Lets a persona say "I am a
+    /// read-only researcher; be stricter about shell commands" to steer
+    /// the classifier toward more conservative decisions. `None` = no
+    /// hint (the classifier uses its default prompt).
+    pub autonomous_hint: Option<String>,
+    /// Controls which personas this one can switch to via the
+    /// `switch_persona` tool, and whether the user must confirm.
+    /// `None` = unrestricted (can switch to any persona, no confirmation).
+    pub transitions: Option<TransitionRules>,
+    /// Fallback models to try if the primary model's provider returns a
+    /// stream error. Each entry is a `provider/model` string (same format
+    /// as `model`). Tried in order; the first that succeeds is used for
+    /// the rest of the turn. `None` or empty = no fallbacks.
+    pub fallback_models: Option<Vec<String>>,
+    /// Accent color for this persona, as a hex string like "#rrggbb".
+    /// When set, the TUI uses it for the persona pill in the status bar,
+    /// the sidebar entry, and the confirm modal border. When `None`,
+    /// a deterministic color is generated from the persona name.
+    pub color: Option<String>,
+}
+
+/// Transition rules for a persona. Controls which personas this one can
+/// switch to and whether the user must confirm the switch.
+#[derive(Debug, Clone, Default)]
+pub struct TransitionRules {
+    /// Which persona names this persona is allowed to switch to.
+    /// `None` = any persona (the default). `Some(vec)` = only those
+    /// listed. An empty vec means the persona cannot switch at all —
+    /// useful for locked-down personas like a read-only planner that
+    /// should not self-escalate to a builder.
+    pub allowed: Option<Vec<String>>,
+    /// When `true`, the user is asked to confirm before the switch is
+    /// applied. The `switch_persona` tool returns a message indicating
+    /// the switch was queued pending confirmation; the main loop shows
+    /// a confirm modal (same as the `/persona` slash command).
+    pub confirm: bool,
 }
 
 /// Frontmatter parsed from a PERSONA.md file.
@@ -79,6 +116,22 @@ struct MewFrontmatter {
     skills: Option<Vec<String>>,
     #[serde(default)]
     template: Option<bool>,
+    #[serde(default)]
+    autonomous_hint: Option<String>,
+    #[serde(default)]
+    transitions: Option<TransitionRulesFrontmatter>,
+    #[serde(default)]
+    fallback_models: Option<Vec<String>>,
+    #[serde(default)]
+    color: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TransitionRulesFrontmatter {
+    #[serde(default)]
+    allowed: Option<Vec<String>>,
+    #[serde(default)]
+    confirm: bool,
 }
 
 static NAME_RE: LazyLock<Regex> =
@@ -188,6 +241,13 @@ fn load_persona_file(path: &Path) -> Result<Persona, PersonaError> {
                     tools_deny: mew.tools_deny,
                     skills: mew.skills,
                     template: mew.template,
+                    autonomous_hint: mew.autonomous_hint,
+                    transitions: mew.transitions.map(|t| TransitionRules {
+                        allowed: t.allowed,
+                        confirm: t.confirm,
+                    }),
+                    fallback_models: mew.fallback_models,
+                    color: mew.color,
                 },
                 None => PersonaConfig::default(),
             };
@@ -539,6 +599,132 @@ mod tests {
             Some("deepseek/deepseek-v4-flash")
         );
     }
+
+    #[test]
+    fn test_persona_autonomous_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        write_persona_with_mew(
+            cwd,
+            "strict",
+            "Strict persona",
+            "body",
+            "  autonomous_hint: \"Be very strict about shell commands.\"\n",
+        );
+
+        let loader = Loader::new(cwd).without_builtins();
+        let personas = loader.load().unwrap();
+        assert_eq!(personas.len(), 1);
+        assert_eq!(
+            personas[0].config.autonomous_hint.as_deref(),
+            Some("Be very strict about shell commands.")
+        );
+    }
+
+    #[test]
+    fn test_persona_transitions_allowed_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        write_persona_with_mew(
+            cwd,
+            "guarded",
+            "Guarded persona",
+            "body",
+            "  transitions:\n    allowed:\n      - builder\n      - reviewer\n    confirm: true\n",
+        );
+
+        let loader = Loader::new(cwd).without_builtins();
+        let personas = loader.load().unwrap();
+        assert_eq!(personas.len(), 1);
+        let t = personas[0].config.transitions.as_ref().unwrap();
+        assert_eq!(
+            t.allowed.as_ref().unwrap(),
+            &vec!["builder".to_string(), "reviewer".to_string()]
+        );
+        assert!(t.confirm);
+    }
+
+    #[test]
+    fn test_persona_transitions_empty_allowed_blocks_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        write_persona_with_mew(
+            cwd,
+            "locked",
+            "Locked persona",
+            "body",
+            "  transitions:\n    allowed: []\n",
+        );
+
+        let loader = Loader::new(cwd).without_builtins();
+        let personas = loader.load().unwrap();
+        let t = personas[0].config.transitions.as_ref().unwrap();
+        assert!(t.allowed.as_ref().unwrap().is_empty());
+        assert!(!t.confirm);
+    }
+
+    #[test]
+    fn test_persona_fallback_models() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        write_persona_with_mew(
+            cwd,
+            "resilient",
+            "Resilient persona",
+            "body",
+            "  model: deepseek/deepseek-v4-flash\n  fallback_models:\n    - z-ai/glm-4.5-air\n    - opencode-zen/gpt-oss-120b\n",
+        );
+
+        let loader = Loader::new(cwd).without_builtins();
+        let personas = loader.load().unwrap();
+        assert_eq!(personas.len(), 1);
+        assert_eq!(
+            personas[0].config.model.as_deref(),
+            Some("deepseek/deepseek-v4-flash")
+        );
+        let fb = personas[0].config.fallback_models.as_ref().unwrap();
+        assert_eq!(
+            fb,
+            &vec![
+                "z-ai/glm-4.5-air".to_string(),
+                "opencode-zen/gpt-oss-120b".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_builtin_planner_has_locked_transitions() {
+        let builtins = builtin_defaults();
+        let planner = builtins.iter().find(|p| p.name == "planner").unwrap();
+        let t = planner
+            .config
+            .transitions
+            .as_ref()
+            .expect("planner has transition rules");
+        // Planner cannot switch to any persona on its own.
+        assert!(t.allowed.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_builtin_planner_has_autonomous_hint() {
+        let builtins = builtin_defaults();
+        let planner = builtins.iter().find(|p| p.name == "planner").unwrap();
+        assert!(planner.config.autonomous_hint.is_some());
+        assert!(planner
+            .config
+            .autonomous_hint
+            .as_ref()
+            .unwrap()
+            .contains("read-only"));
+    }
+
+    #[test]
+    fn test_builtin_builder_has_no_transition_restrictions() {
+        let builtins = builtin_defaults();
+        let builder = builtins.iter().find(|p| p.name == "builder").unwrap();
+        // Builder has no transition restrictions — can switch to any persona.
+        assert!(builder.config.transitions.is_none());
+    }
 }
 
 /// Built-in personas shipped with mew. User-defined personas (loaded from
@@ -580,6 +766,24 @@ pub fn builtin_defaults() -> Vec<Persona> {
                     "todo_complete".into(),
                     "todo_list".into(),
                 ]),
+                // Planner cannot switch to any other persona on its own —
+                // the user must explicitly switch via the slash command or
+                // the confirmation modal. This prevents the planner from
+                // self-escalating to a builder without user oversight.
+                transitions: Some(TransitionRules {
+                    allowed: Some(Vec::new()),
+                    confirm: false,
+                }),
+                // Steer the Auto/Auto+ classifier toward being strict about
+                // any mutating or dangerous tool calls, since the planner is
+                // meant to be read-only.
+                autonomous_hint: Some(
+                    "This persona is read-only. Be strict about shell commands, \
+                     file writes, and any tool that modifies state. Deny or \
+                     escalate unless the action is clearly part of writing \
+                     the plan file."
+                        .into(),
+                ),
                 ..Default::default()
             },
         },

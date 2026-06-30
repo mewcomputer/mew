@@ -3,7 +3,7 @@
 //! interactions between them: write+read, edit+bash, glob+grep, etc.
 
 use mew_tools::tools::bash::Bash;
-use mew_tools::tools::edit::Edit;
+use mew_tools::tools::edit_str_replace::EditStrReplace;
 use mew_tools::tools::glob::Glob;
 use mew_tools::tools::grep::Grep;
 use mew_tools::tools::read::Read;
@@ -65,7 +65,7 @@ async fn write_then_edit_then_bash_cat_verifies_edit() {
         .await
         .unwrap();
 
-    let edit = Edit;
+    let edit = EditStrReplace;
     edit.execute(
         ctx(&dir),
         serde_json::json!({
@@ -300,7 +300,7 @@ async fn edit_then_glob_finds_edited_file_by_pattern() {
         .await
         .unwrap();
 
-    let edit = Edit;
+    let edit = EditStrReplace;
     edit.execute(
         ctx(&dir),
         serde_json::json!({

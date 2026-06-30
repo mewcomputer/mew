@@ -29,6 +29,11 @@ pub struct ToolCtxShared {
     /// Shared via `Arc` from the agent's startup config; defaults empty in
     /// tests via `Default::default()`.
     pub secrets: Arc<SecretSet>,
+    /// Optional persistent shell session shared across bash tool calls.
+    /// When `Some`, the `bash` tool uses it instead of spawning a fresh
+    /// process — so `cd`, `export`, and other state survive between calls.
+    /// `None` (the default) means each bash call is independent.
+    pub shell_session: Option<crate::tools::shell_session::SharedShellSession>,
 }
 
 impl Default for ToolCtxShared {
@@ -38,6 +43,7 @@ impl Default for ToolCtxShared {
             cwd: PathBuf::from("."),
             dispatcher: None,
             secrets: Arc::new(SecretSet::default()),
+            shell_session: None,
         }
     }
 }
@@ -80,7 +86,6 @@ impl ToolCtx {
         }
     }
 
-    /// Test helper: build a minimal ToolCtx with empty shared state.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn test_new(cwd: PathBuf) -> Self {
         Self::new(

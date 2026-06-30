@@ -528,6 +528,7 @@ impl Agent {
                     cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
                     dispatcher: Some(self.dispatcher.clone()),
                     secrets: self.secrets.clone(),
+                    shell_session: self.shell_session.clone(),
                 }),
                 tc.call_id.clone(),
                 self.cancel_token.child_token(),

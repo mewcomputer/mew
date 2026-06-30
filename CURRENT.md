@@ -1,5 +1,184 @@
 # Progress — 2026-06-29
 
+## Confirm modal gap + persona accent colors + overlay wrapping — COMPLETE
+
+### Transition confirm gap closed
+
+When `transitions.confirm: true` on the current persona, the
+`switch_persona` tool's queued switch now opens the confirm modal
+instead of applying silently. `drain_pending_persona_switch` checks
+the current persona's `transitions.confirm` flag and calls
+`request_persona_switch_confirm` when set — reusing the exact same
+modal as the `/persona` slash command. The user accepts or cancels
+via the existing `PersonaSwitchConfirmed` action path.
+
+### Persona accent colors
+
+Personas now have per-persona accent colors. The `color` frontmatter
+field (`#rrggbb`) overrides a deterministic color generated from the
+persona name via FNV-1a hash → HSV → RGB. Applied to:
+- Status bar persona pill (was hardcoded purple)
+- Sidebar persona entry (active persona uses accent)
+- Persona confirm modal border + target name
+
+New `mew-tui/src/theme.rs` module with `accent_for_name()`,
+`accent_from_hex()`, `persona_accent()`, and `parse_hex()`. 7 tests.
+`PersonaConfig.color` + `PersonaSummary.color` carry the hex string.
+
+### Overlay text wrapping (earlier in session)
+
+The `ask_user_question` overlay and persona confirm modal now wrap
+text instead of truncating with `…`. Delegates to the existing
+`wrap_text_to_width` from `chat.rs` — no duplicated logic.
+
+### Files changed
+
+- `crates/mew-personas/src/lib.rs` — `color` field + frontmatter
+- `crates/mew-tui/src/theme.rs` — new module, 7 tests
+- `crates/mew-tui/src/app.rs` — `active_persona_color` + `PersonaSummary.color`
+- `crates/mew-tui/src/ui/status.rs` — accent color pill
+- `crates/mew-tui/src/ui/sidebar.rs` — accent color for active persona
+- `crates/mew-tui/src/ui/overlays.rs` — accent border/name + wrap_text
+- `crates/mew-tui/src/ui/chat.rs` — `wrap_text_to_width` made `pub(super)`
+- `crates/mew/src/main.rs` — confirm gap + persona_summary color
+
+---
+
+## Persona features: autonomous hints, transitions, fallback models, persistent shell — COMPLETE
+
+Implemented four features inspired by the Polytoken comparison doc
+(`docs/polytoken_inspirations.md` sections 2.5, 2.7, 2.6 + omp persistent
+shell).
+
+### Autonomous hints (`mew.autonomous_hint`)
+
+Persona frontmatter gains `autonomous_hint: "..."` — guidance text
+injected into the Auto/Auto+ permission classifier prompt. Lets a
+persona say "I am read-only; be strict about shell commands" to steer
+the classifier.
+
+- `PersonaConfig.autonomous_hint: Option<String>` (`mew-personas`)
+- `Agent.autonomous_hint` set by `apply_persona`/`clear_persona`
+- `permission_decision()` gains `autonomous_hint: Option<&str>` param
+  (`mew-prompts/classifier.rs`), injected as "Persona guidance: ..."
+- Built-in planner persona has a read-only hint
+- 3 tests in `mew-prompts`, 2 in `mew-personas`
+
+### Facet transition rules (`mew.transitions`)
+
+Persona frontmatter gains `transitions: { allowed: [...], confirm: bool }`.
+The `switch_persona` tool checks the *current* persona's transitions
+before queuing a switch.
+
+- `TransitionRules { allowed: Option<Vec<String>>, confirm: bool }`
+- `SwitchPersona` tool gains `current_persona: Arc<RwLock<Option<String>>>`
+  shared with the agent
+- `Agent.current_persona_name` kept in sync by `apply_persona`/
+  `clear_persona`
+- Empty `allowed: []` blocks all switches (planner built-in)
+- `confirm: true` queues the switch with a "confirmation required" note
+- Built-in planner: `allowed: []` (cannot self-escape)
+- 5 new tests in `mew-tools/switch_persona`, 3 in `mew-personas`
+
+### Fallback models (`mew.fallback_models`)
+
+Persona frontmatter gains `fallback_models: ["provider/model", ...]`.
+When the primary provider returns a stream error, the turn loop tries
+each fallback in order.
+
+- `PersonaConfig.fallback_models: Option<Vec<String>>`
+- `Agent.fallback_models` + `Agent.provider_builder` (boxed callback)
+- Turn loop (`turn.rs`): on `provider.stream()` error, iterates fallbacks,
+  builds new provider via callback, retries the request
+- `set_provider_builder` wired in all 3 `main.rs` construction paths
+- 2 tests in `mew-agent` (retry succeeds, no fallbacks = fatal)
+
+### Persistent shell session
+
+New `ShellSession` struct (`mew-tools/src/tools/shell_session.rs`)
+keeps a long-running `bash` process alive. Commands are piped to stdin;
+stdout is read until a sentinel marker carrying the exit code. `cd`,
+`export`, and shell variables survive across calls.
+
+- `ShellSession::execute(command, timeout)` — writes command + sentinel
+  echo, reads stdout until sentinel, drains stderr
+- Timeout kills the shell; `ensure_started` re-spawns on next call
+- `SharedShellSession = Arc<Mutex<ShellSession>>` shared via
+  `ToolCtxShared.shell_session`
+- `Bash` tool: uses session when available, falls back to fresh process
+- Wired in all 3 `main.rs` agent construction paths via
+  `agent.set_shell_session()`
+- 8 tests (echo, exit code, persists cwd, persists env, stderr,
+  multi-line, timeout, recovery after timeout)
+
+### Files changed
+
+- `crates/mew-personas/src/lib.rs` — 3 new fields + `TransitionRules`
+  struct + frontmatter parsing + built-in planner update + 7 tests
+- `crates/mew-prompts/src/classifier.rs` — `autonomous_hint` param + test
+- `crates/mew-agent/src/agent.rs` — 4 new fields + setters + apply/clear
+- `crates/mew-agent/src/turn.rs` — fallback model retry logic
+- `crates/mew-agent/src/tests.rs` — `ErroringProvider` + 2 fallback tests
+- `crates/mew-tools/src/tools/switch_persona.rs` — transition rule
+  enforcement + 5 tests
+- `crates/mew-tools/src/tools/shell_session.rs` — new module, 8 tests
+- `crates/mew-tools/src/tools/bash.rs` — session-aware execution path
+- `crates/mew-tools/src/tools/mod.rs` — module registration
+- `crates/mew-tools/src/lib.rs` — `shell_session` on `ToolCtxShared`
+- `crates/mew-agent/src/tools.rs` — thread `shell_session` into `ToolCtx`
+- `crates/mew/src/main.rs` — wire all 3 construction paths
+
+**Verification:** `cargo fmt --check` clean, `cargo clippy --workspace
+-- -D warnings` clean, `cargo test --all` — all tests pass (95 in
+mew-agent, 10 switch_persona, 8 shell_session, 25 personas, 49 prompts,
+plus all existing tests).
+
+---
+
+## omp + polytoken inspirations: tools, edits, completions, templating
+
+### Shell completions (`mew completions`)
+
+`clap_complete` generates bash/zsh/fish/elvish/powershell completions.
+Auto-detects shell from `$SHELL`. Usage: `mew completions bash`.
+
+### Edit tool improvements (`edit_str_replace`)
+
+- Renamed `edit` to `edit_str_replace` for clarity (separate from hashline).
+- Fuzzy match hints: when `old_string` isn't found, finds the closest line
+  by LCS similarity and reports it with a percentage match. Short strings
+  (under 10 chars) skip fuzzy matching.
+
+### In-process grep (`grep`)
+
+Replaced shelling out to `rg`/`grep` with the `grep` crate (ripgrep's
+search engine as a library). Uses `grep-searcher` + `grep-regex` for
+memory-mapped I/O, binary detection, and SIMD-accelerated regex matching.
+Uses `ignore::WalkBuilder` for `.gitignore`-aware directory walking.
+Added `include` parameter (extension shorthand). Runs in `spawn_blocking`.
+
+### Hashline edit format (`edit_hashline`)
+
+New tool using line-numbered operations with file-hash staleness detection.
+Operations: `SWAP start.=end:`, `DEL start.=end`, `INS.PRE/POST/HEAD/TAIL`.
+File hash (4 hex chars) computed from normalized content; if file changed
+since last read, edit is rejected before writing. All operations validated
+before any write (atomic). 15 tests.
+
+### Templated AGENTS.md/CLAUDE.md
+
+Context files with `mew: true` or `polytoken: true` frontmatter are
+rendered through minijinja with the full template context (model, tools,
+skills, project_vars, etc.) before being inlined into the system prompt.
+5 tests in mew-context.
+
+### Tool tag groups in personas
+
+Persona tool lists accept `tag!ALL` (all tools), `tag!ALL_MCP` (all MCP
+tools), and `mcp__<server>` (all tools from a named server). Expanded
+at `apply_persona` time using the actual tool registry. Plain tool names
+pass through unchanged. Deduplicated.
+
 ## Polytoken inspirations: templating, skills, includes, web_fetch
 
 Implemented P0 and P1 items from `docs/polytoken_inspirations.md`.

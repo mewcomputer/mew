@@ -130,6 +130,9 @@ pub struct App {
     pub personas: Vec<(String, String)>,
     /// Active persona name, if any.
     pub active_persona: Option<String>,
+    /// Active persona's explicit accent color (hex string like "#ff8800").
+    /// `None` = use the deterministic color generated from `active_persona`.
+    pub active_persona_color: Option<String>,
     /// Current permission mode (Standard / Dangerous!). Mirrors the agent's
     /// runtime mode so the TUI can render the picker state, the status-line
     /// badge, and alert the user when it changes.
@@ -424,6 +427,9 @@ pub struct PersonaSummary {
     pub tools_deny: Option<Vec<String>>,
     /// Allowlist of skill names. `None` = all skills.
     pub skills: Option<Vec<String>>,
+    /// Explicit accent color as hex string (e.g. "#ff8800"). `None` = use
+    /// the deterministic color generated from the persona name.
+    pub color: Option<String>,
 }
 
 /// A pending `ask_user_question` prompt. Shown as a one-question-per-page
@@ -486,6 +492,7 @@ impl App {
             tools: Vec::new(),
             personas: Vec::new(),
             active_persona: None,
+            active_persona_color: None,
             permission_mode: Default::default(),
             mcp_status: Vec::new(),
             subagent_names: Vec::new(),

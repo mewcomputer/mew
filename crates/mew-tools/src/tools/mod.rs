@@ -1,7 +1,8 @@
 pub mod ask_user;
 pub mod bash;
 pub mod echo;
-pub mod edit;
+pub mod edit_hashline;
+pub mod edit_str_replace;
 pub mod exit_tool;
 pub mod flag_important;
 pub mod glob;
@@ -9,6 +10,7 @@ pub mod grep;
 pub mod jobs;
 pub mod progress_update;
 pub mod read;
+pub mod shell_session;
 pub mod skill;
 pub mod subagent;
 pub mod subagent_start;
