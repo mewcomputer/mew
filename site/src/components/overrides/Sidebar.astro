@@ -5,3 +5,44 @@ import LucodeSidebar from "lucode-starlight/components/overrides/Sidebar.astro";
 
 <StarlightSidebarTopics />
 <LucodeSidebar />
+
+<style is:global>
+  .starlight-sidebar-topics {
+    margin: 0 2rem;
+    padding: calc(var(--spacing) * 6) calc(var(--spacing) * 6) 0 calc(var(--spacing) * 2);
+  }
+
+  .starlight-sidebar-topics a {
+    font-size: 1rem;
+    font-weight: 500;
+    color: var(--muted-foreground);
+  }
+
+  .starlight-sidebar-topics a.starlight-sidebar-topics-current,
+  .starlight-sidebar-topics a:hover,
+  .starlight-sidebar-topics a:focus-visible {
+    color: var(--foreground);
+  }
+
+  .starlight-sidebar-topics a:hover .starlight-sidebar-topics-icon,
+  .starlight-sidebar-topics a:focus-visible .starlight-sidebar-topics-icon {
+    background-color: var(--foreground);
+    border-color: var(--foreground);
+    color: var(--background);
+  }
+
+  .starlight-sidebar-topics-icon {
+    border-color: var(--border);
+    color: var(--muted-foreground);
+  }
+
+  .starlight-sidebar-topics a.starlight-sidebar-topics-current .starlight-sidebar-topics-icon {
+    background-color: var(--foreground);
+    border-color: var(--foreground);
+    color: var(--background);
+  }
+
+  .starlight-sidebar-topics::after {
+    border-color: var(--border);
+  }
+</style>

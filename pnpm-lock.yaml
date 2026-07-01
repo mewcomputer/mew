@@ -174,6 +174,9 @@ importers:
       lucode-starlight:
         specifier: ^0.1.6
         version: 0.1.6(@astrojs/starlight@0.41.1(@astrojs/markdown-remark@7.2.0)(astro@7.0.3(@astrojs/markdown-remark@7.2.0)(@emnapi/core@1.11.1)(@emnapi/runtime@1.11.1)(@types/node@24.13.2)(jiti@2.7.0)(rollup@4.62.2)(yaml@2.9.0))(typescript@6.0.3))
+      marked:
+        specifier: ^18.0.5
+        version: 18.0.5
       motion:
         specifier: ^12.40.0
         version: 12.42.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)

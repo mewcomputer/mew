@@ -33,6 +33,7 @@ export default defineConfig({
       ],
       components: {
         Sidebar: "./src/components/overrides/Sidebar.astro",
+        PageFrame: "./src/components/overrides/PageFrame.astro",
       },
       plugins: [
         starlightDotMd({ includeFrontmatter: false }),

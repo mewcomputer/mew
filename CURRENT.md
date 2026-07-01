@@ -83,9 +83,23 @@ handover.
 - Added `docs/development/handover.md` with frontmatter, documenting the
   target design for handing a mew session from the TUI to the web UI.
 
+### Mobile drawer topic picker + desktop styling
+
+- Created `site/src/components/overrides/Drawer.astro` (based on lucode's drawer)
+  with the topic picker injected at the top of the mobile docs list.
+- Created `site/src/components/overrides/PageFrame.astro` to use our custom
+  drawer while keeping lucode's layout.
+- Updated `site/astro.config.mjs` to override `PageFrame` as well as `Sidebar`.
+- Added desktop styling in `site/src/components/overrides/Sidebar.astro` so the
+  topic picker aligns with lucode's sidebar margins and uses lucode's foreground
+  colors.
+- Added `marked` to `site/package.json` because the custom PageFrame renders the
+  lucode footer text.
+
 ### Verification
 
 - `pnpm run build` in `/site` succeeds (28 pages built).
+- Topic picker markup appears twice in output: desktop sidebar + mobile drawer.
 
 ---
 
