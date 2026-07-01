@@ -141,5 +141,5 @@ This means:
 - It consumes context window tokens, so keep it focused
 
 If your context file is large, consider moving detailed procedures into
-[skills](/docs/skills/) that the agent loads on demand instead of
+[skills](/docs/using-mew/skills/) that the agent loads on demand instead of
 embedding everything in the system prompt.

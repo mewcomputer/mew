@@ -34,7 +34,7 @@ Two shapes are supported:
   and `content_block_delta`. Thinking blocks become `Part::Reasoning`.
 
 The shape determines how mew parses the SSE stream and maps it to
-`ProviderEvent` variants. See [Adding a Provider](/docs/dev-providers/)
+`ProviderEvent` variants. See [Adding a Provider](/docs/development/dev-providers/)
 for implementation details.
 
 ## Adding a custom provider
@@ -56,7 +56,7 @@ export MEW_CRED_MY_API_KEY="sk-..."
 ```
 
 The `credential_ref` is resolved through env vars, keyring, or
-`credentials.json`. See [Configuration](/docs/configuration/#credentials)
+`credentials.json`. See [Configuration](/docs/getting-started/configuration/#credentials)
 for the resolution order.
 
 ## Router provider
@@ -102,7 +102,7 @@ variant defaults. The catalog is used to:
 - Set context windows for compaction thresholds
 
 You can override or extend the catalog with `[[models]]` entries in
-`config.toml`. See [Configuration](/docs/configuration/#custom-models)
+`config.toml`. See [Configuration](/docs/getting-started/configuration/#custom-models)
 for the format.
 
 ## Thinking variants

@@ -13,7 +13,7 @@ export MEW_CRED_OPENCODE_ZEN="sk-..."
 ```
 
 Or create a `~/.config/mew/config.toml`. See
-[Configuration](/docs/configuration/) for the full reference.
+[Configuration](/docs/getting-started/configuration/) for the full reference.
 
 ## 2. Start a chat
 
@@ -70,7 +70,7 @@ Inside the TUI, press `Ctrl+P` to open the command palette, then select
 ```
 
 The model picker shows available models from your configured providers
-and the built-in catalog. See [Providers](/docs/providers/) for the full
+and the built-in catalog. See [Providers](/docs/using-mew/providers/) for the full
 list.
 
 ## 5. Set thinking variant
@@ -83,7 +83,7 @@ For models that support configurable reasoning:
 
 Or use `Ctrl+P` and select "Thinking Variant". Press `Ctrl+P` repeatedly
 to cycle through available options. See
-[Providers](/docs/providers/#thinking-variants) for which models support
+[Providers](/docs/using-mew/providers/#thinking-variants) for which models support
 which variants.
 
 ## 6. Cancel a stream
@@ -102,8 +102,8 @@ Shows accumulated token counts and estimated cost for the session.
 
 ## Where to go next
 
-- [Slash Commands](/docs/slash-commands/): full command reference
-- [Keyboard Shortcuts](/docs/keyboard-shortcuts/): all TUI keybindings
-- [Tips & Tricks](/docs/tips-and-tricks/): power-user features and
+- [Slash Commands](/docs/using-mew/slash-commands/): full command reference
+- [Keyboard Shortcuts](/docs/getting-started/keyboard-shortcuts/): all TUI keybindings
+- [Tips & Tricks](/docs/using-mew/tips-and-tricks/): power-user features and
   workflows
-- [Permissions](/docs/permissions/): how tool approval works
+- [Permissions](/docs/using-mew/permissions/): how tool approval works

@@ -136,4 +136,4 @@ Identifiers). They sort chronologically by creation time, which is why
 
 When running the daemon (`mew daemon`), sessions are managed by the
 `SessionManager`. Multiple clients can attach to the same session. See
-[Daemon Protocol](/docs/dev-protocol/) for the wire-level details.
+[Daemon Protocol](/docs/development/dev-protocol/) for the wire-level details.

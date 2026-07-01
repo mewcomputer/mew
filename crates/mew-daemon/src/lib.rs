@@ -847,9 +847,7 @@ async fn idle_summary_task(
                     let agent_ref: &Agent = &agent_guard;
                     generate_session_summary(agent_ref).await
                 } {
-                    if let Ok(Some(mut meta)) =
-                        mew_session::Meta::read(&dir, &id_clone).await
-                    {
+                    if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &id_clone).await {
                         let _ = meta.set_summary(&dir, summary.clone()).await;
                     }
                     session_clone
@@ -904,7 +902,10 @@ async fn generate_session_summary(agent: &Agent) -> Option<String> {
             text: transcript.chars().take(2000).collect(),
             synthetic: false,
         })],
-        time: mew_message::Time { created: 0, completed: None },
+        time: mew_message::Time {
+            created: 0,
+            completed: None,
+        },
         assistant: None,
     };
     let mut reasoning_params = serde_json::Map::new();
@@ -913,9 +914,17 @@ async fn generate_session_summary(agent: &Agent) -> Option<String> {
         model: String::new(),
         messages: vec![user_msg],
         tools: vec![],
-        system: "You write concise 1-2 sentence summaries. No preamble, no quotes, no bullet points.".to_string(),
-        reasoning: Some(ReasoningConfig { params: reasoning_params }),
-        params: Some(ChatParams { temperature: Some(0.3), max_tokens: Some(60), ..Default::default() }),
+        system:
+            "You write concise 1-2 sentence summaries. No preamble, no quotes, no bullet points."
+                .to_string(),
+        reasoning: Some(ReasoningConfig {
+            params: reasoning_params,
+        }),
+        params: Some(ChatParams {
+            temperature: Some(0.3),
+            max_tokens: Some(60),
+            ..Default::default()
+        }),
         headers: Default::default(),
     };
     match agent.provider.stream(req).await {
@@ -928,14 +937,20 @@ async fn generate_session_summary(agent: &Agent) -> Option<String> {
                         current_part_is_text = matches!(part, mew_message::Part::Text(_));
                     }
                     ProviderEvent::PartDelta { delta, .. } => {
-                        if current_part_is_text { summary.push_str(&delta); }
+                        if current_part_is_text {
+                            summary.push_str(&delta);
+                        }
                     }
                     ProviderEvent::MessageEnd { .. } => break,
                     _ => {}
                 }
             }
             let trimmed = summary.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         }
         Err(_) => None,
     }

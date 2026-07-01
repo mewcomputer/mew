@@ -117,9 +117,7 @@ impl LineMapping {
         self.map
             .iter()
             .enumerate()
-            .filter(|(i, opt)| {
-                opt.is_some_and(|curr| curr != i + 1)
-            })
+            .filter(|(i, opt)| opt.is_some_and(|curr| curr != i + 1))
             .count()
     }
 }
@@ -232,7 +230,11 @@ fn remap_edits(edits: &[Edit], mapping: &LineMapping) -> Option<RemappedEdits> {
                     }
                 }
             }
-            Edit::Block { anchor, payloads, mode } => {
+            Edit::Block {
+                anchor,
+                payloads,
+                mode,
+            } => {
                 match mapping.lookup(anchor.line) {
                     LineTarget::Found(curr) => {
                         remapped += 1;
@@ -273,12 +275,8 @@ fn remap_cursor(
                     *remapped += 1;
                     let new_anchor = crate::types::Anchor { line: curr };
                     match cursor {
-                        Cursor::BeforeAnchor { .. } => Cursor::BeforeAnchor {
-                            anchor: new_anchor,
-                        },
-                        Cursor::AfterAnchor { .. } => Cursor::AfterAnchor {
-                            anchor: new_anchor,
-                        },
+                        Cursor::BeforeAnchor { .. } => Cursor::BeforeAnchor { anchor: new_anchor },
+                        Cursor::AfterAnchor { .. } => Cursor::AfterAnchor { anchor: new_anchor },
                         _ => unreachable!(),
                     }
                 }
@@ -289,12 +287,12 @@ fn remap_cursor(
                         *remapped += 1;
                         let new_anchor = crate::types::Anchor { line: fallback };
                         match cursor {
-                            Cursor::BeforeAnchor { .. } => Cursor::BeforeAnchor {
-                                anchor: new_anchor,
-                            },
-                            Cursor::AfterAnchor { .. } => Cursor::AfterAnchor {
-                                anchor: new_anchor,
-                            },
+                            Cursor::BeforeAnchor { .. } => {
+                                Cursor::BeforeAnchor { anchor: new_anchor }
+                            }
+                            Cursor::AfterAnchor { .. } => {
+                                Cursor::AfterAnchor { anchor: new_anchor }
+                            }
                             _ => unreachable!(),
                         }
                     } else {
@@ -490,7 +488,10 @@ mod tests {
             insert_after(4, "AFTER_FOUR"),
         ];
         let r = try_recover(current, previous, &edits).unwrap();
-        assert_eq!(r.text, "line0\nline1\nTWO\nline3\nline4\nAFTER_FOUR\nline5\n");
+        assert_eq!(
+            r.text,
+            "line0\nline1\nTWO\nline3\nline4\nAFTER_FOUR\nline5\n"
+        );
     }
 
     // ── 3-way merge: edge cases ───────────────────────────────────────────

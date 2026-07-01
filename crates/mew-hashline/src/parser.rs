@@ -317,8 +317,8 @@ fn strip_line_number_prefix(line: &str) -> Option<&str> {
         return None;
     }
     // Consume remaining digits.
-    let rest_after_digits: &str = line[first.len_utf8()..]
-        .trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest_after_digits: &str =
+        line[first.len_utf8()..].trim_start_matches(|c: char| c.is_ascii_digit());
     // Optional space before the colon.
     let rest_after_space = rest_after_digits.trim_start();
     if !rest_after_space.starts_with(':') {

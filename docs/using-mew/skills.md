@@ -21,7 +21,7 @@ A few examples:
 - A testing convention (where tests go, naming, what to assert)
 
 If something is a single fact or rule, put it in your
-[context file](/docs/context-files/). If it's a procedure with steps,
+[context file](/docs/getting-started/context-files/). If it's a procedure with steps,
 make it a skill.
 
 ## How skills work
@@ -123,7 +123,7 @@ Date: {{ current_date }}
 Templated skills use the same variables and functions as persona
 templates. When no persona is active or the active persona doesn't use
 templating, templated skills fall back to their raw body. See
-[Personas](/docs/personas/#templates) for the full variable reference.
+[Personas](/docs/using-mew/personas/#templates) for the full variable reference.
 
 ### Writing effective skills
 
@@ -150,4 +150,4 @@ the frontmatter:
 - `[skill1, skill2]`: only listed skills available
 - `[]`: no skills available
 
-See [Personas](/docs/personas/) for the full frontmatter reference.
+See [Personas](/docs/using-mew/personas/) for the full frontmatter reference.

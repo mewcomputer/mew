@@ -11,7 +11,7 @@ API calls to your chosen provider.
 
 - **Rust 1.75+** with the `2021` edition (for building from source)
 - A terminal that supports 256 colors and UTF-8
-- An API key for at least one provider (see [Providers](/docs/providers/))
+- An API key for at least one provider (see [Providers](/docs/using-mew/providers/))
 
 ## Install with cargo
 
@@ -87,6 +87,6 @@ interface.
 
 ## Next steps
 
-- [Quick Start](/docs/quick-start/): send your first prompt
-- [Configuration](/docs/configuration/): set up providers and credentials
-- [Providers](/docs/providers/): available providers and how to configure them
+- [Quick Start](/docs/getting-started/quick-start/): send your first prompt
+- [Configuration](/docs/getting-started/configuration/): set up providers and credentials
+- [Providers](/docs/using-mew/providers/): available providers and how to configure them

@@ -10,7 +10,7 @@ tool to call based on the tool's description and the current task.
 ## How tool calls work
 
 1. The model emits a tool call with a name and input arguments
-2. mew checks permissions (see [Permissions](/docs/permissions/))
+2. mew checks permissions (see [Permissions](/docs/using-mew/permissions/))
 3. If approved, the tool runs and produces output
 4. The output goes back to the model as context for the next turn
 
@@ -32,7 +32,7 @@ syntax-colored `+`/`-` highlighting.
 | `glob` | ReadOnly | Find files matching a glob pattern. Sorted by modification time. Honors `.gitignore` by default. |
 | `grep` | ReadOnly | Search file contents for a regex pattern. Prefers ripgrep if available. Supports include filters and context lines. |
 
-See [Hashline Edits](/docs/hashline/) for the patch format and examples.
+See [Hashline Edits](/docs/using-mew/hashline/) for the patch format and examples.
 
 ### Shell
 
@@ -62,7 +62,7 @@ See [Hashline Edits](/docs/hashline/) for the patch format and examples.
 | `subagent_start` | ReadOnly | Spawn a child agent with a fresh conversation context, tool allowlist, and system prompt. Returns a job ID. |
 | `subagent_wait` | ReadOnly | Wait for a background subagent to complete and get its result. |
 
-See [Subagents](/docs/subagents/) for how subagents work and how to
+See [Subagents](/docs/using-mew/subagents/) for how subagents work and how to
 define custom ones.
 
 ### Todos
@@ -95,9 +95,9 @@ These tools only register when their prerequisites are met:
 
 | Tool | Condition | Description |
 |------|-----------|-------------|
-| `skill` | At least one skill discovered | Load a skill's full instructions into context. See [Skills](/docs/skills/). |
-| `switch_persona` | At least one persona defined | Queue a persona switch for the end of the current turn. See [Personas](/docs/personas/). |
-| `mcp__*` | MCP servers configured | Tools from connected MCP servers. See [MCP Servers](/docs/mcp-servers/). |
+| `skill` | At least one skill discovered | Load a skill's full instructions into context. See [Skills](/docs/using-mew/skills/). |
+| `switch_persona` | At least one persona defined | Queue a persona switch for the end of the current turn. See [Personas](/docs/using-mew/personas/). |
+| `mcp__*` | MCP servers configured | Tools from connected MCP servers. See [MCP Servers](/docs/using-mew/mcp-servers/). |
 
 ## Secret redaction
 
@@ -108,10 +108,10 @@ through `SecretSet::redact()` before returning. This catches:
 - File-based secrets (contents of files listed in `secrets.files`)
 - Word-based secrets (specific values listed in `secrets.words`)
 
-See [Permissions](/docs/permissions/) for how to configure secret
+See [Permissions](/docs/using-mew/permissions/) for how to configure secret
 redaction.
 
 ## Adding a custom tool
 
-See [Adding a Tool](/docs/dev-tools/) for the developer guide on
+See [Adding a Tool](/docs/development/dev-tools/) for the developer guide on
 implementing and registering new tools.

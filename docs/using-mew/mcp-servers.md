@@ -81,7 +81,7 @@ it connected successfully, and how many tools it exposes.
 ## Permissions
 
 All MCP tools are treated as `Mutating` sensitivity, meaning they always
-require a permission prompt (subject to your [permission mode](/docs/permissions/)
+require a permission prompt (subject to your [permission mode](/docs/using-mew/permissions/)
 and rules). This is conservative: mew can't know what an MCP tool does,
 so it asks before running it.
 

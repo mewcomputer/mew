@@ -96,7 +96,7 @@ Be direct and specific. Reference file paths and line numbers.
 When `template: true` is set, the subagent body is rendered through
 minijinja before being used as the system prompt. The context includes
 `subagent_name`, `model_id`, `provider_id`, `session_id`, `cwd`,
-`current_date`, and `tools`. See [Personas](/docs/personas/#templates)
+`current_date`, and `tools`. See [Personas](/docs/using-mew/personas/#templates)
 for the full variable reference.
 
 ```markdown
@@ -179,4 +179,4 @@ sessions/<parent-id>/subagents/<child-id>/session.jsonl
 
 This means subagent transcripts are persisted and can be resumed. The
 parent session's `meta.json` records child session IDs. See
-[Sessions](/docs/sessions/) for the session storage format.
+[Sessions](/docs/getting-started/sessions/) for the session storage format.

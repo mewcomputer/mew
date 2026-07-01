@@ -1,3 +1,94 @@
+# Progress — 2026-07-01
+
+## Hashline advanced recovery — COMPLETE
+
+Implemented the four "next steps" from the hashline integration: bare-row
+auto-prefix stripping, after-insert landing correction, replacement-boundary
+repair, and true 3-way merge recovery.
+
+### Bare-row auto-prefix stripping (`parser.rs`)
+
+When the model pastes body rows that still carry the `N:` line-number prefix
+from `read` output (e.g. `12:fn main() {}`), the parser now auto-strips the
+prefix and treats the remainder as literal payload. Conservative: only strips
+when the line starts with digits followed by a colon and has non-empty content
+afterward. A warning is emitted so the model knows.
+
+- `strip_line_number_prefix()` in `parser.rs`
+- 5 new tests in parser module
+
+### True 3-way merge recovery (`recovery.rs`)
+
+Replaced the old simple recovery (exact-match + same-line-count anchor
+replay) with a proper 3-way merge:
+
+1. If `current == previous`, apply edits directly (fast path).
+2. Otherwise, compute a line-level diff between `previous` (snapshot) and
+   `current` (live file) using the `similar` crate's Myers algorithm.
+3. Build a `LineMapping` that maps each `previous` line number to its
+   `current` position (or marks it `Deleted`). Only `Equal` diff ops produce
+   mappings — `Replace` ops (changed line content) correctly map to
+   `Deleted` so we don't silently remap onto wrong content.
+4. Remap every edit anchor from `previous` to `current` coordinates. For
+   inserts whose anchor was deleted, find the nearest surviving line
+   (`find_nearest_surviving`) so the edit still lands nearby. For deletes
+   whose target is already gone, skip the delete. Bof/Eof inserts pass
+   through unchanged.
+5. Apply the remapped edits onto `current`.
+
+This subsumes both "after-insert landing correction" and "replacement-
+boundary repair" — the line-mapping handles arbitrary drift (insertions,
+deletions, modifications anywhere), not just same-length files.
+
+- `build_line_mapping()` — `similar`-based line diff → `LineMapping`
+- `remap_edits()` / `remap_cursor()` — anchor remapping with fallback
+- `find_nearest_surviving()` — nearest-line fallback for deleted anchors
+- 18 tests (original 3 + 15 new covering drift, deletion, multi-edit, edge
+  cases, and line-mapping unit tests)
+
+### Verification
+
+- `cargo fmt --check` clean
+- `cargo clippy -p mew-hashline -- -D warnings` clean
+- `cargo test -p mew-hashline` — 55 tests pass
+- `cargo clippy -p mew-tools -- -D warnings` clean
+- `cargo test -p mew-tools --lib` — 83 tests pass
+
+## Docs reorganization + session handover docs — COMPLETE
+
+Reorganized the docs so the site sources them from `/docs` via symlink, split
+"Development" into its own Starlight sidebar topic, and documented session
+handover.
+
+### What was done
+
+- Moved all site docs from `site/src/content/docs/docs/` to `/docs/` with
+  subfolders:
+  - `docs/getting-started/` — installation, quick-start, sessions,
+    context-files, configuration, keyboard-shortcuts
+  - `docs/using-mew/` — slash-commands, tips-and-tricks, providers,
+    permissions, tools, hashline, personas, skills, subagents, plugins,
+    mcp-servers, web-ui
+  - `docs/development/` — dev-architecture, dev-hashline, dev-providers,
+    dev-tools, dev-protocol, dev-testing, dev-web, handover
+- Moved internal inspiration docs to `notes/` (out of the site content
+  collection).
+- Replaced `site/src/content/docs/docs/` with a symlink to `../../../../docs`.
+- Updated all internal `/docs/...` links to the new nested paths.
+- Added `starlight-sidebar-topics` plugin and configured two topics:
+  - "Docs" (getting-started + using-mew)
+  - "Development" (development folder)
+- Extended the docs content schema with `topicSchema`.
+- Added `site/.astro/` to `.gitignore` and untracked generated files.
+- Added `docs/development/handover.md` with frontmatter, documenting the
+  target design for handing a mew session from the TUI to the web UI.
+
+### Verification
+
+- `pnpm run build` in `/site` succeeds (28 pages built).
+
+---
+
 # Progress — 2026-06-30
 
 ## oh-my-pi/hashline integration — COMPLETE

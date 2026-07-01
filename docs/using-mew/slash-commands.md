@@ -16,7 +16,7 @@ Type any of these in the input box (they autocomplete as you type).
 | `/sessions` | List previous sessions (up to 20) |
 | `/resume <id>` | Resume a previous session by ID |
 
-See [Sessions](/docs/sessions/) for details on persistence, resume, and rewind.
+See [Sessions](/docs/getting-started/sessions/) for details on persistence, resume, and rewind.
 
 ## Model & reasoning
 
@@ -42,7 +42,7 @@ See [Sessions](/docs/sessions/) for details on persistence, resume, and rewind.
 | `/permissions` | Open the permission mode picker |
 | `/permissions <mode>` | Switch directly: `standard`, `permissive`, `auto`, `auto_plus`, `dangerous` |
 
-See [Permissions](/docs/permissions/) for mode details, rules, and sandboxing.
+See [Permissions](/docs/using-mew/permissions/) for mode details, rules, and sandboxing.
 
 ## Other
 

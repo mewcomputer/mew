@@ -45,7 +45,7 @@ the tool name, its input, and three choices:
 | `d` / `Esc` | Deny | Don't run. The agent sees the denial and adapts. |
 
 `Allow session` grants survive `/clear`. They're tied to the session
-(the JSONL log), not the visible context. See [Sessions](/docs/sessions/)
+(the JSONL log), not the visible context. See [Sessions](/docs/getting-started/sessions/)
 for the distinction.
 
 ## Tool sensitivity

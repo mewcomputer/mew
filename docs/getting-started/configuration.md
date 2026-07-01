@@ -61,14 +61,14 @@ roots = ["~/code"]
 | `plan_path` | string | `"PLAN.md"` | Where the planner persona writes and builder reads. Relative or absolute |
 | `providers` | table | (built-in) | Provider definitions keyed by provider ID |
 | `models` | array | `[]` | Custom model entries that override or extend the catalog |
-| `permissions` | table | (empty) | Permission rules and classifier config. See [Permissions](/docs/permissions/) |
+| `permissions` | table | (empty) | Permission rules and classifier config. See [Permissions](/docs/using-mew/permissions/) |
 | `secrets` | table | (empty) | Secret files and words for redaction |
 | `workspace` | table | (empty) | Workspace roots for sandboxing |
 
 :::note
 Personas and skills accept `polytoken:` as an alias for `mew:` in their
 frontmatter. This is for compatibility with personas authored for
-Polytoken. See [Personas](/docs/personas/) for details.
+Polytoken. See [Personas](/docs/using-mew/personas/) for details.
 :::
 
 ### Provider configuration
@@ -103,7 +103,7 @@ big = "z-ai/glm-4.5-air"
 credential_ref = "deepseek"
 ```
 
-See [Providers](/docs/providers/) for the full router behavior and
+See [Providers](/docs/using-mew/providers/) for the full router behavior and
 built-in provider list.
 
 ### Custom models
@@ -144,7 +144,7 @@ words = ["my-api-key-value", "sk-1234567890"]
 ```
 
 Pattern-based redaction (API keys, tokens) is always on. File-based and
-word-based redaction add to this. See [Permissions](/docs/permissions/)
+word-based redaction add to this. See [Permissions](/docs/using-mew/permissions/)
 for how the secret-file guard interacts with permission rules.
 
 ### Workspace
@@ -163,7 +163,7 @@ directory when empty. Feeds two enforcement layers:
    escalate from auto-allow to a prompt.
 
 Empty roots disable the escape tier. See
-[Permissions](/docs/permissions/) for the full sandboxing details.
+[Permissions](/docs/using-mew/permissions/) for the full sandboxing details.
 
 ## Credentials
 
@@ -216,5 +216,5 @@ checks these locations in order:
 3. `.mew/mcp.json`
 4. `.mew/.mcp.json`
 
-See [MCP Servers](/docs/mcp-servers/) for the format and transport
+See [MCP Servers](/docs/using-mew/mcp-servers/) for the format and transport
 options.

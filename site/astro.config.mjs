@@ -3,6 +3,7 @@ import react from "@astrojs/react";
 import tailwindcss from "@tailwindcss/vite";
 import starlight from "@astrojs/starlight";
 import starlightDotMd from "starlight-dot-md";
+import starlightSidebarTopics from "starlight-sidebar-topics";
 import lucode from "lucode-starlight";
 
 // Starlight docs live at /docs. The landing page stays at /.
@@ -16,7 +17,6 @@ export default defineConfig({
         src: "./src/assets/mew-logo.svg",
         replacesTitle: false,
       },
-      plugins: [starlightDotMd({ includeFrontmatter: false }), lucode()],
       customCss: [
         // Relative path to your @font-face CSS file.
         "./src/styles/banga.css",
@@ -31,47 +31,40 @@ export default defineConfig({
           icon: "github",
         },
       ],
-      sidebar: [
-        {
-          label: "Getting Started",
-          items: [
-            { label: "Installation", slug: "docs/installation" },
-            { label: "Quick Start", slug: "docs/quick-start" },
-            { label: "Configuration", slug: "docs/configuration" },
-            { label: "Context Files", slug: "docs/context-files" },
-            { label: "Sessions", slug: "docs/sessions" },
+      plugins: [
+        starlightDotMd({ includeFrontmatter: false }),
+        lucode(),
+        starlightSidebarTopics(
+          [
+            {
+              label: "Docs",
+              link: "/docs/getting-started/installation/",
+              icon: "open-book",
+              items: [
+                {
+                  label: "Getting Started",
+                  items: [{ autogenerate: { directory: "docs/getting-started" } }],
+                },
+                {
+                  label: "Using mew",
+                  items: [{ autogenerate: { directory: "docs/using-mew" } }],
+                },
+              ],
+            },
+            {
+              id: "development",
+              label: "Development",
+              link: "/docs/development/dev-architecture/",
+              icon: "laptop",
+              items: [
+                {
+                  label: "Development",
+                  items: [{ autogenerate: { directory: "docs/development" } }],
+                },
+              ],
+            },
           ],
-        },
-        {
-          label: "Using mew",
-          items: [
-            { label: "Slash Commands", slug: "docs/slash-commands" },
-            { label: "Keyboard Shortcuts", slug: "docs/keyboard-shortcuts" },
-            { label: "Tips & Tricks", slug: "docs/tips-and-tricks" },
-            { label: "Providers", slug: "docs/providers" },
-            { label: "Permissions", slug: "docs/permissions" },
-            { label: "Tools", slug: "docs/tools" },
-            { label: "Hashline Edits", slug: "docs/hashline" },
-            { label: "Personas", slug: "docs/personas" },
-            { label: "Skills", slug: "docs/skills" },
-            { label: "Subagents", slug: "docs/subagents" },
-            { label: "Plugins", slug: "docs/plugins" },
-            { label: "MCP Servers", slug: "docs/mcp-servers" },
-            { label: "Web UI", slug: "docs/web-ui" },
-          ],
-        },
-        {
-          label: "Development",
-          items: [
-            { label: "Architecture", slug: "docs/dev-architecture" },
-            { label: "Hashline Internals", slug: "docs/dev-hashline" },
-            { label: "Adding a Provider", slug: "docs/dev-providers" },
-            { label: "Adding a Tool", slug: "docs/dev-tools" },
-            { label: "Daemon Protocol", slug: "docs/dev-protocol" },
-            { label: "Testing", slug: "docs/dev-testing" },
-            { label: "Web UI Development", slug: "docs/dev-web" },
-          ],
-        },
+        ),
       ],
     }),
     react(),

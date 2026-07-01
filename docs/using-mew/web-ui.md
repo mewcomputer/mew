@@ -103,5 +103,5 @@ Multiple browser tabs can attach to the same session. Permission and
 ask-user prompts go to all connected clients. Any client can respond.
 `RequestResolved` dismisses the prompt across all clients.
 
-See [Daemon Protocol](/docs/dev-protocol/) for the wire-level details,
-and [Web UI Development](/docs/dev-web/) for the developer guide.
+See [Daemon Protocol](/docs/development/dev-protocol/) for the wire-level details,
+and [Web UI Development](/docs/development/dev-web/) for the developer guide.

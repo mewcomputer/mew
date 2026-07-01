@@ -31,7 +31,7 @@ description: Power-user features and workflows for mew.
 ## Session management
 
 - **History**: `/sessions` lists previous sessions with timestamps.
-  `/resume <id>` resumes one. See [Sessions](/docs/sessions/).
+  `/resume <id>` resumes one. See [Sessions](/docs/getting-started/sessions/).
 - **Rewind**: `/rewind <n>` truncates to the first N messages. Use
   `/rewind` with no args to see a list with snippets.
 - **Clear**: `/clear` wipes the conversation context (persists to disk).
@@ -95,7 +95,7 @@ Use the researcher subagent to find all places we construct SQL queries
 and report back which ones use parameterized queries.
 ```
 
-See [Subagents](/docs/subagents/) for the built-in options.
+See [Subagents](/docs/using-mew/subagents/) for the built-in options.
 
 ### Break work into phases
 
@@ -105,7 +105,7 @@ Use the planner/builder workflow for complex tasks:
 2. Review the plan in `PLAN.md`
 3. `/persona builder` to execute it
 
-See [Personas](/docs/personas/) for details.
+See [Personas](/docs/using-mew/personas/) for details.
 
 ## Permission workflow
 
@@ -123,4 +123,4 @@ Switch back to `standard` when you're done:
 /permissions standard
 ```
 
-See [Permissions](/docs/permissions/) for the full mode reference.
+See [Permissions](/docs/using-mew/permissions/) for the full mode reference.
