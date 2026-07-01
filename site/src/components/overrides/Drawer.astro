@@ -211,6 +211,21 @@ function getTranslation(
         padding: 0 0 calc(var(--spacing) * 2) 0;
     }
 
+    .links-docs > :global(.starlight-sidebar-topics) a {
+        font-size: 0.875rem;
+        font-weight: 500;
+        padding: 0.2rem 0;
+        gap: 0.5rem;
+    }
+
+    .links-docs > :global(.starlight-sidebar-topics) .starlight-sidebar-topics-icon {
+        padding: 0.2rem;
+    }
+
+    .links-docs > :global(.starlight-sidebar-topics)::after {
+        margin-top: 0.75rem;
+    }
+
     .container-sidebar-entry {
         padding-top: calc(var(--spacing) * 6);
         display: flex;
