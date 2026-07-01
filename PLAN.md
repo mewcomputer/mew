@@ -95,9 +95,7 @@ Let the model present rich content (HTML, SVG, Mermaid, formatted markdown) via 
 
 ### C1: Subagent + job resume
 
-When the daemon restarts (or a session resumes from disk), background subagent tasks and shell jobs are lost. They should either:
-- **Resume**: re-spawn the subagent/job with the same task ID (if idempotent)
-- **Report as failed**: mark the task as failed in history so the model knows
+When the daemon restarts (or a session resumes from disk), background subagent tasks and shell jobs are lost. They should **Report as failed**: mark the task as failed in history so the model knows
 
 **Done when:** a resumed session shows completed/failed background tasks rather than silently losing them.
 

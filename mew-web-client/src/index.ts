@@ -51,7 +51,8 @@ export type ClientMessage =
   | { type: "slash_command"; command: string }
   | { type: "list_models" }
   | { type: "switch_model"; provider: string; model: string }
-  | { type: "set_thinking_variant"; variant: string };
+  | { type: "set_thinking_variant"; variant: string }
+  | { type: "set_permission_mode"; mode: string };
 
 // Provider events — see mew_message::ProviderEventWire.
 export type ProviderEventWire =
@@ -238,7 +239,7 @@ export interface Tokens {
 }
 
 export type ServerMessage =
-  | { type: "session_ready"; session_id: string; model?: string; provider?: string }
+  | { type: "session_ready"; session_id: string; model?: string; provider?: string; permission_mode?: string }
   | { type: "error"; message: string }
   | { type: "provider"; event: ProviderEventWire }
   | { type: "user_message"; text: string }
@@ -297,6 +298,7 @@ export type ServerMessage =
   | { type: "model_list"; models: ModelInfo[] }
   | { type: "model_switched"; provider: string; model: string }
   | { type: "thinking_variant_changed"; variant?: string }
+  | { type: "permission_mode_changed"; mode: string }
   | { type: "session_title_changed"; session_id: string; title: string }
   | { type: "session_summary_changed"; session_id: string; summary: string };
 
@@ -405,6 +407,7 @@ export interface MewClientEvents {
   "model-list": (data: { models: ModelInfo[] }) => void;
   "model-switched": (data: { provider: string; model: string }) => void;
   "thinking-variant-changed": (data: { variant: string | null }) => void;
+  "permission-mode-changed": (data: { mode: string }) => void;
   "session-title-changed": (data: { session_id: string; title: string }) => void;
   "session-summary-changed": (data: { session_id: string; summary: string }) => void;
 
@@ -660,6 +663,20 @@ export class MewClient {
     });
   }
 
+  /** Set the permission mode for the active session. Mode is one of:
+   *  "standard", "permissive", "auto", "auto_plus", "dangerous".
+   *  Resolves when the daemon confirms via `permission-mode-changed`. */
+  setPermissionMode(mode: string): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
+      const onChanged = (data: { mode: string }) => {
+        this.off("permission-mode-changed", onChanged);
+        resolve(data.mode);
+      };
+      this.on("permission-mode-changed", onChanged);
+      this.send({ type: "set_permission_mode", mode });
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Event registration
   // -------------------------------------------------------------------------
@@ -816,6 +833,9 @@ export class MewClient {
         this.emit("thinking-variant-changed", {
           variant: msg.variant ?? null,
         });
+        break;
+      case "permission_mode_changed":
+        this.emit("permission-mode-changed", { mode: msg.mode });
         break;
       case "session_title_changed":
         this.emit("session-title-changed", {

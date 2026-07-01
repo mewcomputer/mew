@@ -455,6 +455,7 @@ async fn translate_server_message(
         | ServerMessage::RequestResolved { .. }
         | ServerMessage::SessionCleared
         | ServerMessage::ThinkingVariantChanged { .. }
+        | ServerMessage::PermissionModeChanged { .. }
         | ServerMessage::SessionTitleChanged { .. }
         | ServerMessage::SessionSummaryChanged { .. } => {
             // These are handled by the DaemonClient directly or are web-UI

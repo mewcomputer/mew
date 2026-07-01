@@ -337,16 +337,20 @@ where
                         let (cid, _) = session.attach_client(client_tx.clone()).await;
                         client_id = Some(cid);
                         attached_session = Some(session.clone());
-                        let (model, provider) = {
+                        let session_id = session.id.clone();
+                        let (model, provider, permission_mode) = {
+                            let agent = session.agent.lock().await;
                             (
                                 session.model.lock().await.clone(),
                                 session.provider.lock().await.clone(),
+                                Some(agent.permission_mode().id().to_string()),
                             )
                         };
                         reply(ServerMessage::SessionReady {
-                            session_id: session.id.clone(),
+                            session_id,
                             model,
                             provider,
+                            permission_mode,
                         });
                     }
                     Err(e) => {
@@ -363,16 +367,19 @@ where
                         client_id = Some(cid);
                         attached_session = Some(session.clone());
 
-                        let (model, provider) = {
+                        let (model, provider, permission_mode) = {
+                            let agent = session.agent.lock().await;
                             (
                                 session.model.lock().await.clone(),
                                 session.provider.lock().await.clone(),
+                                Some(agent.permission_mode().id().to_string()),
                             )
                         };
                         reply(ServerMessage::SessionReady {
                             session_id: session_id.clone(),
                             model,
                             provider,
+                            permission_mode,
                         });
 
                         // Always send the current message history on attach.
@@ -641,10 +648,42 @@ where
                     }
                 });
             }
+            ClientMessage::SetPermissionMode { mode } => {
+                let Some(session) = attached_session.clone() else {
+                    reply(ServerMessage::Error {
+                        message: "no session".into(),
+                    });
+                    continue;
+                };
+                let session = session.clone();
+                tokio::spawn(async move {
+                    let _guard = session.turn_lock.lock().await;
+                    let parsed = mew_hooks::PermissionMode::from_id(&mode);
+                    match parsed {
+                        Some(m) => {
+                            {
+                                let agent = session.agent.lock().await;
+                                agent.set_permission_mode(m);
+                            }
+                            // Broadcast to all attached clients.
+                            session
+                                .broadcast(ServerMessage::PermissionModeChanged {
+                                    mode: m.id().to_string(),
+                                })
+                                .await;
+                        }
+                        None => {
+                            session
+                                .broadcast(ServerMessage::Error {
+                                    message: format!("unknown permission mode: {mode}"),
+                                })
+                                .await;
+                        }
+                    }
+                });
+            }
         }
     }
-
-    // Cleanup
     if let (Some(session), Some(cid)) = (&attached_session, client_id) {
         let was_last = session.detach_client(cid).await;
         if was_last {

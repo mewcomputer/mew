@@ -50,6 +50,9 @@ export type ClientMessage = {
 } | {
     type: "set_thinking_variant";
     variant: string;
+} | {
+    type: "set_permission_mode";
+    mode: string;
 };
 export type ProviderEventWire = {
     type: "part_start";
@@ -245,6 +248,7 @@ export type ServerMessage = {
     session_id: string;
     model?: string;
     provider?: string;
+    permission_mode?: string;
 } | {
     type: "error";
     message: string;
@@ -343,6 +347,9 @@ export type ServerMessage = {
 } | {
     type: "thinking_variant_changed";
     variant?: string;
+} | {
+    type: "permission_mode_changed";
+    mode: string;
 } | {
     type: "session_title_changed";
     session_id: string;
@@ -459,6 +466,9 @@ export interface MewClientEvents {
     "thinking-variant-changed": (data: {
         variant: string | null;
     }) => void;
+    "permission-mode-changed": (data: {
+        mode: string;
+    }) => void;
     "session-title-changed": (data: {
         session_id: string;
         title: string;
@@ -545,6 +555,10 @@ export declare class MewClient {
      *  `thinking-variant-changed`. Returns the resolved variant name, or
      *  null if thinking was disabled. */
     setThinkingVariant(variant: string): Promise<string | null>;
+    /** Set the permission mode for the active session. Mode is one of:
+     *  "standard", "permissive", "auto", "auto_plus", "dangerous".
+     *  Resolves when the daemon confirms via `permission-mode-changed`. */
+    setPermissionMode(mode: string): Promise<string | null>;
     on<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     off<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     private emit;

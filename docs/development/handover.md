@@ -46,18 +46,20 @@ input when another client has focus.
 Suggested `ServerMessage` variants:
 
 ```rust
-ClientAttached { client_id: u64, client_kind: ClientKind },
+ClientAttached { client_id: u64, client_kind: ClientKind, client_features: Vec<ClientFeature> },
 ClientDetached { client_id: u64 },
 ```
 
 `ClientKind` is an enum such as `Tui`, `Web`, `Cli`, or `Unknown`. Clients
 report their kind during the handshake or in `NewSession` / `AttachSession`.
 
+`ClientFeature` is a feature that a UI supports. For example, `ClientFeature::Handover` indicates that the client can yield control and that the daemon should keep the session warm for a grace period when it detaches. or, `ClientFeature::ObserverMode` indicates that the client can display a session in read-only mode. This is not a complete list; the daemon should be able to add new features in the future.
+
 ### 2. Handover intent
 
 A frontend can announce that it is yielding control. This is advisory; the
 daemon does not enforce it. Other clients can use it to update their UI, for
-example by switching from active input to observer mode.
+example by switching from active input to some sort of observer mode.
 
 ```rust
 // Client → Server

@@ -670,16 +670,19 @@ mod tests {
             session_id: "01H".into(),
             model: Some("deepseek-v4-flash".into()),
             provider: Some("deepseek".into()),
+            permission_mode: None,
         };
         match round_trip(&m) {
             ServerMessage::SessionReady {
                 session_id,
                 model,
                 provider,
+                permission_mode,
             } => {
                 assert_eq!(session_id, "01H");
                 assert_eq!(model.as_deref(), Some("deepseek-v4-flash"));
                 assert_eq!(provider.as_deref(), Some("deepseek"));
+                assert!(permission_mode.is_none());
             }
             _ => panic!(),
         }

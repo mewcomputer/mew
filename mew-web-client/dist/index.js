@@ -243,6 +243,19 @@ export class MewClient {
             this.send({ type: "set_thinking_variant", variant });
         });
     }
+    /** Set the permission mode for the active session. Mode is one of:
+     *  "standard", "permissive", "auto", "auto_plus", "dangerous".
+     *  Resolves when the daemon confirms via `permission-mode-changed`. */
+    setPermissionMode(mode) {
+        return new Promise((resolve) => {
+            const onChanged = (data) => {
+                this.off("permission-mode-changed", onChanged);
+                resolve(data.mode);
+            };
+            this.on("permission-mode-changed", onChanged);
+            this.send({ type: "set_permission_mode", mode });
+        });
+    }
     // -------------------------------------------------------------------------
     // Event registration
     // -------------------------------------------------------------------------
@@ -385,6 +398,9 @@ export class MewClient {
                 this.emit("thinking-variant-changed", {
                     variant: msg.variant ?? null,
                 });
+                break;
+            case "permission_mode_changed":
+                this.emit("permission-mode-changed", { mode: msg.mode });
                 break;
             case "session_title_changed":
                 this.emit("session-title-changed", {
