@@ -31,6 +31,9 @@ export default defineConfig({
           icon: "github",
         },
       ],
+      components: {
+        Sidebar: "./src/components/overrides/Sidebar.astro",
+      },
       plugins: [
         starlightDotMd({ includeFrontmatter: false }),
         lucode(),
