@@ -3,11 +3,21 @@ title: Architecture
 description: Internal architecture and crate structure for mew contributors.
 ---
 
-mew is a three-layer pipeline: **TUI → Agent → Provider**. This doc walks
-through how a keystroke becomes a provider stream, how tool calls are
-collected and executed, and how the display and API stores relate.
+mew is a multi-frontend agent server. The canonical runtime architecture is
+**Frontend → Daemon → Agent → Provider**. A frontend can be the built-in TUI,
+the React web UI, or any other client that speaks the daemon wire protocol.
+The TUI can also run standalone (embedding the agent directly), but in daemon
+mode it is just another frontend.
+
+This doc walks through how input reaches a provider stream, how the daemon
+owns sessions, how tool calls are collected and executed, and how the display
+and API stores relate.
 
 ## The pipeline
+
+Two connection patterns exist today:
+
+**Standalone TUI**
 
 ```
 Keyboard → crossterm EventStream → EventLoop (mpsc::channel(256))
@@ -28,6 +38,31 @@ Keyboard → crossterm EventStream → EventLoop (mpsc::channel(256))
                   app.handle_agent_event(event) → draw()
 ```
 
+**Daemon + frontend (TUI, web UI, etc.)**
+
+```
+Browser/Frontend → WebSocket → mew-daemon (Unix socket or TCP)
+                                      │
+                         SessionManager::create / attach
+                                      │
+                         Session { agent, clients, turn_lock }
+                                      │
+                         agent.run_with_parts(...) → AgentEvent
+                                      │
+                         translate_event → ServerMessage
+                                      │
+                         session.broadcast → all attached clients
+```
+
+The web UI reaches the daemon through `mew-web-bridge`, a small TCP+WS
+bridge that also serves the built React app:
+
+```
+Browser ──ws/http──▶ mew-web-bridge (127.0.0.1:9847)
+                         │
+                         └── unix ws ──▶ mew-daemon
+```
+
 ## Crate map
 
 | Crate | Purpose | Key Types |
@@ -40,19 +75,30 @@ Keyboard → crossterm EventStream → EventLoop (mpsc::channel(256))
 | `mew-hashline` | Line-anchored edits with hash staleness detection | `Patcher`, `SnapshotStore`, `Patch` |
 | `mew-protocol` | Wire message types | `ClientMessage`, `ServerMessage` |
 | `mew-daemon` | WebSocket server, session ownership | `DaemonServer`, `Session`, `SessionManager` |
+| `mew-web-bridge` | TCP+WS bridge + static UI server | `handle_connection`, `proxy` |
+| `mew-web-client` | TypeScript client for the wire protocol | `MewClient`, `MewClientEvents` |
+| `mew-web-ui` | React chat UI | `App.tsx`, `SessionState`, `ChatSurface` |
 | `mew-config` | config.toml + credentials + permissions | `Config`, `PermissionEngine` |
 | `mew-session` | JSONL session persistence | `Writer`, `Reader`, `Meta` |
 | `mew-catalog` | models.dev catalog with 24h cache | `Catalog`, `Model`, `ThinkingVariant` |
 | `mew-mcp` | MCP server client + McpTool wrapper | `McpClient`, `McpTool` |
 | `mew-hooks-runtime` | Subprocess plugin dispatcher | `SubprocessDispatcher`, `PluginHost` |
+| `mew-context` | Discover `AGENTS.md` / `CLAUDE.md` from cwd up to git root | `ContextResolver` |
+| `mew-skills` | Skill discovery + loading from `.mew/skills`, `.opencode/skills`, etc. | `Skill`, `SkillRegistry` |
+| `mew-personas` | Switchable system prompts + model pinning + tool allowlists | `Persona`, `PersonaLoader` |
 | `ratatui-mdstream` | Streaming markdown to ratatui Lines | `MdStream`, `DocumentState` |
 
 ## Startup: building the agent
 
-The `run_tui` function in `main.rs` constructs the agent through a pipeline:
+In standalone mode the `run_tui` function in `main.rs` builds the agent
+locally. In daemon mode the agent is built once per session by the daemon's
+`AgentBuilder` closure. Frontends never construct an agent directly; they
+connect to a session and send `Prompt` messages.
 
-1. **Resolve model** from CLI flags, config, or state. Falls back to
-   `"deepseek-v4-flash"`.
+The builder pipeline is the same in both cases:
+
+1. **Resolve model** from CLI flags, config, session state, or the persona
+   pin. Falls back to `"deepseek-v4-flash"`.
 
 2. **Build provider** via `build_provider(cfg, cat, provider_id, model_id, raw)`.
    Matches the provider's `shape` string to an adapter:
@@ -94,7 +140,14 @@ The `Skill` tool registers only when skills are discovered. The
    then set catalog-derived fields: pricing, context window, vision support,
    workspace roots, subagent runner, flagged files, secrets.
 
+The daemon passes a fresh `mew_session::Writer` for the session so every
+message is persisted to that session's JSONL log as it is produced.
+
 ## The event loop
+
+The `EventLoop` described here is TUI-specific. The web UI and other
+frontends have their own event loops, but the pattern is the same: they
+receive wire events from the daemon and update their local display state.
 
 `EventLoop` (`events.rs`) is a thin wrapper around `mpsc::channel(256)`:
 
@@ -135,7 +188,9 @@ The TUI main loop (`run_tui` in `main.rs`):
    via `try_recv()`. Capped at `STREAMING_DRAIN_LIMIT = 4` agent events per
    frame so streaming text appears incrementally instead of all at once.
 
-## How a keystroke becomes a provider stream
+## How input becomes a provider stream
+
+### Standalone TUI
 
 1. User types text and presses Enter. Crossterm fires `Event::Key(Enter)`.
 2. `handle_input_event` calls `app.submit_input()`, returns `Action::Submit(text)`.
@@ -148,6 +203,47 @@ The TUI main loop (`run_tui` in `main.rs`):
    `PartStart` creates a new part, `PartDelta` appends text, `MessageEnd`
    finalizes the stream.
 7. `draw()` renders the updated state.
+
+### Daemon frontend
+
+1. User submits a prompt in the web UI (or TUI connected via `--connect`).
+2. The frontend sends `ClientMessage::Prompt { text, attachments }` over the
+   WebSocket.
+3. The daemon's `handle_connection` looks up the attached `Session` and
+   acquires `session.turn_lock` to serialize turns.
+4. It broadcasts `ServerMessage::UserMessage` to all attached clients so
+   every frontend shows the prompt immediately.
+5. It calls `agent.run_with_parts(text, vec![], Some(token))` and pumps the
+   resulting `AgentEvent`s through `forward_events`.
+6. `translate_event` converts each `AgentEvent` to one or more
+   `ServerMessage`s. `Provider` events become wire provider events;
+   channel-bearing events (`PermissionRequest`, `AskUser`) are assigned a
+   request ID and stashed in `session.pending_permissions` /
+   `pending_ask_user`.
+7. `session.broadcast(msg)` sends the wire event to every attached client.
+8. Each frontend updates its local display store and re-renders.
+
+## Web UI
+
+The web UI is a React app served by `mew-web-bridge`. It uses the
+`mew-web-client` TypeScript library to speak the daemon wire protocol and
+Zustand for local state. Key pieces:
+
+- **`mew-web-bridge`** (Rust): listens on TCP for browser HTTP/WebSocket
+  connections, proxies WebSocket frames to the daemon's Unix socket, and
+  serves the built React app from embedded `mew-web-ui/dist/` assets.
+- **`mew-web-client`** (TypeScript): typed `MewClient` class that manages the
+  WebSocket, dispatches events, and provides promise-based request/response
+  helpers.
+- **`mew-web-ui`** (TypeScript/React): React app with TanStack Router. The
+  `SessionState` Zustand store holds messages, streaming state, model
+  selection, and the session list; `bridgeClientToStore` wires client events
+  to store actions.
+
+The web UI supports session switching through a sidebar rail, model switching
+via the `ModelPill` component, and permission/ask-user modals that any attached
+client can answer. See [Web UI Development](/docs/development/dev-web/) for
+build commands, component inventory, and the end-to-end event checklist.
 
 ## The turn loop
 
@@ -226,7 +322,9 @@ extension points.
 
 ## AgentEvent variants
 
-The agent communicates with the TUI through `AgentEvent`:
+The agent communicates with the active frontend through `AgentEvent`. In
+standalone TUI mode this is delivered directly to `App`. In daemon mode it is
+translated to `ServerMessage` and broadcast to every attached client:
 
 | Variant | Purpose |
 |---------|---------|
@@ -251,8 +349,14 @@ requests via `ServerMessage::PermissionRequest` / `AskUserRequest`.
 ## Sessions and multisession
 
 The daemon owns every session. Frontends connect over WebSocket and ask to
-`NewSession` or `AttachSession`. A session ID is a ULID prefixed with `sess_`,
-generated by `SessionManager::create` and persisted in the session directory.
+`NewSession`, `AttachSession`, or `ListSessions`. A session ID is a ULID
+prefixed with `sess_`, generated by `SessionManager::create` and persisted in
+the session directory.
+
+Multi-session support is implemented today: `SessionManager` maintains an
+`active` map of in-memory sessions and can resume idle sessions from disk on
+demand. The web UI exposes this through a session rail (`SessionRail.tsx`) that
+lists sessions, attaches to them, renames them, and deletes them.
 
 ### One session, many clients
 
@@ -266,6 +370,35 @@ conversation simultaneously. All clients see `UserMessage`, tool progress, and
 `RequestResolved`. `SessionHistory` is sent only to the client that just
 attached; other clients already have the state.
 
+### Active vs idle sessions
+
+| State | Where it lives | How it is reached |
+|-------|----------------|-------------------|
+| Active | `SessionManager.active` | In memory, has at least one attached client |
+| Idle | `~/.local/share/mew/sessions/<id>/` | On disk; loaded into `active` on `AttachSession` |
+| Empty | Same as idle, but with a zero-byte `session.jsonl` | Auto-deleted on `ListSessions` |
+
+`SessionManager::list()` returns both active and idle top-level sessions as
+`SessionInfo` records, including model, provider, created/last-message times,
+summary, and attached client count.
+
+### Session switching
+
+A single frontend connection can switch sessions by sending a new
+`NewSession` or `AttachSession`. The web UI keeps `sessionId` in `localStorage`
+and re-attaches on reload; the session rail lets the user jump between
+sessions without reconnecting the WebSocket.
+
+Wire messages that change or inspect sessions:
+
+| Message | Purpose |
+|---------|---------|
+| `NewSession { cwd }` | Create a fresh session |
+| `AttachSession { session_id }` | Attach to an active or idle session |
+| `ListSessions` | List all top-level sessions |
+| `DeleteSession { session_id }` | Delete a session from disk and memory |
+| `RenameSession { session_id, title }` | Set a custom title |
+
 ### State ownership
 
 | State | Owner |
@@ -273,10 +406,12 @@ attached; other clients already have the state.
 | Canonical message history | Daemon `Agent.messages` + `mew_session::Writer` JSONL |
 | Session metadata (title, summary, timestamps) | `meta.json` on disk |
 | Active session registry | `SessionManager.active` in the daemon |
+| Per-session load lock | `SessionManager.loading` |
 | Attached client list | `Session.clients` in the daemon |
 | Pending permission / ask-user requests | `Session.pending_permissions` / `pending_ask_user` |
 | Display/render state | Each frontend (TUI `App`, web UI store) |
 | Model/provider per session | `Session.model` / `Session.provider` |
+| Permission mode per session | `Agent.permission_mode` |
 
 ### Lifecycle
 
@@ -293,22 +428,52 @@ Client disconnects
 
 Idle sessions are loaded from disk on `AttachSession`. The JSONL log is replayed
 through `Agent::load_messages`, and the writer is reopened so new messages
-append to the same file.
+append to the same file. Subagent sessions (`meta.depth != 0`) are excluded from
+`ListSessions` and cannot be attached directly.
 
-### Current limitations
+## Multitenancy and isolation
 
-There is no explicit handover protocol. Moving from the TUI to the web UI is
-possible, but it is not a first-class gesture:
+mew is single-user, multi-session. The daemon runs as the local user and all
+sessions share the same OS identity, config file, credential resolution, and
+MCP server pool. There is no authentication or per-user sandboxing.
+
+Session-level isolation exists for the things that matter to a conversation:
+
+- **Message history**: each session has its own JSONL log and `Agent.messages`.
+- **Model/provider**: `Session.model` / `Session.provider` are per-session, and
+  `SwitchModel` only affects the attached session.
+- **Permission mode**: `SetPermissionMode` is per-session.
+- **Workspace roots**: each session's agent gets its own `workspace_roots`
+  (defaulting to the `cwd` supplied in `NewSession` or the current directory).
+- **Turn lock**: `session.turn_lock` serializes turns within a session, but
+  different sessions run independently.
+
+What is **not** isolated:
+
+- **Config and credentials**: all sessions read the same `config.toml`,
+  credentials, and provider defaults.
+- **MCP servers**: MCP tools are registered once per daemon startup and shared
+  across sessions.
+- **Hooks/dispatcher**: the same dispatcher instance is used for every session.
+
+This is enough for one person to run many independent conversations, but it is
+not multi-tenant in the SaaS sense. A shared daemon would need user accounts,
+namespaces, and per-session config overrides before it could safely serve
+multiple people.
+
+## Current limitations
+
+Handover between frontends is partially supported but not seamless:
 
 - The TUI in daemon mode (`mew chat --connect`) always calls `NewSession`; it
-cannot attach to an existing daemon session, so `/resume` is rejected.
+  cannot attach to an existing daemon session, so `/resume` is rejected.
 - The web UI stores the last session ID in `localStorage` and calls
-`AttachSession` on reload. Two tabs with the same ID will share the session.
+  `AttachSession` on reload. Two tabs with the same ID will share the session.
 - There is no wire event for "another client attached/detached", so a frontend
-cannot show presence or claim input focus.
+  cannot show presence or claim input focus.
 - The last client to disconnect cancels the current turn and unloads the
-session from memory. There is no way to keep a session warm while switching
-frontends.
+  session from memory. There is no way to keep a session warm while switching
+  frontends.
 
 See [Daemon Protocol](/docs/development/dev-protocol/) for the wire-level message types and
-`docs/HANDOVER.md` in the repo for the target design.
+[Session Handover](/docs/development/handover/) for the target design.
