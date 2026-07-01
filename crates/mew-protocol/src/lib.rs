@@ -1583,4 +1583,67 @@ mod tests {
         // Empty vec should be skipped in serialization.
         assert!(!j.contains(r#""thinking_variants""#));
     }
+
+    #[test]
+    fn test_roundtrip_set_permission_mode() {
+        let m = ClientMessage::SetPermissionMode {
+            mode: "dangerous".into(),
+        };
+        match round_trip(&m) {
+            ClientMessage::SetPermissionMode { mode } => {
+                assert_eq!(mode, "dangerous");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_permission_mode_changed() {
+        let m = ServerMessage::PermissionModeChanged {
+            mode: "auto_plus".into(),
+        };
+        match round_trip(&m) {
+            ServerMessage::PermissionModeChanged { mode } => {
+                assert_eq!(mode, "auto_plus");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_session_ready_includes_permission_mode() {
+        let m = ServerMessage::SessionReady {
+            session_id: "s1".into(),
+            model: Some("test/model".into()),
+            provider: Some("test".into()),
+            permission_mode: Some("permissive".into()),
+        };
+        match round_trip(&m) {
+            ServerMessage::SessionReady {
+                session_id,
+                model,
+                provider,
+                permission_mode,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(model.as_deref(), Some("test/model"));
+                assert_eq!(provider.as_deref(), Some("test"));
+                assert_eq!(permission_mode.as_deref(), Some("permissive"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_session_ready_permission_mode_skipped_when_absent() {
+        let m = ServerMessage::SessionReady {
+            session_id: "s1".into(),
+            model: None,
+            provider: None,
+            permission_mode: None,
+        };
+        let j = encode_json(&m).unwrap();
+        // permission_mode should be skipped from serialization when None.
+        assert!(!j.contains(r#""permission_mode""#));
+    }
 }
