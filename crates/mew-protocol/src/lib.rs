@@ -93,6 +93,13 @@ pub enum ClientMessage {
         /// Variant name (e.g. "high", "max", "thinking") or empty/none to disable.
         variant: String,
     },
+
+    /// Set the permission mode for the active session.
+    /// Mode is one of: "standard", "permissive", "auto", "auto_plus", "dangerous".
+    SetPermissionMode {
+        /// Lowercase mode id (see `mew_hooks::PermissionMode::id`).
+        mode: String,
+    },
 }
 
 /// Info about a single available model, returned by `ListModels`.
@@ -210,6 +217,9 @@ pub enum ServerMessage {
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
+        /// Current permission mode (lowercase id). Absent means "standard".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_mode: Option<String>,
     },
 
     /// An error before or outside a session turn.
@@ -337,6 +347,13 @@ pub enum ServerMessage {
     ThinkingVariantChanged {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<String>,
+    },
+
+    /// Broadcast when the permission mode changes. Sent to all attached
+    /// clients so multi-device stays in sync.
+    PermissionModeChanged {
+        /// Lowercase mode id (e.g. "standard", "dangerous").
+        mode: String,
     },
 
     /// The daemon generated a title for the session. Frontends should update
