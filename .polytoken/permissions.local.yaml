@@ -3,3 +3,10 @@ allow:
 - tool: web_fetch
   args:
     url: https://api.code.umans.ai/v1/models/info{,/**}
+- tool: web_fetch
+  args:
+    url: https://docs.rs/fff-search/latest/fff_search{,/**}
+- tool: mcp__grep__searchGitHub
+- tool: web_fetch
+  args:
+    url: https://raw.githubusercontent.com/dmtrKovalenko/fff/main/crates/fff-core/tests/grep_integration.rs{,/**}

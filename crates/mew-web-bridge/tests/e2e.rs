@@ -219,7 +219,14 @@ where
 async fn bridge_relays_session_ready_to_browser() {
     let stack = spawn_stack().await;
     let mut browser = connect_browser(stack.tcp_addr).await;
-    send(&mut browser, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut browser,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
 
     let msgs = recv_until(&mut browser, |m| {
         matches!(m, ServerMessage::SessionReady { .. })
@@ -233,7 +240,14 @@ async fn bridge_relays_session_ready_to_browser() {
 async fn bridge_relays_streaming_text_from_daemon() {
     let stack = spawn_stack().await;
     let mut browser = connect_browser(stack.tcp_addr).await;
-    send(&mut browser, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut browser,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_until(&mut browser, |m| {
         matches!(m, ServerMessage::SessionReady { .. })
     })
@@ -273,8 +287,22 @@ async fn bridge_proxies_concurrent_browser_sessions_independently() {
     let stack = spawn_stack().await;
     let mut a = connect_browser(stack.tcp_addr).await;
     let mut b = connect_browser(stack.tcp_addr).await;
-    send(&mut a, ClientMessage::NewSession { cwd: None }).await;
-    send(&mut b, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut a,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
+    send(
+        &mut b,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     let sa = recv_until(&mut a, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
     let sb = recv_until(&mut b, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
     let id_a = match sa.last().unwrap() {
@@ -349,7 +377,14 @@ async fn bridge_handles_tool_use_finish_end_to_end() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let mut browser = connect_browser(tcp_addr).await;
-    send(&mut browser, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut browser,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_until(&mut browser, |m| {
         matches!(m, ServerMessage::SessionReady { .. })
     })

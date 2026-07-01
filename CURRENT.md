@@ -1,5 +1,184 @@
 # Progress — 2026-07-01
 
+## Grep tool: replaced grep crate with fff-search — COMPLETE
+
+Swapped the `grep` (ripgrep library) dependency for `fff-search` in
+`crates/mew-tools`, gaining regex-fallback-to-literal resilience, time
+budgets, and optional fuzzy/literal modes.
+
+### Changes
+
+- **Cargo.toml**: removed `grep = "0.4"` and `regex = "1"` (regex was only
+  used via `grep::regex`); added `fff-search = "0.9"`.
+- **grep.rs rewrite**: per-invocation `FilePicker` (Option A from the plan):
+  - `FilePicker::new(FilePickerOptions { base_path, mode: Ai, watch: false, ... })`
+  - `picker.collect_files()` — synchronous directory scan, gitignore-aware
+  - `QueryParser::new(GrepConfig).parse(&pattern)` — parses with file-path
+    constraint support
+  - Constraints added programmatically: `Constraint::Glob(g)` for `glob`
+    param, `Constraint::Extension(ext)` for `include` param
+  - `picker.grep(&query, &GrepSearchOptions { mode, time_budget_ms: 5000, ... })`
+  - Output formatting unchanged: `path:linenum:content`, 500-char line
+    truncation, 100KB total cap, secret filtering via `filter_output`
+  - `regex_fallback_error` surfaced as a `[note: ...]` line instead of erroring
+  - `next_file_offset > 0` (time budget hit) surfaced as `[partial results: ...]`
+- **New `mode` parameter**: `"regex"` (default), `"literal"`, `"fuzzy"` —
+  backward-compatible schema extension (Phase 2 from the plan).
+- **Cancellation**: checks `ctx.cancel.is_cancelled()` before search and
+  passes an `Arc<AtomicBool>` abort signal to fff's `GrepSearchOptions`.
+- **filter_output**: updated to pass through `[notice]` lines (which don't
+  have `path:linenum:` format) without secret-filtering them.
+- **Tests**: 10 grep unit tests + 8 integration tests all pass. Updated
+  `test_grep_invalid_regex` to expect fallback notice instead of error.
+  Added `test_grep_literal_mode` and `test_grep_fuzzy_mode`.
+
+### What didn't change
+
+- `ignore` crate stays in the workspace (used by mew-tui for @-mentions).
+- `filter_output` / `redact_line` logic unchanged for normal output lines.
+- Tool schema retains `pattern`, `path`, `glob`, `include` — `mode` is additive.
+
+## Session handover — TUI attach + keep-warm + presence + yield — COMPLETE
+
+Implemented the handover features from `docs/development/handover.md`: TUI
+`--attach` flag, `/web` and `/resume` and `/yield` slash commands, keep-warm
+grace period on last-client detach, client presence events, and advisory
+yield/accept protocol.
+
+### Protocol additions (`mew-protocol`)
+
+- `ClientKind` enum (`Tui`, `Web`, `Cli`, `Unknown`) with `#[serde(default)]`
+  on `Unknown` so old clients that don't send the field still work.
+- `NewSession` and `AttachSession` gain `client_kind: ClientKind`.
+- `ClientMessage::YieldControl {}` — advisory yield.
+- `ServerMessage::ClientAttached { client_id, client_kind }` — broadcast when
+  a client joins.
+- `ServerMessage::ClientDetached { client_id }` — broadcast when a client leaves.
+- `ServerMessage::ControlYielded { client_id }` — broadcast when a client yields.
+- 67 protocol tests pass (existing + new field additions).
+
+### Daemon (`mew-daemon`)
+
+- `Session.clients` now stores `(client_id, sender, ClientKind)` per attached
+  client. `attach_client` takes `client_kind` parameter.
+- `NewSession` and `AttachSession` handlers broadcast `ClientAttached` to
+  existing clients when a new one joins (not on first client).
+- Cleanup path broadcasts `ClientDetached` on disconnect.
+- **Keep-warm**: when the last client detaches, instead of immediately
+  cancelling + unloading, spawns a 30s timer. If no client reattaches before
+  it fires, cancels the turn and removes the session. If a client attaches
+  during the window, the session stays alive and the timer's `client_count`
+  check finds it non-zero.
+- `YieldControl` handler broadcasts `ControlYielded` to all clients.
+- `DaemonClient::attach_session(session_id)` — sends `AttachSession` with
+  `ClientKind::Tui`.
+- `DaemonClient::session_id()` — returns the session ID captured from
+  `SessionReady` by the background reader.
+- `DaemonClient::send_raw(json)` — sends arbitrary protocol JSON (used for
+  `YieldControl`).
+
+### TUI (`mew/src/main.rs`, `mew-tui/src/app.rs`)
+
+- `--attach <session-id>` CLI flag on `mew chat`. When set, calls
+  `attach_session` instead of `new_session`.
+- `app.status.session_id` populated from `client.session_id()` after connecting.
+- `/web` slash command — prints `http://localhost:9847/session/<id>`.
+- `/resume <id>` slash command — calls `client.attach_session(id)`.
+- `/yield` slash command — sends `YieldControl` and shows "control yielded".
+- All three added to `builtin_slash_commands()` for autocomplete.
+
+### Web client (`mew-web-client`)
+
+- `client_kind: "web"` sent with `new_session` and `attach_session`.
+- `yieldControl()` method.
+- `client-attached`, `client-detached`, `control-yielded` events.
+- Server message types for the new variants.
+- Dist rebuilt.
+
+### Web UI store (`mew-web-ui/src/stores/session.ts`)
+
+- `attachedClients: { id, kind }[]` state + `onClientAttached`/`onClientDetached`.
+- `yieldedByClient: number | null` state + `onControlYielded`/`clearYieldedControl`.
+- Bridge wires all three new events.
+- `reset()` clears presence + yield state.
+
+### Verification
+
+- `cargo fmt --check` clean
+- `cargo clippy -p mew-protocol -p mew-daemon -p mew -- -D warnings` clean
+- `cargo test -p mew-protocol` — 67 tests
+- `cargo test -p mew-daemon` — 23 tests (12 e2e + 5 tcp + 6 concurrency)
+- `cargo test -p mew-hashline` — 55 tests
+- `tsc --noEmit` clean (no new errors)
+- `vite build` succeeds
+
+## Web UI settings parity with TUI — permission mode + reorg — COMPLETE
+
+The TUI exposed permission mode switching (`/permissions`), model/thinking/
+persona info, theme, and session behavior toggles. The web UI settings page
+only had theme picker, sessions link, auto-title, and auto-summary. The real
+gap was permission mode — the TUI handled it locally, so the daemon had no
+wire support and the web UI couldn't switch modes at all.
+
+### Protocol additions (`mew-protocol`)
+
+- `ClientMessage::SetPermissionMode { mode: String }` — lowercase mode id
+  ("standard", "permissive", "auto", "auto_plus", "dangerous")
+- `ServerMessage::PermissionModeChanged { mode: String }` — broadcast to all
+  attached clients so multi-device stays in sync
+- `SessionReady` gains optional `permission_mode: Option<String>` field
+- 4 new roundtrip tests (set_permission_mode, permission_mode_changed,
+  session_ready with/without permission_mode)
+
+### Daemon handling (`mew-daemon`)
+
+- `SetPermissionMode` handler: parses mode via `PermissionMode::from_id`,
+  calls `agent.set_permission_mode(m)`, broadcasts `PermissionModeChanged`
+  to all attached clients. Errors broadcast as `ServerMessage::Error`.
+- Both `SessionReady` construction sites (NewSession + AttachSession) now
+  include `permission_mode` from `agent.permission_mode().id()`.
+- `DaemonClient::translate_server_message` handles `PermissionModeChanged`
+  (maps to empty Vec — not an AgentEvent, handled by store directly).
+
+### TS client (`mew-web-client`)
+
+- `setPermissionMode(mode): Promise<string | null>` method
+- `permission-mode-changed` event
+- `session_ready` type updated with `permission_mode?` field
+- `set_permission_mode` client message type
+- Dist rebuilt
+
+### Store (`mew-web-ui/src/stores/session.ts`)
+
+- `permissionMode: string` state (default: "standard")
+- `setPermissionMode(mode)` action
+- Bridge wires `session-ready` → `setPermissionMode` and
+  `permission-mode-changed` → `setPermissionMode`
+- `reset()` preserves `permissionMode` (repopulated by session-ready)
+
+### Settings page reorganization (`settings.tsx`)
+
+Restructured into grouped sections matching the TUI's exposed settings:
+
+1. **Sessions** — link to session management page
+2. **Permission Mode** — card picker for Standard / Permissive / Auto /
+   Auto+ / Dangerous with descriptions and active checkmark. Dangerous gets
+   red accent.
+3. **Current Session** — read-only info cards showing Model, Thinking
+   variant, Persona (only shown if set)
+4. **Behavior** — Auto-title toggle, Auto-summary toggle
+5. **Theme** — existing theme picker with search
+
+### Verification
+
+- `cargo fmt --check` clean
+- `cargo clippy -p mew-protocol -p mew-daemon -p mew-hashline -- -D warnings` clean
+- `cargo test -p mew-protocol` — 67 tests pass
+- `cargo test -p mew-daemon` — 23 tests pass (6 + 12 + 5)
+- `cargo test -p mew-hashline` — 55 tests pass
+- `tsc --noEmit` clean (no new errors; 2 pre-existing in virtual-chat-surface)
+- `vite build` succeeds
+
 ## Hashline advanced recovery — COMPLETE
 
 Implemented the four "next steps" from the hashline integration: bare-row

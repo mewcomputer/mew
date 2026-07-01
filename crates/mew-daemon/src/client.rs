@@ -43,6 +43,8 @@ struct ClientState {
     event_tx: Mutex<Option<mpsc::Sender<AgentEvent>>>,
     /// Outgoing message channel (JSON strings to the WebSocket).
     ws_out: mpsc::Sender<String>,
+    /// Session ID set when `SessionReady` arrives.
+    session_id: Mutex<Option<String>>,
 }
 
 /// A client connected to a mew daemon.
@@ -77,6 +79,7 @@ impl DaemonClient {
             pending_ask_user: Mutex::new(HashMap::new()),
             event_tx: Mutex::new(None),
             ws_out: outgoing_tx.clone(),
+            session_id: Mutex::new(None),
         });
 
         let state_clone = state.clone();
@@ -103,8 +106,10 @@ impl DaemonClient {
                 };
 
                 // SessionReady is not an AgentEvent — the caller handles it
-                // via new_session(). Skip forwarding for those.
-                if matches!(server_msg, ServerMessage::SessionReady { .. }) {
+                // via new_session(). Skip forwarding for those. But we do
+                // capture the session ID for later use.
+                if let ServerMessage::SessionReady { ref session_id, .. } = server_msg {
+                    *state_clone.session_id.lock().await = Some(session_id.clone());
                     continue;
                 }
 
@@ -133,17 +138,31 @@ impl DaemonClient {
 
     /// Create a new session on the daemon.
     pub async fn new_session(&self) -> Result<()> {
-        let msg = ClientMessage::NewSession { cwd: None };
+        let msg = ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Tui,
+        };
         let json = mew_protocol::encode_json(&msg)?;
         self.state
             .ws_out
             .send(json)
             .await
             .context("send NewSession")?;
-        // The SessionReady response is handled by the background reader
-        // (it just skips it). For the minimal slice we assume the session
-        // is ready immediately. A proper handshake would wait for the
-        // SessionReady message.
+        Ok(())
+    }
+
+    /// Attach to an existing session on the daemon.
+    pub async fn attach_session(&self, session_id: &str) -> Result<()> {
+        let msg = ClientMessage::AttachSession {
+            session_id: session_id.to_string(),
+            client_kind: mew_protocol::ClientKind::Tui,
+        };
+        let json = mew_protocol::encode_json(&msg)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .context("send AttachSession")?;
         Ok(())
     }
 
@@ -173,11 +192,27 @@ impl DaemonClient {
         let _ = self.state.ws_out.send(json).await;
     }
 
+    /// Send a raw protocol message (for messages not covered by a dedicated
+    /// method, e.g. `YieldControl`).
+    pub async fn send_raw(&self, json: &str) -> Result<()> {
+        self.state
+            .ws_out
+            .send(json.to_string())
+            .await
+            .context("send_raw")?;
+        Ok(())
+    }
+
     /// Send a slash command to the daemon.
     pub async fn slash_command(&self, command: String) {
         let msg = ClientMessage::SlashCommand { command };
         let json = mew_protocol::encode_json(&msg).unwrap_or_default();
         let _ = self.state.ws_out.send(json).await;
+    }
+
+    /// Returns the current session ID, if known (set after `SessionReady`).
+    pub async fn session_id(&self) -> Option<String> {
+        self.state.session_id.lock().await.clone()
     }
 
     /// Clear the event sender (called when the turn ends).
@@ -456,6 +491,9 @@ async fn translate_server_message(
         | ServerMessage::SessionCleared
         | ServerMessage::ThinkingVariantChanged { .. }
         | ServerMessage::PermissionModeChanged { .. }
+        | ServerMessage::ClientAttached { .. }
+        | ServerMessage::ClientDetached { .. }
+        | ServerMessage::ControlYielded { .. }
         | ServerMessage::SessionTitleChanged { .. }
         | ServerMessage::SessionSummaryChanged { .. } => {
             // These are handled by the DaemonClient directly or are web-UI

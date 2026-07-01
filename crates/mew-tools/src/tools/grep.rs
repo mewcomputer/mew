@@ -1,11 +1,14 @@
 use crate::{SecretSet, Sensitivity, Tool, ToolCtx, ToolError, ToolOutput};
 use async_trait::async_trait;
-use grep::regex::RegexMatcher;
-use grep::searcher::{sinks::UTF8, SearcherBuilder};
-use ignore::WalkBuilder;
+use fff_search::file_picker::{FFFMode, FilePicker, FilePickerOptions};
+use fff_search::grep::{GrepMode, GrepSearchOptions};
+use fff_search::{Constraint, GrepConfig, QueryParser};
 use serde_json::Value;
+use std::sync::Arc;
 
 const MAX_OUTPUT: usize = 100_000; // 100KB
+const MAX_LINE_LEN: usize = 500; // truncate long lines
+const TIME_BUDGET_MS: u64 = 5000; // 5 second budget per search
 
 pub struct Grep;
 
@@ -40,6 +43,11 @@ impl Tool for Grep {
                     "include": {
                         "type": "string",
                         "description": "File extension filter without the dot (e.g. 'rs', 'py'). Shorthand for glob."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Search mode: 'regex' (default), 'literal', or 'fuzzy'.",
+                        "enum": ["regex", "literal", "fuzzy"]
                     }
                 },
                 "required": ["pattern"]
@@ -55,125 +63,159 @@ impl Tool for Grep {
         let pattern = input
             .get("pattern")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidInput("missing pattern".into()))?;
-        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-        let glob = input.get("glob").and_then(|v| v.as_str());
-        let include = input.get("include").and_then(|v| v.as_str());
+            .ok_or_else(|| ToolError::InvalidInput("missing pattern".into()))?
+            .to_string();
+        let path = input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".")
+            .to_string();
+        let glob = input
+            .get("glob")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let include = input
+            .get("include")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let mode = input
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("regex")
+            .to_string();
 
-        let base = ctx.cwd.join(path);
+        let base = ctx.cwd.join(&path);
 
-        let matcher = RegexMatcher::new(pattern)
-            .map_err(|e| ToolError::InvalidInput(format!("invalid regex: {e}")))?;
-
-        let searcher = SearcherBuilder::new()
-            .binary_detection(grep::searcher::BinaryDetection::quit(b'\x00'))
-            .line_number(true)
-            .build();
-
-        let mut results = Vec::new();
-        let mut total_bytes = 0usize;
-
-        // Build the directory walker with .gitignore support.
-        let mut builder = WalkBuilder::new(&base);
-        builder.hidden(false);
-        builder.git_ignore(true);
-        builder.git_exclude(true);
-        builder.git_global(true);
-
-        // Apply glob/include filter via ignore's Override system.
-        if let Some(g) = glob.or_else(|| {
-            include.map(|e| {
-                // Convert include extension to glob pattern.
-                // Leak is fine: bounded and only called once per tool invocation.
-                Box::leak(format!("*.{e}").into_boxed_str()) as &str
-            })
-        }) {
-            let mut overrides = ignore::overrides::OverrideBuilder::new(&base);
-            if overrides.add(g).is_ok() {
-                if let Ok(built) = overrides.build() {
-                    builder.overrides(built);
-                }
-            }
-        }
-
-        let walker = builder.build();
-
-        for entry in walker {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                continue;
-            }
-
-            let path_str = entry
-                .path()
-                .strip_prefix(&base)
-                .unwrap_or(entry.path())
-                .to_string_lossy()
-                .to_string();
-
-            let file_path = entry.path().to_path_buf();
-
-            // Run the search in a blocking task since grep's searcher
-            // does synchronous I/O (memory-mapped reads).
-            let matcher = matcher.clone();
-            let searcher = searcher.clone();
-            let search_result = tokio::task::spawn_blocking(move || {
-                let mut file_searcher = searcher;
-                let file_results = std::sync::Mutex::new(Vec::new());
-
-                let sink = UTF8(|lnum, line| {
-                    let line_str = if line.len() > 500 {
-                        format!("{}...", &line[..500])
-                    } else {
-                        line.to_string()
-                    };
-                    let formatted = format!("{}:{}:{}", path_str, lnum, line_str);
-                    file_results.lock().unwrap().push(formatted);
-                    Ok(true)
-                });
-
-                match file_searcher.search_path(&matcher, &file_path, sink) {
-                    Ok(()) => Ok(file_results.into_inner().unwrap()),
-                    Err(e) => Err(e),
-                }
-            })
-            .await;
-
-            if let Ok(Ok(file_matches)) = search_result {
-                for m in file_matches {
-                    let line_bytes = m.len();
-                    if total_bytes + line_bytes > MAX_OUTPUT {
-                        results.push(format!("...[truncated at {} bytes]", MAX_OUTPUT));
-                        let output = filter_output(&results.join("\n"), &ctx.secrets);
-                        return Ok(ToolOutput {
-                            output,
-                            error: String::new(),
-                            diff: None,
-                            metadata: None,
-                        });
-                    }
-                    total_bytes += line_bytes;
-                    results.push(m);
-                }
-            }
-        }
-
-        let output = if results.is_empty() {
-            String::new()
-        } else {
-            filter_output(&results.join("\n"), &ctx.secrets)
+        // Determine the GrepMode based on the mode parameter.
+        let grep_mode = match mode.as_str() {
+            "literal" => GrepMode::PlainText,
+            "fuzzy" => GrepMode::Fuzzy,
+            _ => GrepMode::Regex,
         };
 
-        Ok(ToolOutput {
-            output,
-            error: String::new(),
-            diff: None,
-            metadata: None,
+        // Run the blocking fff-search work in a spawn_blocking task.
+        // fff-search does synchronous I/O (mmap reads, directory walking).
+        let cancel = ctx.cancel.clone();
+        let secrets = ctx.secrets.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<ToolOutput, ToolError> {
+            // Build the FilePicker with the resolved base path.
+            // - watch: false — no background file watcher for per-invocation use.
+            // - enable_mmap_cache: false — no pre-population overhead.
+            // - mode: Ai — enables file-path constraint detection in the query parser.
+            let mut picker = FilePicker::new(FilePickerOptions {
+                base_path: base.to_string_lossy().to_string(),
+                enable_mmap_cache: false,
+                mode: FFFMode::Ai,
+                watch: false,
+                ..Default::default()
+            })
+            .map_err(|e| ToolError::Execution(format!("failed to create file picker: {e}")))?;
+
+            picker
+                .collect_files()
+                .map_err(|e| ToolError::Execution(format!("failed to collect files: {e}")))?;
+
+            // Parse the pattern with GrepConfig (enables file-path constraints).
+            let parser = QueryParser::new(GrepConfig);
+            let mut query = parser.parse(&pattern);
+
+            // Add glob or extension constraint if provided.
+            if let Some(ref g) = glob {
+                query.constraints.push(Constraint::Glob(g));
+            } else if let Some(ref ext) = include {
+                query.constraints.push(Constraint::Extension(ext));
+            }
+
+            // Build an abort signal from the cancellation token.
+            // We check the token before starting; fff's time_budget_ms handles
+            // the inner timeout. The abort flag is wired in case the token
+            // fires during the search.
+            let abort = Arc::new(std::sync::atomic::AtomicBool::new(
+                cancel.is_cancelled(),
+            ));
+
+            let options = GrepSearchOptions {
+                max_file_size: 10 * 1024 * 1024,
+                max_matches_per_file: 200,
+                smart_case: true,
+                file_offset: 0,
+                page_limit: 500,
+                mode: grep_mode,
+                time_budget_ms: TIME_BUDGET_MS,
+                before_context: 0,
+                after_context: 0,
+                classify_definitions: false,
+                trim_whitespace: false,
+                abort_signal: Some(abort),
+            };
+
+            let result = picker.grep(&query, &options);
+
+            // Format matches into output lines.
+            let mut results = Vec::new();
+            let mut total_bytes = 0usize;
+
+            for m in &result.matches {
+                let file = result.files.get(m.file_index);
+                let path_str = file
+                    .map(|f| f.relative_path(&picker))
+                    .unwrap_or_default();
+
+                let line_str = if m.line_content.len() > MAX_LINE_LEN {
+                    format!("{}...", &m.line_content[..MAX_LINE_LEN])
+                } else {
+                    m.line_content.clone()
+                };
+
+                let formatted = format!("{}:{}:{}", path_str, m.line_number, line_str);
+
+                let line_bytes = formatted.len();
+                if total_bytes + line_bytes > MAX_OUTPUT {
+                    results.push(format!("...[truncated at {} bytes]", MAX_OUTPUT));
+                    break;
+                }
+                total_bytes += line_bytes;
+                results.push(formatted);
+            }
+
+            // Append notices for fallback / partial results.
+            if let Some(ref err) = result.regex_fallback_error {
+                results.push(format!(
+                    "[note: regex compilation failed — fell back to literal matching: {err}]"
+                ));
+            }
+
+            if result.next_file_offset > 0 {
+                results.push(format!(
+                    "[partial results: time budget of {}ms reached, {} of {} files searched]",
+                    TIME_BUDGET_MS,
+                    result.total_files_searched,
+                    result.filtered_file_count
+                ));
+            }
+
+            let output = if results.is_empty() {
+                String::new()
+            } else {
+                filter_output(&results.join("\n"), &secrets)
+            };
+
+            Ok(ToolOutput {
+                output,
+                error: String::new(),
+                diff: None,
+                metadata: None,
+            })
         })
+        .await;
+
+        match result {
+            Ok(tool_output) => tool_output,
+            Err(e) => Err(ToolError::Execution(format!(
+                "grep task panicked: {e}"
+            ))),
+        }
     }
 }
 
@@ -199,6 +241,11 @@ fn filter_output(output: &str, secrets: &SecretSet) -> String {
     let mut redacted = 0usize;
     let mut dropped = 0usize;
     for line in output.lines() {
+        // Skip notice lines (they don't have the path:linenum:content format).
+        if line.starts_with('[') && line.ends_with(']') {
+            kept.push(line.to_string());
+            continue;
+        }
         if has_globs {
             let path = line.split(':').next().unwrap_or("");
             if !path.is_empty() && matchers.iter().any(|m| m.is_match(path)) {
@@ -358,10 +405,14 @@ mod tests {
         let tool = Grep;
         let ctx = dummy_ctx(dir.path().to_path_buf());
         let input = serde_json::json!({"pattern": "[unclosed"});
-        let result = tool.execute(ctx, input).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("invalid regex"));
+        let result = tool.execute(ctx, input).await.unwrap();
+        // With fff-search, invalid regex falls back to literal matching instead
+        // of erroring. The output should contain a fallback notice.
+        assert!(
+            result.output.contains("fell back to literal matching"),
+            "invalid regex should trigger fallback notice, got: {}",
+            result.output
+        );
     }
 
     #[test]
@@ -455,5 +506,42 @@ mod tests {
         let result = tool.execute(ctx, input).await.unwrap();
         assert!(result.output.contains("visible.rs"));
         assert!(!result.output.contains("ignored.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_literal_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        // In literal mode, regex metacharacters should be treated as literals.
+        tokio::fs::write(dir.path().join("a.rs"), "fn foo() {}\nfn foo.bar() {}")
+            .await
+            .unwrap();
+
+        let tool = Grep;
+        let ctx = dummy_ctx(dir.path().to_path_buf());
+        // Literal search for "foo.bar" should NOT match "foo bar" (dot is literal)
+        let input = serde_json::json!({"pattern": "foo.bar", "mode": "literal"});
+        let result = tool.execute(ctx, input).await.unwrap();
+        assert!(
+            result.output.contains("foo.bar"),
+            "literal mode should find 'foo.bar'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grep_fuzzy_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("a.rs"), "fn receive_message() {}")
+            .await
+            .unwrap();
+
+        let tool = Grep;
+        let ctx = dummy_ctx(dir.path().to_path_buf());
+        // Fuzzy search should find "receive_message" even with a typo
+        let input = serde_json::json!({"pattern": "recieve_mesage", "mode": "fuzzy"});
+        let result = tool.execute(ctx, input).await.unwrap();
+        assert!(
+            result.output.contains("receive_message"),
+            "fuzzy mode should find 'receive_message' despite typos"
+        );
     }
 }

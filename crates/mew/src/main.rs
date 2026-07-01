@@ -138,6 +138,12 @@ enum Commands {
         /// (e.g. "ws://unix:/tmp/mew.sock")
         #[arg(long)]
         connect: Option<String>,
+
+        /// Attach to an existing session by ID instead of creating a new one.
+        /// Requires --connect. Use `/resume <id>` in daemon mode to switch
+        /// sessions at runtime.
+        #[arg(long)]
+        attach: Option<String>,
     },
     /// Run as a daemon (WebSocket server). Frontends connect to run sessions.
     Daemon {
@@ -418,10 +424,11 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             auto_plus,
             dangerously_skip_permissions,
             connect,
+            attach,
         }) => {
             let mode = resolve_mode(permissive, auto, auto_plus, dangerously_skip_permissions);
             if let Some(connect_url) = connect {
-                chat_with_daemon(&connect_url).await
+                chat_with_daemon(&connect_url, attach.as_deref()).await
             } else {
                 let provider = resolve_provider(provider, &state);
                 let model = resolve_model_opt(model, &state);
@@ -1838,15 +1845,23 @@ fn stop_daemon(pidfile: &str) -> Result<()> {
 
 /// Run the TUI connected to a mew daemon. The daemon owns the agent;
 /// the TUI is a pure frontend that sends prompts and receives AgentEvents.
-async fn chat_with_daemon(connect_url: &str) -> Result<()> {
+async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()> {
     use std::sync::Arc;
 
     let client = mew_daemon::DaemonClient::connect(connect_url).await?;
     let client = Arc::new(client);
 
-    client.new_session().await?;
+    if let Some(session_id) = attach {
+        client.attach_session(session_id).await?;
+    } else {
+        client.new_session().await?;
+    }
 
     let mut app = mew_tui::App::new();
+    // Set the session ID from the daemon client.
+    if let Some(sid) = client.session_id().await {
+        app.status.session_id = sid;
+    }
     // Load theme from state/config (best-effort; daemon client may not
     // have full config available).
     let state = mew_config::load_state().unwrap_or_default();
@@ -1939,6 +1954,40 @@ async fn chat_with_daemon(connect_url: &str) -> Result<()> {
                                     tokio::spawn(async move {
                                         client.slash_command(text.clone()).await;
                                     });
+                                }
+                                "/web" => {
+                                    // Print the web URL for the current session.
+                                    let sid = &app.status.session_id;
+                                    if !sid.is_empty() {
+                                        let port = std::env::var("MEW_PORT")
+                                            .unwrap_or_else(|_| "9847".into());
+                                        let url = format!("http://localhost:{port}/session/{sid}");
+                                        app.set_alert(format!("Web URL: {url}"));
+                                    } else {
+                                        app.set_alert("no active session");
+                                    }
+                                }
+                                "/resume" => {
+                                    if let Some(arg) = _arg {
+                                        let client = client.clone();
+                                        let sid = arg.to_string();
+                                        tokio::spawn(async move {
+                                            let _ = client.attach_session(&sid).await;
+                                        });
+                                        app.set_alert(format!("attaching to {arg}…"));
+                                    } else {
+                                        app.set_alert("usage: /resume <session-id>");
+                                    }
+                                }
+                                "/yield" => {
+                                    let client = client.clone();
+                                    tokio::spawn(async move {
+                                        let msg = mew_protocol::ClientMessage::YieldControl {};
+                                        if let Ok(json) = mew_protocol::encode_json(&msg) {
+                                            let _ = client.send_raw(&json).await;
+                                        }
+                                    });
+                                    app.set_alert("control yielded");
                                 }
                                 _ => {
                                     // Let the TUI handle it locally.

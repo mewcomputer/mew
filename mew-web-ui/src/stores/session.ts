@@ -163,6 +163,15 @@ interface SessionState {
   // Persona
   currentPersona: string | null;
 
+  // Permission mode
+  permissionMode: string;
+
+  // Client presence
+  attachedClients: { id: number; kind: string }[];
+
+  // Control yielded
+  yieldedByClient: number | null;
+
   // Session list
   availableSessions: SessionInfo[];
   sessionsLoading: boolean;
@@ -200,6 +209,11 @@ interface SessionState {
   setCurrentModel: (provider: string, model: string) => void;
   setCurrentThinkingVariant: (variant: string | null) => void;
   setCurrentPersona: (name: string | null) => void;
+  setPermissionMode: (mode: string) => void;
+  onClientAttached: (clientId: number, clientKind: string) => void;
+  onClientDetached: (clientId: number) => void;
+  onControlYielded: (clientId: number) => void;
+  clearYieldedControl: () => void;
   onSessionTitleChanged: (sessionId: string, title: string) => void;
   sessionSummaries: Map<string, string>;
   onSessionSummaryChanged: (sessionId: string, summary: string) => void;
@@ -244,6 +258,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   currentProvider: null,
   currentThinkingVariant: null,
   currentPersona: null,
+  permissionMode: "standard",
+  attachedClients: [],
+  yieldedByClient: null,
   availableSessions: [],
   sessionsLoading: false,
   sessionTitles: new Map(),
@@ -599,6 +616,22 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setCurrentPersona: (name) => set({ currentPersona: name }),
 
+  setPermissionMode: (mode) => set({ permissionMode: mode }),
+
+  onClientAttached: (clientId, clientKind) =>
+    set((s) => ({
+      attachedClients: [...s.attachedClients, { id: clientId, kind: clientKind }],
+    })),
+
+  onClientDetached: (clientId) =>
+    set((s) => ({
+      attachedClients: s.attachedClients.filter((c) => c.id !== clientId),
+    })),
+
+  onControlYielded: (clientId) => set({ yieldedByClient: clientId }),
+
+  clearYieldedControl: () => set({ yieldedByClient: null }),
+
   onSessionTitleChanged: (sessionId, title) =>
     set((state) => {
       const sessionTitles = new Map(state.sessionTitles);
@@ -750,6 +783,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Keep global caches and per-session model info; they are repopulated
       // by wire events (model-list, session-list, session-ready).
       // currentModel is intentionally preserved to avoid model picker/footer blanks.
+      attachedClients: [],
+      yieldedByClient: null,
     }),
 }));
 
@@ -767,6 +802,9 @@ export function bridgeClientToStore(client: MewClient) {
     store.getState().setSessionId(data.session_id);
     if (data.model && data.provider) {
       store.getState().setCurrentModel(data.provider, data.model);
+    }
+    if (data.permission_mode) {
+      store.getState().setPermissionMode(data.permission_mode);
     }
   });
 
@@ -824,6 +862,18 @@ export function bridgeClientToStore(client: MewClient) {
   );
   client.on("thinking-variant-changed", (data) =>
     store.getState().setCurrentThinkingVariant(data.variant),
+  );
+  client.on("permission-mode-changed", (data) =>
+    store.getState().setPermissionMode(data.mode),
+  );
+  client.on("client-attached", (data) =>
+    store.getState().onClientAttached(data.client_id, data.client_kind),
+  );
+  client.on("client-detached", (data) =>
+    store.getState().onClientDetached(data.client_id),
+  );
+  client.on("control-yielded", (data) =>
+    store.getState().onControlYielded(data.client_id),
   );
   client.on("persona-switch-requested", (data) =>
     store.getState().setCurrentPersona(data.name),

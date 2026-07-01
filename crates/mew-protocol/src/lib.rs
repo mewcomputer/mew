@@ -25,6 +25,9 @@ pub enum ClientMessage {
     NewSession {
         /// Working directory for the session. Defaults to the daemon's cwd.
         cwd: Option<String>,
+        /// What kind of client is connecting (TUI, Web, etc.).
+        #[serde(default)]
+        client_kind: ClientKind,
     },
 
     /// Attach to an existing session (active or idle). If the session is idle,
@@ -32,6 +35,9 @@ pub enum ClientMessage {
     AttachSession {
         /// Session ID to attach to.
         session_id: String,
+        /// What kind of client is connecting (TUI, Web, etc.).
+        #[serde(default)]
+        client_kind: ClientKind,
     },
 
     /// List all sessions known to the daemon (active + persisted idle).
@@ -100,6 +106,25 @@ pub enum ClientMessage {
         /// Lowercase mode id (see `mew_hooks::PermissionMode::id`).
         mode: String,
     },
+
+    /// Yield control of the session. Advisory — other clients can use this
+    /// to update their UI (e.g. switch from observer to active input).
+    YieldControl {},
+}
+
+/// What kind of client is connected to a session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientKind {
+    /// Terminal UI (`mew chat --connect`).
+    Tui,
+    /// Browser-based web UI.
+    Web,
+    /// Headless CLI script.
+    Cli,
+    /// Unknown / unspecified.
+    #[default]
+    Unknown,
 }
 
 /// Info about a single available model, returned by `ListModels`.
@@ -356,6 +381,21 @@ pub enum ServerMessage {
         mode: String,
     },
 
+    /// A new client attached to the session. Broadcast to all other clients.
+    ClientAttached {
+        client_id: u64,
+        client_kind: ClientKind,
+    },
+
+    /// A client detached from the session. Broadcast to remaining clients.
+    ClientDetached { client_id: u64 },
+
+    /// Control was yielded. Advisory — other clients can become active.
+    ControlYielded {
+        /// The client that yielded.
+        client_id: u64,
+    },
+
     /// The daemon generated a title for the session. Frontends should update
     /// their session title display.
     SessionTitleChanged { session_id: String, title: String },
@@ -555,9 +595,12 @@ mod tests {
 
     #[test]
     fn client_message_new_session_cwd_none_roundtrip() {
-        let m = ClientMessage::NewSession { cwd: None };
+        let m = ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Unknown,
+        };
         match round_trip(&m) {
-            ClientMessage::NewSession { cwd } => assert!(cwd.is_none()),
+            ClientMessage::NewSession { cwd, .. } => assert!(cwd.is_none()),
             _ => panic!(),
         }
     }
@@ -566,9 +609,10 @@ mod tests {
     fn client_message_new_session_cwd_some_roundtrip() {
         let m = ClientMessage::NewSession {
             cwd: Some("/tmp/work".into()),
+            client_kind: ClientKind::Unknown,
         };
         match round_trip(&m) {
-            ClientMessage::NewSession { cwd } => assert_eq!(cwd.as_deref(), Some("/tmp/work")),
+            ClientMessage::NewSession { cwd, .. } => assert_eq!(cwd.as_deref(), Some("/tmp/work")),
             _ => panic!(),
         }
     }
@@ -1168,7 +1212,13 @@ mod tests {
     #[test]
     fn every_client_variant_has_distinct_type_tag() {
         let samples: Vec<(&'static str, ClientMessage)> = vec![
-            ("new_session", ClientMessage::NewSession { cwd: None }),
+            (
+                "new_session",
+                ClientMessage::NewSession {
+                    cwd: None,
+                    client_kind: ClientKind::Unknown,
+                },
+            ),
             (
                 "prompt",
                 ClientMessage::Prompt {
@@ -1311,9 +1361,10 @@ mod tests {
     fn client_message_attach_session_roundtrip() {
         let m = ClientMessage::AttachSession {
             session_id: "sess_01H8XKJ9ABCDEFGH0123456789".into(),
+            client_kind: ClientKind::Unknown,
         };
         match round_trip(&m) {
-            ClientMessage::AttachSession { session_id } => {
+            ClientMessage::AttachSession { session_id, .. } => {
                 assert_eq!(session_id, "sess_01H8XKJ9ABCDEFGH0123456789");
             }
             _ => panic!("wrong variant"),

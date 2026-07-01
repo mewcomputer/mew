@@ -33,8 +33,8 @@ export interface Attachment {
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
 
 export type ClientMessage =
-  | { type: "new_session"; cwd: string | null }
-  | { type: "attach_session"; session_id: string }
+  | { type: "new_session"; cwd: string | null; client_kind: string }
+  | { type: "attach_session"; session_id: string; client_kind: string }
   | { type: "list_sessions" }
   | { type: "delete_session"; session_id: string }
   | { type: "rename_session"; session_id: string; title: string }
@@ -52,7 +52,8 @@ export type ClientMessage =
   | { type: "list_models" }
   | { type: "switch_model"; provider: string; model: string }
   | { type: "set_thinking_variant"; variant: string }
-  | { type: "set_permission_mode"; mode: string };
+  | { type: "set_permission_mode"; mode: string }
+  | { type: "yield_control" };
 
 // Provider events — see mew_message::ProviderEventWire.
 export type ProviderEventWire =
@@ -299,6 +300,9 @@ export type ServerMessage =
   | { type: "model_switched"; provider: string; model: string }
   | { type: "thinking_variant_changed"; variant?: string }
   | { type: "permission_mode_changed"; mode: string }
+  | { type: "client_attached"; client_id: number; client_kind: string }
+  | { type: "client_detached"; client_id: number }
+  | { type: "control_yielded"; client_id: number }
   | { type: "session_title_changed"; session_id: string; title: string }
   | { type: "session_summary_changed"; session_id: string; summary: string };
 
@@ -350,6 +354,7 @@ export interface MewClientEvents {
     session_id: string;
     model?: string;
     provider?: string;
+    permission_mode?: string;
   }) => void;
   provider: (ev: ProviderEventWire) => void;
   "user-message": (data: { text: string }) => void;
@@ -408,6 +413,9 @@ export interface MewClientEvents {
   "model-switched": (data: { provider: string; model: string }) => void;
   "thinking-variant-changed": (data: { variant: string | null }) => void;
   "permission-mode-changed": (data: { mode: string }) => void;
+  "client-attached": (data: { client_id: number; client_kind: string }) => void;
+  "client-detached": (data: { client_id: number }) => void;
+  "control-yielded": (data: { client_id: number }) => void;
   "session-title-changed": (data: { session_id: string; title: string }) => void;
   "session-summary-changed": (data: { session_id: string; summary: string }) => void;
 
@@ -522,7 +530,7 @@ export class MewClient {
       };
       this.on("session-ready", onReady);
       this.on("errorMessage", onError);
-      this.send({ type: "new_session", cwd });
+      this.send({ type: "new_session", cwd, client_kind: "web" });
     });
   }
 
@@ -587,7 +595,7 @@ export class MewClient {
       };
       this.on("session-ready", onReady);
       this.on("errorMessage", onError);
-      this.send({ type: "attach_session", session_id });
+      this.send({ type: "attach_session", session_id, client_kind: "web" });
     });
   }
 
@@ -675,6 +683,11 @@ export class MewClient {
       this.on("permission-mode-changed", onChanged);
       this.send({ type: "set_permission_mode", mode });
     });
+  }
+
+  /** Yield control of the session. Advisory — other clients can become active. */
+  yieldControl(): void {
+    this.send({ type: "yield_control" });
   }
 
   // -------------------------------------------------------------------------
@@ -836,6 +849,18 @@ export class MewClient {
         break;
       case "permission_mode_changed":
         this.emit("permission-mode-changed", { mode: msg.mode });
+        break;
+      case "client_attached":
+        this.emit("client-attached", {
+          client_id: msg.client_id,
+          client_kind: msg.client_kind,
+        });
+        break;
+      case "client_detached":
+        this.emit("client-detached", { client_id: msg.client_id });
+        break;
+      case "control_yielded":
+        this.emit("control-yielded", { client_id: msg.client_id });
         break;
       case "session_title_changed":
         this.emit("session-title-changed", {

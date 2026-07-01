@@ -331,10 +331,11 @@ where
         };
 
         match client_msg {
-            ClientMessage::NewSession { cwd } => {
+            ClientMessage::NewSession { cwd, client_kind } => {
                 match session_manager.create(cwd.map(PathBuf::from)).await {
                     Ok(session) => {
-                        let (cid, _) = session.attach_client(client_tx.clone()).await;
+                        let (cid, was_first) =
+                            session.attach_client(client_tx.clone(), client_kind).await;
                         client_id = Some(cid);
                         attached_session = Some(session.clone());
                         let session_id = session.id.clone();
@@ -352,6 +353,15 @@ where
                             provider,
                             permission_mode,
                         });
+                        // Notify other clients that a new client joined.
+                        if !was_first {
+                            session
+                                .broadcast(ServerMessage::ClientAttached {
+                                    client_id: cid,
+                                    client_kind,
+                                })
+                                .await;
+                        }
                     }
                     Err(e) => {
                         reply(ServerMessage::Error {
@@ -360,10 +370,14 @@ where
                     }
                 }
             }
-            ClientMessage::AttachSession { session_id } => {
+            ClientMessage::AttachSession {
+                session_id,
+                client_kind,
+            } => {
                 match session_manager.attach(&session_id).await {
                     Ok(session) => {
-                        let (cid, _was_first) = session.attach_client(client_tx.clone()).await;
+                        let (cid, was_first) =
+                            session.attach_client(client_tx.clone(), client_kind).await;
                         client_id = Some(cid);
                         attached_session = Some(session.clone());
 
@@ -391,6 +405,16 @@ where
                             msgs
                         };
                         reply(ServerMessage::SessionHistory { messages });
+
+                        // Notify other clients that a new client joined.
+                        if !was_first {
+                            session
+                                .broadcast(ServerMessage::ClientAttached {
+                                    client_id: cid,
+                                    client_kind,
+                                })
+                                .await;
+                        }
                     }
                     Err(AttachError::NotFound) => {
                         reply(ServerMessage::Error {
@@ -682,16 +706,42 @@ where
                     }
                 });
             }
+            ClientMessage::YieldControl {} => {
+                let Some(session) = attached_session.clone() else {
+                    continue;
+                };
+                let Some(cid) = client_id else {
+                    continue;
+                };
+                session
+                    .broadcast(ServerMessage::ControlYielded { client_id: cid })
+                    .await;
+            }
         }
     }
     if let (Some(session), Some(cid)) = (&attached_session, client_id) {
+        // Broadcast departure to remaining clients.
+        session
+            .broadcast(ServerMessage::ClientDetached { client_id: cid })
+            .await;
         let was_last = session.detach_client(cid).await;
         if was_last {
-            let has_turn: bool = session.current_turn_cancel.lock().await.is_some();
-            if has_turn {
-                session.cancel_turn().await;
-            }
-            session_manager.remove(&session.id).await;
+            // Keep-warm: spawn a grace-period timer. If no client reattaches
+            // before it fires, cancel the turn and unload the session.
+            let session_id = session.id.clone();
+            let session_clone = session.clone();
+            let sm = session_manager.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                // Check if the session still has no clients.
+                if session_clone.client_count().await == 0 {
+                    let has_turn: bool = session_clone.current_turn_cancel.lock().await.is_some();
+                    if has_turn {
+                        session_clone.cancel_turn().await;
+                    }
+                    sm.remove(&session_id).await;
+                }
+            });
         }
     }
     drop(client_tx);

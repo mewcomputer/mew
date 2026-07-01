@@ -60,8 +60,14 @@ pub struct Session {
     pub agent: Mutex<Agent>,
     /// Ensures only one turn or model switch runs at a time.
     pub turn_lock: Mutex<()>,
-    /// Broadcast targets: (client_id, sender) per attached client.
-    pub clients: Mutex<Vec<(u64, mpsc::UnboundedSender<ServerMessage>)>>,
+    /// Broadcast targets: (client_id, sender, kind) per attached client.
+    pub clients: Mutex<
+        Vec<(
+            u64,
+            mpsc::UnboundedSender<ServerMessage>,
+            mew_protocol::ClientKind,
+        )>,
+    >,
     /// Pending permission / workspace-permission / subagent-permission requests.
     pub pending_permissions: Mutex<HashMap<u64, oneshot::Sender<PermissionDecision>>>,
     /// Pending ask-user requests.
@@ -103,18 +109,22 @@ impl Session {
     }
 
     /// Attach a client sender. Returns (client_id, was_first_client).
-    pub async fn attach_client(&self, sender: mpsc::UnboundedSender<ServerMessage>) -> (u64, bool) {
+    pub async fn attach_client(
+        &self,
+        sender: mpsc::UnboundedSender<ServerMessage>,
+        client_kind: mew_protocol::ClientKind,
+    ) -> (u64, bool) {
         let mut clients = self.clients.lock().await;
         let was_first = clients.is_empty();
         let client_id = self.next_id();
-        clients.push((client_id, sender));
+        clients.push((client_id, sender, client_kind));
         (client_id, was_first)
     }
 
     /// Detach a client by id. Returns true if this was the last client.
     pub async fn detach_client(&self, client_id: u64) -> bool {
         let mut clients = self.clients.lock().await;
-        clients.retain(|(id, _)| *id != client_id);
+        clients.retain(|(id, _, _)| *id != client_id);
         clients.is_empty()
     }
 
@@ -125,7 +135,7 @@ impl Session {
     /// Broadcast a message to all attached clients. Removes any sender that fails.
     pub async fn broadcast(&self, msg: ServerMessage) {
         let mut clients = self.clients.lock().await;
-        clients.retain(|(_, sender)| sender.send(msg.clone()).is_ok());
+        clients.retain(|(_, sender, _)| sender.send(msg.clone()).is_ok());
     }
 
     /// Cancel the current turn, if any. Also drains pending requests so the

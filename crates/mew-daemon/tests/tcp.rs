@@ -113,7 +113,14 @@ where
 async fn tcp_listener_serves_session_ready() {
     let addr = spawn_daemon_tcp().await;
     let mut ws = connect_tcp(addr).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
 
     let msg = recv_until(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
     assert!(matches!(
@@ -126,7 +133,14 @@ async fn tcp_listener_serves_session_ready() {
 async fn tcp_listener_streams_text_response() {
     let addr = spawn_daemon_tcp().await;
     let mut ws = connect_tcp(addr).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_until(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
 
     send(
@@ -184,8 +198,22 @@ async fn tcp_listener_supports_concurrent_connections() {
     let mut a = connect_tcp(addr).await;
     let mut b = connect_tcp(addr).await;
 
-    send(&mut a, ClientMessage::NewSession { cwd: None }).await;
-    send(&mut b, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut a,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
+    send(
+        &mut b,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
 
     let sa = recv_until(&mut a, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
     let sb = recv_until(&mut b, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
@@ -244,7 +272,14 @@ async fn tcp_listener_accepts_tool_call_shaped_response() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let mut ws = connect_tcp(addr).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_until(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
     send(
         &mut ws,

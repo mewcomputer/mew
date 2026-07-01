@@ -160,7 +160,14 @@ async fn new_session_returns_session_ready() {
     let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
 
     let mut ws = connect(&socket).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
 
     let msg = recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
 
@@ -180,7 +187,14 @@ async fn prompt_streams_text_response_events() {
     let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
 
     let mut ws = connect(&socket).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
 
     send(
@@ -308,7 +322,14 @@ async fn slash_command_clear_returns_slash_result() {
     let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
 
     let mut ws = connect(&socket).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
 
     send(
@@ -336,7 +357,14 @@ async fn slash_command_compact_returns_slash_result() {
     let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
 
     let mut ws = connect(&socket).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
 
     send(
@@ -367,7 +395,14 @@ async fn cancel_during_stream_does_not_panic() {
     let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
 
     let mut ws = connect(&socket).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
 
     send(
@@ -406,7 +441,14 @@ async fn tool_call_response_emits_tool_use_finish() {
     let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
 
     let mut ws = connect(&socket).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
 
     send(
@@ -457,7 +499,14 @@ async fn multiple_sequential_prompts_each_get_session() {
     let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
 
     let mut ws = connect(&socket).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
 
     // First prompt: drain until MessageEnd.
@@ -519,8 +568,22 @@ async fn concurrent_connections_are_independent() {
     let mut ws_a = connect(&socket).await;
     let mut ws_b = connect(&socket).await;
 
-    send(&mut ws_a, ClientMessage::NewSession { cwd: None }).await;
-    send(&mut ws_b, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws_a,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
+    send(
+        &mut ws_b,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
 
     let sa = recv_one_matching(&mut ws_a, |m| {
         matches!(m, ServerMessage::SessionReady { .. })
@@ -554,7 +617,14 @@ async fn part_id_consistent_across_part_start_and_part_end() {
     let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
 
     let mut ws = connect(&socket).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
     send(
         &mut ws,
@@ -602,7 +672,14 @@ async fn fresh_agent_per_connection() {
     let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
 
     let mut ws1 = connect(&socket).await;
-    send(&mut ws1, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws1,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_one_matching(&mut ws1, |m| {
         matches!(m, ServerMessage::SessionReady { .. })
     })
@@ -637,7 +714,14 @@ async fn fresh_agent_per_connection() {
     drop(ws1);
 
     let mut ws2 = connect(&socket).await;
-    send(&mut ws2, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws2,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_one_matching(&mut ws2, |m| {
         matches!(m, ServerMessage::SessionReady { .. })
     })

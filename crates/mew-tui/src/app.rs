@@ -1764,6 +1764,18 @@ impl App {
                 name: "/theme".into(),
                 description: "switch theme (e.g. /theme light, /theme dark)".into(),
             },
+            SlashCommand {
+                name: "/web".into(),
+                description: "show the web UI URL for the current session".into(),
+            },
+            SlashCommand {
+                name: "/resume".into(),
+                description: "resume a session (e.g. /resume <id>)".into(),
+            },
+            SlashCommand {
+                name: "/yield".into(),
+                description: "yield control to other clients".into(),
+            },
         ]
     }
 

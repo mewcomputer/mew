@@ -6,9 +6,11 @@ export type PermissionDecision = "allow_once" | "allow_session" | "deny";
 export type ClientMessage = {
     type: "new_session";
     cwd: string | null;
+    client_kind: string;
 } | {
     type: "attach_session";
     session_id: string;
+    client_kind: string;
 } | {
     type: "list_sessions";
 } | {
@@ -53,6 +55,8 @@ export type ClientMessage = {
 } | {
     type: "set_permission_mode";
     mode: string;
+} | {
+    type: "yield_control";
 };
 export type ProviderEventWire = {
     type: "part_start";
@@ -351,6 +355,16 @@ export type ServerMessage = {
     type: "permission_mode_changed";
     mode: string;
 } | {
+    type: "client_attached";
+    client_id: number;
+    client_kind: string;
+} | {
+    type: "client_detached";
+    client_id: number;
+} | {
+    type: "control_yielded";
+    client_id: number;
+} | {
     type: "session_title_changed";
     session_id: string;
     title: string;
@@ -382,6 +396,7 @@ export interface MewClientEvents {
         session_id: string;
         model?: string;
         provider?: string;
+        permission_mode?: string;
     }) => void;
     provider: (ev: ProviderEventWire) => void;
     "user-message": (data: {
@@ -468,6 +483,16 @@ export interface MewClientEvents {
     }) => void;
     "permission-mode-changed": (data: {
         mode: string;
+    }) => void;
+    "client-attached": (data: {
+        client_id: number;
+        client_kind: string;
+    }) => void;
+    "client-detached": (data: {
+        client_id: number;
+    }) => void;
+    "control-yielded": (data: {
+        client_id: number;
     }) => void;
     "session-title-changed": (data: {
         session_id: string;
@@ -559,6 +584,8 @@ export declare class MewClient {
      *  "standard", "permissive", "auto", "auto_plus", "dangerous".
      *  Resolves when the daemon confirms via `permission-mode-changed`. */
     setPermissionMode(mode: string): Promise<string | null>;
+    /** Yield control of the session. Advisory — other clients can become active. */
+    yieldControl(): void;
     on<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     off<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     private emit;

@@ -203,7 +203,14 @@ async fn bin_e2e_daemon_plus_bridge_full_round_trip() -> Result<()> {
     let (mut ws, _) = client_async(req, stream).await.context("ws handshake")?;
 
     // Send NewSession, expect SessionReady.
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await?;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await?;
     let session_msgs = recv_until(
         &mut ws,
         |m| matches!(m, ServerMessage::SessionReady { .. }),

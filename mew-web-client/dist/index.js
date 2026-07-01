@@ -117,7 +117,7 @@ export class MewClient {
             };
             this.on("session-ready", onReady);
             this.on("errorMessage", onError);
-            this.send({ type: "new_session", cwd });
+            this.send({ type: "new_session", cwd, client_kind: "web" });
         });
     }
     /** Send `prompt`. Streaming events are emitted via the registered handlers. */
@@ -176,7 +176,7 @@ export class MewClient {
             };
             this.on("session-ready", onReady);
             this.on("errorMessage", onError);
-            this.send({ type: "attach_session", session_id });
+            this.send({ type: "attach_session", session_id, client_kind: "web" });
         });
     }
     /** List all sessions known to the daemon (active + persisted idle).
@@ -255,6 +255,10 @@ export class MewClient {
             this.on("permission-mode-changed", onChanged);
             this.send({ type: "set_permission_mode", mode });
         });
+    }
+    /** Yield control of the session. Advisory — other clients can become active. */
+    yieldControl() {
+        this.send({ type: "yield_control" });
     }
     // -------------------------------------------------------------------------
     // Event registration
@@ -401,6 +405,18 @@ export class MewClient {
                 break;
             case "permission_mode_changed":
                 this.emit("permission-mode-changed", { mode: msg.mode });
+                break;
+            case "client_attached":
+                this.emit("client-attached", {
+                    client_id: msg.client_id,
+                    client_kind: msg.client_kind,
+                });
+                break;
+            case "client_detached":
+                this.emit("client-detached", { client_id: msg.client_id });
+                break;
+            case "control_yielded":
+                this.emit("control-yielded", { client_id: msg.client_id });
                 break;
             case "session_title_changed":
                 this.emit("session-title-changed", {

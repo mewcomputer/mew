@@ -220,7 +220,14 @@ async fn five_concurrent_connections_all_get_distinct_sessions() {
         let socket = socket.clone();
         handles.push(tokio::spawn(async move {
             let mut ws = connect(&socket).await;
-            send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+            send(
+                &mut ws,
+                ClientMessage::NewSession {
+                    cwd: None,
+                    client_kind: mew_protocol::ClientKind::Unknown,
+                },
+            )
+            .await;
             let mut session_id = None;
             recv_until(&mut ws, |m| {
                 if let ServerMessage::SessionReady { session_id: id, .. } = m {
@@ -261,7 +268,14 @@ async fn concurrent_prompts_on_same_connection_serialize() {
     ];
     let (_dir, socket) = spawn_daemon_with_scripts(scripts).await;
     let mut ws = connect(&socket).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_until(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
 
     let mut all_part_ids = Vec::new();
@@ -319,8 +333,22 @@ async fn concurrent_prompts_across_connections_do_not_cross_contaminate() {
 
     let mut ws_a = connect(&socket).await;
     let mut ws_b = connect(&socket).await;
-    send(&mut ws_a, ClientMessage::NewSession { cwd: None }).await;
-    send(&mut ws_b, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws_a,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
+    send(
+        &mut ws_b,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_until(&mut ws_a, |m| {
         matches!(m, ServerMessage::SessionReady { .. })
     })
@@ -440,7 +468,14 @@ async fn prompt_during_in_flight_turn_is_serialized() {
     ];
     let (_dir, socket) = spawn_daemon_with_scripts(scripts).await;
     let mut ws = connect(&socket).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_until(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
 
     // Send both prompts back-to-back.
@@ -534,7 +569,14 @@ async fn rapid_fire_cancel_does_not_crash_daemon() {
     // must survive without panicking and remain responsive.
     let (_dir, socket) = spawn_daemon().await;
     let mut ws = connect(&socket).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_until(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
 
     send(
@@ -571,7 +613,14 @@ async fn slash_command_during_in_flight_turn_does_not_block_stream() {
     // processes commands in order without blocking.
     let (_dir, socket) = spawn_daemon().await;
     let mut ws = connect(&socket).await;
-    send(&mut ws, ClientMessage::NewSession { cwd: None }).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
     recv_until(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
 
     send(
