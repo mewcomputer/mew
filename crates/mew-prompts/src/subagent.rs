@@ -54,7 +54,7 @@ mod tests {
             .map(|(_, b)| *b)
             .expect("reviewer body present");
         assert!(body.contains("critical"));
-        assert!(body.contains("warning"));
+        assert!(body.contains("high"));
     }
 
     #[test]

@@ -153,6 +153,18 @@ Current empty state is just text. Make each empty surface feel intentional.
 5. Reasoning timeline — UI-only upgrade.
 6. Right rail for todos/subagents/questions — larger refactor.
 
+## Implementation status
+
+| # | Differentiator | Status | Notes |
+|---|----------------|--------|-------|
+| 1 | Persistent left rail | ✅ Implemented | Workspace header, New/Continue latest buttons, session rows with title/state/model/age/accent bar. |
+| 2 | Signature status footer | ✅ Implemented | Connection dot, model shortcut via `ModelPill`, tokens/cost/subagents/permissions/persona; hidden until connected. |
+| 3 | Input composer as command surface | ✅ Implemented | `ModelPill` + `PersonaPill`, `/` command palette, `@` persona palette, attach button, focus hints, Cmd/Ctrl+K shortcut. |
+| 4 | Tool-call state + sensitivity | ✅ Implemented | State icon/label/elapsed, sensitivity badge, error styling, copy flash, edit/write diff view. |
+| 5 | Reasoning timeline | ✅ Implemented | Collapsed "Reasoning · N steps" chip expanding to a numbered vertical timeline with live streaming indicator. |
+| 6 | Right rail for todos/subagents/questions | ✅ Implemented | Tabs with active counts, dependency expansion, progress messages, question forms. |
+| 7 | Empty states | ✅ Implemented | Chat empty surface with icon, recent sessions, and new-session CTA; footer hides until connected. |
+
 ---
 
 *This doc is a snapshot. Update when a differentiator is implemented or rejected.*

@@ -34,6 +34,8 @@ pub struct ToolCtxShared {
     /// process — so `cd`, `export`, and other state survive between calls.
     /// `None` (the default) means each bash call is independent.
     pub shell_session: Option<crate::tools::shell_session::SharedShellSession>,
+    /// Shared snapshot store for hashline tag binding and recovery.
+    pub snapshot_store: std::sync::Arc<dyn mew_hashline::SnapshotStore>,
 }
 
 impl Default for ToolCtxShared {
@@ -44,6 +46,7 @@ impl Default for ToolCtxShared {
             dispatcher: None,
             secrets: Arc::new(SecretSet::default()),
             shell_session: None,
+            snapshot_store: std::sync::Arc::new(mew_hashline::InMemorySnapshotStore::new()),
         }
     }
 }

@@ -1,0 +1,352 @@
+import {
+  forwardRef,
+  useRef,
+  useState,
+  useImperativeHandle,
+  type KeyboardEvent,
+} from "react";
+import { Square, Paperclip, X, CornerDownLeft } from "lucide-react";
+import { cn } from "../lib/utils";
+import { useSessionStore } from "../stores/session";
+import { useSidebar } from "@/components/ui/sidebar";
+import { ModelPill } from "./model-pill";
+import { PersonaPill } from "./persona-pill";
+
+const PERSONA_OPTIONS = ["default", "code-reviewer", "explainer"];
+
+interface InputAreaProps {
+  onSend: (text: string) => void;
+  onSlash?: (command: string) => void;
+  onCancel: () => void;
+  connected: boolean;
+}
+
+interface SlashCommand {
+  command: string;
+  description: string;
+}
+
+const SLASH_COMMANDS: SlashCommand[] = [
+  { command: "/clear", description: "Clear the current session" },
+  { command: "/compact", description: "Compact message history" },
+  { command: "/help", description: "Show available commands" },
+];
+
+/** Minimal Claude Code-style composer: a single rounded bar with attach,
+ *  textarea, and send/stop. Slash commands and @ personas still surface as
+ *  small palettes when the user types `/` or `@`. */
+export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
+  function InputArea({ onSend, onSlash, onCancel, connected }, ref) {
+    const { isMobile } = useSidebar();
+    const [text, setText] = useState("");
+    const [files, setFiles] = useState<File[]>([]);
+    const [menuOpen, setMenuOpen] = useState<"slash" | "persona" | null>(null);
+    const [menuIndex, setMenuIndex] = useState(0);
+    const [focused, setFocused] = useState(false);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    useImperativeHandle(ref, () => textareaRef.current!, []);
+
+    const hasStreaming = useSessionStore((s) => s.streamingPartId !== null);
+    const setPersona = useSessionStore((s) => s.setCurrentPersona);
+
+    const filteredSlash = SLASH_COMMANDS.filter(
+      (c) =>
+        text === "/" || c.command.toLowerCase().startsWith(text.toLowerCase()),
+    );
+
+    const filteredPersonas = PERSONA_OPTIONS.filter(
+      (p) =>
+        text === "@" || p.toLowerCase().startsWith(text.slice(1).toLowerCase()),
+    );
+
+    const activeMenu = menuOpen === "slash" ? filteredSlash : filteredPersonas;
+
+    const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (menuOpen && activeMenu.length > 0) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setMenuIndex((i) => (i + 1) % activeMenu.length);
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setMenuIndex((i) => (i - 1 + activeMenu.length) % activeMenu.length);
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          if (menuOpen === "slash") selectSlash(filteredSlash[menuIndex]!);
+          else selectPersona(filteredPersonas[menuIndex] ?? "default");
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          closeMenu();
+          return;
+        }
+      }
+
+      if (isMobile) {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          handleSubmit();
+        }
+      } else {
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          handleSubmit();
+        }
+      }
+
+      if (e.key === "Escape" && hasStreaming) {
+        e.preventDefault();
+        onCancel();
+      }
+    };
+
+    const handleChange = (value: string) => {
+      setText(value);
+      if (value.startsWith("/")) {
+        setMenuOpen("slash");
+        setMenuIndex(0);
+      } else if (value.startsWith("@")) {
+        setMenuOpen("persona");
+        setMenuIndex(0);
+      } else {
+        closeMenu();
+      }
+      autoResize();
+    };
+
+    const closeMenu = () => {
+      setMenuOpen(null);
+      setMenuIndex(0);
+    };
+
+    const handleSubmit = () => {
+      const trimmed = text.trim();
+      if (!trimmed || !connected) return;
+      if (menuOpen === "slash" && filteredSlash.length > 0) {
+        selectSlash(filteredSlash[0]!);
+        return;
+      }
+      if (menuOpen === "persona" && filteredPersonas.length > 0) {
+        selectPersona(filteredPersonas[0]!);
+        return;
+      }
+      onSend(trimmed);
+      setText("");
+      setFiles([]);
+      closeMenu();
+      if (textareaRef.current) textareaRef.current.style.height = "auto";
+    };
+
+    const selectSlash = (cmd: SlashCommand) => {
+      if (onSlash) {
+        onSlash(cmd.command);
+      }
+      setText("");
+      closeMenu();
+      if (textareaRef.current) textareaRef.current.style.height = "auto";
+    };
+
+    const selectPersona = (name: string) => {
+      setPersona(name === "default" ? null : name);
+      setText("");
+      closeMenu();
+      if (textareaRef.current) textareaRef.current.style.height = "auto";
+    };
+
+    const autoResize = () => {
+      const el = textareaRef.current;
+      if (el) {
+        el.style.height = "auto";
+        el.style.height =
+          Math.min(el.scrollHeight, isMobile ? 120 : 160) + "px";
+      }
+    };
+
+    const handleAttach = (next: FileList | null) => {
+      if (!next) return;
+      setFiles((prev) => [...prev, ...Array.from(next)]);
+    };
+
+    const removeFile = (name: string) => {
+      setFiles((prev) => prev.filter((f) => f.name !== name));
+    };
+
+    return (
+      <div
+        // -mb-6 to line up with the status footer
+        className="shrink-0 p-3 pt-0 sm:p-4 sm:pt-0 -mb-6"
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      >
+        <div className="mx-auto max-w-3xl space-y-1">
+          <div className="relative">
+            <div
+              className={cn(
+                "flex items-end gap-2 rounded-xl border bg-muted/40 px-3 py-2 transition-colors",
+                focused ? "border-ring bg-muted" : "border-border",
+              )}
+            >
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={!connected}
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+                title="Attach file"
+              >
+                <Paperclip className="h-4 w-4" />
+              </button>
+
+              <textarea
+                ref={textareaRef}
+                value={text}
+                onChange={(e) => handleChange(e.target.value)}
+                onKeyDown={handleKeyDown}
+                onFocus={() => setFocused(true)}
+                onBlur={() => setFocused(false)}
+                placeholder={connected ? "Ask mew anything…" : "Connecting…"}
+                disabled={!connected}
+                rows={1}
+                className="flex-1 resize-none bg-transparent py-1.5 text-sm leading-5 text-foreground placeholder:text-muted-foreground focus:outline-hidden"
+              />
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={(e) => handleAttach(e.target.files)}
+              />
+
+              {hasStreaming ? (
+                <button
+                  onClick={onCancel}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-destructive/50 text-destructive transition-colors hover:bg-destructive/10"
+                  title="Cancel"
+                >
+                  <Square className="h-4 w-4" />
+                </button>
+              ) : (
+                <button
+                  onClick={handleSubmit}
+                  disabled={!text.trim() || !connected}
+                  className={cn(
+                    "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50",
+                  )}
+                  title="Send"
+                >
+                  <CornerDownLeft className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+
+            {menuOpen === "slash" && filteredSlash.length > 0 && (
+              <MenuPanel title="Commands">
+                {filteredSlash.map((cmd, i) => (
+                  <MenuRow
+                    key={cmd.command}
+                    active={i === menuIndex}
+                    onClick={() => selectSlash(cmd)}
+                    primary={cmd.command}
+                    secondary={cmd.description}
+                  />
+                ))}
+              </MenuPanel>
+            )}
+
+            {menuOpen === "persona" && filteredPersonas.length > 0 && (
+              <MenuPanel title="Personas">
+                {filteredPersonas.map((p, i) => (
+                  <MenuRow
+                    key={p}
+                    active={i === menuIndex}
+                    onClick={() => selectPersona(p)}
+                    primary={p}
+                  />
+                ))}
+              </MenuPanel>
+            )}
+          </div>
+
+          <div className="flex items-start justify-between gap-3">
+            {files.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {files.map((f) => (
+                  <span
+                    key={f.name}
+                    className="flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                  >
+                    {f.name}
+                    <button
+                      onClick={() => removeFile(f.name)}
+                      className="rounded-full hover:text-foreground"
+                      title="Remove"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <div />
+            )}
+          </div>
+          <div className="flex gap-2">
+            <PersonaPill />
+            <ModelPill />
+          </div>
+        </div>
+      </div>
+    );
+  },
+);
+
+function MenuPanel({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="absolute bottom-full left-0 z-30 mb-1 w-56 rounded-lg border border-border bg-popover shadow-lg">
+      <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function MenuRow({
+  active,
+  onClick,
+  primary,
+  secondary,
+}: {
+  active: boolean;
+  onClick: () => void;
+  primary: string;
+  secondary?: string;
+}) {
+  return (
+    <button
+      onMouseDown={(e) => {
+        e.preventDefault();
+        onClick();
+      }}
+      className={cn(
+        "flex w-full flex-col gap-0.5 px-2 py-1.5 text-left transition-colors",
+        active ? "bg-accent" : "hover:bg-accent",
+      )}
+    >
+      <span className="text-xs font-medium text-foreground">{primary}</span>
+      {secondary && (
+        <span className="text-[10px] text-muted-foreground">{secondary}</span>
+      )}
+    </button>
+  );
+}

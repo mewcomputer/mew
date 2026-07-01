@@ -42,9 +42,15 @@ async fn write_then_read_round_trip_preserves_content() {
         )
         .await
         .expect("read succeeds");
-    assert_eq!(
-        result.output, content,
-        "read should return exactly what was written"
+    assert!(
+        result.output.contains("1:first line"),
+        "read output should include numbered content: {}",
+        result.output
+    );
+    assert!(
+        result.output.starts_with("[hello.txt#"),
+        "read output should start with a hashline header: {}",
+        result.output
     );
 }
 
@@ -216,9 +222,14 @@ async fn read_offset_and_limit_pages_through_long_file() {
         .await
         .unwrap();
     let lines: Vec<&str> = page.output.lines().collect();
-    assert_eq!(lines.len(), 3, "limit=3 must give 3 lines: {lines:?}");
-    assert_eq!(lines[0], "line 6", "offset=5 skips lines 1-5");
-    assert_eq!(lines[2], "line 8");
+    // First line is the hashline header; the next three are numbered content.
+    assert_eq!(
+        lines.len(),
+        4,
+        "limit=3 must give header + 3 lines: {lines:?}"
+    );
+    assert_eq!(lines[1], "6:line 6", "offset=5 skips lines 1-5");
+    assert_eq!(lines[3], "8:line 8");
 }
 
 #[tokio::test]

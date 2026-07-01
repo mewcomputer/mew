@@ -13,7 +13,8 @@ impl Tool for Read {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file."
+        "Read the contents of a file. Output includes a [path#hash] header and \
+         line-numbered content so follow-up hashline edits can target exact lines."
     }
 
     fn schema(&self) -> &Value {
@@ -49,30 +50,34 @@ impl Tool for Read {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidInput("missing path".into()))?;
-        let path = ctx.cwd.join(path);
+        let abs_path = ctx.cwd.join(path);
+        let display_path = abs_path
+            .strip_prefix(&ctx.cwd)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string());
 
         // Check file size before reading.
-        let metadata = tokio::fs::metadata(&path)
+        let metadata = tokio::fs::metadata(&abs_path)
             .await
-            .map_err(|e| ToolError::Execution(format!("{}: {}", path.display(), e)))?;
+            .map_err(|e| ToolError::Execution(format!("{}: {}", abs_path.display(), e)))?;
         if metadata.len() > MAX_FILE_SIZE {
             return Err(ToolError::Execution(format!(
                 "{}: file too large ({} bytes, max {})",
-                path.display(),
+                abs_path.display(),
                 metadata.len(),
                 MAX_FILE_SIZE
             )));
         }
 
-        let content = tokio::fs::read_to_string(&path)
+        let content = tokio::fs::read_to_string(&abs_path)
             .await
-            .map_err(|e| ToolError::Execution(format!("{}: {}", path.display(), e)))?;
+            .map_err(|e| ToolError::Execution(format!("{}: {}", abs_path.display(), e)))?;
 
         // Detect binary files via null byte.
         if content.contains('\0') {
             return Err(ToolError::Execution(format!(
                 "{}: cannot read binary file",
-                path.display()
+                abs_path.display()
             )));
         }
 
@@ -82,16 +87,23 @@ impl Tool for Read {
             .and_then(|v| v.as_u64())
             .map(|v| v as usize);
 
-        let content = if offset > 0 || limit.is_some() {
-            let lines: Vec<&str> = content.lines().collect();
-            let start = offset.min(lines.len());
-            let end = limit
-                .map(|l| (start + l).min(lines.len()))
-                .unwrap_or(lines.len());
-            lines[start..end].join("\n")
-        } else {
-            content
-        };
+        // Normalize and record a snapshot for hashline edits before any
+        // redaction or slicing changes the visible text.
+        let normalized =
+            mew_hashline::format::normalize_to_lf(mew_hashline::format::strip_bom(&content).0);
+        let hash = mew_hashline::format::compute_file_hash(&normalized);
+
+        let all_lines: Vec<&str> = content.lines().collect();
+        let start = offset.min(all_lines.len());
+        let end = limit
+            .map(|l| (start + l).min(all_lines.len()))
+            .unwrap_or(all_lines.len());
+        let displayed = all_lines[start..end].join("\n");
+
+        let seen_lines: Vec<usize> = (start..end).map(|i| i + 1).collect();
+        let canonical = abs_path.to_string_lossy().to_string();
+        ctx.snapshot_store
+            .record(&canonical, &normalized, Some(&seen_lines));
 
         // Strip configured secret words from the returned content. This is
         // a second line of defense behind the permission-engine pre-check:
@@ -99,11 +111,16 @@ impl Tool for Read {
         // values (API keys, tokens) are still scrubbed so they do not land
         // in the model's context. The structure (variable names, line
         // shape) is preserved so the model can still reason about the file.
-        let (content, redacted) = crate::secrets::redact_secret_words(&content, &ctx.secrets);
-        let content = crate::secrets::annotate_redaction(content, redacted);
+        let (displayed, redacted) = crate::secrets::redact_secret_words(&displayed, &ctx.secrets);
+        let displayed = crate::secrets::annotate_redaction(displayed, redacted);
+
+        let start_line = start + 1;
+        let numbered = mew_hashline::format::format_numbered_lines(&displayed, start_line);
+        let header = mew_hashline::format::format_hashline_header(&display_path, &hash);
+        let output = format!("{header}\n{numbered}");
 
         Ok(ToolOutput {
-            output: content,
+            output,
             error: String::new(),
             diff: None,
             metadata: None,
@@ -114,10 +131,8 @@ impl Tool for Read {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::*;
     use crate::SecretSet;
     use std::path::PathBuf;
-    use std::sync::Arc;
 
     fn dummy_ctx(cwd: PathBuf) -> ToolCtx {
         ToolCtx::test_new(cwd)
@@ -141,8 +156,9 @@ mod tests {
         let ctx = dummy_ctx(dir.path().to_path_buf());
         let input = serde_json::json!({"path": "test.txt"});
         let result = tool.execute(ctx, input).await.unwrap();
-        assert_eq!(result.output, "hello world");
-        assert!(result.error.is_empty());
+        assert!(result.output.contains("hello world"));
+        assert!(result.output.starts_with("[test.txt#"));
+        assert!(result.output.contains("1:hello world"));
     }
 
     #[tokio::test]
@@ -157,7 +173,9 @@ mod tests {
         let ctx = dummy_ctx(dir.path().to_path_buf());
         let input = serde_json::json!({"path": "test.txt", "offset": 1, "limit": 2});
         let result = tool.execute(ctx, input).await.unwrap();
-        assert_eq!(result.output, "line2\nline3");
+        assert!(result.output.contains("2:line2"));
+        assert!(result.output.contains("3:line3"));
+        assert!(!result.output.contains("line1"));
     }
 
     #[tokio::test]
@@ -200,7 +218,7 @@ mod tests {
         let ctx = dummy_ctx(dir.path().to_path_buf());
         let input = serde_json::json!({"path": "plain.txt"});
         let result = tool.execute(ctx, input).await.unwrap();
-        assert_eq!(result.output, "just text");
+        assert!(result.output.contains("just text"));
         assert!(!result.output.contains("redacted"));
     }
 

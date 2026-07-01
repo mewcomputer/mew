@@ -7,13 +7,17 @@ use ratatui::{
 };
 
 use super::display_width;
-use super::STATUS_BG;
+
 use crate::app::{byte_at_display_offset, App, Mode};
 
 pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let style = match app.mode {
-        Mode::SlashCommand => Style::default().fg(Color::Yellow).bg(STATUS_BG),
-        _ => Style::default().fg(Color::White).bg(STATUS_BG),
+        Mode::SlashCommand => Style::default()
+            .fg(Color::Yellow)
+            .bg(app.theme.tokens.status_bg),
+        _ => Style::default()
+            .fg(Color::White)
+            .bg(app.theme.tokens.status_bg),
     };
 
     let content_width = area.width.saturating_sub(2);
@@ -21,7 +25,7 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let input_height = (visual_line_count as u16).min(12) + 2;
     let input_area = Rect::new(area.x, area.y, area.width, input_height.min(area.height));
 
-    let bg_block = Block::default().style(Style::default().bg(STATUS_BG));
+    let bg_block = Block::default().style(Style::default().bg(app.theme.tokens.status_bg));
     f.render_widget(bg_block, input_area);
 
     let content_area = Rect::new(
@@ -39,12 +43,19 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             .unwrap_or(' ');
         Span::styled(
             format!("{} ", frame),
-            Style::default().fg(Color::Yellow).bg(STATUS_BG),
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(app.theme.tokens.status_bg),
         )
     } else {
-        Span::styled("> ", Style::default().fg(Color::Cyan).bg(STATUS_BG))
+        Span::styled(
+            "> ",
+            Style::default()
+                .fg(Color::Cyan)
+                .bg(app.theme.tokens.status_bg),
+        )
     };
-    let indent = Span::styled("  ", Style::default().bg(STATUS_BG));
+    let indent = Span::styled("  ", Style::default().bg(app.theme.tokens.status_bg));
 
     let (cursor_visual_row, cursor_visual_col) = app.cursor_visual_row_col(content_width);
     let prefix_width = 2usize;
@@ -104,9 +115,13 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         let search_y = input_area.y + input_area.height;
         let search_area = Rect::new(input_area.x, search_y, input_area.width, 1);
         let search_style = if match_count > 0 {
-            Style::default().fg(Color::Green).bg(STATUS_BG)
+            Style::default()
+                .fg(Color::Green)
+                .bg(app.theme.tokens.status_bg)
         } else {
-            Style::default().fg(Color::Red).bg(STATUS_BG)
+            Style::default()
+                .fg(Color::Red)
+                .bg(app.theme.tokens.status_bg)
         };
         let text = Text::from(Line::from(Span::styled(prompt, search_style)));
         f.render_widget(Paragraph::new(text), search_area);
@@ -124,7 +139,9 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             let prompt = format!("paste {} chars? [y/N]", pending.len());
             let confirm_y = input_area.y + input_area.height;
             let confirm_area = Rect::new(input_area.x, confirm_y, input_area.width, 1);
-            let style = Style::default().fg(Color::Yellow).bg(STATUS_BG);
+            let style = Style::default()
+                .fg(Color::Yellow)
+                .bg(app.theme.tokens.status_bg);
             let text = Text::from(Line::from(Span::styled(prompt, style)));
             f.render_widget(Paragraph::new(text), confirm_area);
         }
@@ -159,7 +176,9 @@ pub(super) fn draw_companion_compact(f: &mut Frame, app: &App, _input_area: Rect
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 &bubble_text,
-                Style::default().fg(Color::Yellow).bg(STATUS_BG),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .bg(app.theme.tokens.status_bg),
             ))),
             Rect::new(base_x, _input_area.y + 1, bubble_text.len() as u16 + 1, 1),
         );
@@ -171,7 +190,9 @@ pub(super) fn draw_companion_compact(f: &mut Frame, app: &App, _input_area: Rect
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 face,
-                Style::default().fg(Color::Green).bg(STATUS_BG),
+                Style::default()
+                    .fg(Color::Green)
+                    .bg(app.theme.tokens.status_bg),
             ))),
             Rect::new(base_x + max_w.saturating_sub(lw), _input_area.y + 2, lw, 1),
         );

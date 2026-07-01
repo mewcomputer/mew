@@ -1,10 +1,45 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0"
+    />
+    <meta name="theme-color" content="#1e1e2e" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="mobile-web-app-capable" content="yes" />
     <title>mew</title>
+    <script>
+      (function () {
+        var defaultDark = "evergarden-winter";
+        var defaultLight = "catppuccin-latte";
+
+        var key = "spwn-state-theme";
+        var theme = null;
+        try {
+          var stored = localStorage.getItem(key);
+          if (stored) theme = JSON.parse(stored);
+        } catch (e) {}
+
+        if (!theme) {
+          if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+            theme = defaultDark;
+          } else {
+            theme = defaultLight;
+          }
+        }
+
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

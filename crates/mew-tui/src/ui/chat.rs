@@ -12,8 +12,7 @@ use std::rc::Rc;
 use super::display_width;
 
 use super::{
-    BASH_LINES_COLLAPSED, BASH_LINES_EXPANDED, DIFF_LINES_MAX, TOOL_BG, TOOL_LINES_LIVE,
-    TOOL_LINES_MAX,
+    BASH_LINES_COLLAPSED, BASH_LINES_EXPANDED, DIFF_LINES_MAX, TOOL_LINES_LIVE, TOOL_LINES_MAX,
 };
 use crate::app::{byte_at_display_offset, App, ToolDisplayState};
 use mew_message::{Part, Role, ToolState};
@@ -135,10 +134,10 @@ impl<'a, 't> ChatLineCtx<'a, 't> {
 
 pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     let mut text = Text::default();
-    let tool_bg_style = Style::default().bg(TOOL_BG);
+    let tool_bg_style = Style::default().bg(app.theme.tokens.tool_bg);
     let msg_count = app.messages.len();
     // Reserve the rightmost 1 column for the scrollbar so tool blocks (which
-    // paint TOOL_BG across the full paragraph width) can't cover it. The
+    // paint app.theme.tokens.tool_bg across the full paragraph width) can't cover it. The
     // down-indicator then overlays the last column of the chat (like the
     // up-indicator at the top-left).
     let scrollbar_area = Rect {
@@ -325,7 +324,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                 Part::ToolCall(tc) => {
                     let (state_label, state_color) = tool_call_label_and_color(app, tc);
 
-                    if let Some(line) = push_tool_edge(tool_width, true, TOOL_BG) {
+                    if let Some(line) = push_tool_edge(tool_width, true, app.theme.tokens.tool_bg) {
                         sel_ctx.push_line(line);
                     }
 
@@ -337,7 +336,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                 format!("{} {}", state_label, tc.tool_name),
                                 Style::default()
                                     .fg(state_color)
-                                    .bg(TOOL_BG)
+                                    .bg(app.theme.tokens.tool_bg)
                                     .add_modifier(Modifier::BOLD),
                             ),
                         ],
@@ -351,7 +350,9 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                 Span::styled("      ", tool_bg_style),
                                 Span::styled(
                                     args,
-                                    Style::default().fg(Color::DarkGray).bg(TOOL_BG),
+                                    Style::default()
+                                        .fg(Color::DarkGray)
+                                        .bg(app.theme.tokens.tool_bg),
                                 ),
                             ],
                             tool_bg_style,
@@ -365,7 +366,12 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                             let lines = parsed.lines;
                             let skip = lines.len().saturating_sub(TOOL_LINES_LIVE);
                             for line in lines.into_iter().skip(skip) {
-                                for wrapped in wrap_tool_line(tool_width, line, "      ", TOOL_BG) {
+                                for wrapped in wrap_tool_line(
+                                    tool_width,
+                                    line,
+                                    "      ",
+                                    app.theme.tokens.tool_bg,
+                                ) {
                                     sel_ctx.push_line(wrapped);
                                 }
                             }
@@ -395,24 +401,32 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                             Span::styled("      ", tool_bg_style),
                                             Span::styled(
                                                 format!("... ({} earlier lines)", skip),
-                                                Style::default().fg(Color::DarkGray).bg(TOOL_BG),
+                                                Style::default()
+                                                    .fg(Color::DarkGray)
+                                                    .bg(app.theme.tokens.tool_bg),
                                             ),
                                         ],
                                         tool_bg_style,
                                     ));
                                 }
                                 for line in lines.into_iter().skip(skip) {
-                                    for wrapped in
-                                        wrap_tool_line(tool_width, line, "      ", TOOL_BG)
-                                    {
+                                    for wrapped in wrap_tool_line(
+                                        tool_width,
+                                        line,
+                                        "      ",
+                                        app.theme.tokens.tool_bg,
+                                    ) {
                                         sel_ctx.push_line(wrapped);
                                     }
                                 }
                             } else {
                                 for line in lines.into_iter().take(TOOL_LINES_MAX) {
-                                    for wrapped in
-                                        wrap_tool_line(tool_width, line, "      ", TOOL_BG)
-                                    {
+                                    for wrapped in wrap_tool_line(
+                                        tool_width,
+                                        line,
+                                        "      ",
+                                        app.theme.tokens.tool_bg,
+                                    ) {
                                         sel_ctx.push_line(wrapped);
                                     }
                                 }
@@ -426,7 +440,9 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                                     "... ({} more lines)",
                                                     line_count - TOOL_LINES_MAX
                                                 ),
-                                                Style::default().fg(Color::DarkGray).bg(TOOL_BG),
+                                                Style::default()
+                                                    .fg(Color::DarkGray)
+                                                    .bg(app.theme.tokens.tool_bg),
                                             ),
                                         ],
                                         tool_bg_style,
@@ -437,11 +453,15 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                         if let Some(diff) = diff {
                             for line in diff.lines().take(DIFF_LINES_MAX) {
                                 let style = if line.starts_with('+') {
-                                    Style::default().fg(Color::Green).bg(TOOL_BG)
+                                    Style::default()
+                                        .fg(Color::Green)
+                                        .bg(app.theme.tokens.tool_bg)
                                 } else if line.starts_with('-') {
-                                    Style::default().fg(Color::Red).bg(TOOL_BG)
+                                    Style::default().fg(Color::Red).bg(app.theme.tokens.tool_bg)
                                 } else {
-                                    Style::default().fg(Color::DarkGray).bg(TOOL_BG)
+                                    Style::default()
+                                        .fg(Color::DarkGray)
+                                        .bg(app.theme.tokens.tool_bg)
                                 };
                                 sel_ctx.push_line(push_tool_line(
                                     tool_width,
@@ -463,7 +483,9 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                                 "... ({} more lines)",
                                                 diff_lines - DIFF_LINES_MAX
                                             ),
-                                            Style::default().fg(Color::DarkGray).bg(TOOL_BG),
+                                            Style::default()
+                                                .fg(Color::DarkGray)
+                                                .bg(app.theme.tokens.tool_bg),
                                         ),
                                     ],
                                     tool_bg_style,
@@ -475,14 +497,20 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                         if !err.is_empty() {
                             let parsed = err.as_str().into_text().unwrap_or_default();
                             for line in parsed.lines {
-                                for wrapped in wrap_tool_line(tool_width, line, "      ", TOOL_BG) {
+                                for wrapped in wrap_tool_line(
+                                    tool_width,
+                                    line,
+                                    "      ",
+                                    app.theme.tokens.tool_bg,
+                                ) {
                                     sel_ctx.push_line(wrapped);
                                 }
                             }
                         }
                     }
 
-                    if let Some(line) = push_tool_edge(tool_width, false, TOOL_BG) {
+                    if let Some(line) = push_tool_edge(tool_width, false, app.theme.tokens.tool_bg)
+                    {
                         sel_ctx.push_line(line);
                     }
                 }

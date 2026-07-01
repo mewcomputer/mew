@@ -6,7 +6,7 @@ pub type SessionId = Ulid;
 pub type PartId = Ulid;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     User,
     Assistant,
@@ -52,10 +52,15 @@ pub struct Tokens {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum Finish {
+    #[serde(alias = "Stop")]
     Stop,
+    #[serde(alias = "Length")]
     Length,
+    #[serde(alias = "ToolUse")]
     ToolUse,
+    #[serde(alias = "Error")]
     Error,
 }
 
@@ -68,16 +73,27 @@ pub struct MessageError {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
+    #[serde(alias = "ProviderAuth")]
     ProviderAuth,
+    #[serde(alias = "ProviderRateLimit")]
     ProviderRateLimit,
+    #[serde(alias = "ProviderOverload")]
     ProviderOverload,
+    #[serde(alias = "ProviderApi")]
     ProviderApi,
+    #[serde(alias = "ContextOverflow")]
     ContextOverflow,
+    #[serde(alias = "Aborted")]
     Aborted,
+    #[serde(alias = "ToolExec")]
     ToolExec,
+    #[serde(alias = "ToolTimeout")]
     ToolTimeout,
+    #[serde(alias = "McpTransport")]
     McpTransport,
+    #[serde(alias = "Network")]
     Network,
+    #[serde(alias = "Unknown")]
     Unknown,
 }
 
@@ -802,5 +818,47 @@ mod tests {
         }"#;
         let part: Part = serde_json::from_str(json).expect("deserialize tool result");
         assert!(matches!(part, Part::ToolResult(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Backward compatibility: old on-disk data has PascalCase Finish/ErrorKind
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_deserialize_old_pascal_case_finish() {
+        for (name, json) in [
+            ("Stop", r#""Stop""#),
+            ("Length", r#""Length""#),
+            ("ToolUse", r#""ToolUse""#),
+            ("Error", r#""Error""#),
+        ] {
+            let f: Finish = serde_json::from_str(json)
+                .unwrap_or_else(|e| panic!("deserializing old Finish '{name}': {e}"));
+            println!("old Finish '{name}' -> {f:?}");
+        }
+    }
+
+    #[test]
+    fn test_deserialize_old_pascal_case_error_kind() {
+        for (name, json) in [
+            ("ProviderAuth", r#""ProviderAuth""#),
+            ("ToolExec", r#""ToolExec""#),
+            ("Network", r#""Network""#),
+        ] {
+            let k: ErrorKind = serde_json::from_str(json)
+                .unwrap_or_else(|e| panic!("deserializing old ErrorKind '{name}': {e}"));
+            println!("old ErrorKind '{name}' -> {k:?}");
+        }
+    }
+
+    #[test]
+    fn test_deserialize_full_old_format_message() {
+        // Exact on-disk format from a real session with PascalCase finish.
+        let json = r#"{"id":"01KW8ADP3GR61Q5BVYPH4ENW8F","session_id":"01KW8AD5B7X12BN8GNHN19K1DC","role":"assistant","parts":[{"type":"reasoning","id":"01KW8ADP3G54VTAFNDZT78MR3B","message_id":"01KW8ADP3GS7GQ0B5P50W2HT53","session_id":"01KW8ADP3GMWZJ9FK413S764VX","text":"test","signature":""},{"type":"text","id":"01KW8ADREDRW0D5B8DMBRWQ462","message_id":"01KW8ADRED2DNTQ551R18KRQZ2","session_id":"01KW8ADRED41BVWZRJ8HP6NDEK","text":"hey!"}],"time":{"created":1782690797680,"completed":1782690800125},"assistant":{"provider_id":"","model_id":"","cost":0.0,"tokens":{"input":10134,"output":178,"reasoning":0,"cache_read":0,"cache_write":0},"finish":"Stop"}}"#;
+        let msg: Message = serde_json::from_str(json)
+            .expect("should deserialize old-format message with PascalCase finish");
+        assert_eq!(msg.role, Role::Assistant);
+        assert_eq!(msg.parts.len(), 2);
+        assert_eq!(msg.assistant.unwrap().finish, Some(Finish::Stop));
     }
 }

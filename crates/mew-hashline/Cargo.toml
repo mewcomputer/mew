@@ -1,0 +1,25 @@
+[package]
+name = "mew-hashline"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+similar = { workspace = true }
+tokio = { workspace = true }
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-md = { version = "0.5", features = ["tree-sitter"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"

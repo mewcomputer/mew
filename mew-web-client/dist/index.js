@@ -101,7 +101,7 @@ export class MewClient {
     isConnected() {
         return this.ws !== null;
     }
-    /** Send `NewSession`. Resolves with the daemon-assigned session id. */
+    /** Send `new_session`. Resolves with the daemon-assigned session id. */
     async newSession(cwd = null) {
         await this.connect();
         return new Promise((resolve, reject) => {
@@ -117,20 +117,20 @@ export class MewClient {
             };
             this.on("session-ready", onReady);
             this.on("errorMessage", onError);
-            this.send({ type: "NewSession", cwd });
+            this.send({ type: "new_session", cwd });
         });
     }
-    /** Send `Prompt`. Streaming events are emitted via the registered handlers. */
+    /** Send `prompt`. Streaming events are emitted via the registered handlers. */
     prompt(text, attachments = []) {
-        this.send({ type: "Prompt", text, attachments });
+        this.send({ type: "prompt", text, attachments });
     }
-    /** Send `Cancel` to abort the current turn. */
+    /** Send `cancel` to abort the current turn. */
     cancel() {
-        this.send({ type: "Cancel" });
+        this.send({ type: "cancel" });
     }
     /**
      * Send a slash command (e.g. `/clear`, `/compact`). Returns the
-     * `SlashResult.text` if the daemon produces one.
+     * `slash_result.text` if the daemon produces one.
      */
     slashCommand(command) {
         return new Promise((resolve) => {
@@ -139,7 +139,7 @@ export class MewClient {
                 resolve(data.text);
             };
             this.on("slash-result", onResult);
-            this.send({ type: "SlashCommand", command });
+            this.send({ type: "slash_command", command });
             // Daemon may not produce a SlashResult for unknown commands; resolve
             // null after a short grace period if nothing arrived.
             setTimeout(() => {
@@ -148,14 +148,14 @@ export class MewClient {
             }, 5000);
         });
     }
-    /** Respond to a `PermissionRequest`. The callback in `on("permission-request", ...)` calls this. */
+    /** Respond to a `permission_request`. The callback in `on("permission-request", ...)` calls this. */
     respondToPermission(request_id, decision) {
-        this.send({ type: "PermissionResponse", request_id, decision });
+        this.send({ type: "permission_response", request_id, decision });
     }
-    /** Respond to an `AskUserRequest`. The UI calls this after the user
+    /** Respond to an `ask_user_request`. The UI calls this after the user
      *  submits answers to the questions. */
     respondToAskUser(request_id, answers) {
-        this.send({ type: "AskUserResponse", request_id, answers });
+        this.send({ type: "ask_user_response", request_id, answers });
     }
     /** Attach to an existing session (active or idle). If the session is idle,
      *  the daemon loads its persisted history from disk and sends a
@@ -176,7 +176,7 @@ export class MewClient {
             };
             this.on("session-ready", onReady);
             this.on("errorMessage", onError);
-            this.send({ type: "AttachSession", session_id });
+            this.send({ type: "attach_session", session_id });
         });
     }
     /** List all sessions known to the daemon (active + persisted idle).
@@ -188,8 +188,23 @@ export class MewClient {
                 resolve(data.sessions);
             };
             this.on("session-list", onList);
-            this.send({ type: "ListSessions" });
+            this.send({ type: "list_sessions" });
         });
+    }
+    /** Delete a session from disk and remove it from the active list. */
+    deleteSession(session_id) {
+        this.send({ type: "delete_session", session_id });
+    }
+    /** Rename a session (set a custom title). Persists to disk and broadcasts. */
+    renameSession(session_id, title) {
+        this.send({ type: "rename_session", session_id, title });
+    }
+    /** Enable or disable auto-generated session titles. */
+    setAutoTitle(enabled) {
+        this.send({ type: "set_auto_title", enabled });
+    }
+    setAutoSummary(enabled) {
+        this.send({ type: "set_auto_summary", enabled });
     }
     /** List available models from all configured providers. */
     listModels() {
@@ -199,7 +214,7 @@ export class MewClient {
                 resolve(data.models);
             };
             this.on("model-list", onList);
-            this.send({ type: "ListModels" });
+            this.send({ type: "list_models" });
         });
     }
     /** Switch the active session to a different model. Resolves when the
@@ -211,7 +226,7 @@ export class MewClient {
                 resolve(data);
             };
             this.on("model-switched", onSwitched);
-            this.send({ type: "SwitchModel", provider, model });
+            this.send({ type: "switch_model", provider, model });
         });
     }
     /** Set or clear the thinking/reasoning variant. Pass empty string or
@@ -225,7 +240,7 @@ export class MewClient {
                 resolve(data.variant ?? null);
             };
             this.on("thinking-variant-changed", onChanged);
-            this.send({ type: "SetThinkingVariant", variant });
+            this.send({ type: "set_thinking_variant", variant });
         });
     }
     // -------------------------------------------------------------------------
@@ -261,7 +276,7 @@ export class MewClient {
     // -------------------------------------------------------------------------
     dispatch(msg) {
         switch (msg.type) {
-            case "SessionReady":
+            case "session_ready":
                 this.sessionId = msg.session_id;
                 this.emit("session-ready", {
                     session_id: msg.session_id,
@@ -269,42 +284,45 @@ export class MewClient {
                     provider: msg.provider,
                 });
                 break;
-            case "Provider":
+            case "provider":
                 this.emit("provider", msg.event);
                 break;
-            case "ToolStart":
+            case "user_message":
+                this.emit("user-message", { text: msg.text });
+                break;
+            case "tool_start":
                 this.emit("tool-start", { call_id: msg.call_id });
                 break;
-            case "ToolEnd":
+            case "tool_end":
                 this.emit("tool-end", { call_id: msg.call_id, success: msg.success });
                 break;
-            case "PartUpdated":
+            case "part_updated":
                 this.emit("part-updated", { part_id: msg.part_id, part: msg.part });
                 break;
-            case "ToolProgress":
+            case "tool_progress":
                 this.emit("tool-progress", { call_id: msg.call_id, chunk: msg.chunk });
                 break;
-            case "PermissionRequest":
+            case "permission_request":
                 this.emit("permission-request", {
                     request_id: msg.request_id,
                     tool_name: msg.tool_name,
                     input: msg.input,
                 }, (decision) => this.respondToPermission(msg.request_id, decision));
                 break;
-            case "WorkspacePermissionRequest":
+            case "workspace_permission_request":
                 this.emit("workspace-permission-request", {
                     request_id: msg.request_id,
                     path: msg.path,
                 }, (decision) => this.respondToPermission(msg.request_id, decision));
                 break;
-            case "AskUserRequest":
+            case "ask_user_request":
                 this.emit("ask-user-request", {
                     request_id: msg.request_id,
                     call_id: msg.call_id,
                     questions: msg.questions,
                 });
                 break;
-            case "SubagentStart":
+            case "subagent_start":
                 this.emit("subagent-start", {
                     parent_call_id: msg.parent_call_id,
                     name: msg.name,
@@ -312,72 +330,78 @@ export class MewClient {
                     display_name: msg.display_name,
                 });
                 break;
-            case "SubagentStatus":
+            case "subagent_status":
                 this.emit("subagent-status", {
                     parent_call_id: msg.parent_call_id,
                     tool_name: msg.tool_name,
                     message: msg.message,
                 });
                 break;
-            case "SubagentEnd":
+            case "subagent_end":
                 this.emit("subagent-end", {
                     parent_call_id: msg.parent_call_id,
                     child_session_id: msg.child_session_id,
                     outcome: msg.outcome,
                 });
                 break;
-            case "TodosUpdated":
+            case "todos_updated":
                 this.emit("todos-updated", { todos: msg.todos });
                 break;
-            case "PersonaSwitchRequested":
+            case "persona_switch_requested":
                 this.emit("persona-switch-requested", { name: msg.name });
                 break;
-            case "JobUpdate":
+            case "job_update":
                 this.emit("job-update", {
                     job_id: msg.job_id,
                     command: msg.command,
                     state: msg.state,
                 });
                 break;
-            case "SlashResult":
+            case "slash_result":
                 this.emit("slash-result", { text: msg.text });
                 break;
-            case "RequestResolved":
+            case "request_resolved":
                 this.emit("request-resolved", { request_id: msg.request_id });
                 break;
-            case "SessionCleared":
+            case "session_cleared":
                 this.emit("session-cleared");
                 break;
-            case "SessionList":
+            case "session_list":
                 this.emit("session-list", { sessions: msg.sessions });
                 break;
-            case "SessionHistory":
+            case "session_history":
                 this.emit("session-history", { messages: msg.messages });
                 break;
-            case "ModelList":
+            case "model_list":
                 this.emit("model-list", { models: msg.models });
                 break;
-            case "ModelSwitched":
+            case "model_switched":
                 this.emit("model-switched", {
                     provider: msg.provider,
                     model: msg.model,
                 });
                 break;
-            case "ThinkingVariantChanged":
+            case "thinking_variant_changed":
                 this.emit("thinking-variant-changed", {
                     variant: msg.variant ?? null,
                 });
                 break;
-            case "SessionTitleChanged":
+            case "session_title_changed":
                 this.emit("session-title-changed", {
                     session_id: msg.session_id,
                     title: msg.title,
                 });
                 break;
-            case "Error":
+            case "session_summary_changed":
+                this.emit("session-summary-changed", {
+                    session_id: msg.session_id,
+                    summary: msg.summary,
+                });
+                break;
+            case "error":
                 this.emit("errorMessage", { message: msg.message });
                 break;
-            case "ErrorEvent":
+            case "error_event":
                 this.emit("errorEvent", { message: msg.message });
                 break;
         }

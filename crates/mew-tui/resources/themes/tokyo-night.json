@@ -1,0 +1,69 @@
+{
+  "name": "tokyo-night",
+  "mode": "dark",
+  "tokens": {
+    "background": "#1a1b26",
+    "foreground": "#a9b1d6",
+    "card": "#24283b",
+    "card_foreground": "#a9b1d6",
+    "popover": "#24283b",
+    "popover_foreground": "#a9b1d6",
+    "primary": "#7aa2f7",
+    "primary_foreground": "#1a1b26",
+    "secondary": "#414868",
+    "secondary_foreground": "#a9b1d6",
+    "muted": "#414868",
+    "muted_foreground": "#565f89",
+    "accent": "#414868",
+    "accent_foreground": "#a9b1d6",
+    "destructive": "#f7768e",
+    "border": "#414868",
+    "input": "#24283b",
+    "ring": "#7aa2f7",
+    "sidebar": "#16161e",
+    "sidebar_foreground": "#a9b1d6",
+    "sidebar_primary": "#7aa2f7",
+    "sidebar_primary_foreground": "#16161e",
+    "sidebar_accent": "#24283b",
+    "sidebar_accent_foreground": "#a9b1d6",
+    "sidebar_border": "#414868",
+    "sidebar_ring": "#7aa2f7",
+    "chart_1": "#9ece6a",
+    "chart_2": "#7aa2f7",
+    "chart_3": "#e0af68",
+    "chart_4": "#bb9af7",
+    "status_bg": "#16161e",
+    "tool_bg": "#24283b",
+    "divider": "#414868",
+    "red": {
+      "fg": "#f7768e",
+      "med": "#cc4466",
+      "bg": "#3a1c28"
+    },
+    "green": {
+      "fg": "#9ece6a",
+      "med": "#3a8a2a",
+      "bg": "#1c2e18"
+    },
+    "yellow": {
+      "fg": "#e0af68",
+      "med": "#c08830",
+      "bg": "#3a2e0f"
+    },
+    "blue": {
+      "fg": "#7aa2f7",
+      "med": "#3a5ac4",
+      "bg": "#1c2440"
+    },
+    "purple": {
+      "fg": "#bb9af7",
+      "med": "#6b3fa0",
+      "bg": "#2a1f4a"
+    },
+    "cyan": {
+      "fg": "#7dcfff",
+      "med": "#2a8ac4",
+      "bg": "#0f2e3a"
+    }
+  }
+}

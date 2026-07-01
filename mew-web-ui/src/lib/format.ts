@@ -13,8 +13,8 @@ export function formatTokens(n: number): string {
 }
 
 /** Human-readable relative age from a unix timestamp (seconds). */
-export function formatRelativeAge(timestamp: number): string {
-  const diffMs = Date.now() - timestamp * 1000;
+export function formatRelativeAge(timestampMs: number): string {
+  const diffMs = Date.now() - timestampMs;
   const sec = Math.floor(diffMs / 1000);
   if (sec < 60) return "now";
   const min = Math.floor(sec / 60);
@@ -23,7 +23,7 @@ export function formatRelativeAge(timestamp: number): string {
   if (hr < 24) return `${hr}h`;
   const day = Math.floor(hr / 24);
   if (day < 7) return `${day}d`;
-  return new Date(timestamp * 1000).toLocaleDateString();
+  return new Date(timestampMs).toLocaleDateString();
 }
 
 const CONNECTION_DOT: Record<ConnectionState, string> = {

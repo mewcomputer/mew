@@ -46,6 +46,120 @@ impl Agent {
         }
     }
 
+    /// Resolve the effective permission decision for a tool call.
+    ///
+    /// Runs the full permission pipeline: permission engine (including the
+    /// workspace-escape tier and secret-file guard), dispatcher hooks,
+    /// Auto/Auto+ classifier, and user modal. Returns the final decision and
+    /// an optional human-readable deny reason. Callers must apply
+    /// `AllowSession` themselves if they want to cache the grant.
+    async fn resolve_permission_decision(
+        &self,
+        tool_name: &str,
+        hook_call: &HookToolCall,
+        sensitivity: Sensitivity,
+        engine_cwd: &std::path::Path,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+    ) -> (PermissionDecision, Option<String>) {
+        let default_decision = if let Some(ref engine) = self.permission_engine {
+            engine
+                .check(tool_name, &hook_call.input, sensitivity, engine_cwd)
+                .await
+        } else {
+            match sensitivity {
+                Sensitivity::ReadOnly => PermissionDecision::AllowOnce,
+                _ => PermissionDecision::Prompt,
+            }
+        };
+
+        let mut deny_reason: Option<String> = None;
+        let hook_outcome = self
+            .dispatcher
+            .on_permission_ask(hook_call, default_decision)
+            .await;
+        let decision = match hook_outcome {
+            mew_hooks::HookOutcome::Proceed(d) => {
+                if d == PermissionDecision::Deny {
+                    deny_reason = Some("deny rule or workspace-escape tier".into());
+                }
+                d
+            }
+            mew_hooks::HookOutcome::Block(reason) => {
+                tracing::info!(
+                    tool = %hook_call.tool_name,
+                    reason = %reason,
+                    "permission hook blocked the call"
+                );
+                deny_reason = Some(format!("blocked by hook: {reason}"));
+                PermissionDecision::Deny
+            }
+            mew_hooks::HookOutcome::Suppress => {
+                deny_reason = Some("suppressed by hook".into());
+                PermissionDecision::Deny
+            }
+        };
+
+        let decision = if decision == PermissionDecision::Prompt
+            && matches!(
+                self.permission_mode(),
+                mew_hooks::PermissionMode::Auto | mew_hooks::PermissionMode::AutoPlus
+            ) {
+            match self.classify_permission(hook_call).await {
+                Some(mew_prompts::classifier::ClassifierDecision::Allow) => {
+                    PermissionDecision::AllowOnce
+                }
+                Some(mew_prompts::classifier::ClassifierDecision::Deny) => {
+                    deny_reason = Some("classifier denied".into());
+                    PermissionDecision::Deny
+                }
+                Some(mew_prompts::classifier::ClassifierDecision::Escalate) => {
+                    match self.permission_mode() {
+                        mew_hooks::PermissionMode::AutoPlus => {
+                            deny_reason = Some("classifier escalated (Auto+ fail-closed)".into());
+                            PermissionDecision::Deny
+                        }
+                        _ => PermissionDecision::Prompt, // Auto → user modal
+                    }
+                }
+                None => match self.permission_mode() {
+                    mew_hooks::PermissionMode::AutoPlus => {
+                        deny_reason = Some("classifier unavailable (Auto+ fail-closed)".into());
+                        PermissionDecision::Deny
+                    }
+                    _ => PermissionDecision::Prompt, // Auto → user modal
+                },
+            }
+        } else {
+            decision
+        };
+
+        let decision = if decision == PermissionDecision::Prompt {
+            let (perm_tx, perm_rx) = oneshot::channel();
+            let _ = ev_tx
+                .send(AgentEvent::PermissionRequest {
+                    call: hook_call.clone(),
+                    tx: perm_tx,
+                })
+                .await;
+            match perm_rx.await {
+                Ok(d) => {
+                    if d == PermissionDecision::Deny {
+                        deny_reason = Some("user denied".into());
+                    }
+                    d
+                }
+                Err(_) => {
+                    deny_reason = Some("permission request channel closed".into());
+                    PermissionDecision::Deny
+                }
+            }
+        } else {
+            decision
+        };
+
+        (decision, deny_reason)
+    }
+
     pub(crate) async fn execute_pending_tool_calls(
         &self,
         pending: &[ToolCallPart],
@@ -160,115 +274,15 @@ impl Agent {
                 .unwrap_or(Sensitivity::Dangerous);
             let engine_cwd =
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let default_decision = if let Some(ref engine) = self.permission_engine {
-                engine
-                    .check(&tc.tool_name, &hook_call.input, sensitivity, &engine_cwd)
-                    .await
-            } else {
-                match sensitivity {
-                    Sensitivity::ReadOnly => PermissionDecision::AllowOnce,
-                    _ => PermissionDecision::Prompt,
-                }
-            };
-            // Run the permission-ask hook. The hook can proceed with the
-            // engine's default decision, force-block with a reason, or
-            // silently suppress. Block/Suppress collapse to Deny here.
-            // `deny_reason` tracks *why* the decision was Deny so the model
-            // gets an actionable error instead of a bare "permission denied".
-            let mut deny_reason: Option<String> = None;
-            let hook_outcome = self
-                .dispatcher
-                .on_permission_ask(&hook_call, default_decision)
+            let (decision, deny_reason) = self
+                .resolve_permission_decision(
+                    &tc.tool_name,
+                    &hook_call,
+                    sensitivity,
+                    &engine_cwd,
+                    ev_tx,
+                )
                 .await;
-            let decision = match hook_outcome {
-                mew_hooks::HookOutcome::Proceed(d) => {
-                    if d == PermissionDecision::Deny {
-                        deny_reason = Some("deny rule or workspace-escape tier".into());
-                    }
-                    d
-                }
-                mew_hooks::HookOutcome::Block(reason) => {
-                    tracing::info!(
-                        tool = %hook_call.tool_name,
-                        reason = %reason,
-                        "permission hook blocked the call"
-                    );
-                    deny_reason = Some(format!("blocked by hook: {reason}"));
-                    PermissionDecision::Deny
-                }
-                mew_hooks::HookOutcome::Suppress => {
-                    deny_reason = Some("suppressed by hook".into());
-                    PermissionDecision::Deny
-                }
-            };
-
-            // In Auto / Auto+ mode, route the Prompt decision through the
-            // classifier LLM instead of showing the user modal directly.
-            //
-            // - **Auto**: classifier returns Allow → AllowOnce, Deny → Deny,
-            //   Escalate / failure → fall through to user modal (safe default).
-            // - **Auto+**: classifier returns Allow → AllowOnce, Deny /
-            //   Escalate / failure → Deny (fail closed; the user opted into
-            //   "no human in the loop" so uncertainty means no).
-            let decision = if decision == PermissionDecision::Prompt
-                && matches!(
-                    self.permission_mode(),
-                    mew_hooks::PermissionMode::Auto | mew_hooks::PermissionMode::AutoPlus
-                ) {
-                match self.classify_permission(&hook_call).await {
-                    Some(mew_prompts::classifier::ClassifierDecision::Allow) => {
-                        PermissionDecision::AllowOnce
-                    }
-                    Some(mew_prompts::classifier::ClassifierDecision::Deny) => {
-                        deny_reason = Some("classifier denied".into());
-                        PermissionDecision::Deny
-                    }
-                    Some(mew_prompts::classifier::ClassifierDecision::Escalate) => {
-                        match self.permission_mode() {
-                            mew_hooks::PermissionMode::AutoPlus => {
-                                deny_reason =
-                                    Some("classifier escalated (Auto+ fail-closed)".into());
-                                PermissionDecision::Deny
-                            }
-                            _ => PermissionDecision::Prompt, // Auto → user modal
-                        }
-                    }
-                    None => match self.permission_mode() {
-                        // Provider error / timeout / malformed response.
-                        mew_hooks::PermissionMode::AutoPlus => {
-                            deny_reason = Some("classifier unavailable (Auto+ fail-closed)".into());
-                            PermissionDecision::Deny
-                        }
-                        _ => PermissionDecision::Prompt, // Auto → user modal
-                    },
-                }
-            } else {
-                decision
-            };
-
-            let decision = if decision == PermissionDecision::Prompt {
-                let (perm_tx, perm_rx) = oneshot::channel();
-                let _ = ev_tx
-                    .send(AgentEvent::PermissionRequest {
-                        call: hook_call.clone(),
-                        tx: perm_tx,
-                    })
-                    .await;
-                match perm_rx.await {
-                    Ok(d) => {
-                        if d == PermissionDecision::Deny {
-                            deny_reason = Some("user denied".into());
-                        }
-                        d
-                    }
-                    Err(_) => {
-                        deny_reason = Some("permission request channel closed".into());
-                        PermissionDecision::Deny
-                    }
-                }
-            } else {
-                decision
-            };
 
             if decision == PermissionDecision::AllowSession {
                 if let Some(ref engine) = self.permission_engine {
@@ -529,6 +543,7 @@ impl Agent {
                     dispatcher: Some(self.dispatcher.clone()),
                     secrets: self.secrets.clone(),
                     shell_session: self.shell_session.clone(),
+                    snapshot_store: self.snapshot_store.clone(),
                 }),
                 tc.call_id.clone(),
                 self.cancel_token.child_token(),
@@ -1349,15 +1364,44 @@ impl Agent {
                     let cwd = cwd_str
                         .map(std::path::PathBuf::from)
                         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-                    let job_id = self.start_shell_job(command, &cwd).await;
-                    let _ = ev_tx
-                        .send(AgentEvent::JobUpdate {
-                            job_id: job_id.clone(),
-                            command: command.to_string(),
-                            state: "running".into(),
-                        })
+                    let hook_call = mew_hooks::ToolCall {
+                        tool_name: tc.tool_name.clone(),
+                        call_id: tc.call_id.clone(),
+                        input: input.clone(),
+                    };
+                    let sensitivity = self
+                        .tools
+                        .get(&tc.tool_name)
+                        .map(|t| t.sensitivity())
+                        .unwrap_or(Sensitivity::Dangerous);
+                    let (decision, deny_reason) = self
+                        .resolve_permission_decision(
+                            &tc.tool_name,
+                            &hook_call,
+                            sensitivity,
+                            &cwd,
+                            ev_tx,
+                        )
                         .await;
-                    (format!("started job: {}", job_id), true)
+                    if decision == PermissionDecision::AllowSession {
+                        if let Some(ref engine) = self.permission_engine {
+                            engine.add_session_allow(&tc.tool_name).await;
+                        }
+                    }
+                    if decision == PermissionDecision::Deny {
+                        let reason = deny_reason.unwrap_or_else(|| "permission denied".into());
+                        (format!("permission denied: {reason}"), false)
+                    } else {
+                        let job_id = self.start_shell_job(command, &cwd).await;
+                        let _ = ev_tx
+                            .send(AgentEvent::JobUpdate {
+                                job_id: job_id.clone(),
+                                command: command.to_string(),
+                                state: "running".into(),
+                            })
+                            .await;
+                        (format!("started job: {}", job_id), true)
+                    }
                 }
             }
             "job_status" => {
@@ -1422,43 +1466,72 @@ impl Agent {
                     let cwd = cwd_str
                         .map(std::path::PathBuf::from)
                         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-                    let job_id = self.start_shell_job(command, &cwd).await;
-                    let result = self.shell_job_block(&job_id, timeout).await;
-                    let _ = self.cancel_shell_job(&job_id).await;
-                    match result {
-                        Some((ShellJobState::Completed { exit_code: 0 }, output)) => {
-                            let last = output
-                                .lines()
-                                .rev()
-                                .take(20)
-                                .collect::<Vec<_>>()
-                                .into_iter()
-                                .rev()
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            (format!("ready (exit 0)\n\n{}", last), true)
+                    let hook_call = mew_hooks::ToolCall {
+                        tool_name: tc.tool_name.clone(),
+                        call_id: tc.call_id.clone(),
+                        input: input.clone(),
+                    };
+                    let sensitivity = self
+                        .tools
+                        .get(&tc.tool_name)
+                        .map(|t| t.sensitivity())
+                        .unwrap_or(Sensitivity::Dangerous);
+                    let (decision, deny_reason) = self
+                        .resolve_permission_decision(
+                            &tc.tool_name,
+                            &hook_call,
+                            sensitivity,
+                            &cwd,
+                            ev_tx,
+                        )
+                        .await;
+                    if decision == PermissionDecision::AllowSession {
+                        if let Some(ref engine) = self.permission_engine {
+                            engine.add_session_allow(&tc.tool_name).await;
                         }
-                        Some((state, output)) => {
-                            let last = output
-                                .lines()
-                                .rev()
-                                .take(20)
-                                .collect::<Vec<_>>()
-                                .into_iter()
-                                .rev()
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            (
-                                format!(
-                                    "not ready after {}s: {}\n\n{}",
-                                    timeout,
-                                    state.as_str(),
-                                    last
-                                ),
-                                false,
-                            )
+                    }
+                    if decision == PermissionDecision::Deny {
+                        let reason = deny_reason.unwrap_or_else(|| "permission denied".into());
+                        (format!("permission denied: {reason}"), false)
+                    } else {
+                        let job_id = self.start_shell_job(command, &cwd).await;
+                        let result = self.shell_job_block(&job_id, timeout).await;
+                        let _ = self.cancel_shell_job(&job_id).await;
+                        match result {
+                            Some((ShellJobState::Completed { exit_code: 0 }, output)) => {
+                                let last = output
+                                    .lines()
+                                    .rev()
+                                    .take(20)
+                                    .collect::<Vec<_>>()
+                                    .into_iter()
+                                    .rev()
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                (format!("ready (exit 0)\n\n{}", last), true)
+                            }
+                            Some((state, output)) => {
+                                let last = output
+                                    .lines()
+                                    .rev()
+                                    .take(20)
+                                    .collect::<Vec<_>>()
+                                    .into_iter()
+                                    .rev()
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                (
+                                    format!(
+                                        "not ready after {}s: {}\n\n{}",
+                                        timeout,
+                                        state.as_str(),
+                                        last
+                                    ),
+                                    false,
+                                )
+                            }
+                            None => (format!("shell_monitor: job '{}' not found", job_id), false),
                         }
-                        None => (format!("shell_monitor: job '{}' not found", job_id), false),
                     }
                 }
             }

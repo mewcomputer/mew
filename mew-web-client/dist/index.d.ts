@@ -4,53 +4,66 @@ export interface Attachment {
 }
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
 export type ClientMessage = {
-    type: "NewSession";
+    type: "new_session";
     cwd: string | null;
 } | {
-    type: "AttachSession";
+    type: "attach_session";
     session_id: string;
 } | {
-    type: "ListSessions";
+    type: "list_sessions";
 } | {
-    type: "Prompt";
+    type: "delete_session";
+    session_id: string;
+} | {
+    type: "rename_session";
+    session_id: string;
+    title: string;
+} | {
+    type: "set_auto_title";
+    enabled: boolean;
+} | {
+    type: "set_auto_summary";
+    enabled: boolean;
+} | {
+    type: "prompt";
     text: string;
     attachments: Attachment[];
 } | {
-    type: "Cancel";
+    type: "cancel";
 } | {
-    type: "PermissionResponse";
+    type: "permission_response";
     request_id: number;
     decision: PermissionDecision;
 } | {
-    type: "AskUserResponse";
+    type: "ask_user_response";
     request_id: number;
     answers: string[];
 } | {
-    type: "SlashCommand";
+    type: "slash_command";
     command: string;
 } | {
-    type: "ListModels";
+    type: "list_models";
 } | {
-    type: "SwitchModel";
+    type: "switch_model";
     provider: string;
     model: string;
 } | {
-    type: "SetThinkingVariant";
+    type: "set_thinking_variant";
     variant: string;
 };
 export type ProviderEventWire = {
-    type: "PartStart";
+    type: "part_start";
     part: Part;
 } | {
-    type: "PartDelta";
+    type: "part_delta";
     part_id: string;
     field: string;
     delta: string;
 } | {
-    type: "PartEnd";
+    type: "part_end";
     part_id: string;
 } | {
-    type: "MessageEnd";
+    type: "message_end";
     finish: "stop" | "tool_use" | "length" | "content_filter" | "error";
     usage: {
         input: number;
@@ -58,44 +71,44 @@ export type ProviderEventWire = {
     };
     cost: number;
 } | {
-    type: "RetryWait";
+    type: "retry_wait";
     attempt: number;
     max_attempts: number;
     delay_secs: number;
     reason: string;
 } | {
-    type: "Error";
+    type: "error";
     error: MessageError;
 };
 export type Part = {
-    type: "Text";
+    type: "text";
     base: PartBase;
     text: string;
     synthetic: boolean;
 } | {
-    type: "Reasoning";
+    type: "reasoning";
     base: PartBase;
     text: string;
     signature?: string;
 } | {
-    type: "ToolCall";
+    type: "tool_call";
     base: PartBase;
     tool_name: string;
     call_id: string;
     state: ToolState;
 } | {
-    type: "ToolResult";
+    type: "tool_result";
     base: PartBase;
     call_id: string;
     output?: string;
 } | {
-    type: "File";
+    type: "file";
     base: PartBase;
     mime: string;
     filename?: string;
     url: string;
 } | {
-    type: "Compaction";
+    type: "compaction";
     base: PartBase;
     auto: boolean;
     overflow: boolean;
@@ -106,22 +119,14 @@ export interface PartBase {
     session_id: string;
 }
 export type ToolState = {
-    type: "Pending";
+    type: "pending";
     input: unknown;
     time: {
         start: number;
         end: number | null;
     };
 } | {
-    type: "Running";
-    input: unknown;
-    output: string;
-    time: {
-        start: number;
-        end: number | null;
-    };
-} | {
-    type: "Completed";
+    type: "running";
     input: unknown;
     output: string;
     time: {
@@ -129,7 +134,15 @@ export type ToolState = {
         end: number | null;
     };
 } | {
-    type: "Error";
+    type: "completed";
+    input: unknown;
+    output: string;
+    time: {
+        start: number;
+        end: number | null;
+    };
+} | {
+    type: "error";
     input: unknown;
     error: string;
     time: {
@@ -157,14 +170,14 @@ export interface Todo {
     depends_on: number[];
 }
 export type SubagentOutcome = {
-    type: "Completed";
+    type: "completed";
 } | {
-    type: "Cancelled";
+    type: "cancelled";
 } | {
-    type: "Failed";
+    type: "failed";
     reason: string;
 };
-/** Info about a single available model, returned by `ListModels`. */
+/** Info about a single available model, returned by `list_models`. */
 export interface ModelInfo {
     /** Fully-qualified ID: "provider/model" (e.g. "deepseek/deepseek-v4-flash"). */
     id: string;
@@ -183,7 +196,7 @@ export interface ThinkingVariantInfo {
 }
 /** Session lifecycle state. */
 export type SessionState = "active" | "idle";
-/** Metadata returned by `ListSessions` for one session. */
+/** Metadata returned by `list_sessions` for one session. */
 export interface SessionInfo {
     session_id: string;
     state: SessionState;
@@ -191,6 +204,7 @@ export interface SessionInfo {
     provider?: string;
     created_at: number;
     last_message_at?: number;
+    summary?: string;
     client_count: number;
 }
 /** A message role. */
@@ -200,7 +214,7 @@ export interface Time {
     created: number;
     completed?: number;
 }
-/** A complete message, as returned in `SessionHistory`. */
+/** A complete message, as returned in `session_history`. */
 export interface Message {
     id: string;
     session_id: string;
@@ -227,109 +241,116 @@ export interface Tokens {
     cache_write: number;
 }
 export type ServerMessage = {
-    type: "SessionReady";
+    type: "session_ready";
     session_id: string;
     model?: string;
     provider?: string;
 } | {
-    type: "Error";
+    type: "error";
     message: string;
 } | {
-    type: "Provider";
+    type: "provider";
     event: ProviderEventWire;
 } | {
-    type: "ToolStart";
+    type: "user_message";
+    text: string;
+} | {
+    type: "tool_start";
     call_id: string;
 } | {
-    type: "ToolEnd";
+    type: "tool_end";
     call_id: string;
     success: boolean;
 } | {
-    type: "PartUpdated";
+    type: "part_updated";
     part_id: string;
     part: Part;
 } | {
-    type: "ToolProgress";
+    type: "tool_progress";
     call_id: string;
     chunk: string;
 } | {
-    type: "ErrorEvent";
+    type: "error_event";
     message: string;
 } | {
-    type: "PermissionRequest";
+    type: "permission_request";
     request_id: number;
     tool_name: string;
     input: Record<string, unknown>;
 } | {
-    type: "WorkspacePermissionRequest";
+    type: "workspace_permission_request";
     request_id: number;
     path: string;
 } | {
-    type: "AskUserRequest";
+    type: "ask_user_request";
     request_id: number;
     call_id: string;
     questions: Question[];
 } | {
-    type: "SubagentStart";
+    type: "subagent_start";
     parent_call_id: string;
     name: string;
     child_session_id: string;
     display_name: string | null;
 } | {
-    type: "SubagentStatus";
+    type: "subagent_status";
     parent_call_id: string;
     tool_name: string;
     message: string;
 } | {
-    type: "SubagentEnd";
+    type: "subagent_end";
     parent_call_id: string;
     child_session_id: string;
     outcome: SubagentOutcome;
 } | {
-    type: "SubagentPermissionRequest";
+    type: "subagent_permission_request";
     request_id: number;
     parent_call_id: string;
     tool_name: string;
     input: Record<string, unknown>;
 } | {
-    type: "TodosUpdated";
+    type: "todos_updated";
     todos: Todo[];
 } | {
-    type: "PersonaSwitchRequested";
+    type: "persona_switch_requested";
     name: string;
 } | {
-    type: "JobUpdate";
+    type: "job_update";
     job_id: string;
     command: string;
     state: string;
 } | {
-    type: "SlashResult";
+    type: "slash_result";
     text: string;
 } | {
-    type: "RequestResolved";
+    type: "request_resolved";
     request_id: number;
 } | {
-    type: "SessionCleared";
+    type: "session_cleared";
 } | {
-    type: "SessionList";
+    type: "session_list";
     sessions: SessionInfo[];
 } | {
-    type: "SessionHistory";
+    type: "session_history";
     messages: Message[];
 } | {
-    type: "ModelList";
+    type: "model_list";
     models: ModelInfo[];
 } | {
-    type: "ModelSwitched";
+    type: "model_switched";
     provider: string;
     model: string;
 } | {
-    type: "ThinkingVariantChanged";
+    type: "thinking_variant_changed";
     variant?: string;
 } | {
-    type: "SessionTitleChanged";
+    type: "session_title_changed";
     session_id: string;
     title: string;
+} | {
+    type: "session_summary_changed";
+    session_id: string;
+    summary: string;
 };
 export interface MewWebSocket {
     send(data: string): void;
@@ -356,6 +377,9 @@ export interface MewClientEvents {
         provider?: string;
     }) => void;
     provider: (ev: ProviderEventWire) => void;
+    "user-message": (data: {
+        text: string;
+    }) => void;
     "tool-start": (data: {
         call_id: string;
     }) => void;
@@ -439,6 +463,10 @@ export interface MewClientEvents {
         session_id: string;
         title: string;
     }) => void;
+    "session-summary-changed": (data: {
+        session_id: string;
+        summary: string;
+    }) => void;
     errorMessage: (data: {
         message: string;
     }) => void;
@@ -474,20 +502,20 @@ export declare class MewClient {
     /** Close the WebSocket. After calling this, the client cannot be reused. */
     disconnect(code?: number, reason?: string): void;
     isConnected(): boolean;
-    /** Send `NewSession`. Resolves with the daemon-assigned session id. */
+    /** Send `new_session`. Resolves with the daemon-assigned session id. */
     newSession(cwd?: string | null): Promise<string>;
-    /** Send `Prompt`. Streaming events are emitted via the registered handlers. */
+    /** Send `prompt`. Streaming events are emitted via the registered handlers. */
     prompt(text: string, attachments?: Attachment[]): void;
-    /** Send `Cancel` to abort the current turn. */
+    /** Send `cancel` to abort the current turn. */
     cancel(): void;
     /**
      * Send a slash command (e.g. `/clear`, `/compact`). Returns the
-     * `SlashResult.text` if the daemon produces one.
+     * `slash_result.text` if the daemon produces one.
      */
     slashCommand(command: string): Promise<string | null>;
-    /** Respond to a `PermissionRequest`. The callback in `on("permission-request", ...)` calls this. */
+    /** Respond to a `permission_request`. The callback in `on("permission-request", ...)` calls this. */
     respondToPermission(request_id: number, decision: PermissionDecision): void;
-    /** Respond to an `AskUserRequest`. The UI calls this after the user
+    /** Respond to an `ask_user_request`. The UI calls this after the user
      *  submits answers to the questions. */
     respondToAskUser(request_id: number, answers: string[]): void;
     /** Attach to an existing session (active or idle). If the session is idle,
@@ -497,6 +525,13 @@ export declare class MewClient {
     /** List all sessions known to the daemon (active + persisted idle).
      *  The daemon responds with a `session-list` event. */
     listSessions(): Promise<SessionInfo[]>;
+    /** Delete a session from disk and remove it from the active list. */
+    deleteSession(session_id: string): void;
+    /** Rename a session (set a custom title). Persists to disk and broadcasts. */
+    renameSession(session_id: string, title: string): void;
+    /** Enable or disable auto-generated session titles. */
+    setAutoTitle(enabled: boolean): void;
+    setAutoSummary(enabled: boolean): void;
     /** List available models from all configured providers. */
     listModels(): Promise<ModelInfo[]>;
     /** Switch the active session to a different model. Resolves when the

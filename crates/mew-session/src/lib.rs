@@ -38,6 +38,13 @@ pub struct Meta {
     pub subagent_name: Option<String>,
     #[serde(default = "default_created_at")]
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
+    /// AI-generated summary of the conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 fn default_created_at() -> i64 {
@@ -55,6 +62,9 @@ impl Meta {
             model: None,
             subagent_name: None,
             created_at: default_created_at(),
+            last_message_at: None,
+            custom_title: None,
+            summary: None,
         }
     }
 
@@ -72,7 +82,36 @@ impl Meta {
             model: None,
             subagent_name: Some(subagent_name.into()),
             created_at: default_created_at(),
+            last_message_at: None,
+            custom_title: None,
+            summary: None,
         }
+    }
+
+    /// Update last_message_at to now and persist to disk.
+    pub async fn touch_last_message(&mut self, dir: &Path) -> Result<(), SessionError> {
+        self.last_message_at = Some(Utc::now().timestamp_millis());
+        self.write(dir).await
+    }
+
+    /// Set a custom title and persist to disk.
+    pub async fn set_custom_title(
+        &mut self,
+        dir: &Path,
+        title: impl Into<String>,
+    ) -> Result<(), SessionError> {
+        self.custom_title = Some(title.into());
+        self.write(dir).await
+    }
+
+    /// Set an AI-generated summary and persist to disk.
+    pub async fn set_summary(
+        &mut self,
+        dir: &Path,
+        summary: impl Into<String>,
+    ) -> Result<(), SessionError> {
+        self.summary = Some(summary.into());
+        self.write(dir).await
     }
 
     /// Read meta.json from `<dir>/<id>/meta.json`. Returns None if not present.
@@ -252,11 +291,23 @@ impl Writer {
     }
 
     /// Appends a single message as one JSON line.
+    /// Also updates `last_message_at` in the session's meta.json.
     pub async fn write_message(&mut self, msg: &Message) -> Result<(), SessionError> {
         let line = serde_json::to_vec(msg)?;
         self.file.write_all(&line).await?;
         self.file.write_all(b"\n").await?;
         self.file.flush().await?;
+
+        // Update last_message_at in meta.json.
+        let meta_path = self
+            .path
+            .parent()
+            .ok_or_else(|| SessionError::Io(std::io::Error::other("no parent dir")))?
+            .join("meta.json");
+        self.meta.last_message_at = Some(Utc::now().timestamp_millis());
+        let meta_bytes = serde_json::to_vec_pretty(&self.meta)?;
+        tokio::fs::write(&meta_path, meta_bytes).await?;
+
         Ok(())
     }
 

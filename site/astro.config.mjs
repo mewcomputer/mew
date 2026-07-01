@@ -6,10 +6,9 @@ import starlightDotMd from "starlight-dot-md";
 import lucode from "lucode-starlight";
 
 // Starlight docs live at /docs. The landing page stays at /.
-// Starlight uses its own routing under /docs and doesn't interfere
-// with the existing pages.
+// For this to happen, we have to put all docs in content/docs/docs as content/docs itself is the root for starlight.
 export default defineConfig({
-  site: "https://mew.sh",
+  site: "https://mew.computer",
   integrations: [
     starlight({
       title: "mew",
@@ -36,39 +35,41 @@ export default defineConfig({
         {
           label: "Getting Started",
           items: [
-            { label: "Installation", slug: "installation" },
-            { label: "Quick Start", slug: "quick-start" },
-            { label: "Configuration", slug: "configuration" },
-            { label: "Context Files", slug: "context-files" },
-            { label: "Sessions", slug: "sessions" },
+            { label: "Installation", slug: "docs/installation" },
+            { label: "Quick Start", slug: "docs/quick-start" },
+            { label: "Configuration", slug: "docs/configuration" },
+            { label: "Context Files", slug: "docs/context-files" },
+            { label: "Sessions", slug: "docs/sessions" },
           ],
         },
         {
           label: "Using mew",
           items: [
-            { label: "Slash Commands", slug: "slash-commands" },
-            { label: "Keyboard Shortcuts", slug: "keyboard-shortcuts" },
-            { label: "Tips & Tricks", slug: "tips-and-tricks" },
-            { label: "Providers", slug: "providers" },
-            { label: "Permissions", slug: "permissions" },
-            { label: "Tools", slug: "tools" },
-            { label: "Personas", slug: "personas" },
-            { label: "Skills", slug: "skills" },
-            { label: "Subagents", slug: "subagents" },
-            { label: "Plugins", slug: "plugins" },
-            { label: "MCP Servers", slug: "mcp-servers" },
-            { label: "Web UI", slug: "web-ui" },
+            { label: "Slash Commands", slug: "docs/slash-commands" },
+            { label: "Keyboard Shortcuts", slug: "docs/keyboard-shortcuts" },
+            { label: "Tips & Tricks", slug: "docs/tips-and-tricks" },
+            { label: "Providers", slug: "docs/providers" },
+            { label: "Permissions", slug: "docs/permissions" },
+            { label: "Tools", slug: "docs/tools" },
+            { label: "Hashline Edits", slug: "docs/hashline" },
+            { label: "Personas", slug: "docs/personas" },
+            { label: "Skills", slug: "docs/skills" },
+            { label: "Subagents", slug: "docs/subagents" },
+            { label: "Plugins", slug: "docs/plugins" },
+            { label: "MCP Servers", slug: "docs/mcp-servers" },
+            { label: "Web UI", slug: "docs/web-ui" },
           ],
         },
         {
           label: "Development",
           items: [
-            { label: "Architecture", slug: "dev-architecture" },
-            { label: "Adding a Provider", slug: "dev-providers" },
-            { label: "Adding a Tool", slug: "dev-tools" },
-            { label: "Daemon Protocol", slug: "dev-protocol" },
-            { label: "Testing", slug: "dev-testing" },
-            { label: "Web UI Development", slug: "dev-web" },
+            { label: "Architecture", slug: "docs/dev-architecture" },
+            { label: "Hashline Internals", slug: "docs/dev-hashline" },
+            { label: "Adding a Provider", slug: "docs/dev-providers" },
+            { label: "Adding a Tool", slug: "docs/dev-tools" },
+            { label: "Daemon Protocol", slug: "docs/dev-protocol" },
+            { label: "Testing", slug: "docs/dev-testing" },
+            { label: "Web UI Development", slug: "docs/dev-web" },
           ],
         },
       ],

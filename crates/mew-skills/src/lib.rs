@@ -78,12 +78,24 @@ impl Loader {
             prefixes: SKILL_PREFIXES,
             file: mew_harness::LoadFileSpec::SubdirFile("SKILL.md"),
         };
-        let skills =
+        let mut skills =
             mew_harness::load_markdown_dirs(&self.cwd, &spec, |path| -> Result<_, SkillError> {
                 let skill = load_skill_file(path)?;
                 let name = skill.name.clone();
                 Ok(mew_harness::Loaded { value: skill, name })
             })?;
+
+        // Append built-in skills for any name not already provided by the
+        // user. User-defined skills override built-ins by name.
+        let mut seen: std::collections::HashSet<String> =
+            skills.iter().map(|s| s.name.clone()).collect();
+        for builtin in builtin_skills() {
+            if !seen.contains(&builtin.name) {
+                seen.insert(builtin.name.clone());
+                skills.push(builtin);
+            }
+        }
+
         debug!(count = skills.len(), "loaded skills");
         Ok(skills)
     }
@@ -152,6 +164,62 @@ fn validate_name(name: &str) -> Result<(), SkillError> {
 }
 
 // ---------------------------------------------------------------------------
+// Built-in skills
+// ---------------------------------------------------------------------------
+
+/// Built-in skills shipped with mew. User-defined skills (loaded from
+/// `.mew/skills/<name>/SKILL.md` etc.) override these by name.
+///
+/// - **mew-docs** — documentation sitemap so the agent can `web_fetch` the
+///   right docs page at mew.computer instead of guessing from memory.
+pub fn builtin_skills() -> Vec<Skill> {
+    let content = include_str!("../../mew-prompts/resources/skills/mew-docs/SKILL.md");
+    match load_skill_from_str(content) {
+        Ok(skill) => vec![skill],
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load built-in skill mew-docs");
+            vec![]
+        }
+    }
+}
+
+/// Parse a SKILL.md from a string (used for built-in skills that are
+/// embedded via `include_str!` rather than read from disk).
+fn load_skill_from_str(content: &str) -> Result<Skill, SkillError> {
+    let frontmatter = if let Some(body) = content.strip_prefix("---\n") {
+        if let Some((yaml, body)) = body.split_once("\n---") {
+            let fm: Frontmatter = serde_yaml::from_str(yaml)?;
+            let body = body.trim_start_matches('\n').to_string();
+            Some((fm, body))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let (name, description, body, template) = match frontmatter {
+        Some((fm, body)) => {
+            validate_name(&fm.name)?;
+            (fm.name, fm.description, body, fm.template)
+        }
+        None => {
+            return Err(SkillError::InvalidName(
+                "built-in skill missing frontmatter".into(),
+            ));
+        }
+    };
+
+    Ok(Skill {
+        name,
+        description,
+        body,
+        path: PathBuf::from("(built-in)"),
+        template,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Path helpers (mirrors mew-context)
 // ---------------------------------------------------------------------------
 
@@ -208,6 +276,14 @@ mod tests {
         }
     }
 
+    /// Filter out built-in skills so tests can assert on user-defined ones.
+    fn user_skills(skills: Vec<Skill>) -> Vec<Skill> {
+        skills
+            .into_iter()
+            .filter(|s| s.path != PathBuf::from("(built-in)"))
+            .collect()
+    }
+
     #[test]
     fn test_load_single_skill() {
         let _home = with_test_home();
@@ -221,7 +297,7 @@ mod tests {
         );
 
         let loader = Loader::new(cwd);
-        let skills = loader.load().unwrap();
+        let skills = user_skills(loader.load().unwrap());
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "git-release");
         assert_eq!(skills[0].description, "Creates a git release");
@@ -237,12 +313,13 @@ mod tests {
         write_skill(cwd, "code-review", "Review code", "body2");
 
         let loader = Loader::new(cwd);
-        let skills = loader.load().unwrap();
+        let skills = user_skills(loader.load().unwrap());
         assert_eq!(skills.len(), 2);
     }
 
     #[test]
     fn test_duplicate_name_project_wins_over_global() {
+        let _home = with_test_home();
         // This test verifies that project-level skills take precedence.
         // Since we can't easily mock HOME, we test that the project path
         // works correctly and that seen set prevents duplicates.
@@ -261,7 +338,7 @@ mod tests {
         .unwrap();
 
         let loader = Loader::new(cwd);
-        let skills = loader.load().unwrap();
+        let skills = user_skills(loader.load().unwrap());
         // Only one should survive (first one wins via seen set)
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].description, "First");
@@ -289,7 +366,7 @@ mod tests {
         let _home = with_test_home();
         let tmp = tempfile::tempdir().unwrap();
         let loader = Loader::new(tmp.path());
-        let skills = loader.load().unwrap();
+        let skills = user_skills(loader.load().unwrap());
         assert!(skills.is_empty());
     }
 
@@ -303,7 +380,7 @@ mod tests {
         std::fs::write(skill_dir.join("SKILL.md"), "Just a body").unwrap();
 
         let loader = Loader::new(cwd);
-        let skills = loader.load().unwrap();
+        let skills = user_skills(loader.load().unwrap());
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "no-fm");
         assert_eq!(skills[0].description, ""); // No frontmatter, no description
@@ -324,8 +401,38 @@ mod tests {
         .unwrap();
 
         let loader = Loader::new(cwd);
-        let skills = loader.load().unwrap();
+        let skills = user_skills(loader.load().unwrap());
         // Should be rejected because name doesn't match directory
         assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn test_builtin_skills_loaded() {
+        let builtins = builtin_skills();
+        assert!(
+            builtins.iter().any(|s| s.name == "mew-docs"),
+            "mew-docs should be a built-in skill"
+        );
+    }
+
+    #[test]
+    fn test_builtin_mew_docs_has_sitemap() {
+        let builtins = builtin_skills();
+        let docs = builtins.iter().find(|s| s.name == "mew-docs").unwrap();
+        assert!(docs.body.contains("https://mew.computer/docs/"));
+        assert!(docs.body.contains("web_fetch"));
+    }
+
+    #[test]
+    fn test_builtin_skills_included_in_load() {
+        let _home = with_test_home();
+        let tmp = tempfile::tempdir().unwrap();
+        let loader = Loader::new(tmp.path());
+        let skills = loader.load().unwrap();
+        // Built-in skills should appear even in an empty directory.
+        assert!(
+            skills.iter().any(|s| s.name == "mew-docs"),
+            "mew-docs should be included as a built-in skill"
+        );
     }
 }

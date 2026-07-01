@@ -212,6 +212,8 @@ async fn translate_server_message(
             }
         }
 
+        ServerMessage::UserMessage { .. } => Vec::new(),
+
         ServerMessage::ToolStart { call_id } => {
             vec![AgentEvent::ToolStart {
                 call_id: call_id.clone(),
@@ -453,7 +455,8 @@ async fn translate_server_message(
         | ServerMessage::RequestResolved { .. }
         | ServerMessage::SessionCleared
         | ServerMessage::ThinkingVariantChanged { .. }
-        | ServerMessage::SessionTitleChanged { .. } => {
+        | ServerMessage::SessionTitleChanged { .. }
+        | ServerMessage::SessionSummaryChanged { .. } => {
             // These are handled by the DaemonClient directly or are web-UI
             // specific; they don't map to AgentEvents for the TUI.
             Vec::new()

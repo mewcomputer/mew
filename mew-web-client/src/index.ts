@@ -33,61 +33,65 @@ export interface Attachment {
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
 
 export type ClientMessage =
-  | { type: "NewSession"; cwd: string | null }
-  | { type: "AttachSession"; session_id: string }
-  | { type: "ListSessions" }
-  | { type: "Prompt"; text: string; attachments: Attachment[] }
-  | { type: "Cancel" }
+  | { type: "new_session"; cwd: string | null }
+  | { type: "attach_session"; session_id: string }
+  | { type: "list_sessions" }
+  | { type: "delete_session"; session_id: string }
+  | { type: "rename_session"; session_id: string; title: string }
+  | { type: "set_auto_title"; enabled: boolean }
+  | { type: "set_auto_summary"; enabled: boolean }
+  | { type: "prompt"; text: string; attachments: Attachment[] }
+  | { type: "cancel" }
   | {
-      type: "PermissionResponse";
+      type: "permission_response";
       request_id: number;
       decision: PermissionDecision;
     }
-  | { type: "AskUserResponse"; request_id: number; answers: string[] }
-  | { type: "SlashCommand"; command: string }
-  | { type: "ListModels" }
-  | { type: "SwitchModel"; provider: string; model: string }
-  | { type: "SetThinkingVariant"; variant: string };
+  | { type: "ask_user_response"; request_id: number; answers: string[] }
+  | { type: "slash_command"; command: string }
+  | { type: "list_models" }
+  | { type: "switch_model"; provider: string; model: string }
+  | { type: "set_thinking_variant"; variant: string };
 
 // Provider events — see mew_message::ProviderEventWire.
 export type ProviderEventWire =
-  | { type: "PartStart"; part: Part }
-  | { type: "PartDelta"; part_id: string; field: string; delta: string }
-  | { type: "PartEnd"; part_id: string }
+  | { type: "part_start"; part: Part }
+  | { type: "part_delta"; part_id: string; field: string; delta: string }
+  | { type: "part_end"; part_id: string }
   | {
-      type: "MessageEnd";
+      type: "message_end";
       finish: "stop" | "tool_use" | "length" | "content_filter" | "error";
       usage: { input: number; output: number };
       cost: number;
     }
   | {
-      type: "RetryWait";
+      type: "retry_wait";
       attempt: number;
       max_attempts: number;
       delay_secs: number;
       reason: string;
     }
-  | { type: "Error"; error: MessageError };
+  | { type: "error"; error: MessageError };
 
 export type Part =
-  | { type: "Text"; base: PartBase; text: string; synthetic: boolean }
-  | { type: "Reasoning"; base: PartBase; text: string; signature?: string }
+  | { type: "text"; base: PartBase; text: string; synthetic: boolean }
+  | { type: "reasoning"; base: PartBase; text: string; signature?: string }
   | {
-      type: "ToolCall";
+      type: "tool_call";
       base: PartBase;
       tool_name: string;
       call_id: string;
       state: ToolState;
     }
-  | { type: "ToolResult"; base: PartBase; call_id: string; output?: string }
+  | { type: "tool_result"; base: PartBase; call_id: string; output?: string }
   | {
-      type: "File";
+      type: "file";
       base: PartBase;
       mime: string;
       filename?: string;
       url: string;
     }
-  | { type: "Compaction"; base: PartBase; auto: boolean; overflow: boolean };
+  | { type: "compaction"; base: PartBase; auto: boolean; overflow: boolean };
 
 export interface PartBase {
   id: string;
@@ -97,24 +101,24 @@ export interface PartBase {
 
 export type ToolState =
   | {
-      type: "Pending";
+      type: "pending";
       input: unknown;
       time: { start: number; end: number | null };
     }
   | {
-      type: "Running";
-      input: unknown;
-      output: string;
-      time: { start: number; end: number | null };
-    }
-  | {
-      type: "Completed";
+      type: "running";
       input: unknown;
       output: string;
       time: { start: number; end: number | null };
     }
   | {
-      type: "Error";
+      type: "completed";
+      input: unknown;
+      output: string;
+      time: { start: number; end: number | null };
+    }
+  | {
+      type: "error";
       input: unknown;
       error: string;
       time: { start: number; end: number | null };
@@ -153,15 +157,15 @@ export interface Todo {
 }
 
 export type SubagentOutcome =
-  | { type: "Completed" }
-  | { type: "Cancelled" }
-  | { type: "Failed"; reason: string };
+  | { type: "completed" }
+  | { type: "cancelled" }
+  | { type: "failed"; reason: string };
 
 // ---------------------------------------------------------------------------
 // Session & model management types
 // ---------------------------------------------------------------------------
 
-/** Info about a single available model, returned by `ListModels`. */
+/** Info about a single available model, returned by `list_models`. */
 export interface ModelInfo {
   /** Fully-qualified ID: "provider/model" (e.g. "deepseek/deepseek-v4-flash"). */
   id: string;
@@ -183,7 +187,7 @@ export interface ThinkingVariantInfo {
 /** Session lifecycle state. */
 export type SessionState = "active" | "idle";
 
-/** Metadata returned by `ListSessions` for one session. */
+/** Metadata returned by `list_sessions` for one session. */
 export interface SessionInfo {
   session_id: string;
   state: SessionState;
@@ -191,6 +195,7 @@ export interface SessionInfo {
   provider?: string;
   created_at: number;
   last_message_at?: number;
+  summary?: string;
   client_count: number;
 }
 
@@ -203,7 +208,7 @@ export interface Time {
   completed?: number;
 }
 
-/** A complete message, as returned in `SessionHistory`. */
+/** A complete message, as returned in `session_history`. */
 export interface Message {
   id: string;
   session_id: string;
@@ -233,65 +238,67 @@ export interface Tokens {
 }
 
 export type ServerMessage =
-  | { type: "SessionReady"; session_id: string; model?: string; provider?: string }
-  | { type: "Error"; message: string }
-  | { type: "Provider"; event: ProviderEventWire }
-  | { type: "ToolStart"; call_id: string }
-  | { type: "ToolEnd"; call_id: string; success: boolean }
-  | { type: "PartUpdated"; part_id: string; part: Part }
-  | { type: "ToolProgress"; call_id: string; chunk: string }
-  | { type: "ErrorEvent"; message: string }
+  | { type: "session_ready"; session_id: string; model?: string; provider?: string }
+  | { type: "error"; message: string }
+  | { type: "provider"; event: ProviderEventWire }
+  | { type: "user_message"; text: string }
+  | { type: "tool_start"; call_id: string }
+  | { type: "tool_end"; call_id: string; success: boolean }
+  | { type: "part_updated"; part_id: string; part: Part }
+  | { type: "tool_progress"; call_id: string; chunk: string }
+  | { type: "error_event"; message: string }
   | {
-      type: "PermissionRequest";
+      type: "permission_request";
       request_id: number;
       tool_name: string;
       input: Record<string, unknown>;
     }
-  | { type: "WorkspacePermissionRequest"; request_id: number; path: string }
+  | { type: "workspace_permission_request"; request_id: number; path: string }
   | {
-      type: "AskUserRequest";
+      type: "ask_user_request";
       request_id: number;
       call_id: string;
       questions: Question[];
     }
   | {
-      type: "SubagentStart";
+      type: "subagent_start";
       parent_call_id: string;
       name: string;
       child_session_id: string;
       display_name: string | null;
     }
   | {
-      type: "SubagentStatus";
+      type: "subagent_status";
       parent_call_id: string;
       tool_name: string;
       message: string;
     }
   | {
-      type: "SubagentEnd";
+      type: "subagent_end";
       parent_call_id: string;
       child_session_id: string;
       outcome: SubagentOutcome;
     }
   | {
-      type: "SubagentPermissionRequest";
+      type: "subagent_permission_request";
       request_id: number;
       parent_call_id: string;
       tool_name: string;
       input: Record<string, unknown>;
     }
-  | { type: "TodosUpdated"; todos: Todo[] }
-  | { type: "PersonaSwitchRequested"; name: string }
-  | { type: "JobUpdate"; job_id: string; command: string; state: string }
-  | { type: "SlashResult"; text: string }
-  | { type: "RequestResolved"; request_id: number }
-  | { type: "SessionCleared" }
-  | { type: "SessionList"; sessions: SessionInfo[] }
-  | { type: "SessionHistory"; messages: Message[] }
-  | { type: "ModelList"; models: ModelInfo[] }
-  | { type: "ModelSwitched"; provider: string; model: string }
-  | { type: "ThinkingVariantChanged"; variant?: string }
-  | { type: "SessionTitleChanged"; session_id: string; title: string };
+  | { type: "todos_updated"; todos: Todo[] }
+  | { type: "persona_switch_requested"; name: string }
+  | { type: "job_update"; job_id: string; command: string; state: string }
+  | { type: "slash_result"; text: string }
+  | { type: "request_resolved"; request_id: number }
+  | { type: "session_cleared" }
+  | { type: "session_list"; sessions: SessionInfo[] }
+  | { type: "session_history"; messages: Message[] }
+  | { type: "model_list"; models: ModelInfo[] }
+  | { type: "model_switched"; provider: string; model: string }
+  | { type: "thinking_variant_changed"; variant?: string }
+  | { type: "session_title_changed"; session_id: string; title: string }
+  | { type: "session_summary_changed"; session_id: string; summary: string };
 
 // ---------------------------------------------------------------------------
 // Minimal WebSocket interface — lets Node users pass `ws` while browsers
@@ -343,6 +350,7 @@ export interface MewClientEvents {
     provider?: string;
   }) => void;
   provider: (ev: ProviderEventWire) => void;
+  "user-message": (data: { text: string }) => void;
   "tool-start": (data: { call_id: string }) => void;
   "tool-end": (data: { call_id: string; success: boolean }) => void;
   "part-updated": (data: { part_id: string; part: Part }) => void;
@@ -398,6 +406,7 @@ export interface MewClientEvents {
   "model-switched": (data: { provider: string; model: string }) => void;
   "thinking-variant-changed": (data: { variant: string | null }) => void;
   "session-title-changed": (data: { session_id: string; title: string }) => void;
+  "session-summary-changed": (data: { session_id: string; summary: string }) => void;
 
   errorMessage: (data: { message: string }) => void;
   errorEvent: (data: { message: string }) => void;
@@ -494,7 +503,7 @@ export class MewClient {
     return this.ws !== null;
   }
 
-  /** Send `NewSession`. Resolves with the daemon-assigned session id. */
+  /** Send `new_session`. Resolves with the daemon-assigned session id. */
   async newSession(cwd: string | null = null): Promise<string> {
     await this.connect();
     return new Promise<string>((resolve, reject) => {
@@ -510,23 +519,23 @@ export class MewClient {
       };
       this.on("session-ready", onReady);
       this.on("errorMessage", onError);
-      this.send({ type: "NewSession", cwd });
+      this.send({ type: "new_session", cwd });
     });
   }
 
-  /** Send `Prompt`. Streaming events are emitted via the registered handlers. */
+  /** Send `prompt`. Streaming events are emitted via the registered handlers. */
   prompt(text: string, attachments: Attachment[] = []): void {
-    this.send({ type: "Prompt", text, attachments });
+    this.send({ type: "prompt", text, attachments });
   }
 
-  /** Send `Cancel` to abort the current turn. */
+  /** Send `cancel` to abort the current turn. */
   cancel(): void {
-    this.send({ type: "Cancel" });
+    this.send({ type: "cancel" });
   }
 
   /**
    * Send a slash command (e.g. `/clear`, `/compact`). Returns the
-   * `SlashResult.text` if the daemon produces one.
+   * `slash_result.text` if the daemon produces one.
    */
   slashCommand(command: string): Promise<string | null> {
     return new Promise<string | null>((resolve) => {
@@ -535,7 +544,7 @@ export class MewClient {
         resolve(data.text);
       };
       this.on("slash-result", onResult);
-      this.send({ type: "SlashCommand", command });
+      this.send({ type: "slash_command", command });
       // Daemon may not produce a SlashResult for unknown commands; resolve
       // null after a short grace period if nothing arrived.
       setTimeout(() => {
@@ -545,15 +554,15 @@ export class MewClient {
     });
   }
 
-  /** Respond to a `PermissionRequest`. The callback in `on("permission-request", ...)` calls this. */
+  /** Respond to a `permission_request`. The callback in `on("permission-request", ...)` calls this. */
   respondToPermission(request_id: number, decision: PermissionDecision): void {
-    this.send({ type: "PermissionResponse", request_id, decision });
+    this.send({ type: "permission_response", request_id, decision });
   }
 
-  /** Respond to an `AskUserRequest`. The UI calls this after the user
+  /** Respond to an `ask_user_request`. The UI calls this after the user
    *  submits answers to the questions. */
   respondToAskUser(request_id: number, answers: string[]): void {
-    this.send({ type: "AskUserResponse", request_id, answers });
+    this.send({ type: "ask_user_response", request_id, answers });
   }
 
   /** Attach to an existing session (active or idle). If the session is idle,
@@ -575,7 +584,7 @@ export class MewClient {
       };
       this.on("session-ready", onReady);
       this.on("errorMessage", onError);
-      this.send({ type: "AttachSession", session_id });
+      this.send({ type: "attach_session", session_id });
     });
   }
 
@@ -588,8 +597,27 @@ export class MewClient {
         resolve(data.sessions);
       };
       this.on("session-list", onList);
-      this.send({ type: "ListSessions" });
+      this.send({ type: "list_sessions" });
     });
+  }
+
+  /** Delete a session from disk and remove it from the active list. */
+  deleteSession(session_id: string): void {
+    this.send({ type: "delete_session", session_id });
+  }
+
+  /** Rename a session (set a custom title). Persists to disk and broadcasts. */
+  renameSession(session_id: string, title: string): void {
+    this.send({ type: "rename_session", session_id, title });
+  }
+
+  /** Enable or disable auto-generated session titles. */
+  setAutoTitle(enabled: boolean): void {
+    this.send({ type: "set_auto_title", enabled });
+  }
+
+  setAutoSummary(enabled: boolean): void {
+    this.send({ type: "set_auto_summary", enabled });
   }
 
   /** List available models from all configured providers. */
@@ -600,7 +628,7 @@ export class MewClient {
         resolve(data.models);
       };
       this.on("model-list", onList);
-      this.send({ type: "ListModels" });
+      this.send({ type: "list_models" });
     });
   }
 
@@ -613,7 +641,7 @@ export class MewClient {
         resolve(data);
       };
       this.on("model-switched", onSwitched);
-      this.send({ type: "SwitchModel", provider, model });
+      this.send({ type: "switch_model", provider, model });
     });
   }
 
@@ -628,7 +656,7 @@ export class MewClient {
         resolve(data.variant ?? null);
       };
       this.on("thinking-variant-changed", onChanged);
-      this.send({ type: "SetThinkingVariant", variant });
+      this.send({ type: "set_thinking_variant", variant });
     });
   }
 
@@ -671,7 +699,7 @@ export class MewClient {
 
   private dispatch(msg: ServerMessage): void {
     switch (msg.type) {
-      case "SessionReady":
+      case "session_ready":
         this.sessionId = msg.session_id;
         this.emit("session-ready", {
           session_id: msg.session_id,
@@ -679,22 +707,25 @@ export class MewClient {
           provider: msg.provider,
         });
         break;
-      case "Provider":
+      case "provider":
         this.emit("provider", msg.event);
         break;
-      case "ToolStart":
+      case "user_message":
+        this.emit("user-message", { text: msg.text });
+        break;
+      case "tool_start":
         this.emit("tool-start", { call_id: msg.call_id });
         break;
-      case "ToolEnd":
+      case "tool_end":
         this.emit("tool-end", { call_id: msg.call_id, success: msg.success });
         break;
-      case "PartUpdated":
+      case "part_updated":
         this.emit("part-updated", { part_id: msg.part_id, part: msg.part });
         break;
-      case "ToolProgress":
+      case "tool_progress":
         this.emit("tool-progress", { call_id: msg.call_id, chunk: msg.chunk });
         break;
-      case "PermissionRequest":
+      case "permission_request":
         this.emit(
           "permission-request",
           {
@@ -705,7 +736,7 @@ export class MewClient {
           (decision) => this.respondToPermission(msg.request_id, decision),
         );
         break;
-      case "WorkspacePermissionRequest":
+      case "workspace_permission_request":
         this.emit(
           "workspace-permission-request",
           {
@@ -715,14 +746,14 @@ export class MewClient {
           (decision) => this.respondToPermission(msg.request_id, decision),
         );
         break;
-      case "AskUserRequest":
+      case "ask_user_request":
         this.emit("ask-user-request", {
           request_id: msg.request_id,
           call_id: msg.call_id,
           questions: msg.questions,
         });
         break;
-      case "SubagentStart":
+      case "subagent_start":
         this.emit("subagent-start", {
           parent_call_id: msg.parent_call_id,
           name: msg.name,
@@ -730,72 +761,78 @@ export class MewClient {
           display_name: msg.display_name,
         });
         break;
-      case "SubagentStatus":
+      case "subagent_status":
         this.emit("subagent-status", {
           parent_call_id: msg.parent_call_id,
           tool_name: msg.tool_name,
           message: msg.message,
         });
         break;
-      case "SubagentEnd":
+      case "subagent_end":
         this.emit("subagent-end", {
           parent_call_id: msg.parent_call_id,
           child_session_id: msg.child_session_id,
           outcome: msg.outcome,
         });
         break;
-      case "TodosUpdated":
+      case "todos_updated":
         this.emit("todos-updated", { todos: msg.todos });
         break;
-      case "PersonaSwitchRequested":
+      case "persona_switch_requested":
         this.emit("persona-switch-requested", { name: msg.name });
         break;
-      case "JobUpdate":
+      case "job_update":
         this.emit("job-update", {
           job_id: msg.job_id,
           command: msg.command,
           state: msg.state,
         });
         break;
-      case "SlashResult":
+      case "slash_result":
         this.emit("slash-result", { text: msg.text });
         break;
-      case "RequestResolved":
+      case "request_resolved":
         this.emit("request-resolved", { request_id: msg.request_id });
         break;
-      case "SessionCleared":
+      case "session_cleared":
         this.emit("session-cleared");
         break;
-      case "SessionList":
+      case "session_list":
         this.emit("session-list", { sessions: msg.sessions });
         break;
-      case "SessionHistory":
+      case "session_history":
         this.emit("session-history", { messages: msg.messages });
         break;
-      case "ModelList":
+      case "model_list":
         this.emit("model-list", { models: msg.models });
         break;
-      case "ModelSwitched":
+      case "model_switched":
         this.emit("model-switched", {
           provider: msg.provider,
           model: msg.model,
         });
         break;
-      case "ThinkingVariantChanged":
+      case "thinking_variant_changed":
         this.emit("thinking-variant-changed", {
           variant: msg.variant ?? null,
         });
         break;
-      case "SessionTitleChanged":
+      case "session_title_changed":
         this.emit("session-title-changed", {
           session_id: msg.session_id,
           title: msg.title,
         });
         break;
-      case "Error":
+      case "session_summary_changed":
+        this.emit("session-summary-changed", {
+          session_id: msg.session_id,
+          summary: msg.summary,
+        });
+        break;
+      case "error":
         this.emit("errorMessage", { message: msg.message });
         break;
-      case "ErrorEvent":
+      case "error_event":
         this.emit("errorEvent", { message: msg.message });
         break;
     }

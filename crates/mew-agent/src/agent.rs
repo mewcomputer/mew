@@ -142,6 +142,9 @@ pub struct Agent {
     /// Secret words and file globs to redact from tool output. Shared (via
     /// `Arc`) with each `ToolCtx` built for a tool call.
     pub secrets: Arc<SecretSet>,
+    /// Snapshot store shared with `read` and `edit_hashline` so tags and
+    /// seen-line provenance survive across tool calls in a session.
+    pub snapshot_store: Arc<dyn mew_hashline::SnapshotStore>,
     /// Session-lived, dependency-enforced todo list. Survives compaction (it's
     /// agent state, not message history) and resume (persisted to
     /// `todos_path`).
@@ -308,6 +311,7 @@ impl Agent {
             force_compact: Arc::new(tokio::sync::Mutex::new(false)),
             flagged_files: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             secrets: Arc::new(SecretSet::default()),
+            snapshot_store: Arc::new(mew_hashline::InMemorySnapshotStore::new()),
             todos: Arc::new(tokio::sync::Mutex::new(crate::TodoList::new())),
             todos_path: None,
             reasoning: None,

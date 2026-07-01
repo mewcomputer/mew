@@ -6,13 +6,13 @@ use ratatui::{
     Frame,
 };
 
-use super::{display_width, DIVIDER, STATUS_BG};
+use super::display_width;
 use crate::app::{current_git_branch, App};
 
-pub(super) fn draw_divider(f: &mut Frame, area: Rect) {
+pub(super) fn draw_divider(f: &mut Frame, area: Rect, tokens: &crate::theme::ThemeTokens) {
     let line = Line::from(Span::styled(
         "─".repeat(area.width as usize),
-        Style::default().fg(DIVIDER),
+        Style::default().fg(tokens.divider),
     ));
     f.render_widget(Paragraph::new(line), area);
 }
@@ -45,11 +45,11 @@ struct PillSegment {
     bg: Color,
 }
 
-fn gap_segment(width: usize) -> PillSegment {
+fn gap_segment(width: usize, tokens: &crate::theme::ThemeTokens) -> PillSegment {
     PillSegment {
         text: " ".repeat(width),
         fg: Color::Reset,
-        bg: STATUS_BG,
+        bg: tokens.status_bg,
     }
 }
 
@@ -136,11 +136,15 @@ fn build_pills(app: &App) -> Vec<Pill> {
 
 /// Interleave pills with 1-cell gaps, and append a trailing gap of
 /// `trailing_gap` width so the marquee cycles don't run together.
-fn build_segments(pills: &[Pill], trailing_gap: usize) -> Vec<PillSegment> {
+fn build_segments(
+    pills: &[Pill],
+    trailing_gap: usize,
+    tokens: &crate::theme::ThemeTokens,
+) -> Vec<PillSegment> {
     let mut segs: Vec<PillSegment> = Vec::with_capacity(pills.len() * 2 + 1);
     for (i, p) in pills.iter().enumerate() {
         if i > 0 {
-            segs.push(gap_segment(1));
+            segs.push(gap_segment(1, tokens));
         }
         segs.push(PillSegment {
             text: " ".to_string() + &p.text + " ",
@@ -149,7 +153,7 @@ fn build_segments(pills: &[Pill], trailing_gap: usize) -> Vec<PillSegment> {
         });
     }
     if trailing_gap > 0 {
-        segs.push(gap_segment(trailing_gap));
+        segs.push(gap_segment(trailing_gap, tokens));
     }
     segs
 }
@@ -225,7 +229,7 @@ fn segments_window(segs: &[PillSegment], width: usize, offset: usize) -> Line<'s
 }
 
 pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
-    let bg = Block::default().style(Style::default().bg(STATUS_BG));
+    let bg = Block::default().style(Style::default().bg(app.theme.tokens.status_bg));
     f.render_widget(bg, area);
 
     // Resolve git branch once, lazily (avoids per-frame and per-test fs reads).
@@ -256,7 +260,12 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     let left_area = chunks[0];
 
     // Render the right side (tokens/cost), always pinned.
-    let right_span = Span::styled(right, Style::default().fg(Color::Gray).bg(STATUS_BG));
+    let right_span = Span::styled(
+        right,
+        Style::default()
+            .fg(Color::Gray)
+            .bg(app.theme.tokens.status_bg),
+    );
     f.render_widget(
         Paragraph::new(Line::from(right_span)).alignment(Alignment::Right),
         chunks[1],
@@ -266,17 +275,23 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     let left_line: Line<'static> = if app.esc_cancel_pending.is_some() {
         Line::from(Span::styled(
             "esc again to stop agent",
-            Style::default().fg(Color::Yellow).bg(STATUS_BG),
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(app.theme.tokens.status_bg),
         ))
     } else if app.ctrl_c_quit_pending.is_some() {
         Line::from(Span::styled(
             "ctrl-c again to quit",
-            Style::default().fg(Color::Red).bg(STATUS_BG),
+            Style::default()
+                .fg(Color::Red)
+                .bg(app.theme.tokens.status_bg),
         ))
     } else if let Some(ref retry) = app.retry_status {
         Line::from(Span::styled(
             retry.clone(),
-            Style::default().fg(Color::LightBlue).bg(STATUS_BG),
+            Style::default()
+                .fg(Color::LightBlue)
+                .bg(app.theme.tokens.status_bg),
         ))
     } else {
         let pills = build_pills(app);
@@ -285,14 +300,14 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
             // Fits: render the pill row, reset the ticker.
             app.status_ticker_offset = 0;
             app.status_ticker_at = None;
-            segments_line(&build_segments(&pills, 0))
+            segments_line(&build_segments(&pills, 0, &app.theme.tokens))
         } else {
             // Overflow: color-preserving marquee with a trailing cycle gap.
             // Activate the ticker so `tick()` knows to advance it.
             if app.status_ticker_at.is_none() {
                 app.status_ticker_at = Some(std::time::Instant::now());
             }
-            let marquee_segs = build_segments(&pills, 3);
+            let marquee_segs = build_segments(&pills, 3, &app.theme.tokens);
             segments_window(
                 &marquee_segs,
                 left_area.width as usize,
@@ -338,36 +353,39 @@ mod tests {
 
     #[test]
     fn test_build_segments_interleaves_one_cell_gaps() {
+        let app = crate::app::App::new();
         let pills = vec![
             pill("a", Color::White, Color::Rgb(0, 0, 0)),
             pill("b", Color::Cyan, Color::Rgb(0, 0, 0)),
         ];
-        let segs = build_segments(&pills, 0);
+        let segs = build_segments(&pills, 0, &app.theme.tokens);
         assert_eq!(segs.len(), 3);
         // Pills now have a leading/trailing space for visual padding.
         assert_eq!(segs[0].text, " a ");
         assert_eq!(segs[1].text, " ");
-        assert_eq!(segs[1].bg, STATUS_BG);
+        assert_eq!(segs[1].bg, app.theme.tokens.status_bg);
         assert_eq!(segs[2].text, " b ");
     }
 
     #[test]
     fn test_build_segments_trailing_gap_for_marquee() {
+        let app = crate::app::App::new();
         let pills = vec![pill("ab", Color::White, Color::Rgb(0, 0, 0))];
-        let segs = build_segments(&pills, 3);
+        let segs = build_segments(&pills, 3, &app.theme.tokens);
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[0].text, " ab ");
         assert_eq!(segs[1].text, "   ");
-        assert_eq!(segs[1].bg, STATUS_BG);
+        assert_eq!(segs[1].bg, app.theme.tokens.status_bg);
     }
 
     #[test]
     fn test_segments_line_emits_one_span_per_segment() {
+        let app = crate::app::App::new();
         let pills = vec![
             pill("a", Color::White, Color::Rgb(10, 0, 0)),
             pill("b", Color::Cyan, Color::Rgb(0, 10, 0)),
         ];
-        let segs = build_segments(&pills, 0);
+        let segs = build_segments(&pills, 0, &app.theme.tokens);
         let line = segments_line(&segs);
         // 3 spans: pill_a, gap, pill_b
         assert_eq!(line.spans.len(), 3);
@@ -375,6 +393,7 @@ mod tests {
 
     #[test]
     fn test_segments_window_width_and_color_preservation() {
+        let app = crate::app::App::new();
         // Two pills with distinct bgs; window should include parts of both
         // and the gap, with each part's style intact.
         let pills = vec![
@@ -382,22 +401,23 @@ mod tests {
             pill("BB", Color::Cyan, Color::Rgb(0, 10, 0)),
         ];
         // full sequence: " AA " + " " + " BB " + "   " = " AA  BB    " (12 chars).
-        let segs = build_segments(&pills, 3);
+        let segs = build_segments(&pills, 3, &app.theme.tokens);
         // offset 0, width 10 → first 10 chars = " AA  BB  ".
         let line = segments_window(&segs, 10, 0);
         let total_text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(total_text, " AA   BB  ");
         // The first span carries the first pill's bg, the gap carries
-        // STATUS_BG, the second pill carries its own bg.
+        // app.theme.tokens.status_bg, the second pill carries its own bg.
         assert_eq!(line.spans[0].style.bg, Some(Color::Rgb(10, 0, 0)));
-        assert_eq!(line.spans[1].style.bg, Some(STATUS_BG));
+        assert_eq!(line.spans[1].style.bg, Some(app.theme.tokens.status_bg));
         assert_eq!(line.spans[2].style.bg, Some(Color::Rgb(0, 10, 0)));
     }
 
     #[test]
     fn test_segments_window_wraps_with_offset() {
+        let app = crate::app::App::new();
         let pills = vec![pill("abc", Color::White, Color::Rgb(0, 0, 0))];
-        let segs = build_segments(&pills, 3);
+        let segs = build_segments(&pills, 3, &app.theme.tokens);
         // full text: " abc " + "   " = " abc    " (8 chars).
         // offset 0, width 3 → " ab".
         assert_eq!(text_of(&segments_window(&segs, 3, 0)), " ab");
@@ -411,9 +431,10 @@ mod tests {
 
     #[test]
     fn test_segments_window_cycles_end_to_start() {
+        let app = crate::app::App::new();
         // offset equal to the total char count must wrap to offset 0.
         let pills = vec![pill("ab", Color::White, Color::Rgb(0, 0, 0))];
-        let segs = build_segments(&pills, 3);
+        let segs = build_segments(&pills, 3, &app.theme.tokens);
         // full text = "ab" + "   " = 5 chars.
         let total: usize = segs.iter().map(|s| s.text.chars().count()).sum();
         let a = segments_window(&segs, 2, 0);

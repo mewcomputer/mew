@@ -6,7 +6,6 @@ use ratatui::{
     Frame,
 };
 
-use super::DIVIDER;
 use crate::app::App;
 
 pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
@@ -55,7 +54,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     text.push_line(Line::from(Span::styled(
         "─".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(DIVIDER),
+        Style::default().fg(app.theme.tokens.divider),
     )));
     visual_row += 1;
 
@@ -113,7 +112,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     text.push_line(Line::from(Span::styled(
         "─".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(DIVIDER),
+        Style::default().fg(app.theme.tokens.divider),
     )));
     visual_row += 1;
 
@@ -156,7 +155,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     text.push_line(Line::from(Span::styled(
         "─".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(DIVIDER),
+        Style::default().fg(app.theme.tokens.divider),
     )));
     visual_row += 1;
 
@@ -223,7 +222,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     text.push_line(Line::from(Span::styled(
         "─".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(DIVIDER),
+        Style::default().fg(app.theme.tokens.divider),
     )));
     visual_row += 1;
 
@@ -274,7 +273,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     text.push_line(Line::from(Span::styled(
         "─".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(DIVIDER),
+        Style::default().fg(app.theme.tokens.divider),
     )));
 
     // Subagents
@@ -344,7 +343,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         }
         text.push_line(Line::from(Span::styled(
             "─".repeat(area.width.saturating_sub(2) as usize),
-            Style::default().fg(DIVIDER),
+            Style::default().fg(app.theme.tokens.divider),
         )));
     }
 
@@ -395,7 +394,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         }
         text.push_line(Line::from(Span::styled(
             "─".repeat(area.width.saturating_sub(2) as usize),
-            Style::default().fg(DIVIDER),
+            Style::default().fg(app.theme.tokens.divider),
         )));
     }
 

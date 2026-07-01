@@ -1,7 +1,7 @@
 import { createHighlighterCore } from "shiki/core";
 import { createOnigurumaEngine } from "shiki/engine/oniguruma";
 import type { HighlighterCore } from "shiki/core";
-import type { ResolvedTheme } from "./theme";
+import type { ResolvedMode } from "./theme";
 
 const DARK_THEME = "github-dark";
 const LIGHT_THEME = "github-light";
@@ -82,7 +82,7 @@ async function initHighlighter() {
 export async function highlightCode(
   code: string,
   lang: string,
-  theme: ResolvedTheme = "dark",
+  theme: ResolvedMode = "dark",
 ): Promise<string> {
   const h = await initHighlighter();
   const resolvedLang = h.getLoadedLanguages().includes(lang) ? lang : "text";

@@ -430,8 +430,12 @@ async fn prompt_during_in_flight_turn_is_serialized() {
     // interleave their events — A's events stream back first, then B's.
     // (This is the existing serial behavior; if the daemon ever switches
     // to concurrent turns per session, this test will catch it.)
+    // The daemon generates a session title from the first user message after
+    // that prompt has streamed; the title call also hits the provider, so
+    // provide a dummy script between the two turn scripts.
     let scripts = vec![
         FakeProvider::text_response("first-turn"),
+        FakeProvider::text_response("title"),
         FakeProvider::text_response("second-turn"),
     ];
     let (_dir, socket) = spawn_daemon_with_scripts(scripts).await;

@@ -38,6 +38,18 @@ pub struct Config {
     /// (".mew/plans/current.md") or absolute.
     #[serde(default = "default_plan_path")]
     pub plan_path: String,
+    /// TUI configuration (theme, etc.).
+    #[serde(default)]
+    pub tui: TuiConfig,
+}
+
+/// TUI configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TuiConfig {
+    /// Theme name. "dark" (default), "light", or the name of a JSON theme
+    /// file in `~/.config/mew/themes/` or `.mew/themes/`.
+    #[serde(default)]
+    pub theme: String,
 }
 
 fn default_persona() -> String {
@@ -110,6 +122,7 @@ impl Default for Config {
             workspace: WorkspaceConfig::default(),
             default_persona: default_persona(),
             plan_path: default_plan_path(),
+            tui: TuiConfig::default(),
         }
     }
 }
@@ -218,6 +231,11 @@ pub struct ProviderConfig {
     /// configs keep working. New configs should use `deci`.
     #[serde(default)]
     pub big: String,
+    /// When true, the `edit_hashline` tool is not registered for models using
+    /// this provider. Useful for less-capable models that do not follow the
+    /// hashline format reliably.
+    #[serde(default)]
+    pub disable_hashline: bool,
 }
 
 fn default_kind() -> String {
@@ -256,6 +274,7 @@ impl Default for ProviderConfig {
             deci: String::new(),
             small: String::new(),
             big: String::new(),
+            disable_hashline: false,
         }
     }
 }
@@ -341,6 +360,9 @@ pub struct State {
     /// Plugin names that the user has disabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_plugins: Vec<String>,
+    /// Active theme name (overrides config when set via /theme command).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub theme: String,
 }
 
 /// Reads state from the standard location.

@@ -273,6 +273,21 @@ where
     ) = mpsc::unbounded_channel();
     let mut attached_session: Option<Arc<Session>> = None;
     let mut client_id: Option<u64> = None;
+    let mut auto_title_enabled = true;
+
+    // Shared flag for the idle-summary background task.
+    let auto_summary_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+    // Spawn the idle-summary background task. It periodically checks active
+    // sessions and generates a summary for sessions that have been idle
+    // for a while.
+    {
+        let auto_summary_enabled = auto_summary_enabled.clone();
+        let session_manager = session_manager.clone();
+        tokio::spawn(async move {
+            idle_summary_task(session_manager, auto_summary_enabled).await;
+        });
+    }
 
     // Spawn a writer task that owns the WebSocket sink.
     let mut ws_tx = ws_tx;
@@ -344,7 +359,7 @@ where
             ClientMessage::AttachSession { session_id } => {
                 match session_manager.attach(&session_id).await {
                     Ok(session) => {
-                        let (cid, was_first) = session.attach_client(client_tx.clone()).await;
+                        let (cid, _was_first) = session.attach_client(client_tx.clone()).await;
                         client_id = Some(cid);
                         attached_session = Some(session.clone());
 
@@ -360,14 +375,15 @@ where
                             provider,
                         });
 
-                        if was_first {
-                            let messages = {
-                                let agent = session.agent.lock().await;
-                                let msgs = agent.messages.lock().await.clone();
-                                msgs
-                            };
-                            reply(ServerMessage::SessionHistory { messages });
-                        }
+                        // Always send the current message history on attach.
+                        // The client may be switching between sessions on the
+                        // same connection, so it needs the full history.
+                        let messages = {
+                            let agent = session.agent.lock().await;
+                            let msgs = agent.messages.lock().await.clone();
+                            msgs
+                        };
+                        reply(ServerMessage::SessionHistory { messages });
                     }
                     Err(AttachError::NotFound) => {
                         reply(ServerMessage::Error {
@@ -390,6 +406,45 @@ where
                 let sessions = session_manager.list().await;
                 reply(ServerMessage::SessionList { sessions });
             }
+            ClientMessage::DeleteSession { session_id } => {
+                // Remove from active sessions if present.
+                session_manager.remove(&session_id).await;
+                // Delete from disk.
+                let session_dir = mew_session::session_dir();
+                let dir = session_dir.join(&session_id);
+                if dir.exists() {
+                    match tokio::fs::remove_dir_all(&dir).await {
+                        Ok(_) => {
+                            tracing::info!(session_id = %session_id, "deleted session");
+                        }
+                        Err(e) => {
+                            tracing::warn!(session_id = %session_id, error = %e, "failed to delete session dir");
+                        }
+                    }
+                }
+                // If the deleted session was the current one, navigate home.
+                if attached_session.as_ref().map(|s| s.id.as_str()) == Some(session_id.as_str()) {
+                    attached_session = None;
+                    client_id = None;
+                }
+            }
+            ClientMessage::RenameSession { session_id, title } => {
+                // Persist to disk for both active and idle sessions.
+                let dir = mew_session::session_dir();
+                if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
+                    let _ = meta.set_custom_title(&dir, title.clone()).await;
+                }
+                // Broadcast to all clients.
+                session_manager.broadcast_title(&session_id, title).await;
+            }
+            ClientMessage::SetAutoTitle { enabled } => {
+                auto_title_enabled = enabled;
+                tracing::info!(auto_title = enabled, "auto-title setting changed");
+            }
+            ClientMessage::SetAutoSummary { enabled } => {
+                auto_summary_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(auto_summary = enabled, "auto-summary setting changed");
+            }
             ClientMessage::Prompt { text, .. } => {
                 let Some(session) = attached_session.clone() else {
                     reply(ServerMessage::Error {
@@ -397,6 +452,11 @@ where
                     });
                     continue;
                 };
+                // Broadcast the user message to all attached clients.
+                // The sending client deduplicates by matching text content.
+                session
+                    .broadcast(ServerMessage::UserMessage { text: text.clone() })
+                    .await;
                 let client_tx = client_tx.clone();
                 tokio::spawn(async move {
                     let _guard = session.turn_lock.lock().await;
@@ -410,9 +470,31 @@ where
                     let token = CancellationToken::new();
                     *session.current_turn_cancel.lock().await = Some(token.clone());
                     let agent = session.agent.lock().await.clone();
+                    let prompt_text = text.clone();
+                    let auto_title = auto_title_enabled;
                     let rx = agent.run_with_parts(text, vec![], Some(token));
                     forward_events(rx, session.clone()).await;
                     *session.current_turn_cancel.lock().await = None;
+
+                    // Generate a session title from the first user message
+                    // if we haven't already. Uses a lightweight LLM call;
+                    // falls back to text truncation on error. Skipped if the
+                    // user has disabled auto-title generation.
+                    if auto_title {
+                        let mut generated = session.title_generated.lock().await;
+                        if !*generated {
+                            *generated = true;
+                            drop(generated);
+
+                            let title = generate_session_title(&agent, &prompt_text).await;
+                            session
+                                .broadcast(ServerMessage::SessionTitleChanged {
+                                    session_id: session.id.clone(),
+                                    title,
+                                })
+                                .await;
+                        }
+                    }
                 });
             }
             ClientMessage::Cancel => {
@@ -594,6 +676,268 @@ async fn forward_events(mut rx: tokio::sync::mpsc::Receiver<AgentEvent>, session
         for msg in msgs {
             session.broadcast(msg).await;
         }
+    }
+}
+
+/// Generate a short session title using the LLM.
+/// Falls back to text truncation if the provider call fails.
+async fn generate_session_title(agent: &Agent, prompt_text: &str) -> String {
+    use mew_message::{Message, Part, PartBase, Role, TextPart, Time};
+    use mew_provider::{ChatParams, ProviderEvent, ReasoningConfig, Request};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use ulid::Ulid;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let system = "You generate concise session titles. Respond with ONLY a 3-5 word title. No quotes, no punctuation at the end, no explanation.".to_string();
+
+    let user_msg = Message {
+        id: Ulid::new(),
+        session_id: Ulid::new(),
+        role: Role::User,
+        parts: vec![Part::Text(TextPart {
+            base: PartBase {
+                id: Ulid::new(),
+                message_id: Ulid::new(),
+                session_id: Ulid::new(),
+            },
+            text: format!(
+                "Generate a 3-5 word title for a session that starts with this message:\n\n{}",
+                prompt_text.chars().take(500).collect::<String>()
+            ),
+            synthetic: false,
+        })],
+        time: Time {
+            created: now,
+            completed: None,
+        },
+        assistant: None,
+    };
+
+    // Explicitly disable thinking/reasoning for the title generation call.
+    let mut reasoning_params = serde_json::Map::new();
+    reasoning_params.insert("type".into(), "disabled".into());
+
+    let req = Request {
+        model: String::new(),
+        messages: vec![user_msg],
+        tools: vec![],
+        system,
+        reasoning: Some(ReasoningConfig {
+            params: reasoning_params,
+        }),
+        params: Some(ChatParams {
+            temperature: Some(0.3),
+            max_tokens: Some(30),
+            ..Default::default()
+        }),
+        headers: Default::default(),
+    };
+
+    match agent.provider.stream(req).await {
+        Ok(mut stream) => {
+            let mut title = String::new();
+            let mut current_part_is_text = false;
+            while let Some(event) = futures::StreamExt::next(&mut stream).await {
+                match event {
+                    ProviderEvent::PartStart { part } => {
+                        current_part_is_text = matches!(part, Part::Text(_));
+                    }
+                    ProviderEvent::PartDelta { delta, .. } => {
+                        if current_part_is_text {
+                            title.push_str(&delta);
+                        }
+                    }
+                    ProviderEvent::MessageEnd { .. } => break,
+                    _ => {}
+                }
+            }
+            let trimmed = title.trim().trim_matches('"').to_string();
+            if trimmed.is_empty() {
+                derive_session_title(prompt_text)
+            } else {
+                trimmed.chars().take(80).collect()
+            }
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "title generation failed, using fallback");
+            derive_session_title(prompt_text)
+        }
+    }
+}
+
+/// Fallback: derive a short session title from the first user message.
+/// Truncates to 60 chars, collapses whitespace, strips newlines.
+fn derive_session_title(text: &str) -> String {
+    let cleaned: String = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(60)
+        .collect();
+    if cleaned.len() == 60 && text.len() > 60 {
+        format!("{cleaned}…")
+    } else {
+        cleaned
+    }
+}
+
+/// Background task that generates AI summaries for sessions that have
+/// been idle for >10 minutes. Runs every 5 minutes.
+async fn idle_summary_task(
+    session_manager: std::sync::Arc<crate::session::SessionManager>,
+    enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::time::Duration;
+    let idle_threshold = Duration::from_secs(600); // 10 minutes
+    let check_interval = Duration::from_secs(300); // 5 minutes
+
+    loop {
+        tokio::time::sleep(check_interval).await;
+
+        if !enabled.load(std::sync::atomic::Ordering::Relaxed) {
+            continue;
+        }
+
+        // Collect idle sessions (id, Arc) without holding the active lock.
+        let candidates: Vec<(String, Arc<Session>)> = {
+            let active = session_manager.active.lock().await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            let mut to_process: Vec<(String, Arc<Session>)> = Vec::new();
+            for (id, session) in active.iter() {
+                let last = {
+                    let agent = session.agent.lock().await;
+                    let msgs = agent.messages.lock().await;
+                    msgs.last().map(|m| m.time.created).unwrap_or(0)
+                };
+                if now - last >= idle_threshold.as_millis() as i64 {
+                    to_process.push((id.clone(), session.clone()));
+                }
+            }
+            to_process
+        };
+
+        for (id, session) in candidates {
+            // Check if already has a summary.
+            let dir = mew_session::session_dir();
+            let has_summary = mew_session::Meta::read(&dir, &id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|m| m.summary)
+                .is_some();
+            if has_summary {
+                continue;
+            }
+
+            let session_clone = session.clone();
+            let id_clone = id.clone();
+            tokio::spawn(async move {
+                if let Some(summary) = {
+                    let agent_guard = session_clone.agent.lock().await;
+                    let agent_ref: &Agent = &agent_guard;
+                    generate_session_summary(agent_ref).await
+                } {
+                    if let Ok(Some(mut meta)) =
+                        mew_session::Meta::read(&dir, &id_clone).await
+                    {
+                        let _ = meta.set_summary(&dir, summary.clone()).await;
+                    }
+                    session_clone
+                        .broadcast(mew_protocol::ServerMessage::SessionSummaryChanged {
+                            session_id: id_clone.clone(),
+                            summary,
+                        })
+                        .await;
+                }
+            });
+        }
+    }
+}
+
+/// Generate a short summary of the session's conversation.
+async fn generate_session_summary(agent: &Agent) -> Option<String> {
+    use mew_message::Role;
+    use mew_provider::{ChatParams, ProviderEvent, ReasoningConfig};
+    let messages = agent.messages.lock().await.clone();
+    if messages.is_empty() {
+        return None;
+    }
+    // Build a condensed transcript (first user msg + last few exchanges).
+    let mut transcript = String::new();
+    transcript.push_str("Summarize this conversation in 1-2 sentences (max 30 words):\n\n");
+    for msg in messages.iter().take(20) {
+        if let Role::User = msg.role {
+            transcript.push_str("User: ");
+        } else {
+            transcript.push_str("Assistant: ");
+        }
+        for part in &msg.parts {
+            if let mew_message::Part::Text(tp) = part {
+                transcript.push_str(&tp.text);
+                transcript.push('\n');
+            }
+        }
+        if transcript.len() > 2000 {
+            break;
+        }
+    }
+    let user_msg = mew_message::Message {
+        id: ulid::Ulid::new(),
+        session_id: ulid::Ulid::new(),
+        role: Role::User,
+        parts: vec![mew_message::Part::Text(mew_message::TextPart {
+            base: mew_message::PartBase {
+                id: ulid::Ulid::new(),
+                message_id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+            },
+            text: transcript.chars().take(2000).collect(),
+            synthetic: false,
+        })],
+        time: mew_message::Time { created: 0, completed: None },
+        assistant: None,
+    };
+    let mut reasoning_params = serde_json::Map::new();
+    reasoning_params.insert("type".into(), "disabled".into());
+    let req = mew_provider::Request {
+        model: String::new(),
+        messages: vec![user_msg],
+        tools: vec![],
+        system: "You write concise 1-2 sentence summaries. No preamble, no quotes, no bullet points.".to_string(),
+        reasoning: Some(ReasoningConfig { params: reasoning_params }),
+        params: Some(ChatParams { temperature: Some(0.3), max_tokens: Some(60), ..Default::default() }),
+        headers: Default::default(),
+    };
+    match agent.provider.stream(req).await {
+        Ok(mut stream) => {
+            let mut summary = String::new();
+            let mut current_part_is_text = false;
+            while let Some(event) = futures::StreamExt::next(&mut stream).await {
+                match event {
+                    ProviderEvent::PartStart { part } => {
+                        current_part_is_text = matches!(part, mew_message::Part::Text(_));
+                    }
+                    ProviderEvent::PartDelta { delta, .. } => {
+                        if current_part_is_text { summary.push_str(&delta); }
+                    }
+                    ProviderEvent::MessageEnd { .. } => break,
+                    _ => {}
+                }
+            }
+            let trimmed = summary.trim().to_string();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        }
+        Err(_) => None,
     }
 }
 

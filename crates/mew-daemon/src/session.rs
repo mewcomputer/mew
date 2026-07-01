@@ -73,6 +73,8 @@ pub struct Session {
     /// Current model/provider display IDs for SessionReady.
     pub model: Mutex<Option<String>>,
     pub provider: Mutex<Option<String>>,
+    /// Whether a title has been generated for this session.
+    pub title_generated: Mutex<bool>,
 }
 
 impl Session {
@@ -88,6 +90,7 @@ impl Session {
             current_turn_cancel: Mutex::new(None),
             model: Mutex::new(model),
             provider: Mutex::new(provider),
+            title_generated: Mutex::new(false),
         }
     }
 
@@ -150,7 +153,7 @@ pub struct SessionManager {
     pub(crate) switcher: Option<ModelSwitcher>,
     pub(crate) lister: Option<ModelLister>,
     pub(crate) session_dir: PathBuf,
-    active: Mutex<HashMap<String, Arc<Session>>>,
+    pub(crate) active: Mutex<HashMap<String, Arc<Session>>>,
     loading: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
@@ -273,21 +276,33 @@ impl SessionManager {
 
         // Active sessions.
         for (id, session) in active.iter() {
-            let (model, provider, created_at) = {
-                let meta = session.agent.lock().await.session_meta().await;
+            let agent = session.agent.lock().await;
+            let meta = agent.session_meta().await;
+            // Skip empty sessions (no messages yet).
+            let message_count = agent.messages.try_lock().map(|m| m.len()).unwrap_or(0);
+            if message_count == 0 {
+                continue;
+            }
+            let (model, provider) = {
                 (
                     session.model.lock().await.clone(),
                     session.provider.lock().await.clone(),
-                    meta.as_ref().map(|m| m.created_at).unwrap_or(0),
                 )
             };
+            let created_at = meta.as_ref().map(|m| m.created_at).unwrap_or(0);
+            let last_message_at = meta
+                .as_ref()
+                .and_then(|m| m.last_message_at)
+                .or_else(|| meta.as_ref().map(|m| m.created_at));
+            let summary = meta.as_ref().and_then(|m| m.summary.clone());
             infos.push(SessionInfo {
                 session_id: id.clone(),
                 state: SessionState::Active,
                 model,
                 provider,
                 created_at,
-                last_message_at: None, // TODO
+                last_message_at,
+                summary,
                 client_count: session.client_count().await,
             });
         }
@@ -310,13 +325,25 @@ impl SessionManager {
                 }
                 match mew_session::Meta::read(&self.session_dir, &id).await {
                     Ok(Some(meta)) if meta.depth == 0 => {
+                        // Auto-delete sessions with no messages.
+                        let jsonl_path = path.join("session.jsonl");
+                        let has_messages = match tokio::fs::metadata(&jsonl_path).await {
+                            Ok(m) => m.len() > 0,
+                            Err(_) => false,
+                        };
+                        if !has_messages {
+                            tracing::debug!(session_id = %id, "auto-deleting empty session");
+                            let _ = tokio::fs::remove_dir_all(&path).await;
+                            continue;
+                        }
                         infos.push(SessionInfo {
                             session_id: id.clone(),
                             state: SessionState::Idle,
                             model: meta.model.clone(),
-                            provider: None, // not stored in Meta today
+                            provider: None,
                             created_at: meta.created_at,
-                            last_message_at: None, // TODO
+                            last_message_at: meta.last_message_at.or(Some(meta.created_at)),
+                            summary: meta.summary.clone(),
                             client_count: 0,
                         });
                     }
@@ -326,5 +353,23 @@ impl SessionManager {
         }
 
         infos
+    }
+
+    /// Broadcast a title change for a session. If the session is active,
+    /// sends to all attached clients. If only on disk, notifies via
+    /// disk meta (frontend will pick it up on next list_sessions).
+    pub async fn broadcast_title(&self, session_id: &str, title: String) {
+        let active = self.active.lock().await;
+        if let Some(session) = active.get(session_id) {
+            session
+                .broadcast(ServerMessage::SessionTitleChanged {
+                    session_id: session_id.to_string(),
+                    title,
+                })
+                .await;
+        }
+        // If the session is idle/on-disk only, the frontend will get the
+        // title when it calls list_sessions (we don't return titles in
+        // SessionInfo yet, so this is best-effort).
     }
 }

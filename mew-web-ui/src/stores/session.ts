@@ -26,7 +26,15 @@ export interface ChatMessage {
 export type MessagePart =
   | { type: "text"; text: string; streaming?: boolean }
   | { type: "reasoning"; text: string; streaming?: boolean }
-  | { type: "tool-call"; toolName: string; callId: string; input: unknown; state: ToolDisplayState; output?: string }
+  | {
+      type: "tool-call";
+      toolName: string;
+      callId: string;
+      input: unknown;
+      state: ToolDisplayState;
+      output?: string;
+      time?: { start: number; end: number | null };
+    }
   | { type: "error"; message: string };
 
 export type ToolDisplayState = "pending" | "running" | "completed" | "error";
@@ -34,36 +42,36 @@ export type ToolDisplayState = "pending" | "running" | "completed" | "error";
 /** Map the wire ToolState.type to our display state. */
 function matchToolState(type: string): ToolDisplayState {
   switch (type) {
-    case "Pending":
+    case "pending":
       return "pending";
-    case "Running":
+    case "running":
       return "running";
-    case "Completed":
+    case "completed":
       return "completed";
-    case "Error":
+    case "error":
       return "error";
     default:
       return "pending";
   }
 }
 
-/** Convert a wire Part (from SessionHistory) into the store's MessagePart
- *  shape, or null if the part should be skipped (e.g. ToolResult parts
- *  are absorbed into the preceding ToolCall). Wire parts are discriminated
- *  by PascalCase `type`; we map each to the display representation. */
+/** Convert a wire Part (from session_history) into the store's MessagePart
+ *  shape, or null if the part should be skipped (e.g. tool_result parts
+ *  are absorbed into the preceding tool_call). Wire parts are discriminated
+ *  by snake_case `type`; we map each to the display representation. */
 function wirePartToMessagePart(part: Part): MessagePart | null {
   switch (part.type) {
-    case "Text":
+    case "text":
       if (!part.text || part.text.trim() === "") return null;
       return { type: "text", text: part.text };
-    case "Reasoning":
+    case "reasoning":
       return { type: "reasoning", text: part.text };
-    case "ToolCall": {
+    case "tool_call": {
       const state: ToolDisplayState = matchToolState(part.state.type);
       const output =
-        part.state.type === "Completed" || part.state.type === "Running"
+        part.state.type === "completed" || part.state.type === "running"
           ? part.state.output
-          : part.state.type === "Error"
+          : part.state.type === "error"
             ? part.state.error
             : undefined;
       return {
@@ -73,15 +81,16 @@ function wirePartToMessagePart(part: Part): MessagePart | null {
         input: part.state.input,
         state,
         output,
+        time: part.state.time,
       };
     }
-    case "ToolResult":
-      // ToolResult parts are absorbed into the preceding ToolCall's
-      // state; the ToolCall part already carries the output. Skip.
+    case "tool_result":
+      // tool_result parts are absorbed into the preceding tool_call's
+      // state; the tool_call part already carries the output. Skip.
       return null;
-    case "File":
+    case "file":
       return { type: "text", text: `[file: ${part.url}]` };
-    case "Compaction":
+    case "compaction":
       return { type: "text", text: "[context compacted]" };
   }
 }
@@ -151,6 +160,9 @@ interface SessionState {
   currentProvider: string | null;
   currentThinkingVariant: string | null;
 
+  // Persona
+  currentPersona: string | null;
+
   // Session list
   availableSessions: SessionInfo[];
   sessionsLoading: boolean;
@@ -187,7 +199,10 @@ interface SessionState {
   setAvailableModels: (models: ModelInfo[]) => void;
   setCurrentModel: (provider: string, model: string) => void;
   setCurrentThinkingVariant: (variant: string | null) => void;
+  setCurrentPersona: (name: string | null) => void;
   onSessionTitleChanged: (sessionId: string, title: string) => void;
+  sessionSummaries: Map<string, string>;
+  onSessionSummaryChanged: (sessionId: string, summary: string) => void;
 
   // Shared-session actions
   setAvailableSessions: (sessions: SessionInfo[]) => void;
@@ -228,9 +243,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   currentModel: null,
   currentProvider: null,
   currentThinkingVariant: null,
+  currentPersona: null,
   availableSessions: [],
   sessionsLoading: false,
   sessionTitles: new Map(),
+  sessionSummaries: new Map(),
   subagents: new Map(),
   pendingAskUser: [],
   todos: [],
@@ -254,8 +271,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   onProviderEvent: (ev) => {
     const state = get();
     switch (ev.type) {
-      case "PartStart": {
-        if (ev.part.type === "Text") {
+      case "part_start": {
+        if (ev.part.type === "text") {
           // Start a new streaming text part.
           const partId = ev.part.base.id;
           set({
@@ -297,7 +314,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             }
             return { messages: msgs };
           });
-        } else if (ev.part.type === "Reasoning") {
+        } else if (ev.part.type === "reasoning") {
           // Start streaming reasoning text
           const partId = ev.part.base.id;
           set({
@@ -331,7 +348,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             }
             return { messages: msgs };
           });
-        } else if (ev.part.type === "ToolCall") {
+        } else if (ev.part.type === "tool_call") {
           // Add a tool call part to the current assistant message,
           // creating a new one if needed (new turn).
           const tc = ev.part;
@@ -372,7 +389,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }
         break;
       }
-      case "PartDelta": {
+      case "part_delta": {
         if (ev.field === "text" && state.streamingPartId === ev.part_id) {
           set((s) => ({ streamingText: s.streamingText + ev.delta }));
         } else if (
@@ -385,7 +402,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }
         break;
       }
-      case "PartEnd": {
+      case "part_end": {
         if (state.streamingPartId === ev.part_id) {
           // Finalize the streaming text into the message
           set((s) => {
@@ -429,7 +446,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }
         break;
       }
-      case "MessageEnd": {
+      case "message_end": {
         // Accumulate cost
         set((s) => ({
           totalInputTokens: s.totalInputTokens + ev.usage.input,
@@ -438,11 +455,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }));
         break;
       }
-      case "RetryWait": {
+      case "retry_wait": {
         // Could show a toast; for now just log
         break;
       }
-      case "Error": {
+      case "error": {
         set((s) => ({
           messages: [
             ...s.messages,
@@ -481,15 +498,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }),
 
   onPartUpdated: (partId, part) => {
-    // Handle tool state transitions: PartUpdated arrives with the updated
-    // ToolCall part (state.type: Running/Completed/Error) and ToolResult parts.
-    if (part.type === "ToolCall") {
+    // Handle tool state transitions: part_updated arrives with the updated
+    // tool_call part (state.type: running/completed/error) and tool_result parts.
+    if (part.type === "tool_call") {
       const callId = part.call_id;
       const newState: ToolDisplayState = matchToolState(part.state.type);
       const output =
-        part.state.type === "Completed" || part.state.type === "Running"
+        part.state.type === "completed" || part.state.type === "running"
           ? part.state.output
-          : part.state.type === "Error"
+          : part.state.type === "error"
             ? part.state.error
             : undefined;
 
@@ -504,10 +521,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           );
           if (tcPart && tcPart.type === "tool-call") {
             tcPart.state = newState;
-            // Update input from the PartUpdated event (the initial PartStart
+            // Update input from the part_updated event (the initial part_start
             // may not have the full input if it arrived before parsing).
             if (part.state.input !== undefined) {
               tcPart.input = part.state.input;
+            }
+            if (part.state.time) {
+              tcPart.time = part.state.time;
             }
             if (output) tcPart.output = output;
           }
@@ -518,9 +538,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         if (output) outs.set(callId, output);
         return { messages: msgs, toolStates: ts, toolOutputs: outs };
       });
-    } else if (part.type === "ToolResult") {
-      // ToolResult part just confirms the tool finished. The output is
-      // already in the ToolCallPart's state (Completed/Running has output).
+    } else if (part.type === "tool_result") {
+      // tool_result part just confirms the tool finished. The output is
+      // already in the tool_call part's state (completed/running has output).
       // Just mark the tool as completed if not already.
       const callId = part.call_id;
       set((s) => {
@@ -577,11 +597,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setCurrentThinkingVariant: (variant) =>
     set({ currentThinkingVariant: variant }),
 
+  setCurrentPersona: (name) => set({ currentPersona: name }),
+
   onSessionTitleChanged: (sessionId, title) =>
     set((state) => {
       const sessionTitles = new Map(state.sessionTitles);
       sessionTitles.set(sessionId, title);
       return { sessionTitles };
+    }),
+
+  onSessionSummaryChanged: (sessionId, summary) =>
+    set((state) => {
+      const sessionSummaries = new Map(state.sessionSummaries);
+      sessionSummaries.set(sessionId, summary);
+      return { sessionSummaries };
     }),
 
   setAvailableSessions: (sessions) => set({ availableSessions: sessions }),
@@ -664,8 +693,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const sub = subs.get(data.parent_call_id);
       if (sub) {
         let status: SubagentInfo["status"] = "completed";
-        if (data.outcome.type === "Cancelled") status = "cancelled";
-        else if (data.outcome.type === "Failed") status = "failed";
+        if (data.outcome.type === "cancelled") status = "cancelled";
+        else if (data.outcome.type === "failed") status = "failed";
         subs.set(data.parent_call_id, {
           ...sub,
           status,
@@ -718,13 +747,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       totalInputTokens: 0,
       totalOutputTokens: 0,
       totalCost: 0,
-      availableModels: [],
-      currentModel: null,
-      currentProvider: null,
-      currentThinkingVariant: null,
-      availableSessions: [],
-      sessionsLoading: false,
-      sessionTitles: new Map(),
+      // Keep global caches and per-session model info; they are repopulated
+      // by wire events (model-list, session-list, session-ready).
+      // currentModel is intentionally preserved to avoid model picker/footer blanks.
     }),
 }));
 
@@ -746,6 +771,16 @@ export function bridgeClientToStore(client: MewClient) {
   });
 
   client.on("provider", (ev) => store.getState().onProviderEvent(ev));
+
+  client.on("user-message", (data) => {
+    const store = useSessionStore.getState();
+    // Deduplicate: the sending client already added the message locally.
+    const last = store.messages[store.messages.length - 1];
+    if (last && last.role === "user" && last.parts.some((p) => p.type === "text" && p.text === data.text)) {
+      return;
+    }
+    store.addUserMessage(data.text);
+  });
 
   client.on("tool-start", (data) => store.getState().onToolStart(data.call_id));
   client.on("tool-end", (data) => store.getState().onToolEnd(data.call_id, data.success));
@@ -790,8 +825,15 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("thinking-variant-changed", (data) =>
     store.getState().setCurrentThinkingVariant(data.variant),
   );
+  client.on("persona-switch-requested", (data) =>
+    store.getState().setCurrentPersona(data.name),
+  );
   client.on("session-title-changed", (data) =>
     store.getState().onSessionTitleChanged(data.session_id, data.title),
+  );
+
+  client.on("session-summary-changed", (data) =>
+    store.getState().onSessionSummaryChanged(data.session_id, data.summary),
   );
 
   client.on("session-list", (data) => {

@@ -56,8 +56,12 @@ build-web:
 #   --daemon-socket PATH    override the daemon unix socket path
 #
 # dev-web-specific flags:
-#   --open    launch the system browser once the bridge is bound
-dev-web *flags: build-web
+#   --open    launch the system browser once Vite is running
+#
+# This runs the Vite dev server (port 5173) and the bridge in the
+# background. Vite proxies /ws to the bridge so you get hot-module reload
+# and no production build step.
+dev-web *flags:
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{justfile_directory()}}"
@@ -69,11 +73,66 @@ dev-web *flags: build-web
             *) bridge_args+=("$arg") ;;
         esac
     done
+
+    # Start the bridge in the background; Vite proxies /ws to it.
+    cargo run -p mew-web-bridge --bin mew-web -- ${bridge_args[@]+"${bridge_args[@]}"} &
+    bridge_pid=$!
+    trap 'kill $bridge_pid 2>/dev/null || true' EXIT
+
+    # Wait for the bridge TCP listener to bind.
+    for i in {1..60}; do
+        if bash -c '>/dev/tcp/127.0.0.1/9847' 2>/dev/null; then break; fi
+        sleep 0.5
+    done
+
     if $do_open; then
-        # Open 2s after the bridge starts; that gives the listener time to bind.
-        (sleep 2 && just _open-url "http://127.0.0.1:9847/" >/dev/null 2>&1 &)
+        # Give Vite a moment to start, then open the dev URL.
+        (sleep 2 && just _open-url "http://127.0.0.1:5173/" >/dev/null 2>&1 &)
     fi
-    cargo run -p mew-web-bridge --bin mew-web -- ${bridge_args[@]+"${bridge_args[@]}"}
+
+    pnpm --filter mew-web-ui dev
+    wait $bridge_pid
+
+# Kills the bridge (port 9847) and the daemon process it spawned.
+kill-daemon:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Kill the bridge first so it doesn't re-spawn a daemon.
+    if lsof -i :9847 >/dev/null 2>&1; then
+        echo "killing mew-web-bridge on port 9847"
+        lsof -ti :9847 | xargs kill 2>/dev/null || true
+    else
+        echo "no mew-web-bridge running on port 9847"
+    fi
+    # Kill any lingering daemon processes.
+    pids=$(pgrep -f "target/debug/mew daemon" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo "killing mew daemon: $pids"
+        echo "$pids" | xargs kill 2>/dev/null || true
+    fi
+    # Clean up the socket.
+    rm -f /tmp/mew.sock 2>/dev/null || true
+
+# Rebuilds the mew binary (daemon + bridge) and restarts everything.
+# Use this after changing Rust source files. The bridge auto-spawns
+# a fresh daemon from the rebuilt binary.
+restart-daemon:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just kill-daemon
+    cargo build -p mew-web-bridge -p mew
+    rm -f /tmp/mew.sock 2>/dev/null || true
+    nohup target/debug/mew-web > /tmp/mew-bridge.log 2>&1 &
+    disown
+    sleep 2
+    if pgrep -f "target/debug/mew-web" >/dev/null 2>&1; then
+        echo "✓ bridge + daemon running"
+        tail -2 /tmp/mew-bridge.log
+    else
+        echo "✗ failed to start — check /tmp/mew-bridge.log"
+        cat /tmp/mew-bridge.log
+        exit 1
+    fi
 
 # Open the chat UI in the system browser. Default URL is the bridge's
 # default listen address. Override with:  just web-open http://host:port/
@@ -101,6 +160,12 @@ _open-url url:
 # bridge separately in another terminal: `just dev-web --spawn false`.
 dev-ui:
     pnpm --filter mew-web-ui dev
+
+# Full watch dev mode: Vite dev server + cargo-watch for the Rust stack.
+# Rebuilds and restarts the bridge/daemon whenever Rust sources change.
+# Flags are forwarded to the bridge; use --open to launch the browser.
+dev-web-watch *flags:
+    {{justfile_directory()}}/scripts/dev-web-watch.sh {{flags}}
 
 # Remove all build artifacts: Vite dist, TypeScript library dist, and
 # Vite/turbo caches. Useful when switching branches or after dependency

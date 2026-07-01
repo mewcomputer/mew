@@ -224,6 +224,24 @@ enum Commands {
         /// Shell to generate completions for
         shell: Option<String>,
     },
+    /// Manage TUI themes
+    Theme {
+        #[command(subcommand)]
+        command: ThemeCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ThemeCommands {
+    /// List available themes
+    List,
+    /// Print the currently active theme name
+    Current,
+    /// Install a theme JSON file to ~/.config/mew/themes/
+    Install {
+        /// Path to the JSON theme file to install
+        path: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -486,6 +504,58 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             clap_complete::generate(shell, &mut cmd, "mew", &mut std::io::stdout());
             Ok(())
         }
+        Some(Commands::Theme { command }) => theme_cmd(command),
+    }
+}
+
+/// Handle `mew theme` subcommands.
+fn theme_cmd(command: ThemeCommands) -> Result<()> {
+    match command {
+        ThemeCommands::List => {
+            let names = mew_tui::theme::Theme::list_available();
+            let state = mew_config::load_state().unwrap_or_default();
+            let cfg = mew_config::load().unwrap_or_default();
+            let active = if !state.theme.is_empty() {
+                &state.theme
+            } else {
+                &cfg.tui.theme
+            };
+            let active = if active.is_empty() { "dark" } else { active };
+            for name in &names {
+                if name == active {
+                    println!("  * {name} (active)");
+                } else {
+                    println!("    {name}");
+                }
+            }
+            Ok(())
+        }
+        ThemeCommands::Current => {
+            let state = mew_config::load_state().unwrap_or_default();
+            let cfg = mew_config::load().unwrap_or_default();
+            let active = if !state.theme.is_empty() {
+                &state.theme
+            } else {
+                &cfg.tui.theme
+            };
+            let active = if active.is_empty() { "dark" } else { active };
+            println!("{active}");
+            Ok(())
+        }
+        ThemeCommands::Install { path } => {
+            // Validate the file parses as a theme.
+            let theme =
+                mew_tui::theme::Theme::from_json(&path).context("failed to parse theme file")?;
+            // Determine the install directory.
+            let themes_dir = mew_tui::theme::Theme::themes_dir()
+                .context("could not determine themes directory")?;
+            std::fs::create_dir_all(&themes_dir).context("failed to create themes directory")?;
+            let dest = themes_dir.join(format!("{}.json", theme.name));
+            std::fs::copy(&path, &dest)
+                .with_context(|| format!("failed to copy to {}", dest.display()))?;
+            println!("installed theme '{}' to {}", theme.name, dest.display());
+            Ok(())
+        }
     }
 }
 
@@ -732,6 +802,13 @@ fn config_cmd(command: ConfigCommands) -> Result<()> {
     Ok(())
 }
 
+fn hashline_enabled_for(cfg: &Config, provider_id: &str) -> bool {
+    !cfg.providers
+        .get(provider_id)
+        .map(|p| p.disable_hashline)
+        .unwrap_or(false)
+}
+
 fn build_tools(
     skills: Arc<Vec<mew_skills::Skill>>,
     skill_filter: Arc<tokio::sync::RwLock<Option<std::collections::HashSet<String>>>>,
@@ -739,12 +816,12 @@ fn build_tools(
     personas: Arc<Vec<mew_personas::Persona>>,
     pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
     current_persona_name: Arc<tokio::sync::RwLock<Option<String>>>,
+    hashline_enabled: bool,
 ) -> Vec<Arc<dyn mew_tools::Tool>> {
     let mut tools: Vec<Arc<dyn mew_tools::Tool>> = vec![
         Arc::new(Read),
         Arc::new(Write),
         Arc::new(EditStrReplace),
-        Arc::new(EditHashline),
         Arc::new(Bash),
         Arc::new(Glob),
         Arc::new(Grep),
@@ -764,6 +841,9 @@ fn build_tools(
         Arc::new(TodoListTool),
         Arc::new(WebFetch),
     ];
+    if hashline_enabled {
+        tools.insert(3, Arc::new(EditHashline));
+    }
     if !skills.is_empty() {
         tools.push(Arc::new(Skill::new(skills, skill_filter, template_ctx)));
     }
@@ -1294,6 +1374,7 @@ fn build_session_agent(
         personas_arc.clone(),
         pending_persona_switch.clone(),
         current_persona_name.clone(),
+        hashline_enabled_for(cfg, provider_id),
     );
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
@@ -1766,6 +1847,16 @@ async fn chat_with_daemon(connect_url: &str) -> Result<()> {
     client.new_session().await?;
 
     let mut app = mew_tui::App::new();
+    // Load theme from state/config (best-effort; daemon client may not
+    // have full config available).
+    let state = mew_config::load_state().unwrap_or_default();
+    let cfg = mew_config::load().unwrap_or_default();
+    let theme_name = if !state.theme.is_empty() {
+        &state.theme
+    } else {
+        &cfg.tui.theme
+    };
+    app.theme = mew_tui::theme::Theme::load(theme_name);
     app.status.model = "daemon".to_string();
     app.status.provider = "mewd".to_string();
 
@@ -1909,6 +2000,10 @@ fn handle_slash_result_local(app: &mut mew_tui::App, result: mew_tui::app::Slash
         }
         SlashResult::SetThinkingVariant(_) => {
             app.set_alert("thinking variant switching not available in daemon mode");
+        }
+        SlashResult::SetTheme(name) => {
+            app.theme = mew_tui::theme::Theme::load(&name);
+            app.set_alert(format!("theme: {}", app.theme.name));
         }
         SlashResult::PermissionModeMenu => {
             app.open_permission_mode_picker();
@@ -2277,6 +2372,7 @@ async fn run_tui(
         personas_arc.clone(),
         pending_persona_switch.clone(),
         current_persona_name.clone(),
+        hashline_enabled_for(cfg, &provider_id),
     );
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
@@ -2462,6 +2558,14 @@ async fn run_tui(
     }
 
     let mut app = mew_tui::App::new();
+    // Load theme: state.toml overrides config.toml, falling back to "dark".
+    let state = mew_config::load_state().unwrap_or_default();
+    let theme_name = if !state.theme.is_empty() {
+        &state.theme
+    } else {
+        &cfg.tui.theme
+    };
+    app.theme = mew_tui::theme::Theme::load(theme_name);
 
     // Seed the sidebar's todos pane from whatever was loaded at startup.
     app.todos = agent.todos.lock().await.items.clone();
@@ -2705,6 +2809,19 @@ async fn run_tui(
                                             }
                                         }
                                     }
+                                }
+                                mew_tui::SlashResult::SetTheme(ref name) => {
+                                    app.theme = mew_tui::theme::Theme::load(name);
+                                    // Persist to state.toml so it survives restart.
+                                    {
+                                        let mut save = mew_config::load_state().unwrap_or_default();
+                                        save.theme = app.theme.name.clone();
+                                        let _ = mew_config::save_state(&save);
+                                    }
+                                    app.messages.push(synthetic_message(format!(
+                                        "theme: {}",
+                                        app.theme.name
+                                    )));
                                 }
                                 mew_tui::SlashResult::SwitchPersona(ref name) => {
                                     if name == "default" || name == "none" {
@@ -3265,6 +3382,19 @@ async fn run_tui(
                                     mew_tui::SlashResult::SetThinkingVariant(_) => {
                                         // Deferred; handled in main loop.
                                     }
+                                    mew_tui::SlashResult::SetTheme(ref name) => {
+                                        app.theme = mew_tui::theme::Theme::load(name);
+                                        {
+                                            let mut save =
+                                                mew_config::load_state().unwrap_or_default();
+                                            save.theme = app.theme.name.clone();
+                                            let _ = mew_config::save_state(&save);
+                                        }
+                                        app.messages.push(synthetic_message(format!(
+                                            "theme: {}",
+                                            app.theme.name
+                                        )));
+                                    }
                                     mew_tui::SlashResult::SwitchPersona(_) => {
                                         // Handled inline above (direct clear).
                                     }
@@ -3713,6 +3843,7 @@ async fn build_and_run(
         personas_arc.clone(),
         pending_persona_switch.clone(),
         current_persona_name.clone(),
+        hashline_enabled_for(cfg, &provider_id),
     );
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =

@@ -68,10 +68,14 @@ pub enum SlashResult {
     /// Set or clear the thinking variant (used by `/thinking <variant>`
     /// and `/thinking off`).
     SetThinkingVariant(String),
+    /// Switch the TUI theme (used by `/theme <name>` or `/theme` to list).
+    SetTheme(String),
 }
 
 /// The application's main state.
 pub struct App {
+    /// The active color theme.
+    pub theme: crate::theme::Theme,
     /// Conversation messages.
     pub messages: Vec<Message>,
     /// Input buffer.
@@ -468,6 +472,7 @@ pub enum ToolDisplayState {
 impl App {
     pub fn new() -> Self {
         Self {
+            theme: crate::theme::Theme::dark(),
             messages: Vec::new(),
             input: String::new(),
             cursor: 0,
@@ -1755,6 +1760,10 @@ impl App {
                 name: "/mouse".into(),
                 description: "toggle mouse capture for text selection".into(),
             },
+            SlashCommand {
+                name: "/theme".into(),
+                description: "switch theme (e.g. /theme light, /theme dark)".into(),
+            },
         ]
     }
 
@@ -1797,6 +1806,29 @@ impl App {
                     SlashResult::Message(
                         "usage: /thinking <variant> — e.g. /thinking high, /thinking max, /thinking off".into(),
                     )
+                }
+            }
+            "/theme" => {
+                if let Some(name) = arg {
+                    SlashResult::SetTheme(name.trim().to_string())
+                } else {
+                    // No arg → list available themes.
+                    let names = crate::theme::Theme::list_available();
+                    let current = &self.theme.name;
+                    let lines: Vec<String> = names
+                        .iter()
+                        .map(|n| {
+                            if n == current {
+                                format!("  * {n} (active)")
+                            } else {
+                                format!("    {n}")
+                            }
+                        })
+                        .collect();
+                    SlashResult::Message(format!(
+                        "available themes:\n{}\nusage: /theme <name>",
+                        lines.join("\n")
+                    ))
                 }
             }
             "/persona" => {

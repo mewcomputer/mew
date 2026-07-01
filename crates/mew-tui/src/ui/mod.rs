@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     widgets::Block,
     Frame,
 };
@@ -16,16 +16,6 @@ mod spinner;
 mod status;
 mod welcome;
 
-/// Background color for the input and status line surface.
-pub(super) const STATUS_BG: Color = Color::Rgb(30, 30, 33);
-/// Background color for the sidebar surface.
-pub(super) const SIDEBAR_BG: Color = Color::Rgb(28, 28, 31);
-/// Background color for tool call blocks. Picked to be clearly lighter than
-/// the surrounding chat surface so the block reads as a filled card; the
-/// half-block top/bottom edges add a 1-row soft transition into the fill.
-pub(super) const TOOL_BG: Color = Color::Rgb(50, 50, 56);
-/// Subtle divider color.
-pub(super) const DIVIDER: Color = Color::Rgb(50, 50, 55);
 /// Max lines of bash output shown when collapsed.
 pub(super) const BASH_LINES_COLLAPSED: usize = 10;
 /// Max lines of bash output shown when expanded.
@@ -58,7 +48,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 Constraint::Length(SIDEBAR_WIDTH),
             ])
             .split(area);
-        let sidebar_bg = Block::default().style(Style::default().bg(SIDEBAR_BG));
+        let sidebar_bg = Block::default().style(Style::default().bg(app.theme.tokens.sidebar));
         f.render_widget(sidebar_bg, chunks[1]);
         sidebar::draw_sidebar(f, app, chunks[1]);
         chunks.to_vec()
@@ -103,7 +93,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let input_rect = welcome::draw_landing(f, app, hero_area, slash_height);
         if app.mode == Mode::UserQuestion {
             if let Some(ref uq) = app.user_question {
-                overlays::draw_user_question(f, uq, input_rect);
+                overlays::draw_user_question(f, uq, input_rect, &app.theme.tokens);
             }
         } else {
             input::draw_input(f, app, input_rect);
@@ -181,13 +171,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         companion::draw_companion_float(f, app, vert[0]);
     }
 
-    status::draw_divider(f, vert[1]);
+    status::draw_divider(f, vert[1], &app.theme.tokens);
     if show_slash {
         overlays::draw_slash_autocomplete(f, app, &slash_cmds, vert[2]);
     }
     if app.mode == Mode::UserQuestion {
         if let Some(ref uq) = app.user_question {
-            overlays::draw_user_question(f, uq, vert[3]);
+            overlays::draw_user_question(f, uq, vert[3], &app.theme.tokens);
         }
     } else {
         input::draw_input(f, app, vert[3]);
@@ -212,19 +202,19 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.mode == Mode::PermissionPrompt {
         if let Some(ref perm) = app.permission {
-            overlays::draw_permission_modal(f, perm, area);
+            overlays::draw_permission_modal(f, perm, area, &app.theme.tokens);
         }
     }
 
     if app.mode == Mode::PersonaSwitchConfirm {
         if let Some(ref state) = app.persona_switch_confirm {
-            overlays::draw_persona_confirm_modal(f, state, area);
+            overlays::draw_persona_confirm_modal(f, state, area, &app.theme.tokens);
         }
     }
 
     if app.mode == Mode::CommandPalette {
         if let Some(ref mut picker) = app.picker {
-            overlays::draw_picker(f, picker, area);
+            overlays::draw_picker(f, picker, area, &app.theme.tokens);
         }
     }
 

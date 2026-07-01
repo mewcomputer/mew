@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 mew-message = { workspace = true }
 mew-hooks = { workspace = true }
+mew-hashline = { workspace = true }
 mew-skills = { workspace = true }
 mew-subagents = { workspace = true }
 mew-personas = { workspace = true }

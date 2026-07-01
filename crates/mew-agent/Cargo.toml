@@ -10,6 +10,7 @@ mew-message = { workspace = true }
 mew-provider = { workspace = true }
 mew-hooks = { workspace = true }
 mew-tools = { workspace = true }
+mew-hashline = { workspace = true }
 mew-subagents = { workspace = true }
 mew-session = { workspace = true }
 mew-config = { workspace = true }

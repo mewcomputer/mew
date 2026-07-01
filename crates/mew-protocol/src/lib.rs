@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 /// A message from the frontend to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// Create a new session.
     NewSession {
@@ -36,6 +36,18 @@ pub enum ClientMessage {
 
     /// List all sessions known to the daemon (active + persisted idle).
     ListSessions,
+
+    /// Delete a session from disk and remove it from the active list.
+    DeleteSession { session_id: String },
+
+    /// Rename a session (set a custom title).
+    RenameSession { session_id: String, title: String },
+
+    /// Enable or disable auto-generated session titles.
+    SetAutoTitle { enabled: bool },
+
+    /// Enable or disable idle session summaries.
+    SetAutoSummary { enabled: bool },
 
     /// Send a prompt to the active session. The daemon streams events back.
     Prompt {
@@ -110,7 +122,7 @@ pub struct ThinkingVariantInfo {
 
 /// Session lifecycle state as exposed by the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum SessionState {
     Active,
     Idle,
@@ -128,6 +140,9 @@ pub struct SessionInfo {
     pub created_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_message_at: Option<i64>,
+    /// AI-generated summary of the conversation (if enabled and generated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
     pub client_count: usize,
 }
 
@@ -184,7 +199,7 @@ impl From<PermissionDecision> for mew_hooks::PermissionDecision {
 /// `oneshot::Sender` in `AgentEvent` become ID-paired requests here; the
 /// frontend responds with a `ClientMessage` using the same `request_id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     /// Sent after `NewSession` succeeds. The session is ready for prompts.
     /// `model` and `provider` are the daemon's current model, so the
@@ -205,6 +220,11 @@ pub enum ServerMessage {
     Provider {
         event: mew_message::ProviderEventWire,
     },
+
+    /// A user message was sent to this session. Broadcast to all
+    /// attached clients so multi-device clients see the prompt.
+    /// The sending client can deduplicate by matching text content.
+    UserMessage { text: String },
 
     /// A tool execution has started.
     ToolStart { call_id: String },
@@ -322,6 +342,10 @@ pub enum ServerMessage {
     /// The daemon generated a title for the session. Frontends should update
     /// their session title display.
     SessionTitleChanged { session_id: String, title: String },
+
+    /// The daemon generated a summary for an idle session. Frontends
+    /// should display this in the session list / detail view.
+    SessionSummaryChanged { session_id: String, summary: String },
 }
 
 /// A question for `AskUserRequest`.
@@ -507,7 +531,7 @@ mod tests {
         // Verify the serde tag produces {"type": "..."} shape.
         let msg = ClientMessage::Cancel;
         let json = encode_json(&msg).unwrap();
-        assert!(json.contains(r#""type":"Cancel""#));
+        assert!(json.contains(r#""type":"cancel""#));
     }
 
     // -- ClientMessage: exhaustive variant coverage --------------------------
@@ -1075,7 +1099,7 @@ mod tests {
 
     #[test]
     fn malformed_json_is_rejected() {
-        let bad = r#"{"type":"Prompt","text":#}"#;
+        let bad = r#"{"type":"prompt","text":#}"#;
         let result: Result<ClientMessage, _> = decode_json(bad);
         assert!(result.is_err(), "malformed JSON must not decode");
     }
@@ -1083,7 +1107,7 @@ mod tests {
     #[test]
     fn missing_required_field_is_rejected() {
         // Prompt requires `text`. Drop it.
-        let bad = r#"{"type":"Prompt","attachments":[]}"#;
+        let bad = r#"{"type":"prompt","attachments":[]}"#;
         let result: Result<ClientMessage, _> = decode_json(bad);
         assert!(result.is_err(), "Prompt without text must fail to decode");
     }
@@ -1091,7 +1115,7 @@ mod tests {
     #[test]
     fn wrong_type_for_known_field_is_rejected() {
         // request_id must be a number, not a string.
-        let bad = r#"{"type":"PermissionResponse","request_id":"oops","decision":"AllowOnce"}"#;
+        let bad = r#"{"type":"permission_response","request_id":"oops","decision":"allow_once"}"#;
         let result: Result<ClientMessage, _> = decode_json(bad);
         assert!(result.is_err(), "string in number field must be rejected");
     }
@@ -1124,31 +1148,31 @@ mod tests {
     #[test]
     fn every_client_variant_has_distinct_type_tag() {
         let samples: Vec<(&'static str, ClientMessage)> = vec![
-            ("NewSession", ClientMessage::NewSession { cwd: None }),
+            ("new_session", ClientMessage::NewSession { cwd: None }),
             (
-                "Prompt",
+                "prompt",
                 ClientMessage::Prompt {
                     text: "x".into(),
                     attachments: vec![],
                 },
             ),
-            ("Cancel", ClientMessage::Cancel),
+            ("cancel", ClientMessage::Cancel),
             (
-                "PermissionResponse",
+                "permission_response",
                 ClientMessage::PermissionResponse {
                     request_id: 0,
                     decision: PermissionDecision::AllowOnce,
                 },
             ),
             (
-                "AskUserResponse",
+                "ask_user_response",
                 ClientMessage::AskUserResponse {
                     request_id: 0,
                     answers: vec![],
                 },
             ),
             (
-                "SlashCommand",
+                "slash_command",
                 ClientMessage::SlashCommand {
                     command: "/help".into(),
                 },
@@ -1300,6 +1324,7 @@ mod tests {
             provider: Some("deepseek".into()),
             created_at: 1_700_000_000,
             last_message_at: Some(1_700_000_123),
+            summary: None,
             client_count: 2,
         };
         let decoded = round_trip(&info);
@@ -1322,6 +1347,7 @@ mod tests {
             provider: None,
             created_at: 0,
             last_message_at: None,
+            summary: None,
             client_count: 0,
         };
         let json = encode_json(&info).unwrap();
@@ -1369,6 +1395,7 @@ mod tests {
                 provider: Some("p1".into()),
                 created_at: 100,
                 last_message_at: None,
+                summary: None,
                 client_count: 1,
             },
             SessionInfo {
@@ -1378,6 +1405,7 @@ mod tests {
                 provider: None,
                 created_at: 200,
                 last_message_at: Some(250),
+                summary: None,
                 client_count: 0,
             },
         ];
