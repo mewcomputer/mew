@@ -27,6 +27,24 @@ import "../styles/global.css";
                 the change, runs the tests. <br />And every part of it is a
                 plugin away from being yours.
             </p>
+            <div
+                class="flex flex-wrap gap-4 mt-8 mew-reveal"
+                style="transition-delay: 900ms"
+            >
+                <button
+                    type="button"
+                    data-copy="curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | sh"
+                    class="inline-flex items-center justify-center px-5 py-2.5 rounded-lg bg-primary text-primary-foreground font-medium hover:opacity-90 transition-opacity"
+                >
+                    Install
+                </button>
+                <a
+                    href="/docs/getting-started/installation/"
+                    class="inline-flex items-center justify-center px-5 py-2.5 rounded-lg border border-border bg-card text-foreground font-medium hover:bg-accent hover:text-accent-foreground transition-colors"
+                >
+                    Docs
+                </a>
+            </div>
         </section>
 
         <div>
@@ -65,7 +83,7 @@ import "../styles/global.css";
                 style="transition-delay: 400ms"
             >
                 <div class="text-foreground font-medium">
-                    $ curl get.mew.computer | bash
+                    $ curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | sh
                 </div>
                 <div class="text-muted-foreground">
                     $ export MEW_MODEL_PROVIDER="openai"
@@ -78,7 +96,7 @@ import "../styles/global.css";
                 </div>
                 <button
                     type="button"
-                    data-copy="curl get.mew.computer | bash"
+                    data-copy="curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | sh"
                     class="absolute top-4 right-4 text-xs font-mono text-muted-foreground hover:text-foreground transition-colors"
                     aria-label="Copy install command">copy</button
                 >
