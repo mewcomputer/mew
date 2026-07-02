@@ -121,9 +121,7 @@ pub enum AgentEvent {
         removed: u64,
     },
     /// The flagged-files set changed (file flagged or unflagged).
-    FlaggedFilesChanged {
-        files: Vec<FlaggedFileInfo>,
-    },
+    FlaggedFilesChanged { files: Vec<FlaggedFileInfo> },
 }
 
 /// Info about a flagged file, for the wire protocol.
@@ -234,7 +232,11 @@ impl std::fmt::Debug for AgentEvent {
                 .field("job_id", job_id)
                 .field("state", state)
                 .finish(),
-            AgentEvent::FileDelta { path, added, removed } => f
+            AgentEvent::FileDelta {
+                path,
+                added,
+                removed,
+            } => f
                 .debug_struct("FileDelta")
                 .field("path", path)
                 .field("added", added)

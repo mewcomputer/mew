@@ -443,7 +443,10 @@ where
                                 .iter()
                                 .map(|f| mew_protocol::FlaggedFileWire {
                                     path: f.path.display().to_string(),
-                                    reason: Some(mew_tools::tools::flag_important::flag_mode_label(f.mode).to_string()),
+                                    reason: Some(
+                                        mew_tools::tools::flag_important::flag_mode_label(f.mode)
+                                            .to_string(),
+                                    ),
                                 })
                                 .collect();
                             drop(agent);
@@ -678,7 +681,8 @@ where
                                     &session_manager_clone,
                                     &wiki_agent,
                                     wiki_prompt.to_string(),
-                                ).await;
+                                )
+                                .await;
                                 if had_error {
                                     Some("wiki generation failed".to_string())
                                 } else {
@@ -923,10 +927,7 @@ where
                     })
                     .await;
             }
-            ClientMessage::PinSession {
-                session_id,
-                pinned,
-            } => {
+            ClientMessage::PinSession { session_id, pinned } => {
                 let dir = session_manager.session_dir.clone();
                 if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
                     let _ = meta.set_pinned(&dir, pinned).await;
@@ -1002,7 +1003,10 @@ where
                         .iter()
                         .map(|f| mew_protocol::FlaggedFileWire {
                             path: f.path.display().to_string(),
-                            reason: Some(mew_tools::tools::flag_important::flag_mode_label(f.mode).to_string()),
+                            reason: Some(
+                                mew_tools::tools::flag_important::flag_mode_label(f.mode)
+                                    .to_string(),
+                            ),
                         })
                         .collect();
                     drop(guard);
@@ -1151,8 +1155,7 @@ async fn forward_events(
             // Everything else goes to just this session's clients.
             if matches!(
                 msg,
-                ServerMessage::SessionAlert { .. }
-                    | ServerMessage::SessionAttentionChanged { .. }
+                ServerMessage::SessionAlert { .. } | ServerMessage::SessionAttentionChanged { .. }
             ) {
                 session_mgr.broadcast_all(msg).await;
             } else {
@@ -1455,7 +1458,9 @@ async fn translate_event(
                 let dir = session.session_dir.clone();
                 let agent = session.agent.lock().await;
                 if let Some(mut meta) = agent.session_meta().await {
-                    let u = meta.usage.get_or_insert_with(mew_session::SessionUsage::default);
+                    let u = meta
+                        .usage
+                        .get_or_insert_with(mew_session::SessionUsage::default);
                     u.add_message(
                         usage.input as u64,
                         usage.output as u64,

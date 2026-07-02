@@ -229,11 +229,7 @@ impl Meta {
     }
 
     /// Set the archived flag and persist to disk.
-    pub async fn set_archived(
-        &mut self,
-        dir: &Path,
-        archived: bool,
-    ) -> Result<(), SessionError> {
+    pub async fn set_archived(&mut self, dir: &Path, archived: bool) -> Result<(), SessionError> {
         self.archived = archived;
         self.write(dir).await
     }
@@ -249,11 +245,7 @@ impl Meta {
     }
 
     /// Set the pinned flag and persist to disk.
-    pub async fn set_pinned(
-        &mut self,
-        dir: &Path,
-        pinned: bool,
-    ) -> Result<(), SessionError> {
+    pub async fn set_pinned(&mut self, dir: &Path, pinned: bool) -> Result<(), SessionError> {
         self.pinned = pinned;
         self.write(dir).await
     }
@@ -272,11 +264,7 @@ impl Meta {
     }
 
     /// Set the session usage and persist to disk.
-    pub async fn set_usage(
-        &mut self,
-        dir: &Path,
-        usage: SessionUsage,
-    ) -> Result<(), SessionError> {
+    pub async fn set_usage(&mut self, dir: &Path, usage: SessionUsage) -> Result<(), SessionError> {
         self.usage = Some(usage);
         self.write(dir).await
     }

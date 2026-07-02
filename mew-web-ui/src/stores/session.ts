@@ -159,6 +159,8 @@ interface SessionState {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCost: number;
+  // Input tokens from the last message_end — approximates current context fill
+  lastInputTokens: number;
 
   // Model management
   availableModels: ModelInfo[];
@@ -294,6 +296,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   totalInputTokens: 0,
   totalOutputTokens: 0,
   totalCost: 0,
+  lastInputTokens: 0,
   availableModels: [],
   currentModel: null,
   currentProvider: null,
@@ -518,6 +521,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           totalInputTokens: s.totalInputTokens + ev.usage.input,
           totalOutputTokens: s.totalOutputTokens + ev.usage.output,
           totalCost: s.totalCost + ev.cost,
+          lastInputTokens: ev.usage.input,
         }));
         break;
       }
@@ -838,6 +842,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       totalInputTokens: 0,
       totalOutputTokens: 0,
       totalCost: 0,
+      lastInputTokens: 0,
     }),
 
   onSubagentStart: (data) =>
@@ -928,6 +933,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       totalInputTokens: 0,
       totalOutputTokens: 0,
       totalCost: 0,
+      lastInputTokens: 0,
       // Clear per-session state that shouldn't leak across sessions.
       flaggedFiles: [],
       dirListing: null,

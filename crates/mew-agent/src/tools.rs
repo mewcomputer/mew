@@ -699,12 +699,12 @@ impl Agent {
                     .iter()
                     .map(|f| crate::FlaggedFileInfo {
                         path: f.path.display().to_string(),
-                        reason: Some(mew_tools::tools::flag_important::flag_mode_label(f.mode).to_string()),
+                        reason: Some(
+                            mew_tools::tools::flag_important::flag_mode_label(f.mode).to_string(),
+                        ),
                     })
                     .collect();
-                let _ = ev_tx
-                    .send(AgentEvent::FlaggedFilesChanged { files })
-                    .await;
+                let _ = ev_tx.send(AgentEvent::FlaggedFilesChanged { files }).await;
             }
             result_parts.push(Part::ToolResult(ToolResultPart {
                 base: PartBase {

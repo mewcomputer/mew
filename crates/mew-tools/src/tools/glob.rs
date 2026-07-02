@@ -95,7 +95,7 @@ impl Tool for Glob {
             error: String::new(),
             diff: None,
             metadata: None,
-        file_delta: None,
+            file_delta: None,
         })
     }
 }

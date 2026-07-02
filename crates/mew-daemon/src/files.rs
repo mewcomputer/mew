@@ -25,13 +25,18 @@ fn resolve_scoped(cwd: &Path, relative: Option<&str>) -> Result<PathBuf, String>
     };
 
     // Canonicalize both base and target, then check containment.
-    let canon_base = base.canonicalize().map_err(|e| format!("cwd canonicalize: {e}"))?;
+    let canon_base = base
+        .canonicalize()
+        .map_err(|e| format!("cwd canonicalize: {e}"))?;
     let canon_target = target
         .canonicalize()
         .map_err(|e| format!("path canonicalize: {e}"))?;
 
     if !canon_target.starts_with(&canon_base) {
-        return Err(format!("path escapes workspace: {}", canon_target.display()));
+        return Err(format!(
+            "path escapes workspace: {}",
+            canon_target.display()
+        ));
     }
 
     Ok(canon_target)
@@ -61,10 +66,7 @@ pub async fn handle_list_dir(
         .map_err(|e| format!("read_dir: {e}"))?;
 
     while let Ok(Some(entry)) = reader.next_entry().await {
-        let name = entry
-            .file_name()
-            .to_string_lossy()
-            .to_string();
+        let name = entry.file_name().to_string_lossy().to_string();
         // Skip hidden files (dotfiles).
         if name.starts_with('.') {
             continue;
@@ -115,7 +117,11 @@ pub async fn handle_read_preview(
         .map_err(|e| format!("read file: {e}"))?;
 
     let truncated = bytes.len() > limit;
-    let content_bytes = if truncated { &bytes[..limit] } else { &bytes[..] };
+    let content_bytes = if truncated {
+        &bytes[..limit]
+    } else {
+        &bytes[..]
+    };
 
     // Convert to string, handling non-UTF8 gracefully.
     let content = String::from_utf8_lossy(content_bytes).to_string();

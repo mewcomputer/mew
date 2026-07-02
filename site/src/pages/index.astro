@@ -28,22 +28,53 @@ import "../styles/global.css";
                 plugin away from being yours.
             </p>
             <div
-                class="flex flex-wrap gap-4 mt-8 mew-reveal"
+                class="mt-8 max-w-2xl mew-reveal"
                 style="transition-delay: 900ms"
             >
-                <button
-                    type="button"
-                    data-copy="curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | sh"
-                    class="inline-flex items-center justify-center px-5 py-2.5 rounded-lg bg-primary text-primary-foreground font-medium hover:opacity-90 transition-opacity"
+                <div
+                    class="bg-card border border-border rounded-lg overflow-hidden shadow-sm"
                 >
-                    Install
-                </button>
-                <a
-                    href="/docs/getting-started/installation/"
-                    class="inline-flex items-center justify-center px-5 py-2.5 rounded-lg border border-border bg-card text-foreground font-medium hover:bg-accent hover:text-accent-foreground transition-colors"
-                >
-                    Docs
-                </a>
+                    <div class="flex border-b border-border">
+                        <button
+                            type="button"
+                            data-install-tab="bash"
+                            class="install-tab px-4 py-2 text-sm font-mono text-foreground border-b-2 border-primary bg-primary/5"
+                        >
+                            bash
+                        </button>
+                        <button
+                            type="button"
+                            data-install-tab="brew"
+                            class="install-tab px-4 py-2 text-sm font-mono text-muted-foreground border-b-2 border-transparent hover:text-foreground transition-colors"
+                        >
+                            brew
+                        </button>
+                    </div>
+                    <div class="p-4 flex items-center justify-between gap-4">
+                        <code
+                            data-install-command="bash"
+                            class="font-mono text-sm text-foreground break-all"
+                            >curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | sh</code
+                        >
+                        <code
+                            data-install-command="brew"
+                            class="font-mono text-sm text-foreground break-all hidden"
+                            >brew tap mewcomputer/mew && brew install mew</code
+                        >
+                        <button
+                            type="button"
+                            class="install-copy text-xs font-mono text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                            aria-label="Copy command">copy</button
+                        >
+                    </div>
+                </div>
+                <p class="text-sm text-muted-foreground mt-3">
+                    Or read the <a
+                        href="/docs/getting-started/installation/"
+                        class="underline hover:text-foreground transition-colors"
+                        >installation docs</a
+                    >.
+                </p>
             </div>
         </section>
 
@@ -144,5 +175,53 @@ import "../styles/global.css";
                     .catch(() => {});
             });
         });
+    </script>
+    <script>
+        (() => {
+            const tabs = document.querySelectorAll("[data-install-tab]");
+            const commands = document.querySelectorAll("[data-install-command]");
+            const copyBtn = document.querySelector(".install-copy");
+
+            function switchTab(name) {
+                tabs.forEach((tab) => {
+                    const active = tab.getAttribute("data-install-tab") === name;
+                    tab.classList.toggle("border-primary", active);
+                    tab.classList.toggle("bg-primary/5", active);
+                    tab.classList.toggle("text-foreground", active);
+                    tab.classList.toggle("border-transparent", !active);
+                    tab.classList.toggle("text-muted-foreground", !active);
+                });
+                commands.forEach((cmd) => {
+                    const visible =
+                        cmd.getAttribute("data-install-command") === name;
+                    cmd.classList.toggle("hidden", !visible);
+                });
+            }
+
+            tabs.forEach((tab) => {
+                tab.addEventListener("click", () => {
+                    switchTab(tab.getAttribute("data-install-tab"));
+                });
+            });
+
+            if (copyBtn) {
+                copyBtn.addEventListener("click", () => {
+                    const visible = document.querySelector(
+                        "[data-install-command]:not(.hidden)"
+                    );
+                    const text = visible?.textContent?.trim() || "";
+                    navigator.clipboard
+                        ?.writeText(text)
+                        .then(() => {
+                            const prev = copyBtn.textContent;
+                            copyBtn.textContent = "copied";
+                            setTimeout(() => {
+                                copyBtn.textContent = prev;
+                            }, 1200);
+                        })
+                        .catch(() => {});
+                });
+            }
+        })();
     </script>
 </Base>

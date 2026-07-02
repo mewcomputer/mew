@@ -1666,6 +1666,7 @@ async fn run_daemon(
                                 if m.reasoning { "reasoning" } else { "standard" }
                             )),
                             thinking_variants,
+                            context_window: Some(m.context_window),
                         });
                     }
                 }

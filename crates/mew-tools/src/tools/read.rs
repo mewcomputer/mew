@@ -124,7 +124,7 @@ impl Tool for Read {
             error: String::new(),
             diff: None,
             metadata: None,
-        file_delta: None,
+            file_delta: None,
         })
     }
 }

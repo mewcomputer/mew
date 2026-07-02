@@ -131,9 +131,7 @@ impl Tool for Grep {
             // We check the token before starting; fff's time_budget_ms handles
             // the inner timeout. The abort flag is wired in case the token
             // fires during the search.
-            let abort = Arc::new(std::sync::atomic::AtomicBool::new(
-                cancel.is_cancelled(),
-            ));
+            let abort = Arc::new(std::sync::atomic::AtomicBool::new(cancel.is_cancelled()));
 
             let options = GrepSearchOptions {
                 max_file_size: 10 * 1024 * 1024,
@@ -158,9 +156,7 @@ impl Tool for Grep {
 
             for m in &result.matches {
                 let file = result.files.get(m.file_index);
-                let path_str = file
-                    .map(|f| f.relative_path(&picker))
-                    .unwrap_or_default();
+                let path_str = file.map(|f| f.relative_path(&picker)).unwrap_or_default();
 
                 let line_str = if m.line_content.len() > MAX_LINE_LEN {
                     format!("{}...", &m.line_content[..MAX_LINE_LEN])
@@ -189,9 +185,7 @@ impl Tool for Grep {
             if result.next_file_offset > 0 {
                 results.push(format!(
                     "[partial results: time budget of {}ms reached, {} of {} files searched]",
-                    TIME_BUDGET_MS,
-                    result.total_files_searched,
-                    result.filtered_file_count
+                    TIME_BUDGET_MS, result.total_files_searched, result.filtered_file_count
                 ));
             }
 
@@ -206,16 +200,14 @@ impl Tool for Grep {
                 error: String::new(),
                 diff: None,
                 metadata: None,
-        file_delta: None,
+                file_delta: None,
             })
         })
         .await;
 
         match result {
             Ok(tool_output) => tool_output,
-            Err(e) => Err(ToolError::Execution(format!(
-                "grep task panicked: {e}"
-            ))),
+            Err(e) => Err(ToolError::Execution(format!("grep task panicked: {e}"))),
         }
     }
 }

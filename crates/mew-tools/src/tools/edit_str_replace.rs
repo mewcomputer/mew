@@ -111,7 +111,11 @@ impl Tool for EditStrReplace {
             output: "replaced 1 occurrence".to_string(),
             error: String::new(),
             diff: Some(diff),
-            file_delta: Some(super::compute_file_delta(Some(&content), &new_content, &path)),
+            file_delta: Some(super::compute_file_delta(
+                Some(&content),
+                &new_content,
+                &path,
+            )),
             ..Default::default()
         })
     }

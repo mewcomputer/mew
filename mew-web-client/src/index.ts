@@ -207,6 +207,8 @@ export interface ModelInfo {
   description?: string;
   /** Available thinking/reasoning variants for this model. */
   thinking_variants?: ThinkingVariantInfo[];
+  /** Maximum context window in tokens, if known from the catalog. */
+  context_window?: number;
 }
 
 /** A named thinking/reasoning variant (e.g. "high", "max", "thinking"). */

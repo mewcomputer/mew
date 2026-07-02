@@ -109,12 +109,7 @@ impl GroupsStore {
 
     /// Return the group_id for a session, if any.
     pub async fn group_for_session(&self, session_id: &str) -> Option<String> {
-        self.state
-            .lock()
-            .await
-            .membership
-            .get(session_id)
-            .cloned()
+        self.state.lock().await.membership.get(session_id).cloned()
     }
 
     /// Create a new group. Returns the group list.

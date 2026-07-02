@@ -103,7 +103,7 @@ impl Tool for SwitchPersona {
                 error: String::new(),
                 diff: None,
                 metadata: None,
-        file_delta: None,
+                file_delta: None,
             });
         }
 
@@ -151,7 +151,7 @@ impl Tool for SwitchPersona {
                             error: String::new(),
                             diff: None,
                             metadata: None,
-        file_delta: None,
+                            file_delta: None,
                         });
                     }
                 }

@@ -44,16 +44,25 @@ pub enum ClientMessage {
     ListSessions,
 
     /// Delete a session from disk and remove it from the active list.
-    DeleteSession { session_id: String },
+    DeleteSession {
+        session_id: String,
+    },
 
     /// Rename a session (set a custom title).
-    RenameSession { session_id: String, title: String },
+    RenameSession {
+        session_id: String,
+        title: String,
+    },
 
     /// Enable or disable auto-generated session titles.
-    SetAutoTitle { enabled: bool },
+    SetAutoTitle {
+        enabled: bool,
+    },
 
     /// Enable or disable idle session summaries.
-    SetAutoSummary { enabled: bool },
+    SetAutoSummary {
+        enabled: bool,
+    },
 
     /// Send a prompt to the active session. The daemon streams events back.
     Prompt {
@@ -80,7 +89,9 @@ pub enum ClientMessage {
     },
 
     /// Run a slash command on the daemon (the ones that mutate agent state).
-    SlashCommand { command: String },
+    SlashCommand {
+        command: String,
+    },
 
     /// List available models from all configured providers.
     ListModels,
@@ -126,7 +137,9 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         order: Option<u32>,
     },
-    DeleteGroup { group_id: String },
+    DeleteGroup {
+        group_id: String,
+    },
     AssignSessionGroup {
         session_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,8 +147,14 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<u32>,
     },
-    ArchiveSession { session_id: String, archived: bool },
-    PinSession { session_id: String, pinned: bool },
+    ArchiveSession {
+        session_id: String,
+        archived: bool,
+    },
+    PinSession {
+        session_id: String,
+        pinned: bool,
+    },
 
     // -- Phase 3: File service --
     ListDir {
@@ -149,13 +168,24 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_bytes: Option<u64>,
     },
-    GitStatus { session_id: String },
-    WatchWorkspace { session_id: String, enabled: bool },
-    OpenPath { session_id: String, path: String },
+    GitStatus {
+        session_id: String,
+    },
+    WatchWorkspace {
+        session_id: String,
+        enabled: bool,
+    },
+    OpenPath {
+        session_id: String,
+        path: String,
+    },
 
     // -- Flagged files --
     /// Unflag a file (remove from the session's flagged-files set).
-    UnflagFile { session_id: String, path: String },
+    UnflagFile {
+        session_id: String,
+        path: String,
+    },
 }
 
 /// What kind of client is connected to a session.
@@ -189,6 +219,9 @@ pub struct ModelInfo {
     /// model doesn't support configurable thinking.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub thinking_variants: Vec<ThinkingVariantInfo>,
+    /// Maximum context window in tokens, if known from the catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<i64>,
 }
 
 /// A named thinking/reasoning variant (e.g. "high", "max", "thinking").
@@ -360,7 +393,9 @@ pub enum ServerMessage {
     },
 
     /// An error before or outside a session turn.
-    Error { message: String },
+    Error {
+        message: String,
+    },
 
     // -- Streaming events (map 1:1 to AgentEvent variants without channels) --
     /// A raw provider streaming event (text chunks, tool-call parts, etc.).
@@ -371,13 +406,20 @@ pub enum ServerMessage {
     /// A user message was sent to this session. Broadcast to all
     /// attached clients so multi-device clients see the prompt.
     /// The sending client can deduplicate by matching text content.
-    UserMessage { text: String },
+    UserMessage {
+        text: String,
+    },
 
     /// A tool execution has started.
-    ToolStart { call_id: String },
+    ToolStart {
+        call_id: String,
+    },
 
     /// A tool execution has finished.
-    ToolEnd { call_id: String, success: bool },
+    ToolEnd {
+        call_id: String,
+        success: bool,
+    },
 
     /// A part's content or state has changed.
     PartUpdated {
@@ -386,10 +428,15 @@ pub enum ServerMessage {
     },
 
     /// A tool produced intermediate output while running.
-    ToolProgress { call_id: String, chunk: String },
+    ToolProgress {
+        call_id: String,
+        chunk: String,
+    },
 
     /// A terminal error occurred.
-    ErrorEvent { message: String },
+    ErrorEvent {
+        message: String,
+    },
 
     // -- Request/response pairs (replaces oneshot::Sender variants) --
     /// Request user approval for a tool call.
@@ -401,7 +448,10 @@ pub enum ServerMessage {
     },
 
     /// Request user approval for a path outside the workspace.
-    WorkspacePermissionRequest { request_id: u64, path: String },
+    WorkspacePermissionRequest {
+        request_id: u64,
+        path: String,
+    },
 
     /// Ask the user one to four free-text questions.
     AskUserRequest {
@@ -440,10 +490,14 @@ pub enum ServerMessage {
 
     // -- Session-level events --
     /// The session's todo list changed.
-    TodosUpdated { todos: Vec<Todo> },
+    TodosUpdated {
+        todos: Vec<Todo>,
+    },
 
     /// A `switch_persona` tool call was queued and the turn ended.
-    PersonaSwitchRequested { name: String },
+    PersonaSwitchRequested {
+        name: String,
+    },
 
     /// A background shell job state changed.
     JobUpdate {
@@ -453,12 +507,16 @@ pub enum ServerMessage {
     },
 
     /// A slash command produced a text result.
-    SlashResult { text: String },
+    SlashResult {
+        text: String,
+    },
 
     /// Broadcast when a pending permission / ask-user / subagent-permission
     /// request has been resolved by any attached client. All frontends should
     /// dismiss the matching modal.
-    RequestResolved { request_id: u64 },
+    RequestResolved {
+        request_id: u64,
+    },
 
     /// Broadcast when the session context has been cleared (e.g. `/clear`).
     /// All attached clients should wipe their message list.
@@ -466,18 +524,27 @@ pub enum ServerMessage {
 
     // -- Session management --
     /// Response to `ListSessions`.
-    SessionList { sessions: Vec<SessionInfo> },
+    SessionList {
+        sessions: Vec<SessionInfo>,
+    },
 
     /// Full message history replay for a resumed session. Only sent to the
     /// client that triggered the resume.
-    SessionHistory { messages: Vec<mew_message::Message> },
+    SessionHistory {
+        messages: Vec<mew_message::Message>,
+    },
 
     // -- Model management --
     /// Response to `ListModels`: the full set of models the daemon can build.
-    ModelList { models: Vec<ModelInfo> },
+    ModelList {
+        models: Vec<ModelInfo>,
+    },
 
     /// Response to `SwitchModel`: confirms the switch succeeded.
-    ModelSwitched { provider: String, model: String },
+    ModelSwitched {
+        provider: String,
+        model: String,
+    },
 
     /// Response to `SetThinkingVariant`: confirms the variant was applied.
     /// `variant` is `None` when thinking was disabled.
@@ -500,7 +567,9 @@ pub enum ServerMessage {
     },
 
     /// A client detached from the session. Broadcast to remaining clients.
-    ClientDetached { client_id: u64 },
+    ClientDetached {
+        client_id: u64,
+    },
 
     /// Control was yielded. Advisory — other clients can become active.
     ControlYielded {
@@ -510,11 +579,17 @@ pub enum ServerMessage {
 
     /// The daemon generated a title for the session. Frontends should update
     /// their session title display.
-    SessionTitleChanged { session_id: String, title: String },
+    SessionTitleChanged {
+        session_id: String,
+        title: String,
+    },
 
     /// The daemon generated a summary for an idle session. Frontends
     /// should display this in the session list / detail view.
-    SessionSummaryChanged { session_id: String, summary: String },
+    SessionSummaryChanged {
+        session_id: String,
+        summary: String,
+    },
 
     // -- Phase 1: session activity & stats --
     SessionActivityChanged {
@@ -529,11 +604,18 @@ pub enum ServerMessage {
     },
 
     // -- Phase 2: groups --
-    GroupList { groups: Vec<GroupInfo> },
-    GroupsChanged { groups: Vec<GroupInfo> },
+    GroupList {
+        groups: Vec<GroupInfo>,
+    },
+    GroupsChanged {
+        groups: Vec<GroupInfo>,
+    },
 
     // -- Phase 3: File service responses --
-    DirListing { path: String, entries: Vec<DirEntry> },
+    DirListing {
+        path: String,
+        entries: Vec<DirEntry>,
+    },
     FilePreview {
         path: String,
         content: String,
@@ -541,8 +623,12 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         language: Option<String>,
     },
-    GitStatusResult { entries: Vec<GitEntry> },
-    FsChanged { paths: Vec<String> },
+    GitStatusResult {
+        entries: Vec<GitEntry>,
+    },
+    FsChanged {
+        paths: Vec<String>,
+    },
 
     // -- Cost & usage --
     /// Broadcast at turn end with updated cumulative usage.
@@ -1645,9 +1731,9 @@ mod tests {
             pinned: false,
             group_id: None,
             change_stats: None,
-                usage: None,
-                pending_permissions: 0,
-                pending_questions: 0,
+            usage: None,
+            pending_permissions: 0,
+            pending_questions: 0,
         };
         let decoded = round_trip(&info);
         assert_eq!(decoded.session_id, "sess_abc");
@@ -1894,6 +1980,7 @@ mod tests {
                 },
                 ThinkingVariantInfo { name: "max".into() },
             ],
+            context_window: Some(128_000),
         };
         let j = encode_json(&m).unwrap();
         assert!(j.contains(r#""thinking_variants""#));
@@ -1910,6 +1997,7 @@ mod tests {
             model: "model".into(),
             description: None,
             thinking_variants: vec![],
+            context_window: None,
         };
         let j = encode_json(&m).unwrap();
         // Empty vec should be skipped in serialization.
