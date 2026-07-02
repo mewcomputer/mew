@@ -179,7 +179,7 @@ const sections: Section[] = [
     id: "mcp",
     title: "A pluggable runtime.",
     paragraphs: [
-      "mew speaks standard agent protocols. It can run entirely in the terminal, or act as a JSON-RPC server for editors like Zed and Neovim. Your agent lives where you write code.",
+      "mew speaks standard agent protocols. It runs entirely in the terminal, or exposes a WebSocket daemon that browser and mobile frontends connect to. Your agent lives where you write code.",
       "MCP (Model Context Protocol) servers are loaded automatically. If it speaks the protocol, mew can use it. Connect it to your database, your issue tracker, or your internal APIs without writing wrapper code.",
     ],
     terminal: [
@@ -253,7 +253,7 @@ const sections: Section[] = [
         and it becomes a slash command. Share them with your team or keep them
         in your dotfiles. Skills are just prompt fragments and tool bundles.
       </>,
-      "For deeper integrations, mew exposes a JSON-RPC 2.0 plugin runtime over stdin/stdout with 14 hook points. The TUI companion itself is a plugin, proving the runtime is robust enough for complex, stateful UI.",
+      "For deeper integrations, mew exposes a JSON-RPC 2.0 plugin runtime over stdin/stdout with 18 hook points covering the full agent lifecycle. Plugins can register tools, slash commands, and hook into any stage of a turn.",
     ],
     terminal: [
       { type: "user", text: "/pr-describe" },
@@ -280,7 +280,7 @@ const sections: Section[] = [
     id: "jsonl",
     title: "Nothing is hidden.",
     paragraphs: [
-      "Every session is saved locally as plain JSONL. You can read exactly what it did, what it thought, and what commands it ran. Nothing is locked away in a database, and nothing leaves your machine.",
+      "Every session is saved locally as plain JSONL. You can read exactly what it did, what it thought, and what commands it ran. Nothing is locked away in a database — every session is a file you own.",
       <>
         You can{" "}
         <code className="bg-muted px-1.5 py-0.5 rounded text-sm font-mono">

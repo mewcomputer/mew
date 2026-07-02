@@ -28,6 +28,13 @@ mew-tools = { workspace = true }
 
 tokio-util = { workspace = true }
 
+# Optional: iroh p2p networking for remote access (mobile, cross-network)
+iroh = { workspace = true, optional = true }
+data-encoding = "2"  # base32 for NodeId display
+
+[features]
+iroh = ["dep:iroh"]
+
 [dev-dependencies]
 tempfile = "3"
 tokio-tungstenite = { workspace = true }

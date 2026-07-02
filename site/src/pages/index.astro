@@ -47,6 +47,65 @@ import "../styles/global.css";
             <CapabilitiesSection client:visible />
         </div>
 
+        <section id="webui" class="md:mt-96 mt-32 max-w-3xl">
+            <h2
+                class="font-display text-5xl tracking-tight mb-8 mew-reveal"
+                style="transition-delay: 0ms"
+            >
+                Not just the terminal.
+            </h2>
+            <p
+                class="text-lg text-foreground/80 leading-relaxed mb-6 mew-reveal"
+                style="transition-delay: 400ms"
+            >
+                The same daemon that powers the TUI also serves a browser-based
+                interface. Open it on another screen, share a session across
+                tabs, or check on a long-running turn from your laptop while the
+                agent works on your desktop. Same agent, same history, same
+                JSONL on disk.
+            </p>
+            <p
+                class="text-lg text-foreground/80 leading-relaxed mb-8 mew-reveal"
+                style="transition-delay: 600ms"
+            >
+                Streaming markdown with syntax highlighting, tool-call cards
+                that expand and collapse, inline permission prompts, a session
+                rail for switching between runs, and a model picker. Multiple
+                frontends can attach to the same session at once — a permission
+                request reaches every connected client.
+            </p>
+            <div
+                class="bg-card border border-border rounded-lg overflow-hidden shadow-sm mew-reveal"
+                style="transition-delay: 800ms"
+            >
+                <div
+                    class="bg-tui-status flex items-center h-7 px-3 gap-2 text-[11px] font-mono text-muted-foreground"
+                >
+                    <span class="flex gap-1.5">
+                        <span class="w-2.5 h-2.5 rounded-full bg-rose-500/80"></span>
+                        <span class="w-2.5 h-2.5 rounded-full bg-amber-500/80"></span>
+                        <span class="w-2.5 h-2.5 rounded-full bg-emerald-500/80"></span>
+                    </span>
+                    <span class="ml-2">localhost:9847</span>
+                </div>
+                <div class="p-6 font-mono text-[13px] leading-snug">
+                    <div class="text-muted-foreground mb-2">
+                        <span class="text-cyan-500">assistant</span>
+                        <span class="ml-2">ran 3 tools · deepseek-v4-pro</span>
+                    </div>
+                    <div class="mb-1">Done. I added the test and the linter passes.</div>
+                    <div class="mt-3 flex gap-2 flex-wrap">
+                        <span
+                            class="px-2 py-1 rounded bg-emerald-500/10 text-emerald-500 text-xs font-mono">✓ edit</span>
+                        <span
+                            class="px-2 py-1 rounded bg-emerald-500/10 text-emerald-500 text-xs font-mono">✓ bash</span>
+                        <span
+                            class="px-2 py-1 rounded bg-primary/10 text-primary text-xs font-mono">allow?</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <section id="why" class="md:mt-96 mt-32 max-w-3xl">
             <h2
                 class="font-display text-5xl tracking-tight mb-8 mew-reveal"
@@ -59,11 +118,11 @@ import "../styles/global.css";
                 style="transition-delay: 400ms"
             >
                 mew is a tool you install, not a service you subscribe to. It
-                doesn't know your name, it doesn't cache your code, and it works
-                the same offline as online. Every provider, tool, and prompt is
-                a plugin you can replace. Sessions are plain JSONL on your disk,
-                readable end to end. MIT licensed and free. The bus factor is
-                you.
+                doesn't know your name, it doesn't cache your code, and it
+                talks straight to your model — local or remote. Every
+                provider, tool, and prompt is a plugin you can replace.
+                Sessions are plain JSONL on your disk, readable end to end.
+                MIT licensed and free. The bus factor is you.
             </p>
         </section>
 
