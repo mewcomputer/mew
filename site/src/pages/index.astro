@@ -52,27 +52,25 @@ import "../styles/global.css";
                 class="font-display text-5xl tracking-tight mb-8 mew-reveal"
                 style="transition-delay: 0ms"
             >
-                Not just the terminal.
+                Two windows, one agent.
             </h2>
             <p
                 class="text-lg text-foreground/80 leading-relaxed mb-6 mew-reveal"
                 style="transition-delay: 400ms"
             >
-                The same daemon that powers the TUI also serves a browser-based
-                interface. Open it on another screen, share a session across
-                tabs, or check on a long-running turn from your laptop while the
-                agent works on your desktop. Same agent, same history, same
-                JSONL on disk.
+                The daemon that runs the terminal also serves a browser
+                interface. Start a turn in the TUI and pick it up from a
+                browser on the same network. One session. One history file.
+                No sync, no export, no second copy of anything.
             </p>
             <p
                 class="text-lg text-foreground/80 leading-relaxed mb-8 mew-reveal"
                 style="transition-delay: 600ms"
             >
-                Streaming markdown with syntax highlighting, tool-call cards
-                that expand and collapse, inline permission prompts, a session
-                rail for switching between runs, and a model picker. Multiple
-                frontends can attach to the same session at once — a permission
-                request reaches every connected client.
+                The web UI ships with mew, but it sits on top of an open
+                protocol. The TUI uses the same protocol. Build a third
+                frontend and it speaks to the same running agent, with full
+                access to tool execution and session history.
             </p>
             <div
                 class="bg-card border border-border rounded-lg overflow-hidden shadow-sm mew-reveal"

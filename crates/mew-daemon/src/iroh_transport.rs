@@ -27,14 +27,14 @@ pub const MEW_ALPN: &[u8] = b"mew/wire/0";
 /// Wraps an iroh bidirectional stream pair into a single type implementing
 /// both `AsyncRead` and `AsyncWrite`, so it can be passed to `handle_connection`.
 pub struct IrohStream {
-    send: iroh::endpoint::quic::SendStream,
-    recv: iroh::endpoint::quic::RecvStream,
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
 }
 
 impl IrohStream {
     pub fn new(
-        send: iroh::endpoint::quic::SendStream,
-        recv: iroh::endpoint::quic::RecvStream,
+        send: iroh::endpoint::SendStream,
+        recv: iroh::endpoint::RecvStream,
     ) -> Self {
         Self { send, recv }
     }
@@ -46,7 +46,8 @@ impl AsyncRead for IrohStream {
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().recv).poll_read(cx, buf)
+        let this = self.get_mut();
+        AsyncRead::poll_read(std::pin::Pin::new(&mut this.recv), cx, buf)
     }
 }
 
@@ -56,21 +57,24 @@ impl AsyncWrite for IrohStream {
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.get_mut().send).poll_write(cx, buf)
+        let this = self.get_mut();
+        AsyncWrite::poll_write(std::pin::Pin::new(&mut this.send), cx, buf)
     }
 
     fn poll_flush(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().send).poll_flush(cx)
+        let this = self.get_mut();
+        AsyncWrite::poll_flush(std::pin::Pin::new(&mut this.send), cx)
     }
 
     fn poll_shutdown(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().send).poll_shutdown(cx)
+        let this = self.get_mut();
+        AsyncWrite::poll_shutdown(std::pin::Pin::new(&mut this.send), cx)
     }
 }
 
@@ -78,6 +82,7 @@ impl AsyncWrite for IrohStream {
 ///
 /// Stored as a JSON sidecar file (default: `~/.config/mew/authorized_nodes.json`).
 /// Managed through the pairing flow — users do not edit it by hand.
+#[derive(Debug)]
 pub struct NodeIdAllowlist {
     nodes: Mutex<Vec<String>>,
     path: PathBuf,
@@ -164,51 +169,59 @@ pub struct MewIrohHandler {
     pub pairing_mode: Arc<std::sync::atomic::AtomicBool>,
 }
 
+impl std::fmt::Debug for MewIrohHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MewIrohHandler")
+            .field("allowlist", &self.allowlist)
+            .field("pairing_mode", &self.pairing_mode.load(std::sync::atomic::Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 impl ProtocolHandler for MewIrohHandler {
-    fn accept(&self, connection: Connection) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'static>> {
-        let allowlist = self.allowlist.clone();
-        let session_manager = self.session_manager.clone();
-        let groups_store = self.groups_store.clone();
-        let thinking_setter = self.thinking_setter.clone();
-        let pairing_mode = self.pairing_mode.clone();
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let remote_id = connection.remote_id();
+        let id_str = remote_id.to_string();
 
-        Box::pin(async move {
-            let remote_id = connection.remote_id();
-            let id_str = remote_id.to_string();
+        let is_pairing = self.pairing_mode.load(std::sync::atomic::Ordering::Relaxed);
 
-            let is_pairing = pairing_mode.load(std::sync::atomic::Ordering::Relaxed);
+        if !is_pairing && !self.allowlist.contains(&id_str) {
+            warn!(peer = %id_str, "rejected iroh connection: not in allowlist");
+            connection.close(1u32.into(), b"unauthorized");
+            return Ok(());
+        }
 
-            if !is_pairing && !allowlist.contains(&id_str) {
-                warn!(peer = %id_str, "rejected iroh connection: not in allowlist");
-                connection.close(1u32.into(), b"unauthorized");
-                return Ok(());
+        if is_pairing {
+            info!(peer = %id_str, "pairing: adding new peer to allowlist");
+            if let Err(e) = self.allowlist.add(&id_str) {
+                warn!(error = %e, "failed to persist allowlist during pairing");
             }
+            self.pairing_mode.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
 
-            if is_pairing {
-                info!(peer = %id_str, "pairing: adding new peer to allowlist");
-                allowlist.add(&id_str)?;
-                pairing_mode.store(false, std::sync::atomic::Ordering::Relaxed);
+        info!(peer = %id_str, "iroh connection accepted");
+
+        let (send, recv) = connection
+            .accept_bi()
+            .await
+            .map_err(|e| AcceptError::from_err(e))?;
+        let stream = IrohStream::new(send, recv);
+
+        if let Err(e) = handle_connection(
+            stream,
+            self.session_manager.clone(),
+            self.groups_store.clone(),
+            self.thinking_setter.clone(),
+        )
+        .await
+        {
+            if !e.to_string().contains("connection reset") {
+                warn!(peer = %id_str, error = %e, "iroh connection ended with error");
             }
+        }
 
-            info!(peer = %id_str, "iroh connection accepted");
-
-            let (send, recv) = connection
-                .accept_bi()
-                .await
-                .map_err(|e| anyhow::anyhow!("accept bi stream: {e}"))?;
-            let stream = IrohStream::new(send, recv);
-
-            if let Err(e) =
-                handle_connection(stream, session_manager, groups_store, thinking_setter).await
-            {
-                if !e.to_string().contains("connection reset") {
-                    warn!(peer = %id_str, error = %e, "iroh connection ended with error");
-                }
-            }
-
-            info!(peer = %id_str, "iroh connection closed");
-            Ok(())
-        })
+        info!(peer = %id_str, "iroh connection closed");
+        Ok(())
     }
 }
 
@@ -241,13 +254,13 @@ pub async fn run_iroh(
 
     let pairing_mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    let handler = Arc::new(MewIrohHandler {
+    let handler = MewIrohHandler {
         allowlist: allowlist.clone(),
         session_manager,
         groups_store,
         thinking_setter,
         pairing_mode: pairing_mode.clone(),
-    });
+    };
 
     let router = Router::builder(endpoint)
         .accept(MEW_ALPN, handler)

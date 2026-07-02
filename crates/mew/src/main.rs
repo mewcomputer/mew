@@ -214,7 +214,19 @@ enum Commands {
         /// Skip all permission prompts. Every tool auto-runs.
         #[arg(long, short = 'D', env = "MEW_DANGEROUS")]
         dangerously_skip_permissions: bool,
+
+        /// Listen for iroh p2p connections (remote access). The daemon's
+        /// NodeId is printed to stdout — use `mew pair` to add mobile clients.
+        #[cfg(feature = "iroh")]
+        #[arg(long)]
+        iroh: bool,
     },
+    /// Generate a pairing QR code for mobile/remote clients.
+    ///
+    /// Prints the daemon's iroh NodeId and enters pairing mode. The next
+    /// iroh connection's peer ID is added to the allowlist automatically.
+    #[cfg(feature = "iroh")]
+    Pair,
     /// View or edit configuration
     Config {
         #[command(subcommand)]
@@ -450,6 +462,8 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             auto,
             auto_plus,
             dangerously_skip_permissions,
+            #[cfg(feature = "iroh")]
+            iroh,
         }) => {
             // --background and --stop are handled before the tokio runtime
             // starts (in main()). By the time we reach here, we're already
@@ -457,6 +471,10 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             let provider = resolve_provider(provider, &state);
             let model = resolve_model_opt(model, &state);
             let mode = resolve_mode(permissive, auto, auto_plus, dangerously_skip_permissions);
+            #[cfg(feature = "iroh")]
+            if iroh {
+                return run_daemon_iroh(fake_provider, &provider, model, raw, mode).await;
+            }
             run_daemon(socket, port, fake_provider, &provider, model, raw, mode).await
         }
         None => {
@@ -470,6 +488,10 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
                 mew_hooks::PermissionMode::Standard,
             )
             .await
+        }
+        #[cfg(feature = "iroh")]
+        Some(Commands::Pair) => {
+            pair_cmd().await
         }
         Some(Commands::Config { command }) => {
             config_cmd(command)?;
