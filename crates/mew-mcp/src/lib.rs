@@ -764,6 +764,7 @@ impl mew_tools::Tool for McpTool {
                 error: e.to_string(),
                 diff: None,
                 metadata: None,
+                file_delta: None,
             }),
         }
     }

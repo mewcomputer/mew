@@ -166,6 +166,7 @@ async fn test_plugin_redacts_secrets() {
         error: String::new(),
         diff: None,
         metadata: None,
+        file_delta: None,
     };
 
     let result = dispatcher.on_tool_execute_after(&call, output).await;

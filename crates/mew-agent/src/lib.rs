@@ -113,6 +113,24 @@ pub enum AgentEvent {
         /// One of "running", "completed", "failed", "cancelled".
         state: String,
     },
+    /// A file-writing tool produced a diff delta. The daemon accumulates
+    /// these into per-session change stats and broadcasts them to frontends.
+    FileDelta {
+        path: String,
+        added: u64,
+        removed: u64,
+    },
+    /// The flagged-files set changed (file flagged or unflagged).
+    FlaggedFilesChanged {
+        files: Vec<FlaggedFileInfo>,
+    },
+}
+
+/// Info about a flagged file, for the wire protocol.
+#[derive(Debug, Clone)]
+pub struct FlaggedFileInfo {
+    pub path: String,
+    pub reason: Option<String>,
 }
 
 impl std::fmt::Debug for AgentEvent {
@@ -215,6 +233,16 @@ impl std::fmt::Debug for AgentEvent {
                 .debug_struct("JobUpdate")
                 .field("job_id", job_id)
                 .field("state", state)
+                .finish(),
+            AgentEvent::FileDelta { path, added, removed } => f
+                .debug_struct("FileDelta")
+                .field("path", path)
+                .field("added", added)
+                .field("removed", removed)
+                .finish(),
+            AgentEvent::FlaggedFilesChanged { files } => f
+                .debug_struct("FlaggedFilesChanged")
+                .field("count", &files.len())
                 .finish(),
         }
     }

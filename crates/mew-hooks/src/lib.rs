@@ -175,6 +175,19 @@ pub struct ToolOutput {
     /// Ignored by frontends that don't understand it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// Optional file-level diff stats (lines added/removed, path).
+    /// Populated by Write/Edit tools so the agent can accumulate
+    /// per-session change stats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_delta: Option<FileDelta>,
+}
+
+/// Line-level diff stats for a single file operation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileDelta {
+    pub path: String,
+    pub added: u64,
+    pub removed: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

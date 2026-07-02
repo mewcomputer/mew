@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { CheckCircle2, HelpCircle, Loader2, PlayCircle, XCircle, AlertCircle } from "lucide-react";
+import { CheckCircle2, HelpCircle, Loader2, PlayCircle, XCircle, AlertCircle, Pin, X } from "lucide-react";
 import { useSessionStore, type TodoItem, type SubagentInfo, type PendingAskUser } from "../stores/session";
 import { cn } from "../lib/utils";
 import { AskUserForm } from "./ask-user-card";
@@ -24,6 +24,7 @@ export function RightRail({ open, onOpenChange }: RightRailProps) {
   const todos = useSessionStore((s) => s.todos);
   const subagents = useSessionStore((s) => s.subagents);
   const questions = useSessionStore((s) => s.pendingAskUser);
+  const flaggedFiles = useSessionStore((s) => s.flaggedFiles);
 
   const activeCounts = {
     todos: todos.filter((t) => t.status === "in_progress" || t.status === "pending").length,
@@ -48,6 +49,41 @@ export function RightRail({ open, onOpenChange }: RightRailProps) {
             Todos, subagents, and pending questions.
           </SheetDescription>
         </SheetHeader>
+
+        {/* Pinned Context (flagged files) */}
+        {flaggedFiles.length > 0 && (
+          <div className="border-b border-border px-3 py-2">
+            <div className="flex items-center gap-1 text-[10px] font-semibold text-muted-foreground">
+              <Pin className="h-2.5 w-2.5" />
+              Pinned Context ({flaggedFiles.length})
+            </div>
+            <div className="mt-1 space-y-0.5">
+              {flaggedFiles.map((f) => (
+                <div key={f.path} className="flex items-center gap-1 group">
+                  <span className="truncate text-[10px] text-muted-foreground">
+                    {f.path.split("/").pop() ?? f.path}
+                  </span>
+                  {f.reason && (
+                    <span className="text-[8px] text-muted-foreground/60">
+                      ({f.reason})
+                    </span>
+                  )}
+                  <button
+                    className="ml-auto hidden text-muted-foreground hover:text-foreground group-hover:block"
+                    onClick={() => {
+                      const client = getClient();
+                      const sid = useSessionStore.getState().sessionId;
+                      if (sid) client?.unflagFile(sid, f.path);
+                    }}
+                    title="Unflag"
+                  >
+                    <X className="h-2.5 w-2.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="flex items-center gap-2 border-b border-border px-3 py-1.5">
@@ -119,11 +155,11 @@ function TabButton({
 }
 
 function TodoRailPanel({ todos }: { todos: TodoItem[] }) {
+  const [expandedId, setExpandedId] = useState<number | null>(null);
+
   if (todos.length === 0) {
     return <EmptyState icon={<CheckCircle2 className="h-4 w-4" />} text="No todos yet" />;
   }
-
-  const [expandedId, setExpandedId] = useState<number | null>(null);
 
   return (
     <div className="space-y-0.5">

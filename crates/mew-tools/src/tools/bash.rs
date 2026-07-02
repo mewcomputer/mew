@@ -269,6 +269,7 @@ async fn execute_in_session(
         error: error_msg.unwrap_or_default(),
         diff: None,
         metadata: None,
+        file_delta: None,
     })
 }
 
@@ -314,6 +315,7 @@ fn finalize_output(
         error: error_msg.unwrap_or_default(),
         diff: None,
         metadata: None,
+        file_delta: None,
     }
 }
 

@@ -612,6 +612,7 @@ impl Agent {
                         error: e.to_string(),
                         diff: None,
                         metadata: None,
+                        file_delta: None,
                     }
                 }
             };
@@ -678,6 +679,33 @@ impl Agent {
                     success,
                 })
                 .await;
+            // If the tool produced a file delta, emit it so the daemon can
+            // accumulate per-session change stats.
+            if let Some(delta) = &output.file_delta {
+                let _ = ev_tx
+                    .send(AgentEvent::FileDelta {
+                        path: delta.path.clone(),
+                        added: delta.added,
+                        removed: delta.removed,
+                    })
+                    .await;
+            }
+            // If the flag_important tool ran, emit the current flagged-files set.
+            if tc.tool_name == "flag_important" {
+                let files: Vec<crate::FlaggedFileInfo> = self
+                    .flagged_files
+                    .lock()
+                    .await
+                    .iter()
+                    .map(|f| crate::FlaggedFileInfo {
+                        path: f.path.display().to_string(),
+                        reason: Some(mew_tools::tools::flag_important::flag_mode_label(f.mode).to_string()),
+                    })
+                    .collect();
+                let _ = ev_tx
+                    .send(AgentEvent::FlaggedFilesChanged { files })
+                    .await;
+            }
             result_parts.push(Part::ToolResult(ToolResultPart {
                 base: PartBase {
                     id: ulid::Ulid::new(),

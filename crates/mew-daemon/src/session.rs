@@ -81,10 +81,20 @@ pub struct Session {
     pub provider: Mutex<Option<String>>,
     /// Whether a title has been generated for this session.
     pub title_generated: Mutex<bool>,
+    /// True when a turn is in progress. Used for the session-rail running indicator.
+    pub is_running: Mutex<bool>,
+    /// Sessions root directory (for meta persistence).
+    pub session_dir: PathBuf,
 }
 
 impl Session {
-    pub fn new(id: String, agent: Agent, model: Option<String>, provider: Option<String>) -> Self {
+    pub fn new(
+        id: String,
+        agent: Agent,
+        model: Option<String>,
+        provider: Option<String>,
+        session_dir: PathBuf,
+    ) -> Self {
         Self {
             id,
             agent: Mutex::new(agent),
@@ -97,7 +107,23 @@ impl Session {
             model: Mutex::new(model),
             provider: Mutex::new(provider),
             title_generated: Mutex::new(false),
+            is_running: Mutex::new(false),
+            session_dir,
         }
+    }
+
+    /// Get a display title for this session (custom title > summary > id).
+    pub async fn display_title(&self) -> String {
+        let agent = self.agent.lock().await;
+        if let Some(meta) = agent.session_meta().await {
+            if let Some(title) = &meta.custom_title {
+                return title.clone();
+            }
+            if let Some(summary) = &meta.summary {
+                return summary.clone();
+            }
+        }
+        self.id.clone()
     }
 
     fn next_id(&self) -> u64 {
@@ -200,6 +226,7 @@ impl SessionManager {
             agent,
             model.clone(),
             provider.clone(),
+            self.session_dir.clone(),
         ));
         self.active.lock().await.insert(session_id, session.clone());
         Ok(session)
@@ -265,6 +292,7 @@ impl SessionManager {
             agent,
             model.clone(),
             provider.clone(),
+            self.session_dir.clone(),
         ));
         self.active
             .lock()
@@ -307,13 +335,26 @@ impl SessionManager {
             let summary = meta.as_ref().and_then(|m| m.summary.clone());
             infos.push(SessionInfo {
                 session_id: id.clone(),
-                state: SessionState::Active,
+                state: if *session.is_running.lock().await {
+                    SessionState::Running
+                } else {
+                    SessionState::Active
+                },
                 model,
                 provider,
                 created_at,
                 last_message_at,
                 summary,
                 client_count: session.client_count().await,
+                cwd: meta.as_ref().and_then(|m| m.cwd.clone()),
+                last_turn_failed: meta.as_ref().map(|m| m.last_turn_failed).unwrap_or(false),
+                archived: meta.as_ref().map(|m| m.archived).unwrap_or(false),
+                pinned: meta.as_ref().map(|m| m.pinned).unwrap_or(false),
+                group_id: meta.as_ref().and_then(|m| m.group_id.clone()),
+                change_stats: meta.as_ref().and_then(|m| m.change_stats.clone()),
+                usage: meta.as_ref().and_then(|m| m.usage.as_ref().map(Into::into)),
+                pending_permissions: session.pending_permissions.lock().await.len() as u32,
+                pending_questions: session.pending_ask_user.lock().await.len() as u32,
             });
         }
         drop(active);
@@ -355,6 +396,15 @@ impl SessionManager {
                             last_message_at: meta.last_message_at.or(Some(meta.created_at)),
                             summary: meta.summary.clone(),
                             client_count: 0,
+                            cwd: meta.cwd.clone(),
+                            last_turn_failed: meta.last_turn_failed,
+                            archived: meta.archived,
+                            pinned: meta.pinned,
+                            group_id: meta.group_id.clone(),
+                            change_stats: meta.change_stats.clone(),
+                            usage: meta.usage.as_ref().map(Into::into),
+                            pending_permissions: 0,
+                            pending_questions: 0,
                         });
                     }
                     _ => continue,
@@ -381,5 +431,73 @@ impl SessionManager {
         // If the session is idle/on-disk only, the frontend will get the
         // title when it calls list_sessions (we don't return titles in
         // SessionInfo yet, so this is best-effort).
+    }
+
+    /// Broadcast a session activity change to all clients of that session
+    /// and all other active sessions (for the rail).
+    pub async fn broadcast_activity(&self, session_id: &str, activity: SessionState) {
+        let active = self.active.lock().await;
+        let msg = ServerMessage::SessionActivityChanged {
+            session_id: session_id.to_string(),
+            activity,
+        };
+        for session in active.values() {
+            session.broadcast(msg.clone()).await;
+        }
+    }
+
+    /// Broadcast a session stats change to all clients.
+    pub async fn broadcast_stats(
+        &self,
+        session_id: &str,
+        added: u64,
+        removed: u64,
+        files_changed: u64,
+    ) {
+        let active = self.active.lock().await;
+        let msg = ServerMessage::SessionStatsChanged {
+            session_id: session_id.to_string(),
+            added,
+            removed,
+            files_changed,
+        };
+        for session in active.values() {
+            session.broadcast(msg.clone()).await;
+        }
+    }
+
+    /// Broadcast a groups-changed notification to all active sessions.
+    pub async fn broadcast_groups(&self, groups: Vec<mew_protocol::GroupInfo>) {
+        let active = self.active.lock().await;
+        let msg = ServerMessage::GroupsChanged { groups };
+        for session in active.values() {
+            session.broadcast(msg.clone()).await;
+        }
+    }
+
+    /// Broadcast a message to ALL active sessions' clients.
+    /// Used for cross-session alerts (permission needed, turn complete, etc.)
+    pub async fn broadcast_all(&self, msg: ServerMessage) {
+        let active = self.active.lock().await;
+        for session in active.values() {
+            session.broadcast(msg.clone()).await;
+        }
+    }
+
+    /// Get the cwd for a session (from active agent's meta or disk).
+    pub async fn session_cwd(&self, session_id: &str) -> Option<PathBuf> {
+        let active = self.active.lock().await;
+        if let Some(session) = active.get(session_id) {
+            let agent = session.agent.lock().await;
+            let meta = agent.session_meta().await;
+            drop(agent);
+            drop(active);
+            return meta.and_then(|m| m.cwd.map(PathBuf::from));
+        }
+        drop(active);
+        match mew_session::Meta::read(&self.session_dir, session_id).await {
+            Ok(Some(meta)) => meta.cwd.map(PathBuf::from),
+            _ => None,
+        }
     }
 }

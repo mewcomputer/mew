@@ -25,6 +25,11 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            cross_linker: aarch64-linux-gnu-gcc
+            cross_pkg: gcc-aarch64-linux-gnu
 
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +50,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
 
+      - name: Install cross-compilation toolchain
+        if: matrix.cross_pkg
+        run: |
+          sudo apt-get install -y ${{ matrix.cross_pkg }}
+
       - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross_linker }}
         run: cargo build --release --target ${{ matrix.target }} -p mew
 
       - name: Package binary
@@ -93,8 +105,16 @@ jobs:
       - name: List artifacts
         run: ls -la artifacts/
 
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz > ../SHA256SUMS
+          cat ../SHA256SUMS
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: artifacts/*.tar.gz
+          files: |
+            artifacts/*.tar.gz
+            SHA256SUMS

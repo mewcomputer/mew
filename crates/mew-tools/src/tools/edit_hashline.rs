@@ -65,7 +65,8 @@ impl Tool for EditHashline {
 
         let mut output = String::new();
         let mut diff = String::new();
-        for result in results {
+        let mut file_delta = None;
+        for result in &results {
             if !output.is_empty() {
                 output.push('\n');
             }
@@ -92,13 +93,21 @@ impl Tool for EditHashline {
                 }
                 diff.push_str(&section_diff);
             }
+
+            // Keep the last file delta (most common case: one file per edit).
+            file_delta = Some(super::compute_file_delta(
+                Some(&result.before),
+                &result.after,
+                std::path::Path::new(&result.path),
+            ));
         }
 
         Ok(ToolOutput {
             output,
             error: String::new(),
             diff: if diff.is_empty() { None } else { Some(diff) },
-            metadata: None,
+            file_delta,
+            ..Default::default()
         })
     }
 }

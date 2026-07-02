@@ -260,6 +260,49 @@ export class MewClient {
     yieldControl() {
         this.send({ type: "yield_control" });
     }
+    // -- Phase 2: groups & archive --
+    createGroup(name, color) {
+        this.send({ type: "create_group", name, color });
+    }
+    updateGroup(groupId, opts) {
+        this.send({ type: "update_group", group_id: groupId, ...opts });
+    }
+    deleteGroup(groupId) {
+        this.send({ type: "delete_group", group_id: groupId });
+    }
+    assignSessionGroup(sessionId, groupId, position) {
+        this.send({
+            type: "assign_session_group",
+            session_id: sessionId,
+            group_id: groupId,
+            position,
+        });
+    }
+    archiveSession(sessionId, archived) {
+        this.send({ type: "archive_session", session_id: sessionId, archived });
+    }
+    pinSession(sessionId, pinned) {
+        this.send({ type: "pin_session", session_id: sessionId, pinned });
+    }
+    // -- Phase 3: file service --
+    listDir(sessionId, path) {
+        this.send({ type: "list_dir", session_id: sessionId, path });
+    }
+    readFilePreview(sessionId, path, maxBytes) {
+        this.send({ type: "read_file_preview", session_id: sessionId, path, max_bytes: maxBytes });
+    }
+    gitStatus(sessionId) {
+        this.send({ type: "git_status", session_id: sessionId });
+    }
+    watchWorkspace(sessionId, enabled) {
+        this.send({ type: "watch_workspace", session_id: sessionId, enabled });
+    }
+    openPath(sessionId, path) {
+        this.send({ type: "open_path", session_id: sessionId, path });
+    }
+    unflagFile(sessionId, path) {
+        this.send({ type: "unflag_file", session_id: sessionId, path });
+    }
     // -------------------------------------------------------------------------
     // Event registration
     // -------------------------------------------------------------------------
@@ -428,6 +471,78 @@ export class MewClient {
                 this.emit("session-summary-changed", {
                     session_id: msg.session_id,
                     summary: msg.summary,
+                });
+                break;
+            case "session_activity_changed":
+                this.emit("session-activity-changed", {
+                    session_id: msg.session_id,
+                    activity: msg.activity,
+                });
+                break;
+            case "session_stats_changed":
+                this.emit("session-stats-changed", {
+                    session_id: msg.session_id,
+                    added: msg.added,
+                    removed: msg.removed,
+                    files_changed: msg.files_changed,
+                });
+                break;
+            case "group_list":
+                this.emit("group-list", { groups: msg.groups });
+                break;
+            case "groups_changed":
+                this.emit("groups-changed", { groups: msg.groups });
+                break;
+            case "dir_listing":
+                this.emit("dir-listing", { path: msg.path, entries: msg.entries });
+                break;
+            case "file_preview":
+                this.emit("file-preview", {
+                    path: msg.path,
+                    content: msg.content,
+                    truncated: msg.truncated,
+                    language: msg.language,
+                });
+                break;
+            case "git_status_result":
+                this.emit("git-status-result", { entries: msg.entries });
+                break;
+            case "fs_changed":
+                this.emit("fs-changed", { paths: msg.paths });
+                break;
+            case "session_usage_changed":
+                this.emit("session-usage-changed", {
+                    session_id: msg.session_id,
+                    usage: msg.usage,
+                });
+                break;
+            case "session_alert":
+                this.emit("session-alert", {
+                    session_id: msg.session_id,
+                    title: msg.title,
+                    kind: msg.kind,
+                    detail: msg.detail,
+                });
+                break;
+            case "flagged_files_changed":
+                this.emit("flagged-files-changed", {
+                    session_id: msg.session_id,
+                    files: msg.files,
+                });
+                break;
+            case "session_meta_changed":
+                this.emit("session-meta-changed", {
+                    session_id: msg.session_id,
+                    archived: msg.archived,
+                    pinned: msg.pinned,
+                    group_id: msg.group_id,
+                });
+                break;
+            case "session_attention_changed":
+                this.emit("session-attention-changed", {
+                    session_id: msg.session_id,
+                    pending_permissions: msg.pending_permissions,
+                    pending_questions: msg.pending_questions,
                 });
                 break;
             case "error":

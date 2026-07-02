@@ -231,5 +231,10 @@ deps:
 tidy:
     cargo update
 
+# Generate a Homebrew formula from a GitHub release.
+# Usage: just generate-homebrew-formula v0.2.0
+generate-homebrew-formula version:
+    scripts/generate-homebrew-formula.sh {{version}}
+
 site-dev:
     pnpm --filter site dev

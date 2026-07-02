@@ -53,7 +53,35 @@ export type ClientMessage =
   | { type: "switch_model"; provider: string; model: string }
   | { type: "set_thinking_variant"; variant: string }
   | { type: "set_permission_mode"; mode: string }
-  | { type: "yield_control" };
+  | { type: "yield_control" }
+  | { type: "create_group"; name: string; color?: string }
+  | {
+      type: "update_group";
+      group_id: string;
+      name?: string;
+      color?: string | null;
+      order?: number;
+    }
+  | { type: "delete_group"; group_id: string }
+  | {
+      type: "assign_session_group";
+      session_id: string;
+      group_id?: string | null;
+      position?: number;
+    }
+  | { type: "archive_session"; session_id: string; archived: boolean }
+  | { type: "pin_session"; session_id: string; pinned: boolean }
+  | { type: "list_dir"; session_id: string; path?: string }
+  | {
+      type: "read_file_preview";
+      session_id: string;
+      path: string;
+      max_bytes?: number;
+    }
+  | { type: "git_status"; session_id: string }
+  | { type: "watch_workspace"; session_id: string; enabled: boolean }
+  | { type: "open_path"; session_id: string; path: string }
+  | { type: "unflag_file"; session_id: string; path: string };
 
 // Provider events — see mew_message::ProviderEventWire.
 export type ProviderEventWire =
@@ -187,7 +215,33 @@ export interface ThinkingVariantInfo {
 }
 
 /** Session lifecycle state. */
-export type SessionState = "active" | "idle";
+export type SessionState = "active" | "idle" | "running";
+
+/** Cumulative diff stats for a session. */
+export interface ChangeStats {
+  added: number;
+  removed: number;
+  files: string[];
+}
+
+/** Wire-format usage stats for a session. */
+export interface SessionUsageWire {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost: number;
+  turns: number;
+}
+
+/** Alert kind for cross-session notifications. */
+export type AlertKind = "turn_complete" | "turn_failed" | "permission_needed" | "input_needed";
+
+/** Wire-format info about a flagged file. */
+export interface FlaggedFileWire {
+  path: string;
+  reason?: string;
+}
 
 /** Metadata returned by `list_sessions` for one session. */
 export interface SessionInfo {
@@ -199,6 +253,39 @@ export interface SessionInfo {
   last_message_at?: number;
   summary?: string;
   client_count: number;
+  cwd?: string;
+  last_turn_failed?: boolean;
+  archived?: boolean;
+  pinned?: boolean;
+  group_id?: string;
+  change_stats?: ChangeStats;
+  usage?: SessionUsageWire;
+  pending_permissions?: number;
+  pending_questions?: number;
+}
+
+/** A session group. */
+export interface GroupInfo {
+  id: string;
+  name: string;
+  color?: string;
+  order: number;
+}
+
+/** One entry in a directory listing. */
+export interface DirEntry {
+  name: string;
+  is_dir: boolean;
+  size?: number;
+}
+
+/** Git file status. */
+export type GitFileStatus = "added" | "modified" | "deleted" | "renamed" | "untracked";
+
+/** One entry in a git status result. */
+export interface GitEntry {
+  path: string;
+  status: GitFileStatus;
 }
 
 /** A message role. */
@@ -304,7 +391,49 @@ export type ServerMessage =
   | { type: "client_detached"; client_id: number }
   | { type: "control_yielded"; client_id: number }
   | { type: "session_title_changed"; session_id: string; title: string }
-  | { type: "session_summary_changed"; session_id: string; summary: string };
+  | { type: "session_summary_changed"; session_id: string; summary: string }
+  | { type: "session_activity_changed"; session_id: string; activity: SessionState }
+  | {
+      type: "session_stats_changed";
+      session_id: string;
+      added: number;
+      removed: number;
+      files_changed: number;
+    }
+  | { type: "group_list"; groups: GroupInfo[] }
+  | { type: "groups_changed"; groups: GroupInfo[] }
+  | { type: "dir_listing"; path: string; entries: DirEntry[] }
+  | {
+      type: "file_preview";
+      path: string;
+      content: string;
+      truncated: boolean;
+      language?: string;
+    }
+  | { type: "git_status_result"; entries: GitEntry[] }
+  | { type: "fs_changed"; paths: string[] }
+  | { type: "session_usage_changed"; session_id: string; usage: SessionUsageWire }
+  | {
+      type: "session_alert";
+      session_id: string;
+      title: string;
+      kind: AlertKind;
+      detail?: string;
+    }
+  | { type: "flagged_files_changed"; session_id: string; files: FlaggedFileWire[] }
+  | {
+      type: "session_meta_changed";
+      session_id: string;
+      archived: boolean;
+      pinned: boolean;
+      group_id?: string;
+    }
+  | {
+      type: "session_attention_changed";
+      session_id: string;
+      pending_permissions: number;
+      pending_questions: number;
+    };
 
 // ---------------------------------------------------------------------------
 // Minimal WebSocket interface — lets Node users pass `ws` while browsers
@@ -418,6 +547,43 @@ export interface MewClientEvents {
   "control-yielded": (data: { client_id: number }) => void;
   "session-title-changed": (data: { session_id: string; title: string }) => void;
   "session-summary-changed": (data: { session_id: string; summary: string }) => void;
+  "session-activity-changed": (data: { session_id: string; activity: SessionState }) => void;
+  "session-stats-changed": (data: {
+    session_id: string;
+    added: number;
+    removed: number;
+    files_changed: number;
+  }) => void;
+  "group-list": (data: { groups: GroupInfo[] }) => void;
+  "groups-changed": (data: { groups: GroupInfo[] }) => void;
+  "dir-listing": (data: { path: string; entries: DirEntry[] }) => void;
+  "file-preview": (data: {
+    path: string;
+    content: string;
+    truncated: boolean;
+    language?: string;
+  }) => void;
+  "git-status-result": (data: { entries: GitEntry[] }) => void;
+  "fs-changed": (data: { paths: string[] }) => void;
+  "session-usage-changed": (data: { session_id: string; usage: SessionUsageWire }) => void;
+  "session-alert": (data: {
+    session_id: string;
+    title: string;
+    kind: AlertKind;
+    detail?: string;
+  }) => void;
+  "flagged-files-changed": (data: { session_id: string; files: FlaggedFileWire[] }) => void;
+  "session-meta-changed": (data: {
+    session_id: string;
+    archived: boolean;
+    pinned: boolean;
+    group_id?: string;
+  }) => void;
+  "session-attention-changed": (data: {
+    session_id: string;
+    pending_permissions: number;
+    pending_questions: number;
+  }) => void;
 
   errorMessage: (data: { message: string }) => void;
   errorEvent: (data: { message: string }) => void;
@@ -690,6 +856,59 @@ export class MewClient {
     this.send({ type: "yield_control" });
   }
 
+  // -- Phase 2: groups & archive --
+  createGroup(name: string, color?: string): void {
+    this.send({ type: "create_group", name, color });
+  }
+  updateGroup(
+    groupId: string,
+    opts: { name?: string; color?: string | null; order?: number },
+  ): void {
+    this.send({ type: "update_group", group_id: groupId, ...opts });
+  }
+  deleteGroup(groupId: string): void {
+    this.send({ type: "delete_group", group_id: groupId });
+  }
+  assignSessionGroup(
+    sessionId: string,
+    groupId: string | null,
+    position?: number,
+  ): void {
+    this.send({
+      type: "assign_session_group",
+      session_id: sessionId,
+      group_id: groupId,
+      position,
+    });
+  }
+  archiveSession(sessionId: string, archived: boolean): void {
+    this.send({ type: "archive_session", session_id: sessionId, archived });
+  }
+  pinSession(sessionId: string, pinned: boolean): void {
+    this.send({ type: "pin_session", session_id: sessionId, pinned });
+  }
+
+  // -- Phase 3: file service --
+  listDir(sessionId: string, path?: string): void {
+    this.send({ type: "list_dir", session_id: sessionId, path });
+  }
+  readFilePreview(sessionId: string, path: string, maxBytes?: number): void {
+    this.send({ type: "read_file_preview", session_id: sessionId, path, max_bytes: maxBytes });
+  }
+  gitStatus(sessionId: string): void {
+    this.send({ type: "git_status", session_id: sessionId });
+  }
+  watchWorkspace(sessionId: string, enabled: boolean): void {
+    this.send({ type: "watch_workspace", session_id: sessionId, enabled });
+  }
+  openPath(sessionId: string, path: string): void {
+    this.send({ type: "open_path", session_id: sessionId, path });
+  }
+
+  unflagFile(sessionId: string, path: string): void {
+    this.send({ type: "unflag_file", session_id: sessionId, path });
+  }
+
   // -------------------------------------------------------------------------
   // Event registration
   // -------------------------------------------------------------------------
@@ -872,6 +1091,78 @@ export class MewClient {
         this.emit("session-summary-changed", {
           session_id: msg.session_id,
           summary: msg.summary,
+        });
+        break;
+      case "session_activity_changed":
+        this.emit("session-activity-changed", {
+          session_id: msg.session_id,
+          activity: msg.activity,
+        });
+        break;
+      case "session_stats_changed":
+        this.emit("session-stats-changed", {
+          session_id: msg.session_id,
+          added: msg.added,
+          removed: msg.removed,
+          files_changed: msg.files_changed,
+        });
+        break;
+      case "group_list":
+        this.emit("group-list", { groups: msg.groups });
+        break;
+      case "groups_changed":
+        this.emit("groups-changed", { groups: msg.groups });
+        break;
+      case "dir_listing":
+        this.emit("dir-listing", { path: msg.path, entries: msg.entries });
+        break;
+      case "file_preview":
+        this.emit("file-preview", {
+          path: msg.path,
+          content: msg.content,
+          truncated: msg.truncated,
+          language: msg.language,
+        });
+        break;
+      case "git_status_result":
+        this.emit("git-status-result", { entries: msg.entries });
+        break;
+      case "fs_changed":
+        this.emit("fs-changed", { paths: msg.paths });
+        break;
+      case "session_usage_changed":
+        this.emit("session-usage-changed", {
+          session_id: msg.session_id,
+          usage: msg.usage,
+        });
+        break;
+      case "session_alert":
+        this.emit("session-alert", {
+          session_id: msg.session_id,
+          title: msg.title,
+          kind: msg.kind,
+          detail: msg.detail,
+        });
+        break;
+      case "flagged_files_changed":
+        this.emit("flagged-files-changed", {
+          session_id: msg.session_id,
+          files: msg.files,
+        });
+        break;
+      case "session_meta_changed":
+        this.emit("session-meta-changed", {
+          session_id: msg.session_id,
+          archived: msg.archived,
+          pinned: msg.pinned,
+          group_id: msg.group_id,
+        });
+        break;
+      case "session_attention_changed":
+        this.emit("session-attention-changed", {
+          session_id: msg.session_id,
+          pending_permissions: msg.pending_permissions,
+          pending_questions: msg.pending_questions,
         });
         break;
       case "error":

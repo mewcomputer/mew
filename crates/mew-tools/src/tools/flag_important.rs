@@ -21,6 +21,15 @@ pub enum FlagMode {
     Referenced,
 }
 
+/// Human-readable label for a FlagMode, used in wire protocol and UI.
+/// Shared between the agent emit path, daemon unflag handler, and attach replay.
+pub fn flag_mode_label(mode: FlagMode) -> &'static str {
+    match mode {
+        FlagMode::Included => "included",
+        FlagMode::Referenced => "referenced",
+    }
+}
+
 pub struct FlagImportant {
     flagged: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>>,
     schema: Value,

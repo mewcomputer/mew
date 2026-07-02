@@ -12,3 +12,4 @@ mew-message = { workspace = true }
 mew-hooks = { workspace = true }
 mew-provider = { workspace = true }
 mew-subagents = { workspace = true }
+mew-session = { workspace = true }

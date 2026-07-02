@@ -164,6 +164,7 @@ impl Tool for EchoTool {
             error: String::new(),
             diff: None,
             metadata: None,
+            file_delta: None,
         })
     }
 }

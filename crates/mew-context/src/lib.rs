@@ -83,6 +83,14 @@ impl Loader {
                 trace!(?dot_mew, "loaded .mew/AGENTS.md");
                 files.push(f);
             }
+
+            // .mew/wiki.md (agent-generated repo wiki) is loaded additively
+            // at every level. It provides orientation context.
+            let wiki = dir.join(".mew").join("wiki.md");
+            if let Some(f) = try_read(&wiki) {
+                trace!(?wiki, "loaded .mew/wiki.md");
+                files.push(f);
+            }
         }
 
         debug!(count = files.len(), "loaded context files");
