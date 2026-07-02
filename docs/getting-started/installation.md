@@ -7,15 +7,54 @@ mew is a terminal-based AI coding assistant. It runs on your machine and
 connects to LLM providers you configure. No data leaves your system except
 API calls to your chosen provider.
 
-## Prerequisites
+## macOS and Linux
 
-- **Rust 1.75+** with the `2021` edition (for building from source)
+### Homebrew
+
+```sh
+brew tap mewcomputer/mew
+brew install mew
+```
+
+Upgrade later with:
+
+```sh
+brew upgrade mew
+```
+
+### Install script
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | sh
+```
+
+The script detects your platform, downloads the latest release from GitHub,
+verifies the SHA256 checksum, and installs `mew` to `~/.local/bin` or
+`~/bin`. Re-run the script to upgrade.
+
+Environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `MEW_VERSION` | Install a specific release, e.g. `v0.2.0` (default: `latest`) |
+| `MEW_INSTALL_DIR` | Override the install directory |
+| `MEW_DRY_RUN` | Set to `1` to preview without installing |
+| `MEW_VERBOSE` | Set to `1` for extra logging |
+
+### Manual download
+
+Grab the tarball for your platform from the [GitHub Releases](https://github.com/mewcomputer/mew/releases)
+page. Each release includes a `SHA256SUMS` file for verification.
+
+## Build from source
+
+### Prerequisites
+
+- **Rust 1.75+** with the `2021` edition
 - A terminal that supports 256 colors and UTF-8
 - An API key for at least one provider (see [Providers](/docs/using-mew/providers/))
 
-## Install with cargo
-
-If you have Rust installed, the fastest path:
+### Install with cargo
 
 ```sh
 cargo install --git https://github.com/mewcomputer/mew mew
@@ -24,9 +63,7 @@ cargo install --git https://github.com/mewcomputer/mew mew
 This builds and installs the `mew` binary to `~/.cargo/bin/mew`. Make sure
 `~/.cargo/bin` is on your `PATH`.
 
-## Build from source
-
-Clone and build:
+### Clone and build
 
 ```sh
 git clone https://github.com/mewcomputer/mew.git
@@ -40,7 +77,7 @@ The binary lands at `target/release/mew`. Copy it somewhere on your `PATH`:
 cp target/release/mew /usr/local/bin/
 ```
 
-Or use the install recipe, which runs `cargo install --path crates/mew`:
+Or use the install recipe:
 
 ```sh
 just install
@@ -59,7 +96,8 @@ mew --version
 ```
 
 You should see a version string. If `mew` isn't found, check that your
-install directory (`~/.cargo/bin` or `/usr/local/bin`) is on your `PATH`.
+install directory (`~/.local/bin`, `~/bin`, `~/.cargo/bin`, or `/usr/local/bin`)
+is on your `PATH`.
 
 ## What gets installed
 

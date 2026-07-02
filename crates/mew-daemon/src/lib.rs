@@ -31,7 +31,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use mew_agent::{Agent, AgentEvent};
-use mew_protocol::{ClientMessage, Question, QuestionOption, ServerMessage};
+use mew_protocol::{ClientMessage, Question, QuestionOption, ServerMessage, SessionState};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::mpsc;
@@ -41,6 +41,8 @@ use tracing::{error, info, warn};
 use tungstenite::Message;
 
 pub mod client;
+pub mod files;
+pub mod groups;
 pub mod session;
 
 pub use client::DaemonClient;
@@ -88,6 +90,8 @@ pub struct DaemonServer {
     pub thinking_setter: Option<ThinkingSetter>,
     /// Owns active sessions and resume-from-disk.
     pub session_manager: Arc<SessionManager>,
+    /// Session groups sidecar store (groups.json).
+    pub groups_store: Arc<groups::GroupsStore>,
 }
 
 impl DaemonServer {
@@ -112,16 +116,25 @@ impl DaemonServer {
     ) -> Self {
         let session_manager = Arc::new(SessionManager::new(
             builder.clone(),
-            session_dir,
+            session_dir.clone(),
             switcher,
             lister,
         ));
+        let groups_state = {
+            let path = session_dir.join("groups.json");
+            std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<groups::GroupsState>(&bytes).ok())
+                .unwrap_or_default()
+        };
+        let groups_store = Arc::new(groups::GroupsStore::from_state(groups_state, session_dir));
         Self {
             builder,
             model_switcher: None,
             model_lister: None,
             thinking_setter: None,
             session_manager,
+            groups_store,
         }
     }
 
@@ -159,6 +172,7 @@ impl DaemonServer {
         info!(socket = socket_path, "mew daemon listening");
 
         let session_manager = self.session_manager.clone();
+        let groups_store = self.groups_store.clone();
         let thinking_setter = self.thinking_setter.clone();
         let mut id_counter = 0u64;
 
@@ -178,10 +192,11 @@ impl DaemonServer {
                             id_counter += 1;
                             let conn_id = id_counter;
                             let session_manager = session_manager.clone();
+                            let groups_store = groups_store.clone();
                             let thinking_setter = thinking_setter.clone();
                             tokio::spawn(async move {
                                 info!(conn_id, "connection accepted");
-                                if let Err(e) = handle_connection(stream, session_manager, thinking_setter).await {
+                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter).await {
                                     if !e.to_string().contains("connection reset") {
                                         warn!(conn_id, error = %e, "connection ended with error");
                                     }
@@ -210,6 +225,7 @@ impl DaemonServer {
         info!(%addr, "mew daemon listening (tcp)");
 
         let session_manager = self.session_manager.clone();
+        let groups_store = self.groups_store.clone();
         let thinking_setter = self.thinking_setter.clone();
         let mut id_counter = 0u64;
 
@@ -229,10 +245,11 @@ impl DaemonServer {
                             id_counter += 1;
                             let conn_id = id_counter;
                             let session_manager = session_manager.clone();
+                            let groups_store = groups_store.clone();
                             let thinking_setter = thinking_setter.clone();
                             tokio::spawn(async move {
                                 info!(conn_id, %peer, "connection accepted (tcp)");
-                                if let Err(e) = handle_connection(stream, session_manager, thinking_setter).await {
+                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter).await {
                                     if !e.to_string().contains("connection reset") {
                                         warn!(conn_id, error = %e, "connection ended with error");
                                     }
@@ -259,6 +276,7 @@ impl DaemonServer {
 async fn handle_connection<S>(
     stream: S,
     session_manager: Arc<SessionManager>,
+    groups_store: Arc<groups::GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
 ) -> Result<()>
 where
@@ -332,7 +350,7 @@ where
 
         match client_msg {
             ClientMessage::NewSession { cwd, client_kind } => {
-                match session_manager.create(cwd.map(PathBuf::from)).await {
+                match session_manager.create(cwd.clone().map(PathBuf::from)).await {
                     Ok(session) => {
                         let (cid, was_first) =
                             session.attach_client(client_tx.clone(), client_kind).await;
@@ -347,6 +365,14 @@ where
                                 Some(agent.permission_mode().id().to_string()),
                             )
                         };
+                        // Persist cwd on the session meta.
+                        if let Some(cwd_str) = &cwd {
+                            let dir = session_manager.session_dir.clone();
+                            let agent = session.agent.lock().await;
+                            if let Some(mut meta) = agent.session_meta().await {
+                                let _ = meta.set_cwd(&dir, cwd_str.clone()).await;
+                            }
+                        }
                         reply(ServerMessage::SessionReady {
                             session_id,
                             model,
@@ -406,6 +432,29 @@ where
                         };
                         reply(ServerMessage::SessionHistory { messages });
 
+                        // Replay current flagged-files set so the UI has it
+                        // immediately after attach.
+                        {
+                            let agent = session.agent.lock().await;
+                            let files: Vec<mew_protocol::FlaggedFileWire> = agent
+                                .flagged_files
+                                .lock()
+                                .await
+                                .iter()
+                                .map(|f| mew_protocol::FlaggedFileWire {
+                                    path: f.path.display().to_string(),
+                                    reason: Some(mew_tools::tools::flag_important::flag_mode_label(f.mode).to_string()),
+                                })
+                                .collect();
+                            drop(agent);
+                            if !files.is_empty() {
+                                reply(ServerMessage::FlaggedFilesChanged {
+                                    session_id: session_id.clone(),
+                                    files,
+                                });
+                            }
+                        }
+
                         // Notify other clients that a new client joined.
                         if !was_first {
                             session
@@ -436,6 +485,8 @@ where
             ClientMessage::ListSessions => {
                 let sessions = session_manager.list().await;
                 reply(ServerMessage::SessionList { sessions });
+                let groups = groups_store.list().await;
+                reply(ServerMessage::GroupList { groups });
             }
             ClientMessage::DeleteSession { session_id } => {
                 // Remove from active sessions if present.
@@ -489,6 +540,7 @@ where
                     .broadcast(ServerMessage::UserMessage { text: text.clone() })
                     .await;
                 let client_tx = client_tx.clone();
+                let session_mgr = session_manager.clone();
                 tokio::spawn(async move {
                     let _guard = session.turn_lock.lock().await;
                     let has_turn: bool = session.current_turn_cancel.lock().await.is_some();
@@ -498,20 +550,16 @@ where
                         });
                         return;
                     }
-                    let token = CancellationToken::new();
-                    *session.current_turn_cancel.lock().await = Some(token.clone());
                     let agent = session.agent.lock().await.clone();
                     let prompt_text = text.clone();
                     let auto_title = auto_title_enabled;
-                    let rx = agent.run_with_parts(text, vec![], Some(token));
-                    forward_events(rx, session.clone()).await;
-                    *session.current_turn_cancel.lock().await = None;
+                    let had_error = run_turn(&session, &session_mgr, &agent, text).await;
 
                     // Generate a session title from the first user message
                     // if we haven't already. Uses a lightweight LLM call;
                     // falls back to text truncation on error. Skipped if the
                     // user has disabled auto-title generation.
-                    if auto_title {
+                    if auto_title && !had_error {
                         let mut generated = session.title_generated.lock().await;
                         if !*generated {
                             *generated = true;
@@ -545,6 +593,16 @@ where
                     session
                         .broadcast(ServerMessage::RequestResolved { request_id })
                         .await;
+                    // Broadcast updated attention count.
+                    let perm_count = session.pending_permissions.lock().await.len() as u32;
+                    let q_count = session.pending_ask_user.lock().await.len() as u32;
+                    session_manager
+                        .broadcast_all(ServerMessage::SessionAttentionChanged {
+                            session_id: session.id.clone(),
+                            pending_permissions: perm_count,
+                            pending_questions: q_count,
+                        })
+                        .await;
                 }
             }
             ClientMessage::AskUserResponse {
@@ -559,6 +617,16 @@ where
                     session
                         .broadcast(ServerMessage::RequestResolved { request_id })
                         .await;
+                    // Broadcast updated attention count.
+                    let perm_count = session.pending_permissions.lock().await.len() as u32;
+                    let q_count = session.pending_ask_user.lock().await.len() as u32;
+                    session_manager
+                        .broadcast_all(ServerMessage::SessionAttentionChanged {
+                            session_id: session.id.clone(),
+                            pending_permissions: perm_count,
+                            pending_questions: q_count,
+                        })
+                        .await;
                 }
             }
             ClientMessage::SlashCommand { command } => {
@@ -569,6 +637,7 @@ where
                     continue;
                 };
                 let client_tx = client_tx.clone();
+                let session_manager_clone = session_manager.clone();
                 tokio::spawn(async move {
                     let _guard = session.turn_lock.lock().await;
                     let result = {
@@ -586,6 +655,35 @@ where
                             "/compact" => {
                                 agent.force_compact().await;
                                 Some("compaction done".to_string())
+                            }
+                            "/wiki" => {
+                                let _ = client_tx.send(ServerMessage::SlashResult {
+                                    text: "Generating wiki… (this may take a moment)".to_string(),
+                                });
+                                let wiki_prompt = "You are generating a repository wiki. \
+                                    Analyze the codebase structure using your read, glob, and grep tools. \
+                                    Then write a file at .mew/wiki.md with:\n\
+                                    1. YAML frontmatter with `generated_at` (ISO timestamp) and `git_head` (run `git rev-parse HEAD` via bash)\n\
+                                    2. A markdown document covering:\n\
+                                    - Project overview (what this codebase is)\n\
+                                    - Directory structure (key directories and their responsibilities)\n\
+                                    - Build & test commands\n\
+                                    - Configuration conventions\n\
+                                    - Key architectural patterns\n\n\
+                                    Keep it concise (under 200 lines). Use the write tool to create .mew/wiki.md.";
+                                drop(agent);
+                                let wiki_agent = session.agent.lock().await.clone();
+                                let had_error = run_turn(
+                                    &session,
+                                    &session_manager_clone,
+                                    &wiki_agent,
+                                    wiki_prompt.to_string(),
+                                ).await;
+                                if had_error {
+                                    Some("wiki generation failed".to_string())
+                                } else {
+                                    Some("wiki generated at .mew/wiki.md".to_string())
+                                }
                             }
                             _ => None,
                         }
@@ -717,6 +815,208 @@ where
                     .broadcast(ServerMessage::ControlYielded { client_id: cid })
                     .await;
             }
+
+            // -- Phase 2: groups & archive --
+            ClientMessage::CreateGroup { name, color } => {
+                match groups_store.create_group(name, color).await {
+                    Ok(groups) => {
+                        session_manager.broadcast_groups(groups).await;
+                    }
+                    Err(e) => {
+                        reply(ServerMessage::Error {
+                            message: format!("failed to create group: {e}"),
+                        });
+                    }
+                }
+            }
+            ClientMessage::UpdateGroup {
+                group_id,
+                name,
+                color,
+                order,
+            } => {
+                match groups_store
+                    .update_group(&group_id, name, color.map(Some), order)
+                    .await
+                {
+                    Ok(groups) => {
+                        session_manager.broadcast_groups(groups).await;
+                    }
+                    Err(e) => {
+                        reply(ServerMessage::Error {
+                            message: format!("failed to update group: {e}"),
+                        });
+                    }
+                }
+            }
+            ClientMessage::DeleteGroup { group_id } => {
+                match groups_store.delete_group(&group_id).await {
+                    Ok(groups) => {
+                        let dir = session_manager.session_dir.clone();
+                        if let Ok(entries) = tokio::fs::read_dir(&dir).await {
+                            let mut entries = entries;
+                            while let Ok(Some(entry)) = entries.next_entry().await {
+                                if let Some(id) = entry.file_name().to_str() {
+                                    if let Ok(Some(mut meta)) =
+                                        mew_session::Meta::read(&dir, id).await
+                                    {
+                                        if meta.group_id.as_deref() == Some(&group_id) {
+                                            let _ = meta.set_group_id(&dir, None).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        session_manager.broadcast_groups(groups).await;
+                    }
+                    Err(e) => {
+                        reply(ServerMessage::Error {
+                            message: format!("failed to delete group: {e}"),
+                        });
+                    }
+                }
+            }
+            ClientMessage::AssignSessionGroup {
+                session_id,
+                group_id,
+                position: _,
+            } => {
+                let dir = session_manager.session_dir.clone();
+                let mut meta_group_id = None;
+                if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
+                    let _ = meta.set_group_id(&dir, group_id.clone()).await;
+                    meta_group_id = meta.group_id.clone();
+                }
+                match groups_store.assign_session(&session_id, group_id).await {
+                    Ok(groups) => {
+                        session_manager.broadcast_groups(groups).await;
+                        session_manager
+                            .broadcast_all(ServerMessage::SessionMetaChanged {
+                                session_id: session_id.clone(),
+                                archived: false,
+                                pinned: false,
+                                group_id: meta_group_id,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        reply(ServerMessage::Error {
+                            message: format!("failed to assign session: {e}"),
+                        });
+                    }
+                }
+            }
+            ClientMessage::ArchiveSession {
+                session_id,
+                archived,
+            } => {
+                let dir = session_manager.session_dir.clone();
+                if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
+                    let _ = meta.set_archived(&dir, archived).await;
+                }
+                session_manager
+                    .broadcast_all(ServerMessage::SessionMetaChanged {
+                        session_id: session_id.clone(),
+                        archived,
+                        pinned: false,
+                        group_id: None,
+                    })
+                    .await;
+            }
+            ClientMessage::PinSession {
+                session_id,
+                pinned,
+            } => {
+                let dir = session_manager.session_dir.clone();
+                if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
+                    let _ = meta.set_pinned(&dir, pinned).await;
+                }
+                session_manager
+                    .broadcast_all(ServerMessage::SessionMetaChanged {
+                        session_id: session_id.clone(),
+                        archived: false,
+                        pinned,
+                        group_id: None,
+                    })
+                    .await;
+            }
+
+            // -- Phase 3: File service --
+            ClientMessage::ListDir { session_id, path } => {
+                match crate::files::handle_list_dir(&session_manager, &session_id, path).await {
+                    Ok(listing) => reply(listing),
+                    Err(e) => reply(ServerMessage::Error {
+                        message: format!("list_dir: {e}"),
+                    }),
+                }
+            }
+            ClientMessage::ReadFilePreview {
+                session_id,
+                path,
+                max_bytes,
+            } => {
+                match crate::files::handle_read_preview(
+                    &session_manager,
+                    &session_id,
+                    &path,
+                    max_bytes,
+                )
+                .await
+                {
+                    Ok(preview) => reply(preview),
+                    Err(e) => reply(ServerMessage::Error {
+                        message: format!("read_file_preview: {e}"),
+                    }),
+                }
+            }
+            ClientMessage::GitStatus { session_id } => {
+                match crate::files::handle_git_status(&session_manager, &session_id).await {
+                    Ok(result) => reply(result),
+                    Err(e) => reply(ServerMessage::Error {
+                        message: format!("git_status: {e}"),
+                    }),
+                }
+            }
+            ClientMessage::WatchWorkspace { .. } => {
+                // Watcher not implemented in v1; acknowledge silently.
+            }
+            ClientMessage::OpenPath { session_id, path } => {
+                match crate::files::handle_open_path(&session_manager, &session_id, &path).await {
+                    Ok(()) => {}
+                    Err(e) => reply(ServerMessage::Error {
+                        message: format!("open_path: {e}"),
+                    }),
+                }
+            }
+
+            // -- Flagged files --
+            ClientMessage::UnflagFile { session_id, path } => {
+                // Remove from the agent's flagged_files set if the session is active.
+                let active = session_manager.active.lock().await;
+                if let Some(session) = active.get(&session_id).cloned() {
+                    drop(active);
+                    let agent = session.agent.lock().await;
+                    let mut guard = agent.flagged_files.lock().await;
+                    guard.retain(|f| f.path.display().to_string() != path);
+                    let files: Vec<mew_protocol::FlaggedFileWire> = guard
+                        .iter()
+                        .map(|f| mew_protocol::FlaggedFileWire {
+                            path: f.path.display().to_string(),
+                            reason: Some(mew_tools::tools::flag_important::flag_mode_label(f.mode).to_string()),
+                        })
+                        .collect();
+                    drop(guard);
+                    drop(agent);
+                    session
+                        .broadcast(ServerMessage::FlaggedFilesChanged {
+                            session_id: session_id.clone(),
+                            files,
+                        })
+                        .await;
+                } else {
+                    drop(active);
+                }
+            }
         }
     }
     if let (Some(session), Some(cid)) = (&attached_session, client_id) {
@@ -759,13 +1059,108 @@ type WsSink<S> = futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<S
 /// Read AgentEvents from the receiver and broadcast them to every client
 /// attached to the session. This consumes events until the receiver is drained
 /// (i.e. the agent turn has ended).
-async fn forward_events(mut rx: tokio::sync::mpsc::Receiver<AgentEvent>, session: Arc<Session>) {
+/// Run an agent turn with full turn management: cancel token, is_running,
+/// activity broadcasts, forward_events, meta updates, usage broadcast, and
+/// session alert. Returns `had_error`.
+///
+/// Does NOT do: user message broadcast, title generation — those are
+/// Prompt-handler-specific.
+async fn run_turn(
+    session: &Arc<Session>,
+    session_mgr: &Arc<SessionManager>,
+    agent: &Agent,
+    prompt_text: String,
+) -> bool {
+    let token = CancellationToken::new();
+    *session.current_turn_cancel.lock().await = Some(token.clone());
+    *session.is_running.lock().await = true;
+    session_mgr
+        .broadcast_activity(&session.id, SessionState::Running)
+        .await;
+
+    let rx = agent.run_with_parts(prompt_text, vec![], Some(token));
+    let had_error = forward_events(rx, session.clone(), session_mgr.clone()).await;
+
+    *session.current_turn_cancel.lock().await = None;
+    *session.is_running.lock().await = false;
+
+    // Update last_turn_failed + increment turn count.
+    let dir = session_mgr.session_dir.clone();
+    let usage_wire = {
+        let agent = session.agent.lock().await;
+        if let Some(mut meta) = agent.session_meta().await {
+            let _ = meta.set_last_turn_failed(&dir, had_error).await;
+            if let Some(u) = meta.usage.as_mut() {
+                u.add_turn();
+                let wire = mew_protocol::SessionUsageWire::from(&*u);
+                let _ = meta.set_usage(&dir, wire.clone().into()).await;
+                Some(wire)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    // Broadcast idle state.
+    session_mgr
+        .broadcast_activity(&session.id, SessionState::Idle)
+        .await;
+
+    // Broadcast usage (only if we have data).
+    if let Some(u) = &usage_wire {
+        session_mgr
+            .broadcast_all(ServerMessage::SessionUsageChanged {
+                session_id: session.id.clone(),
+                usage: u.clone(),
+            })
+            .await;
+    }
+
+    // Session alert: TurnComplete or TurnFailed.
+    session_mgr
+        .broadcast_all(ServerMessage::SessionAlert {
+            session_id: session.id.clone(),
+            title: session.display_title().await,
+            kind: if had_error {
+                mew_protocol::AlertKind::TurnFailed
+            } else {
+                mew_protocol::AlertKind::TurnComplete
+            },
+            detail: None,
+        })
+        .await;
+
+    had_error
+}
+
+async fn forward_events(
+    mut rx: tokio::sync::mpsc::Receiver<AgentEvent>,
+    session: Arc<Session>,
+    session_mgr: Arc<SessionManager>,
+) -> bool {
+    let mut had_error = false;
     while let Some(event) = rx.recv().await {
-        let msgs = translate_event(event, &session).await;
+        if matches!(event, AgentEvent::Error(_)) {
+            had_error = true;
+        }
+        let msgs = translate_event(event, &session, &session_mgr).await;
         for msg in msgs {
-            session.broadcast(msg).await;
+            // SessionAlert and SessionAttentionChanged go to ALL sessions.
+            // Everything else goes to just this session's clients.
+            if matches!(
+                msg,
+                ServerMessage::SessionAlert { .. }
+                    | ServerMessage::SessionAttentionChanged { .. }
+            ) {
+                session_mgr.broadcast_all(msg).await;
+            } else {
+                session.broadcast(msg).await;
+            }
         }
     }
+    had_error
 }
 
 /// Generate a short session title using the LLM.
@@ -1048,9 +1443,30 @@ async fn generate_session_summary(agent: &Agent) -> Option<String> {
 /// Translate a single `AgentEvent` (owned) into zero or more `ServerMessage`s.
 /// Channel-bearing events are converted to wire requests with fresh IDs;
 /// the `oneshot::Sender` is stashed in the `Session` for later response.
-async fn translate_event(event: AgentEvent, session: &Session) -> Vec<ServerMessage> {
+async fn translate_event(
+    event: AgentEvent,
+    session: &Session,
+    _session_mgr: &SessionManager,
+) -> Vec<ServerMessage> {
     match event {
         AgentEvent::Provider(pe) => {
+            // Intercept MessageEnd to accumulate usage on Meta.
+            if let mew_provider::ProviderEvent::MessageEnd { usage, cost, .. } = &pe {
+                let dir = session.session_dir.clone();
+                let agent = session.agent.lock().await;
+                if let Some(mut meta) = agent.session_meta().await {
+                    let u = meta.usage.get_or_insert_with(mew_session::SessionUsage::default);
+                    u.add_message(
+                        usage.input as u64,
+                        usage.output as u64,
+                        usage.cache_read as u64,
+                        usage.cache_write as u64,
+                        *cost,
+                    );
+                    let usage_clone = u.clone();
+                    let _ = meta.set_usage(&dir, usage_clone).await;
+                }
+            }
             vec![ServerMessage::Provider {
                 event: mew_protocol::provider_event_to_wire(&pe),
             }]
@@ -1073,11 +1489,26 @@ async fn translate_event(event: AgentEvent, session: &Session) -> Vec<ServerMess
         AgentEvent::PermissionRequest { call, tx } => {
             let id = session.next_request_id();
             session.pending_permissions.lock().await.insert(id, tx);
-            vec![ServerMessage::PermissionRequest {
-                request_id: id,
-                tool_name: call.tool_name,
-                input: call.input,
-            }]
+            let title = session.display_title().await;
+            let alert = ServerMessage::SessionAlert {
+                session_id: session.id.clone(),
+                title,
+                kind: mew_protocol::AlertKind::PermissionNeeded,
+                detail: Some(call.tool_name.clone()),
+            };
+            vec![
+                ServerMessage::PermissionRequest {
+                    request_id: id,
+                    tool_name: call.tool_name,
+                    input: call.input,
+                },
+                alert,
+                ServerMessage::SessionAttentionChanged {
+                    session_id: session.id.clone(),
+                    pending_permissions: session.pending_permissions.lock().await.len() as u32,
+                    pending_questions: session.pending_ask_user.lock().await.len() as u32,
+                },
+            ]
         }
         AgentEvent::WorkspacePermissionRequest { path, tx } => {
             let id = session.next_request_id();
@@ -1094,24 +1525,37 @@ async fn translate_event(event: AgentEvent, session: &Session) -> Vec<ServerMess
         } => {
             let id = session.next_request_id();
             session.pending_ask_user.lock().await.insert(id, tx);
-            vec![ServerMessage::AskUserRequest {
-                request_id: id,
-                call_id,
-                questions: questions
-                    .into_iter()
-                    .map(|q| Question {
-                        prompt: q.prompt,
-                        options: q
-                            .options
-                            .into_iter()
-                            .map(|o| QuestionOption {
-                                label: o.label,
-                                description: o.description,
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-            }]
+            vec![
+                ServerMessage::AskUserRequest {
+                    request_id: id,
+                    call_id,
+                    questions: questions
+                        .into_iter()
+                        .map(|q| Question {
+                            prompt: q.prompt,
+                            options: q
+                                .options
+                                .into_iter()
+                                .map(|o| QuestionOption {
+                                    label: o.label,
+                                    description: o.description,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                },
+                ServerMessage::SessionAlert {
+                    session_id: session.id.clone(),
+                    title: session.display_title().await,
+                    kind: mew_protocol::AlertKind::InputNeeded,
+                    detail: None,
+                },
+                ServerMessage::SessionAttentionChanged {
+                    session_id: session.id.clone(),
+                    pending_permissions: session.pending_permissions.lock().await.len() as u32,
+                    pending_questions: session.pending_ask_user.lock().await.len() as u32,
+                },
+            ]
         }
         AgentEvent::SubagentStart {
             parent_call_id,
@@ -1194,6 +1638,47 @@ async fn translate_event(event: AgentEvent, session: &Session) -> Vec<ServerMess
                 job_id,
                 command,
                 state,
+            }]
+        }
+        AgentEvent::FileDelta {
+            path,
+            added,
+            removed,
+        } => {
+            let dir = session.session_dir.clone();
+            let session_id = session.id.clone();
+            let (total_added, total_removed, files_changed) = {
+                let agent = session.agent.lock().await;
+                if let Some(mut meta) = agent.session_meta().await {
+                    let _ = meta.apply_file_delta(&dir, &path, added, removed).await;
+                    let stats = meta.change_stats.as_ref();
+                    (
+                        stats.map(|s| s.added).unwrap_or(0),
+                        stats.map(|s| s.removed).unwrap_or(0),
+                        stats.map(|s| s.files.len() as u64).unwrap_or(0),
+                    )
+                } else {
+                    (0u64, 0u64, 0u64)
+                }
+            };
+            vec![ServerMessage::SessionStatsChanged {
+                session_id,
+                added: total_added,
+                removed: total_removed,
+                files_changed,
+            }]
+        }
+        AgentEvent::FlaggedFilesChanged { files } => {
+            let wire_files: Vec<mew_protocol::FlaggedFileWire> = files
+                .into_iter()
+                .map(|f| mew_protocol::FlaggedFileWire {
+                    path: f.path,
+                    reason: f.reason,
+                })
+                .collect();
+            vec![ServerMessage::FlaggedFilesChanged {
+                session_id: session.id.clone(),
+                files: wire_files,
             }]
         }
     }

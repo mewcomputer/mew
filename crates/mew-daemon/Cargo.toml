@@ -24,6 +24,7 @@ mew-subagents = { workspace = true }
 mew-provider = { workspace = true }
 mew-provider-fake = { workspace = true }
 mew-session = { workspace = true }
+mew-tools = { workspace = true }
 
 tokio-util = { workspace = true }
 

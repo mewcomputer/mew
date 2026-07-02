@@ -4142,6 +4142,12 @@ async fn build_and_run(
                 // No sidebar in non-interactive mode; the job's output is
                 // surfaced through its own tool result when it finishes.
             }
+            mew_agent::AgentEvent::FileDelta { .. } => {
+                // Diff stats are accumulated daemon-side; no-op in CLI mode.
+            }
+            mew_agent::AgentEvent::FlaggedFilesChanged { .. } => {
+                // Flagged files visibility is web-UI only.
+            }
         }
     }
 

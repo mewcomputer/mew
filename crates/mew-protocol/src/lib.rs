@@ -110,6 +110,52 @@ pub enum ClientMessage {
     /// Yield control of the session. Advisory — other clients can use this
     /// to update their UI (e.g. switch from observer to active input).
     YieldControl {},
+
+    // -- Phase 2: groups & archive --
+    CreateGroup {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+    },
+    UpdateGroup {
+        group_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order: Option<u32>,
+    },
+    DeleteGroup { group_id: String },
+    AssignSessionGroup {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        position: Option<u32>,
+    },
+    ArchiveSession { session_id: String, archived: bool },
+    PinSession { session_id: String, pinned: bool },
+
+    // -- Phase 3: File service --
+    ListDir {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    ReadFilePreview {
+        session_id: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_bytes: Option<u64>,
+    },
+    GitStatus { session_id: String },
+    WatchWorkspace { session_id: String, enabled: bool },
+    OpenPath { session_id: String, path: String },
+
+    // -- Flagged files --
+    /// Unflag a file (remove from the session's flagged-files set).
+    UnflagFile { session_id: String, path: String },
 }
 
 /// What kind of client is connected to a session.
@@ -158,6 +204,8 @@ pub struct ThinkingVariantInfo {
 pub enum SessionState {
     Active,
     Idle,
+    /// A turn is currently in progress (provider streaming or tool execution).
+    Running,
 }
 
 /// Metadata returned by `ListSessions` for one session.
@@ -176,6 +224,70 @@ pub struct SessionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     pub client_count: usize,
+    /// Working directory for the session, if set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// True if the last turn ended with an error.
+    #[serde(default)]
+    pub last_turn_failed: bool,
+    /// True if this session has been archived.
+    #[serde(default)]
+    pub archived: bool,
+    /// True if this session is pinned (exempt from auto-archive).
+    #[serde(default)]
+    pub pinned: bool,
+    /// ID of the group this session belongs to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    /// Cumulative diff stats, if any file changes have been recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_stats: Option<mew_session::ChangeStats>,
+    /// Cumulative token usage and cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<SessionUsageWire>,
+    /// Count of pending permission requests (needs human approval).
+    #[serde(default)]
+    pub pending_permissions: u32,
+    /// Count of pending questions (ask_user awaiting response).
+    #[serde(default)]
+    pub pending_questions: u32,
+}
+
+/// Wire-format usage stats for a session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionUsageWire {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cost: f64,
+    pub turns: u32,
+}
+
+impl From<&mew_session::SessionUsage> for SessionUsageWire {
+    fn from(u: &mew_session::SessionUsage) -> Self {
+        Self {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cache_read_tokens: u.cache_read_tokens,
+            cache_write_tokens: u.cache_write_tokens,
+            cost: u.cost,
+            turns: u.turns,
+        }
+    }
+}
+
+impl From<SessionUsageWire> for mew_session::SessionUsage {
+    fn from(u: SessionUsageWire) -> Self {
+        Self {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            cache_read_tokens: u.cache_read_tokens,
+            cache_write_tokens: u.cache_write_tokens,
+            cost: u.cost,
+            turns: u.turns,
+        }
+    }
 }
 
 /// A file attachment for a prompt.
@@ -403,6 +515,98 @@ pub enum ServerMessage {
     /// The daemon generated a summary for an idle session. Frontends
     /// should display this in the session list / detail view.
     SessionSummaryChanged { session_id: String, summary: String },
+
+    // -- Phase 1: session activity & stats --
+    SessionActivityChanged {
+        session_id: String,
+        activity: SessionState,
+    },
+    SessionStatsChanged {
+        session_id: String,
+        added: u64,
+        removed: u64,
+        files_changed: u64,
+    },
+
+    // -- Phase 2: groups --
+    GroupList { groups: Vec<GroupInfo> },
+    GroupsChanged { groups: Vec<GroupInfo> },
+
+    // -- Phase 3: File service responses --
+    DirListing { path: String, entries: Vec<DirEntry> },
+    FilePreview {
+        path: String,
+        content: String,
+        truncated: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        language: Option<String>,
+    },
+    GitStatusResult { entries: Vec<GitEntry> },
+    FsChanged { paths: Vec<String> },
+
+    // -- Cost & usage --
+    /// Broadcast at turn end with updated cumulative usage.
+    SessionUsageChanged {
+        session_id: String,
+        usage: SessionUsageWire,
+    },
+
+    // -- Notifications --
+    /// Cross-session alert (permission needed, turn complete, etc.).
+    /// Sent to ALL clients regardless of session attachment.
+    SessionAlert {
+        session_id: String,
+        title: String,
+        kind: AlertKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+
+    // -- Flagged files visibility --
+    /// Broadcast when the flagged-files set changes.
+    FlaggedFilesChanged {
+        session_id: String,
+        files: Vec<FlaggedFileWire>,
+    },
+
+    // -- Session meta changes (archive/pin/group) --
+    /// Broadcast when a session's archived/pinned/group_id changes,
+    /// so all clients can update their session rail.
+    SessionMetaChanged {
+        session_id: String,
+        #[serde(default)]
+        archived: bool,
+        #[serde(default)]
+        pinned: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_id: Option<String>,
+    },
+
+    // -- "Needs you" attention --
+    /// Broadcast when a session's pending permission/question count changes.
+    SessionAttentionChanged {
+        session_id: String,
+        pending_permissions: u32,
+        pending_questions: u32,
+    },
+}
+
+/// Wire-format info about a flagged file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlaggedFileWire {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Alert kind for cross-session notifications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertKind {
+    TurnComplete,
+    TurnFailed,
+    PermissionNeeded,
+    InputNeeded,
 }
 
 /// A question for `AskUserRequest`.
@@ -436,6 +640,44 @@ pub struct Todo {
     pub content: String,
     pub status: String,
     pub depends_on: Vec<usize>,
+}
+
+/// Metadata for a session group.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    pub order: u32,
+}
+
+/// One entry in a directory listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+/// One entry in a git status result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GitEntry {
+    pub path: String,
+    pub status: GitFileStatus,
+}
+
+/// Git file status, simplified from porcelain output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Untracked,
 }
 
 // ---------------------------------------------------------------------------
@@ -1397,6 +1639,15 @@ mod tests {
             last_message_at: Some(1_700_000_123),
             summary: None,
             client_count: 2,
+            cwd: None,
+            last_turn_failed: false,
+            archived: false,
+            pinned: false,
+            group_id: None,
+            change_stats: None,
+                usage: None,
+                pending_permissions: 0,
+                pending_questions: 0,
         };
         let decoded = round_trip(&info);
         assert_eq!(decoded.session_id, "sess_abc");
@@ -1420,6 +1671,15 @@ mod tests {
             last_message_at: None,
             summary: None,
             client_count: 0,
+            cwd: None,
+            last_turn_failed: false,
+            archived: false,
+            pinned: false,
+            group_id: None,
+            change_stats: None,
+            usage: None,
+            pending_permissions: 0,
+            pending_questions: 0,
         };
         let json = encode_json(&info).unwrap();
         assert!(
@@ -1468,6 +1728,15 @@ mod tests {
                 last_message_at: None,
                 summary: None,
                 client_count: 1,
+                cwd: None,
+                last_turn_failed: false,
+                archived: false,
+                pinned: false,
+                group_id: None,
+                change_stats: None,
+                usage: None,
+                pending_permissions: 0,
+                pending_questions: 0,
             },
             SessionInfo {
                 session_id: "sess_b".into(),
@@ -1478,6 +1747,15 @@ mod tests {
                 last_message_at: Some(250),
                 summary: None,
                 client_count: 0,
+                cwd: None,
+                last_turn_failed: false,
+                archived: false,
+                pinned: false,
+                group_id: None,
+                change_stats: None,
+                usage: None,
+                pending_permissions: 0,
+                pending_questions: 0,
             },
         ];
         let m = ServerMessage::SessionList { sessions };

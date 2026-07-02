@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { navigateToSession } from "../lib/router-ref";
 import type {
   MewClient,
   ProviderEventWire,
@@ -10,6 +11,11 @@ import type {
   Question,
   SubagentOutcome,
   Todo as WireTodo,
+  GroupInfo,
+  DirEntry,
+  GitEntry,
+  SessionUsageWire,
+  AlertKind,
 } from "@mew/web-client";
 
 // ---------------------------------------------------------------------------
@@ -179,6 +185,24 @@ interface SessionState {
   // Session titles (session_id → title)
   sessionTitles: Map<string, string>;
 
+  // Session groups
+  groups: GroupInfo[];
+
+  // File tree state
+  dirListing: DirEntry[] | null;
+  dirListingPath: string | null;
+  filePreview: { path: string; content: string; truncated: boolean; language?: string } | null;
+  gitStatus: GitEntry[];
+
+  // Per-session usage map (session_id → usage)
+  sessionUsage: Map<string, SessionUsageWire>;
+
+  // Cross-session alerts
+  alerts: { sessionId: string; title: string; kind: AlertKind; detail?: string; timestamp: number }[];
+
+  // Flagged files for the current session
+  flaggedFiles: { path: string; reason?: string }[];
+
   // Subagents
   subagents: Map<string, SubagentInfo>;
 
@@ -217,6 +241,23 @@ interface SessionState {
   onSessionTitleChanged: (sessionId: string, title: string) => void;
   sessionSummaries: Map<string, string>;
   onSessionSummaryChanged: (sessionId: string, summary: string) => void;
+
+  // Phase 1-3 + misc new actions
+  onSessionActivityChanged: (sessionId: string, activity: string) => void;
+  onSessionStatsChanged: (sessionId: string, added: number, removed: number, filesChanged: number) => void;
+  setGroups: (groups: GroupInfo[]) => void;
+  onGroupsChanged: (groups: GroupInfo[]) => void;
+  onDirListing: (path: string, entries: DirEntry[]) => void;
+  onFilePreview: (path: string, content: string, truncated: boolean, language?: string) => void;
+  onGitStatus: (entries: GitEntry[]) => void;
+  onFsChanged: (paths: string[]) => void;
+  onSessionUsageChanged: (sessionId: string, usage: SessionUsageWire) => void;
+  onSessionAlert: (sessionId: string, title: string, kind: AlertKind, detail?: string) => void;
+  clearAlertsForSession: (sessionId: string) => void;
+  dismissAlert: (sessionId: string, timestamp: number) => void;
+  onFlaggedFilesChanged: (files: { path: string; reason?: string }[]) => void;
+  onSessionMetaChanged: (sessionId: string, archived: boolean, pinned: boolean, groupId?: string) => void;
+  onSessionAttentionChanged: (sessionId: string, pendingPermissions: number, pendingQuestions: number) => void;
 
   // Shared-session actions
   setAvailableSessions: (sessions: SessionInfo[]) => void;
@@ -265,6 +306,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   sessionsLoading: false,
   sessionTitles: new Map(),
   sessionSummaries: new Map(),
+  groups: [],
+  dirListing: null,
+  dirListingPath: null,
+  filePreview: null,
+  gitStatus: [],
+  sessionUsage: new Map(),
+  alerts: [],
+  flaggedFiles: [],
   subagents: new Map(),
   pendingAskUser: [],
   todos: [],
@@ -646,6 +695,105 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return { sessionSummaries };
     }),
 
+  // Phase 1-3 + misc new actions
+  onSessionActivityChanged: (sessionId, activity) =>
+    set((state) => ({
+      availableSessions: state.availableSessions.map((s) =>
+        s.session_id === sessionId
+          ? { ...s, state: activity as SessionInfo["state"] }
+          : s,
+      ),
+    })),
+
+  onSessionStatsChanged: (sessionId, added, removed, filesChanged) =>
+    set((state) => ({
+      availableSessions: state.availableSessions.map((s) =>
+        s.session_id === sessionId
+          ? {
+              ...s,
+              change_stats: {
+                added,
+                removed,
+                files: Array.from({ length: filesChanged }, (_, i) => `file_${i}`),
+              },
+            }
+          : s,
+      ),
+    })),
+
+  setGroups: (groups) => set({ groups }),
+
+  onGroupsChanged: (groups) => set({ groups }),
+
+  onDirListing: (path, entries) =>
+    set({ dirListing: entries, dirListingPath: path }),
+
+  onFilePreview: (path, content, truncated, language) =>
+    set({ filePreview: { path, content, truncated, language } }),
+
+  onGitStatus: (entries) => set({ gitStatus: entries }),
+
+  onFsChanged: () => {},
+
+  onSessionUsageChanged: (sessionId, usage) =>
+    set((state) => {
+      const sessionUsage = new Map(state.sessionUsage);
+      sessionUsage.set(sessionId, usage);
+      // Also update availableSessions with the usage.
+      return {
+        sessionUsage,
+        availableSessions: state.availableSessions.map((s) =>
+          s.session_id === sessionId ? { ...s, usage } : s,
+        ),
+      };
+    }),
+
+  onSessionAlert: (sessionId, title, kind, detail) =>
+    set((state) => {
+      const alerts = [
+        ...state.alerts,
+        { sessionId, title, kind, detail, timestamp: Date.now() },
+      ];
+      syncTitleBadge(alerts);
+      return { alerts };
+    }),
+
+  clearAlertsForSession: (sessionId) =>
+    set((state) => {
+      const alerts = state.alerts.filter((a) => a.sessionId !== sessionId);
+      syncTitleBadge(alerts);
+      return { alerts };
+    }),
+
+  dismissAlert: (sessionId, timestamp) =>
+    set((state) => {
+      const alerts = state.alerts.filter(
+        (a) => !(a.sessionId === sessionId && a.timestamp === timestamp),
+      );
+      syncTitleBadge(alerts);
+      return { alerts };
+    }),
+
+  onFlaggedFilesChanged: (files) => set({ flaggedFiles: files }),
+
+  onSessionMetaChanged: (sessionId, archived, pinned, groupId) =>
+    set((state) => ({
+      availableSessions: state.availableSessions.map((s) =>
+        s.session_id === sessionId
+          ? { ...s, archived, pinned, group_id: groupId }
+          : s,
+      ),
+    })),
+
+  onSessionAttentionChanged: (sessionId, pendingPermissions, pendingQuestions) =>
+    set((state) => ({
+      availableSessions: state.availableSessions.map((s) =>
+        s.session_id === sessionId
+          ? { ...s, pending_permissions: pendingPermissions, pending_questions: pendingQuestions }
+          : s,
+      ),
+    })),
+
   setAvailableSessions: (sessions) => set({ availableSessions: sessions }),
 
   setSessionsLoading: (loading) => set({ sessionsLoading: loading }),
@@ -780,6 +928,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       totalInputTokens: 0,
       totalOutputTokens: 0,
       totalCost: 0,
+      // Clear per-session state that shouldn't leak across sessions.
+      flaggedFiles: [],
+      dirListing: null,
+      dirListingPath: null,
+      filePreview: null,
+      gitStatus: [],
       // Keep global caches and per-session model info; they are repopulated
       // by wire events (model-list, session-list, session-ready).
       // currentModel is intentionally preserved to avoid model picker/footer blanks.
@@ -886,6 +1040,82 @@ export function bridgeClientToStore(client: MewClient) {
     store.getState().onSessionSummaryChanged(data.session_id, data.summary),
   );
 
+  client.on("session-activity-changed", (data) =>
+    store.getState().onSessionActivityChanged(data.session_id, data.activity),
+  );
+
+  client.on("session-stats-changed", (data) =>
+    store.getState().onSessionStatsChanged(
+      data.session_id,
+      data.added,
+      data.removed,
+      data.files_changed,
+    ),
+  );
+
+  client.on("group-list", (data) => store.getState().setGroups(data.groups));
+  client.on("groups-changed", (data) => store.getState().onGroupsChanged(data.groups));
+  client.on("dir-listing", (data) => store.getState().onDirListing(data.path, data.entries));
+  client.on("file-preview", (data) =>
+    store.getState().onFilePreview(data.path, data.content, data.truncated, data.language),
+  );
+  client.on("git-status-result", (data) => store.getState().onGitStatus(data.entries));
+  client.on("fs-changed", (data) => store.getState().onFsChanged(data.paths));
+
+  client.on("flagged-files-changed", (data) => {
+    if (data.session_id !== store.getState().sessionId) return;
+    store.getState().onFlaggedFilesChanged(data.files);
+  });
+
+  client.on("session-meta-changed", (data) =>
+    store.getState().onSessionMetaChanged(
+      data.session_id,
+      data.archived,
+      data.pinned,
+      data.group_id,
+    ),
+  );
+
+  client.on("session-attention-changed", (data) =>
+    store.getState().onSessionAttentionChanged(
+      data.session_id,
+      data.pending_permissions,
+      data.pending_questions,
+    ),
+  );
+
+  client.on("session-usage-changed", (data) =>
+    store.getState().onSessionUsageChanged(data.session_id, data.usage),
+  );
+
+  client.on("session-alert", (data) => {
+    // Suppress alerts for the currently viewed session.
+    const currentSessionId = store.getState().sessionId;
+    if (data.session_id === currentSessionId) return;
+
+    store.getState().onSessionAlert(
+      data.session_id,
+      data.title,
+      data.kind,
+      data.detail,
+    );
+
+    // OS notification delivery.
+    if (typeof Notification !== "undefined") {
+      if (Notification.permission === "default") {
+        // Request permission lazily (Safari needs a user gesture, but
+        // Chrome/Firefox honor this from background events).
+        Notification.requestPermission().then((perm) => {
+          if (perm === "granted") {
+            showNotification(data.session_id, data.title, data.kind, data.detail);
+          }
+        });
+      } else if (Notification.permission === "granted") {
+        showNotification(data.session_id, data.title, data.kind, data.detail);
+      }
+    }
+  });
+
   client.on("session-list", (data) => {
     store.getState().setAvailableSessions(data.sessions);
     store.getState().setSessionsLoading(false);
@@ -898,6 +1128,33 @@ export function bridgeClientToStore(client: MewClient) {
 
   client.on("errorMessage", (data) => store.getState().onError(data.message));
   client.on("errorEvent", (data) => store.getState().onError(data.message));
+}
+
+/** Sync document.title with the alert count. Called after any alerts mutation. */
+function syncTitleBadge(alerts: { sessionId: string }[]) {
+  if (typeof document === "undefined") return;
+  if (alerts.length > 0) {
+    document.title = `(${alerts.length}) mew`;
+  } else {
+    document.title = "mew";
+  }
+}
+
+/** Show an OS notification for a session alert. Uses router-ref for navigation. */
+function showNotification(
+  sessionId: string,
+  title: string,
+  kind: string,
+  detail?: string,
+) {
+  const kindLabel = kind.replace(/_/g, " ");
+  const n = new Notification(`${title}: ${kindLabel}`, {
+    body: detail ?? "",
+  });
+  n.onclick = () => {
+    window.focus();
+    navigateToSession(sessionId);
+  };
 }
 
 /** Side-channel map: request_id → respond callback. The UI reads from this

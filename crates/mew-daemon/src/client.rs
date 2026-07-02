@@ -495,7 +495,20 @@ async fn translate_server_message(
         | ServerMessage::ClientDetached { .. }
         | ServerMessage::ControlYielded { .. }
         | ServerMessage::SessionTitleChanged { .. }
-        | ServerMessage::SessionSummaryChanged { .. } => {
+        | ServerMessage::SessionSummaryChanged { .. }
+        | ServerMessage::SessionActivityChanged { .. }
+        | ServerMessage::SessionStatsChanged { .. }
+        | ServerMessage::GroupList { .. }
+        | ServerMessage::GroupsChanged { .. }
+        | ServerMessage::DirListing { .. }
+        | ServerMessage::FilePreview { .. }
+        | ServerMessage::GitStatusResult { .. }
+        | ServerMessage::FsChanged { .. }
+        | ServerMessage::SessionUsageChanged { .. }
+        | ServerMessage::SessionAlert { .. }
+        | ServerMessage::FlaggedFilesChanged { .. }
+        | ServerMessage::SessionMetaChanged { .. }
+        | ServerMessage::SessionAttentionChanged { .. } => {
             // These are handled by the DaemonClient directly or are web-UI
             // specific; they don't map to AgentEvents for the TUI.
             Vec::new()

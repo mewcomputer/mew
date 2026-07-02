@@ -1461,6 +1461,7 @@ impl mew_tools::Tool for PluginTool {
             error: String::new(),
             diff: None,
             metadata: None,
+            file_delta: None,
         })
     }
 }

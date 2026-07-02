@@ -2435,6 +2435,13 @@ impl App {
                     });
                 }
             }
+            AgentEvent::FileDelta { .. } => {
+                // File delta accumulation is handled by the daemon for web
+                // clients. The TUI doesn't show per-session diff stats yet.
+            }
+            AgentEvent::FlaggedFilesChanged { .. } => {
+                // Flagged files visibility is handled by web frontends.
+            }
         }
     }
 

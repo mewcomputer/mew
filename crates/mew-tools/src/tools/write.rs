@@ -98,6 +98,11 @@ impl Tool for Write {
             output: format!("wrote {} bytes to {}", content.len(), path.display()),
             error: String::new(),
             diff,
+            file_delta: Some(super::compute_file_delta(
+                old_content.as_deref(),
+                content,
+                &path,
+            )),
             ..Default::default()
         })
     }

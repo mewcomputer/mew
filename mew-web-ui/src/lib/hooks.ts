@@ -60,11 +60,11 @@ export function useMewConnection() {
   return connected;
 }
 
-/** Trap Cmd/Ctrl+K to focus the composer. */
+/** Trap Cmd/Ctrl+L to focus the composer. */
 export function useComposerFocusShortcut(inputRef: RefObject<HTMLTextAreaElement | null>) {
   useEffect(() => {
     const handler = (e: globalThis.KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "l") {
         e.preventDefault();
         inputRef.current?.focus();
       }
@@ -104,6 +104,8 @@ export function useSessionAttach(sessionId: string) {
 
     store.reset();
     localStorage.setItem(SESSION_ID_KEY, sessionId);
+    // Clear alerts for this session since we're now viewing it.
+    store.clearAlertsForSession(sessionId);
 
     client.attachSession(sessionId).catch(() => {
       router.navigate({ to: "/" });

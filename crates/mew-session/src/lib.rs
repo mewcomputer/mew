@@ -45,6 +45,86 @@ pub struct Meta {
     /// AI-generated summary of the conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Working directory for the session. Set at creation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// True if the last turn ended with an error (provider error or
+    /// tool hard-failure). Cleared on the next successful turn.
+    #[serde(default)]
+    pub last_turn_failed: bool,
+    /// True if this session has been archived. Archived sessions are
+    /// filtered into a separate view in the UI.
+    #[serde(default)]
+    pub archived: bool,
+    /// ID of the group this session belongs to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    /// Pinned sessions are exempt from auto-archive.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Cumulative line-level diff stats for the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_stats: Option<ChangeStats>,
+    /// Cumulative token usage and cost for the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<SessionUsage>,
+}
+
+/// Cumulative token usage and cost accumulated over a session's lifetime.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cost: f64,
+    pub turns: u32,
+}
+
+impl SessionUsage {
+    /// Add a single message's usage delta.
+    pub fn add_message(
+        &mut self,
+        input: u64,
+        output: u64,
+        cache_read: u64,
+        cache_write: u64,
+        cost: f64,
+    ) {
+        self.input_tokens += input;
+        self.output_tokens += output;
+        self.cache_read_tokens += cache_read;
+        self.cache_write_tokens += cache_write;
+        self.cost += cost;
+    }
+
+    /// Increment the turn counter (called once per completed turn).
+    pub fn add_turn(&mut self) {
+        self.turns += 1;
+    }
+}
+
+/// Cumulative diff stats accumulated over a session's lifetime.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChangeStats {
+    /// Total lines added across all file writes/edits.
+    pub added: u64,
+    /// Total lines removed across all file writes/edits.
+    pub removed: u64,
+    /// Distinct file paths that were modified.
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+impl ChangeStats {
+    /// Merge a single file delta into the cumulative stats.
+    pub fn apply_delta(&mut self, path: &str, added: u64, removed: u64) {
+        self.added += added;
+        self.removed += removed;
+        if !self.files.iter().any(|f| f == path) {
+            self.files.push(path.to_string());
+        }
+    }
 }
 
 fn default_created_at() -> i64 {
@@ -65,6 +145,13 @@ impl Meta {
             last_message_at: None,
             custom_title: None,
             summary: None,
+            cwd: None,
+            last_turn_failed: false,
+            archived: false,
+            group_id: None,
+            pinned: false,
+            change_stats: None,
+            usage: None,
         }
     }
 
@@ -85,6 +172,13 @@ impl Meta {
             last_message_at: None,
             custom_title: None,
             summary: None,
+            cwd: None,
+            last_turn_failed: false,
+            archived: false,
+            group_id: None,
+            pinned: false,
+            change_stats: None,
+            usage: None,
         }
     }
 
@@ -111,6 +205,79 @@ impl Meta {
         summary: impl Into<String>,
     ) -> Result<(), SessionError> {
         self.summary = Some(summary.into());
+        self.write(dir).await
+    }
+
+    /// Set the cwd and persist to disk.
+    pub async fn set_cwd(
+        &mut self,
+        dir: &Path,
+        cwd: impl Into<String>,
+    ) -> Result<(), SessionError> {
+        self.cwd = Some(cwd.into());
+        self.write(dir).await
+    }
+
+    /// Set the last_turn_failed flag and persist to disk.
+    pub async fn set_last_turn_failed(
+        &mut self,
+        dir: &Path,
+        failed: bool,
+    ) -> Result<(), SessionError> {
+        self.last_turn_failed = failed;
+        self.write(dir).await
+    }
+
+    /// Set the archived flag and persist to disk.
+    pub async fn set_archived(
+        &mut self,
+        dir: &Path,
+        archived: bool,
+    ) -> Result<(), SessionError> {
+        self.archived = archived;
+        self.write(dir).await
+    }
+
+    /// Set the group_id and persist to disk.
+    pub async fn set_group_id(
+        &mut self,
+        dir: &Path,
+        group_id: Option<String>,
+    ) -> Result<(), SessionError> {
+        self.group_id = group_id;
+        self.write(dir).await
+    }
+
+    /// Set the pinned flag and persist to disk.
+    pub async fn set_pinned(
+        &mut self,
+        dir: &Path,
+        pinned: bool,
+    ) -> Result<(), SessionError> {
+        self.pinned = pinned;
+        self.write(dir).await
+    }
+
+    /// Apply a file delta to cumulative change stats and persist to disk.
+    pub async fn apply_file_delta(
+        &mut self,
+        dir: &Path,
+        path: &str,
+        added: u64,
+        removed: u64,
+    ) -> Result<(), SessionError> {
+        let stats = self.change_stats.get_or_insert_with(ChangeStats::default);
+        stats.apply_delta(path, added, removed);
+        self.write(dir).await
+    }
+
+    /// Set the session usage and persist to disk.
+    pub async fn set_usage(
+        &mut self,
+        dir: &Path,
+        usage: SessionUsage,
+    ) -> Result<(), SessionError> {
+        self.usage = Some(usage);
         self.write(dir).await
     }
 
