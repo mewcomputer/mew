@@ -23,6 +23,10 @@ jobs:
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            cross_linker: aarch64-linux-gnu-gcc
+            cross_pkg: gcc-aarch64-linux-gnu
 
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +47,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
 
+      - name: Install cross-compilation toolchain
+        if: matrix.cross_pkg
+        run: |
+          sudo apt-get install -y ${{ matrix.cross_pkg }}
+
       - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross_linker }}
         run: cargo build --release --target ${{ matrix.target }} -p mew
 
       - name: Package binary
@@ -51,14 +62,15 @@ jobs:
           DATE=$(date +%Y%m%d)
           TARGET="${{ matrix.target }}"
           STAGE="mew-nightly-${DATE}-${TARGET}"
+          ASSET="mew-nightly-${TARGET}.tar.gz"
 
           mkdir -p "${STAGE}/bin"
           cp "target/${TARGET}/release/mew" "${STAGE}/bin/mew"
           [ -f LICENSE ] && cp LICENSE "${STAGE}/" || true
           [ -f README.md ] && cp README.md "${STAGE}/" || true
 
-          tar czf "${STAGE}.tar.gz" "${STAGE}"
-          echo "ASSET=${STAGE}.tar.gz" >> "$GITHUB_ENV"
+          tar czf "${ASSET}" "${STAGE}"
+          echo "ASSET=${ASSET}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -82,6 +94,24 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz > ../SHA256SUMS
+          cat ../SHA256SUMS
+
+      - name: Delete existing nightly assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view nightly --repo mewcomputer/mew >/dev/null 2>&1; then
+            gh release view nightly --repo mewcomputer/mew --json assets \
+              --jq '.assets[].name' | while read -r name; do
+              echo "Deleting old asset: $name"
+              gh release delete-asset nightly "$name" --repo mewcomputer/mew --yes || true
+            done
+          fi
+
       - name: Update nightly release
         uses: softprops/action-gh-release@v2
         with:
@@ -93,4 +123,6 @@ jobs:
             stable releases. They may contain bugs or unfinished features.
           tag_name: nightly
           prerelease: true
-          files: artifacts/*.tar.gz
+          files: |
+            artifacts/*.tar.gz
+            SHA256SUMS

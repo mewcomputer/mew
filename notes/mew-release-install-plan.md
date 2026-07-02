@@ -56,6 +56,8 @@ In the release job, after all artifacts are downloaded:
 - Upload `SHA256SUMS` as a release asset.
 - The install script and Homebrew formula will consume this file.
 
+Do the same for the existing nightly workflow: build `aarch64-unknown-linux-gnu`, rename nightly assets to predictable `mew-nightly-TARGET.tar.gz` names, generate `SHA256SUMS`, and replace old assets on each nightly run.
+
 ### 1.4 Release notes
 
 Keep `softprops/action-gh-release@v2` with `generate_release_notes: true`, but also prepend the relevant section from `CHANGELOG.md` if present. Options:
@@ -177,8 +179,9 @@ Then it:
 
 Mirror the polytoken pattern where useful:
 
-- `MEW_VERSION` — install a specific version.
-- `MEW_INSTALL_DIR` — override install location.
+- `--nightly` / `MEW_CHANNEL=nightly` — install the latest nightly build.
+- `MEW_VERSION` — install a specific stable version.
+- `MEW_INSTALL_DIR` — override install directory.
 - `MEW_DRY_RUN` — print what would happen.
 - `MEW_VERBOSE` — extra logging.
 

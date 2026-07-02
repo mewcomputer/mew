@@ -5,18 +5,40 @@ set -euo pipefail
 # Usage:
 #   curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | sh
 #
+# Flags:
+#   --nightly        install the latest nightly build instead of the latest release
+#
 # Environment variables:
-#   MEW_VERSION      - install a specific version (e.g. "v0.2.0") or "latest"
+#   MEW_CHANNEL      - "stable" or "nightly" (default: "stable")
+#   MEW_VERSION      - install a specific stable version (e.g. "v0.2.0") or "latest"
 #   MEW_INSTALL_DIR  - override install directory
 #   MEW_DRY_RUN      - set to "1" to print the plan without installing
 #   MEW_VERBOSE      - set to "1" for extra logging
 
 repo="mewcomputer/mew"
-api_url="https://api.github.com/repos/${repo}/releases/latest"
-requested_version="${MEW_VERSION:-latest}"
+api_base="https://api.github.com/repos/${repo}"
 install_dir_override="${MEW_INSTALL_DIR:-}"
 dry_run="${MEW_DRY_RUN:-0}"
 verbose="${MEW_VERBOSE:-0}"
+channel="${MEW_CHANNEL:-stable}"
+requested_version="${MEW_VERSION:-latest}"
+
+# Parse command-line flags. Everything else is ignored so the script can be
+# piped from curl without surprising behavior.
+for arg in "$@"; do
+    case "$arg" in
+        --nightly)
+            channel="nightly"
+            ;;
+        --stable)
+            channel="stable"
+            ;;
+        --help|-h)
+            sed -n '2,20p' "$0"
+            exit 0
+            ;;
+    esac
+done
 
 log() {
     printf '%s\n' "$*"
@@ -88,23 +110,24 @@ choose_install_dir() {
     printf '%s\n' "$local_bin"
 }
 
-resolve_version() {
+resolve_stable_version() {
     if [[ "$requested_version" != "latest" ]]; then
         printf '%s\n' "$requested_version"
         return
     fi
 
-    verbose_log "Fetching latest release from ${api_url}"
+    local url="${api_base}/releases/latest"
+    verbose_log "Fetching latest stable release from ${url}"
     local json
     json="$(curl --fail --show-error --silent --proto '=https' --tlsv1.2 \
         --header 'Accept: application/vnd.github+json' \
         --header 'X-GitHub-Api-Version: 2022-11-28' \
-        "$api_url")"
+        "$url")"
 
     local tag
     tag="$(printf '%s' "$json" | grep -o '"tag_name": "v[^"]*"' | head -n1 | cut -d'"' -f4)"
     if [[ -z "$tag" ]]; then
-        fail "could not determine latest release from GitHub API"
+        fail "could not determine latest stable release from GitHub API"
     fi
     printf '%s\n' "$tag"
 }
@@ -161,7 +184,6 @@ require_tool tar
 require_tool uname
 
 tmp_dir="$(mktemp -d 2>/dev/null || mktemp -d -t mew-install)"
-version="$(resolve_version)"
 target="$(platform_info)"
 install_dir="$(choose_install_dir)"
 target_path="$install_dir/mew"
@@ -170,13 +192,25 @@ if ! path_contains_dir "$install_dir"; then
     path_needs_update=1
 fi
 
-base_url="https://github.com/${repo}/releases/download/${version}"
-tarball_name="mew-${version}-${target}.tar.gz"
-tarball_url="$base_url/$tarball_name"
+if [[ "$channel" == "nightly" ]]; then
+    if [[ "$requested_version" != "latest" ]]; then
+        fail "MEW_VERSION cannot be combined with nightly channel"
+    fi
+    version="nightly"
+    base_url="https://github.com/${repo}/releases/download/nightly"
+    tarball_name="mew-nightly-${target}.tar.gz"
+else
+    version="$(resolve_stable_version)"
+    base_url="https://github.com/${repo}/releases/download/${version}"
+    tarball_name="mew-${version}-${target}.tar.gz"
+fi
+
 checksums_url="$base_url/SHA256SUMS"
+tarball_url="$base_url/$tarball_name"
 
 if [[ "$dry_run" == "1" ]]; then
     log "mew installer dry run"
+    log "  channel: $channel"
     log "  version: $version"
     log "  platform: $target"
     log "  tarball: $tarball_url"

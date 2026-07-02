@@ -32,11 +32,18 @@ The script detects your platform, downloads the latest release from GitHub,
 verifies the SHA256 checksum, and installs `mew` to `~/.local/bin` or
 `~/bin`. Re-run the script to upgrade.
 
+Install the latest nightly build instead:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://mew.computer/get.sh | sh -s -- --nightly
+```
+
 Environment variables:
 
 | Variable | Description |
 |----------|-------------|
-| `MEW_VERSION` | Install a specific release, e.g. `v0.2.0` (default: `latest`) |
+| `MEW_CHANNEL` | `stable` or `nightly` (default: `stable`) |
+| `MEW_VERSION` | Install a specific stable release, e.g. `v0.2.0` (default: `latest`) |
 | `MEW_INSTALL_DIR` | Override the install directory |
 | `MEW_DRY_RUN` | Set to `1` to preview without installing |
 | `MEW_VERBOSE` | Set to `1` for extra logging |
