@@ -107,12 +107,6 @@ function RightRailContent({ inSheet = false }: { inSheet?: boolean }) {
   };
   const totalActive = activeCounts.todos + activeCounts.subagents + activeCounts.questions;
 
-  // Auto-switch to questions tab when a question arrives
-  const prevQCount = useState(questions.length)[0];
-  if (questions.length > prevQCount && activeTab !== "questions") {
-    // Can't call setState during render directly; use effect pattern
-  }
-
   // Determine unread alerts (not for current session)
   const unreadAlerts = alerts.filter((a) => a.sessionId !== sessionId);
 
@@ -127,7 +121,6 @@ function RightRailContent({ inSheet = false }: { inSheet?: boolean }) {
       <ContextGauge
         used={lastInputTokens}
         limit={contextWindow}
-        model={currentModel}
       />
 
       {/* Pinned Context (flagged files) */}
@@ -297,7 +290,7 @@ function alertColor(kind: string) {
 // Context Gauge
 // ---------------------------------------------------------------------------
 
-function ContextGauge({ used, limit, model }: { used: number; limit?: number; model: string | null }) {
+function ContextGauge({ used, limit }: { used: number; limit?: number }) {
   if (!limit || limit <= 0) {
     // No context window info available
     return null;
@@ -401,7 +394,7 @@ function ActivityTimeline({
       id: `sub-${sub.parentCallId}`,
       type: "subagent",
       label: sub.displayName ?? sub.name,
-      detail: sub.lastProgress,
+      detail: sub.lastProgress ?? undefined,
       timestamp: Date.now(),
       icon: sub.status === "running" ? (
         <Loader2 className="h-3 w-3 animate-spin text-blue-400" />

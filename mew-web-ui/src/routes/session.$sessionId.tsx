@@ -10,6 +10,7 @@ import { InputArea } from "@/components/input-area";
 import { StatusFooter } from "@/components/status-footer";
 import { PermissionToast } from "@/components/permission-toast";
 import { AskUserCard } from "@/components/ask-user-card";
+import { RightRail } from "@/components/right-rail";
 import { useSidebar } from "@/components/ui/sidebar";
 
 export const Route = createFileRoute("/session/$sessionId")({
@@ -54,20 +55,24 @@ function SessionRouteComponent() {
   };
 
   return (
-    <>
-      <FakeHeader />
-      <VirtualChatSurface />
-      <MobileAskUser />
-      <InputArea
-        ref={inputRef}
-        onSend={handleSend}
-        onSlash={handleSlash}
-        onCancel={handleCancel}
-        connected={connected}
-      />
-      <StatusFooter />
-      <PermissionToast onResolve={handlePermission} />
-    </>
+    <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 flex-col overflow-hidden">
+        <FakeHeader />
+        <VirtualChatSurface />
+        <MobileAskUser />
+        <InputArea
+          ref={inputRef}
+          onSend={handleSend}
+          onSlash={handleSlash}
+          onCancel={handleCancel}
+          connected={connected}
+        />
+        <StatusFooter />
+        <PermissionToast onResolve={handlePermission} />
+      </div>
+      {/* Desktop docked right rail */}
+      <RightRail />
+    </div>
   );
 }
 

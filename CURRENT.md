@@ -1,5 +1,53 @@
 # CURRENT.md — mew Fixes + Right Rail Redesign Progress
 
+## 2026-07-02: Right Rail Redesign (Complete)
+
+### P0.1a: Context window on ModelInfo (Rust + TS)
+- Added `context_window: Option<i64>` to `mew-protocol::ModelInfo` (serde skip-if-none)
+- Populated from catalog's `m.context_window` in `main.rs` model lister
+- Added `context_window?: number` to `mew-web-client/src/index.ts` `ModelInfo`
+- Fixed 2 protocol test constructions to include the new field
+- Rust + TS both compile cleanly
+
+### P0.1b: Context gauge
+- Added `lastInputTokens` to store (from `message_end` `usage.input` — approximates current context fill)
+- Reset in `reset()` and `onSessionCleared()`
+- `ContextGauge` component in right rail: progress bar (green/yellow/red), `formatTokens` labels, warning at >80%
+
+### P0.2: Alert banner
+- `AlertBanner` at top of right rail showing most recent unread alert
+- Color-coded by kind (yellow for permission/input, red for failed, green for turn-complete)
+- Click navigates to alert's session via `routerRef` + clears alerts for that session
+- Dismiss button per-alert; shows "+N more" when multiple alerts
+- Only shows alerts not for the current session (suppresses self-alerts)
+
+### Dock: Right rail as docked panel
+- Desktop: `<aside>` docked on the right with sidebar styling (border-l, bg-sidebar, text-sidebar-foreground)
+- Mobile: Sheet slide-over (unchanged behavior, toggled from FakeHeader Activity button)
+- `FakeHeader` only shows Activity button on mobile (desktop rail is always visible)
+- Session route wraps content in flex row: `[chat column] [right rail]`
+
+### P1: Activity timeline tab
+- New "Activity" tab in right rail
+- Flattens recent messages + subagents into a timeline (text/tool-call/subagent/error entries)
+- Sorted newest-first, capped at 50 entries
+- Icons match state (spinning for running, green for done, red for error)
+
+### P2: Changes panel tab
+- New "Changes" tab in right rail
+- Shows per-session `ChangeStats` (added/removed/files) from `availableSessions`
+- Lists changed files with short name + full path
+
+### Pre-existing fixes (from revert)
+- Fixed stray `s` typo in `virtual-chat-surface.tsx` line 44
+- Removed `streamingText`/`streamingReasoningText` props from `MessageItem` usage (it reads from store directly)
+- Cleaned up unused store selectors in `virtual-chat-surface.tsx`
+
+### Build status
+- Rust: zero clippy warnings, all 67 protocol tests pass
+- Web client: builds cleanly
+- Web UI: builds cleanly, 9 vitest tests pass
+
 ## 2026-07-02: Web UI Fixes Plan (6 Phases Complete)
 
 ### Phase 1: Crashes and alert correctness
