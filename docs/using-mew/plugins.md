@@ -22,7 +22,7 @@ using the same protocol in reverse.
 ```
 Host (mew)                          Plugin (subprocess)
     │                                      │
-    ├── hook call ──────────────────────→  │  {"jsonrpc":"2.0","method":"on_chat_message","params":{...},"id":1}
+    ├── hook call ──────────────────────→  │  {"jsonrpc":"2.0","method":"on-chat-message","params":{...},"id":1}
     │                                      │
     │  ←────────────────────────────────── result
     │  {"jsonrpc":"2.0","result":{...},"id":1}
@@ -58,7 +58,7 @@ Plugins can hook into any of these lifecycle events:
 | `on_tool_error` | A tool returned an error | No |
 | `on_turn_end` | A turn finished | No |
 | `on_chat_message` | Before each message is sent to the provider | Yes (returns modified message) |
-| `on_chat_params` | Before building the request | Yes (temperature, max_tokens, tool_choice) |
+| `on_chat_params` | Before building the request | Yes (temperature, top_p, max_tokens, tool_choice) |
 | `on_chat_headers` | Before sending the request | Yes (HTTP headers) |
 | `on_system_prompt` | After system prompt is assembled | Yes (returns modified prompt) |
 | `on_tool_execute_before` | Before a tool runs | Yes (can block or modify input) |
@@ -70,6 +70,11 @@ Plugins can hook into any of these lifecycle events:
 | `on_subagent_start` | A subagent was spawned | No |
 | `on_subagent_end` | A subagent finished | No |
 | `on_stop` | Agent is shutting down | No |
+| `on_pre_model_turn` | Before each model turn (LLM request) | No |
+| `on_user_input` | When the user submits a prompt, before it reaches the agent | Yes (can rewrite the prompt) |
+| `on_persona_change` | Active persona changed | No |
+| `on_session_save` | Session is being saved | No |
+| `on_model_finish` | Model finished a response (finish reason, token usage, cost) | No |
 
 ## Host functions
 
@@ -101,14 +106,14 @@ import sys, json
 def handle(method, params, msg_id):
     if method == "init":
         return {"status": "ready"}
-    elif method == "on_turn_end":
+    elif method == "on-turn-end":
         # Log turn completion
         turns = params.get("turn_count", "?")
         print(f"turn {turns} done", file=sys.stderr)
         return None  # no mutation
-    elif method == "on_register_slash_commands":
-        return [{"name": "/ping", "description": "Test plugin"}]
-    elif method == "execute_slash_command":
+    elif method == "on-register-slash-commands":
+        return [{"name": "/ping", "description": "Test plugin", "handler_id": "ping-1"}]
+    elif method == "execute-slash-command":
         if params.get("command") == "/ping":
             return "pong"
         return None

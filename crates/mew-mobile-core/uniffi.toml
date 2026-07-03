@@ -1,0 +1,2 @@
+[bindings.swift]
+cdylib_name = "mew_mobile_core_ffi"

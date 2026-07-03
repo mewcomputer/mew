@@ -56,8 +56,8 @@ when no rule matches:
 | Sensitivity | Default behavior | Built-in tools |
 |-------------|-----------------|----------------|
 | `ReadOnly` | Auto-allow (no prompt) | Read, Glob, Grep |
-| `Mutating` | Prompt | Write, Edit, Bash, MCP tools |
-| `Dangerous` | Prompt (highest urgency) | (reserved) |
+| `Mutating` | Prompt | Write, Edit, MCP tools |
+| `Dangerous` | Prompt (highest urgency) | Bash, shell_background, shell_monitor |
 
 MCP tools are always treated as `Mutating` regardless of what they do.
 
@@ -166,7 +166,7 @@ that appears in your `.env`, it's replaced with `[REDACTED]`.
 
 ```toml
 [[secrets.words]]
-words = ["my-api-key-value", "sk-1234567890"]
+values = ["my-api-key-value", "sk-1234567890"]
 ```
 
 Secret words let you redact specific values that don't match common

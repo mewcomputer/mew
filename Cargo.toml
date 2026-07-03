@@ -26,6 +26,7 @@ members = [
     "crates/mew-hooks",
     "crates/mew-hooks-runtime",
     "crates/mew-tui",
+    "crates/mew-mobile-core",
     "crates/ratatui-mdstream",
 ]
 resolver = "2"
@@ -118,6 +119,9 @@ tokio-tungstenite = "0.24"
 # p2p networking (iroh) — optional, used by `mew daemon --iroh`
 iroh = "1"
 
+# UniFFI for generating Swift bindings
+uniffi = "0.32"
+
 # unix system calls (fork, setsid, signals)
 nix = { version = "0.29", features = ["process", "signal", "fs"] }
 
@@ -146,6 +150,7 @@ mew-provider-router = { path = "crates/mew-provider-router" }
 mew-provider-fake = { path = "crates/mew-provider-fake" }
 mew-protocol = { path = "crates/mew-protocol" }
 mew-daemon = { path = "crates/mew-daemon" }
+mew-mobile-core = { path = "crates/mew-mobile-core" }
 mew-web-bridge = { path = "crates/mew-web-bridge" }
 ratatui-mdstream = { path = "crates/ratatui-mdstream" }
 

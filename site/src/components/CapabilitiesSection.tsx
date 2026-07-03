@@ -33,7 +33,7 @@ const sections: Section[] = [
     paragraphs: [
       "Give it a large, unfamiliar repository, and it will use search, grep, and shell commands to find exactly what needs to change. It doesn\u2019t need a pre-built index; it uses the same tools you do.",
       <>
-        It uses{" "}
+        It can use{" "}
         <code className="bg-muted px-1.5 py-0.5 rounded text-sm font-mono">
           glob
         </code>{" "}

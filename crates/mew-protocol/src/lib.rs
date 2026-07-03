@@ -186,6 +186,10 @@ pub enum ClientMessage {
         session_id: String,
         path: String,
     },
+
+    /// Ping the daemon for liveness check and version negotiation.
+    /// The daemon responds with `ServerMessage::Pong { version }`.
+    Ping,
 }
 
 /// What kind of client is connected to a session.
@@ -198,6 +202,8 @@ pub enum ClientKind {
     Web,
     /// Headless CLI script.
     Cli,
+    /// Mobile app (iOS / Android).
+    Mobile,
     /// Unknown / unspecified.
     #[default]
     Unknown,
@@ -674,6 +680,13 @@ pub enum ServerMessage {
         session_id: String,
         pending_permissions: u32,
         pending_questions: u32,
+    },
+
+    /// Response to `ClientMessage::Ping`. Carries the daemon's version
+    /// so clients can detect version skew.
+    Pong {
+        /// Daemon version string (e.g. "0.2.0").
+        version: String,
     },
 }
 
@@ -1555,6 +1568,7 @@ mod tests {
                 },
             ),
             ("cancel", ClientMessage::Cancel),
+            ("ping", ClientMessage::Ping),
             (
                 "permission_response",
                 ClientMessage::PermissionResponse {
@@ -2065,5 +2079,26 @@ mod tests {
         let j = encode_json(&m).unwrap();
         // permission_mode should be skipped from serialization when None.
         assert!(!j.contains(r#""permission_mode""#));
+    }
+
+    #[test]
+    fn test_roundtrip_ping_pong() {
+        let ping = ClientMessage::Ping;
+        let j = encode_json(&ping).unwrap();
+        assert!(j.contains(r#""type":"ping""#));
+        let decoded: ClientMessage = decode_json(&j).unwrap();
+        assert!(matches!(decoded, ClientMessage::Ping));
+
+        let pong = ServerMessage::Pong {
+            version: "0.2.0".into(),
+        };
+        let j = encode_json(&pong).unwrap();
+        assert!(j.contains(r#""type":"pong""#));
+        assert!(j.contains(r#""version":"0.2.0""#));
+        let decoded: ServerMessage = decode_json(&j).unwrap();
+        match decoded {
+            ServerMessage::Pong { version } => assert_eq!(version, "0.2.0"),
+            _ => panic!("expected Pong"),
+        }
     }
 }

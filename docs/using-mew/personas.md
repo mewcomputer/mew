@@ -231,8 +231,8 @@ full toolset. This bypasses the confirm modal.
 /persona
 ```
 
-Lists all available personas with their descriptions and whether they're
-built-in or user-defined.
+Lists all available personas with their descriptions. The active persona
+is marked with `*`.
 
 ## Personas vs skills vs subagents
 

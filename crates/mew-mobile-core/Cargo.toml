@@ -1,0 +1,45 @@
+[package]
+name = "mew-mobile-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+name = "mew_mobile_core"
+
+[dependencies]
+mew-protocol = { workspace = true }
+mew-message = { workspace = true }
+iroh = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tungstenite = "0.24"
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+ulid = { workspace = true }
+uniffi = { workspace = true, features = ["tokio", "cli"] }
+
+[dev-dependencies]
+tempfile = "3"
+ulid = { workspace = true }
+mew-daemon = { workspace = true, features = ["iroh"] }
+mew-agent = { workspace = true }
+mew-hooks = { workspace = true }
+mew-message = { workspace = true }
+mew-protocol = { workspace = true }
+mew-provider-fake = { workspace = true }
+iroh = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tungstenite = "0.24"
+futures = { workspace = true }
+anyhow = { workspace = true }
+uniffi_bindgen = "0.32"
+
+[features]
+test-harness = []

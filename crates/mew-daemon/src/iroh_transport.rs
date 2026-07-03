@@ -9,13 +9,13 @@
 //!   against the allowlist and dispatches to `handle_connection`.
 //! - `DaemonServer::run_iroh` — binds an iroh endpoint and serves connections.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use iroh::endpoint::Connection;
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
-use iroh::Endpoint;
+use iroh::{Endpoint, SecretKey};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
@@ -95,7 +95,13 @@ impl NodeIdAllowlist {
         let nodes = if path.exists() {
             let bytes = std::fs::read(&path)
                 .with_context(|| format!("read allowlist {}", path.display()))?;
-            serde_json::from_slice::<Vec<String>>(&bytes).unwrap_or_default()
+            match serde_json::from_slice::<Vec<String>>(&bytes) {
+                Ok(nodes) => nodes,
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %path.display(), "allowlist file is corrupted, starting with empty allowlist");
+                    Vec::new()
+                }
+            }
         } else {
             Vec::new()
         };
@@ -164,16 +170,12 @@ pub struct MewIrohHandler {
     pub session_manager: Arc<SessionManager>,
     pub groups_store: Arc<GroupsStore>,
     pub thinking_setter: Option<ThinkingSetter>,
-    /// When true, the first connection's NodeId is added to the allowlist
-    /// automatically. Set during `mew pair`.
-    pub pairing_mode: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for MewIrohHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MewIrohHandler")
             .field("allowlist", &self.allowlist)
-            .field("pairing_mode", &self.pairing_mode.load(std::sync::atomic::Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
@@ -183,20 +185,10 @@ impl ProtocolHandler for MewIrohHandler {
         let remote_id = connection.remote_id();
         let id_str = remote_id.to_string();
 
-        let is_pairing = self.pairing_mode.load(std::sync::atomic::Ordering::Relaxed);
-
-        if !is_pairing && !self.allowlist.contains(&id_str) {
+        if !self.allowlist.contains(&id_str) {
             warn!(peer = %id_str, "rejected iroh connection: not in allowlist");
             connection.close(1u32.into(), b"unauthorized");
             return Ok(());
-        }
-
-        if is_pairing {
-            info!(peer = %id_str, "pairing: adding new peer to allowlist");
-            if let Err(e) = self.allowlist.add(&id_str) {
-                warn!(error = %e, "failed to persist allowlist during pairing");
-            }
-            self.pairing_mode.store(false, std::sync::atomic::Ordering::Relaxed);
         }
 
         info!(peer = %id_str, "iroh connection accepted");
@@ -234,17 +226,23 @@ pub async fn run_iroh(
     groups_store: Arc<GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
     allowlist_path: PathBuf,
+    secret_key: SecretKey,
 ) -> Result<()> {
     let allowlist = Arc::new(NodeIdAllowlist::load(allowlist_path.clone())?);
 
     let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+        .secret_key(secret_key)
         .alpns(vec![MEW_ALPN.to_vec()])
         .bind()
         .await
         .context("bind iroh endpoint")?;
 
     // Bring the endpoint online (waits for relay connection).
-    endpoint.online().await;
+    // Timeout prevents hanging forever if relays are unreachable.
+    info!("connecting to iroh relay servers...");
+    tokio::time::timeout(std::time::Duration::from_secs(15), endpoint.online())
+        .await
+        .map_err(|_| anyhow::anyhow!("iroh endpoint failed to come online within 15s — check network connectivity"))?;
 
     let node_id = endpoint.id();
     info!(node_id = %node_id, "mew daemon listening (iroh)");
@@ -252,14 +250,11 @@ pub async fn run_iroh(
     // Print pairing info to stdout for `mew pair` to capture.
     println!("iroh-node-id:{node_id}");
 
-    let pairing_mode = Arc::new(std::sync::atomic::AtomicBool::new(false));
-
     let handler = MewIrohHandler {
         allowlist: allowlist.clone(),
         session_manager,
         groups_store,
         thinking_setter,
-        pairing_mode: pairing_mode.clone(),
     };
 
     let router = Router::builder(endpoint)
@@ -270,27 +265,17 @@ pub async fn run_iroh(
     let mut sig_term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("install SIGTERM handler")?;
 
-    loop {
-        tokio::select! {
-            _ = sig_term.recv() => {
-                info!("received SIGTERM, shutting down iroh listener");
-                break;
-            }
-            _ = tokio::signal::ctrl_c() => {
-                info!("received Ctrl+C, shutting down iroh listener");
-                break;
-            }
+    tokio::select! {
+        _ = sig_term.recv() => {
+            info!("received SIGTERM, shutting down iroh listener");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("received Ctrl+C, shutting down iroh listener");
         }
     }
 
     let _ = router.shutdown().await;
     Ok(())
-}
-
-/// Put the daemon into pairing mode: the next iroh connection's NodeId
-/// will be added to the allowlist automatically.
-pub fn enable_pairing_mode(pairing_mode: &std::sync::atomic::AtomicBool) {
-    pairing_mode.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Default path for the authorized nodes sidecar: alongside session dir.
@@ -300,6 +285,55 @@ pub fn default_allowlist_path() -> PathBuf {
         .parent()
         .map(|p| p.join("authorized_nodes.json"))
         .unwrap_or_else(|| PathBuf::from("authorized_nodes.json"))
+}
+
+/// Default path for the daemon's persistent iroh secret key.
+/// Stored as JSON (the 32-byte key serialized via serde).
+pub fn default_secret_key_path() -> PathBuf {
+    let session_dir = mew_session::session_dir();
+    session_dir
+        .parent()
+        .map(|p| p.join("iroh_secret_key.json"))
+        .unwrap_or_else(|| PathBuf::from("iroh_secret_key.json"))
+}
+
+/// Load a persistent `SecretKey` from the given path, or generate a new one
+/// and persist it. This ensures the daemon's NodeId stays stable across
+/// restarts, which is essential for the mobile client's daemon registry.
+///
+/// The key is stored as JSON-serialized bytes. It should never be shared
+/// or committed to version control.
+pub fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
+    if path.exists() {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("read iroh secret key {}", path.display()))?;
+        let key: SecretKey = serde_json::from_slice(&bytes)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "corrupted iroh secret key at {}: {e}. \
+                     Delete the file and restart to generate a new key. \
+                     WARNING: this will change the daemon's NodeId and \
+                     break all paired mobile clients.",
+                    path.display()
+                )
+            })?;
+        Ok(key)
+    } else {
+        let key = SecretKey::generate();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let json = serde_json::to_string(&key)?;
+        // Write with restrictive permissions (0600 on Unix).
+        std::fs::write(path, json)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).ok();
+        }
+        info!(path = %path.display(), "generated new iroh secret key");
+        Ok(key)
+    }
 }
 
 #[cfg(test)]
@@ -355,12 +389,12 @@ mod tests {
     }
 
     #[test]
-    fn test_iroh_stream_async_traits() {
-        // Verify IrohStream implements both traits at compile time.
-        fn _assert_async_read<T: AsyncRead>() {}
-        fn _assert_async_write<T: AsyncWrite>() {}
-        // We can't construct one without an actual iroh connection,
-        // but this ensures the impls are present.
-        // The real test is the integration test.
+    fn test_iroh_stream_implements_async_traits() {
+        // Verify IrohStream implements AsyncRead + AsyncWrite + Unpin at
+        // compile time. This catches accidental trait removals.
+        fn _assert_async_read<T: AsyncRead + Unpin>() {}
+        fn _assert_async_write<T: AsyncWrite + Unpin>() {}
+        _assert_async_read::<IrohStream>();
+        _assert_async_write::<IrohStream>();
     }
 }

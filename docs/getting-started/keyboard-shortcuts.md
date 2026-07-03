@@ -3,7 +3,8 @@ title: Keyboard Shortcuts
 description: All TUI keyboard shortcuts in one place.
 ---
 
-Press `?` in the TUI to toggle the shortcuts overlay at any time.
+Press `?` in the TUI (with an empty input box) to toggle the shortcuts
+overlay.
 
 ## Global
 
@@ -31,12 +32,12 @@ Press `?` in the TUI to toggle the shortcuts overlay at any time.
 | `Ctrl+U` | Clear entire input |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Shift+Z` / `Ctrl+Y` | Redo |
-| `Ctrl+S` | Forward search through input history |
+| `Ctrl+S` | Cycle to next newer match inside an active `Ctrl+R` search |
 | `Alt+Left` / `Alt+Right` | Move word left / right |
 | `Alt+Backspace` | Delete word backward |
 | `Up` / `Down` | Navigate between input lines / history |
 | `PageUp` / `PageDown` | Scroll chat up / down by 10 lines |
-| `Ctrl+R` | Reverse search through input history |
+| `Ctrl+R` | Open reverse history search (press again for older matches) |
 
 ## Chat
 

@@ -1,0 +1,37 @@
+name: mew
+options:
+  bundleIdPrefix: ai.mew
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+packages:
+  MewMobileCore:
+    path: ./MewMobileCore
+targets:
+  mew:
+    type: application
+    platform: iOS
+    sources:
+      - path: mew
+    dependencies:
+      - package: MewMobileCore
+      - sdk: SystemConfiguration.framework
+      - sdk: Security.framework
+      - sdk: Network.framework
+    info:
+      path: mew/Info.plist
+      properties:
+        CFBundleDisplayName: mew
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen:
+          UIColorName: ""
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSLocalNetworkUsageDescription: "mew connects to your daemons over the local network and iroh relays."

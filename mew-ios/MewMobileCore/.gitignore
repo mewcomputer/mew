@@ -1,0 +1,6 @@
+# XCFramework is a build artifact — regenerate with `just ios-core`
+XCFramework/
+
+# SwiftPM build artifacts
+.build/
+Package.resolved

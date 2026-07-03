@@ -140,7 +140,7 @@ permission prompt. Their contents are also redacted from all tool output.
 paths = [".env", "secrets.toml", "*.key"]
 
 [[secrets.words]]
-words = ["my-api-key-value", "sk-1234567890"]
+values = ["my-api-key-value", "sk-1234567890"]
 ```
 
 Pattern-based redaction (API keys, tokens) is always on. File-based and
@@ -169,7 +169,8 @@ Empty roots disable the escape tier. See
 
 Credential resolution for `credential_ref` follows this order:
 
-1. **Env var**: `MEW_CRED_<REF_UPPERCASED>` (hyphens become underscores).
+1. **Env var**: `MEW_CRED_<REF_UPPERCASED>` (all non-alphanumeric characters
+   become underscores).
    For `credential_ref = "deepseek"`, set `MEW_CRED_DEEPSEEK`.
 2. **System keyring**: `mew` service, account = ref name
 3. **credentials.json**: `{"deepseek": "sk-..."}` in the config directory
@@ -181,13 +182,14 @@ persistent setups. `credentials.json` works when neither is available.
 
 | Variable | Description |
 |----------|-------------|
-| `MEW_CRED_<NAME>` | Set a credential value (hyphens in name become underscores) |
+| `MEW_CRED_<NAME>` | Set a credential value (non-alphanumeric characters in the name become underscores) |
 | `MEW_DEFAULT_MODEL` | Override `default_model` |
 | `MEW_WORKSPACE__ROOTS` | Override workspace roots (`__` = nested path, comma-separated) |
 | `MEW_SESSION_DIR` | Override session storage directory |
 | `MEW_CONFIG_DIR` | Override config directory |
 | `MEW_PERMISSIVE` | Start in permissive mode |
 | `MEW_AUTO` | Start in auto mode |
+| `MEW_AUTO_PLUS` | Start in auto_plus mode |
 | `MEW_DANGEROUS` | Start in dangerous mode (skip all prompts) |
 | `RUST_LOG` | Log level (loaded from `.env` before tracing init) |
 
@@ -201,6 +203,7 @@ persistent setups. `credentials.json` works when neither is available.
 | `last_provider` | Last-used provider ID |
 | `sidebar_collapsed` | Sidebar section collapse state |
 | `disabled_plugins` | Plugins the user has disabled |
+| `theme` | Active theme name (set via `/theme`; overrides the configured theme) |
 
 CLI `--provider` and `--model` flags override state, which overrides
 the built-in default. The last-used model and provider are saved back to

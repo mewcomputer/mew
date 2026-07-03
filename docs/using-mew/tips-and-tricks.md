@@ -9,8 +9,9 @@ description: Power-user features and workflows for mew.
   submitting. Useful for writing code snippets or structured prompts.
 - **Undo/redo**: `Ctrl+Z` undoes the last edit. `Ctrl+Shift+Z` or `Ctrl+Y`
   redoes. Edits within a 500ms window coalesce into one undo entry.
-- **History search**: `Ctrl+R` searches backward through input history.
-  `Ctrl+S` searches forward. Type to filter, Enter to insert.
+- **History search**: `Ctrl+R` opens a reverse search through input
+  history. Type to filter; `Ctrl+R` cycles to older matches, `Ctrl+S`
+  cycles to newer matches, Enter inserts.
 - **Word navigation**: `Alt+Left` / `Alt+Right` jump word boundaries.
   `Alt+Backspace` deletes a word backward.
 - **Line editing**: `Ctrl+A` / `Ctrl+E` jump to start / end. `Ctrl+K`
@@ -60,7 +61,7 @@ session, that approval survives `/clear`.
 
 ## Terminal title
 
-When streaming, the terminal tab title shows `mew - thinking...`. When
+When streaming, the terminal tab title shows `mew — thinking…`. When
 idle, it shows `mew`. This helps you tell when a response is done from
 another tab. Logs are redirected to `/tmp/mew-<pid>.log` so they don't
 corrupt the TUI display.

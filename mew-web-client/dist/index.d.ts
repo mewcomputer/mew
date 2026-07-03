@@ -107,6 +107,8 @@ export type ClientMessage = {
     type: "unflag_file";
     session_id: string;
     path: string;
+} | {
+    type: "ping";
 };
 export type ProviderEventWire = {
     type: "part_start";
@@ -532,6 +534,9 @@ export type ServerMessage = {
     session_id: string;
     pending_permissions: number;
     pending_questions: number;
+} | {
+    type: "pong";
+    version: string;
 };
 export interface MewWebSocket {
     send(data: string): void;
@@ -719,6 +724,10 @@ export interface MewClientEvents {
         pending_permissions: number;
         pending_questions: number;
     }) => void;
+    /** Response to `ping`. Carries the daemon version. */
+    pong: (data: {
+        version: string;
+    }) => void;
     errorMessage: (data: {
         message: string;
     }) => void;
@@ -760,6 +769,8 @@ export declare class MewClient {
     prompt(text: string, attachments?: Attachment[]): void;
     /** Send `cancel` to abort the current turn. */
     cancel(): void;
+    /** Send `ping` to check daemon liveness and get its version. */
+    ping(): Promise<string>;
     /**
      * Send a slash command (e.g. `/clear`, `/compact`). Returns the
      * `slash_result.text` if the daemon produces one.

@@ -11,8 +11,8 @@ with domain-specific capabilities without writing Rust code.
 ## Configuration
 
 MCP servers are configured in `mcp.json` in your working directory. The
-code also checks `.mcp.json`, `.mew/mcp.json`, and `.mew/.mcp.json`
-(in that order, first match wins).
+code also checks `.mcp.json`, `.mew/mcp.json`, and `.mew/.mcp.json`.
+All present files are loaded and their servers merged.
 
 ### Stdio transport
 

@@ -86,7 +86,7 @@ Be direct and specific. Reference file paths and line numbers.
 | `name` | yes | Subagent identifier |
 | `description` | yes | When the agent should delegate to this subagent |
 | `tools` | no | Tool allowlist. Inherits all tools if omitted |
-| `model` | no | Pin a `provider/model` pair, or use tier keywords (`micro`, `deci`) when the active provider is a router |
+| `model` | no | Pin a `provider/model` pair, or use tier keywords (`nano`, `micro`, `deci`) when the active provider is a router |
 | `max_turns` | no | Maximum turns before stopping (default: 500) |
 | `max_duration_secs` | no | Wall-clock cap in seconds (default: 300) |
 | `template` | no | When `true`, render the body through minijinja before using it as the system prompt |

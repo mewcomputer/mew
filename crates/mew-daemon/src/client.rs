@@ -508,7 +508,8 @@ async fn translate_server_message(
         | ServerMessage::SessionAlert { .. }
         | ServerMessage::FlaggedFilesChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }
-        | ServerMessage::SessionAttentionChanged { .. } => {
+        | ServerMessage::SessionAttentionChanged { .. }
+        | ServerMessage::Pong { .. } => {
             // These are handled by the DaemonClient directly or are web-UI
             // specific; they don't map to AgentEvents for the TUI.
             Vec::new()

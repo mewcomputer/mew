@@ -47,3 +47,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 nix = { workspace = true }
+
+# Optional: iroh p2p networking for `mew daemon --iroh` and `mew pair`
+iroh = { workspace = true, optional = true }
+qrcode = "0.14"
+
+[features]
+iroh = ["dep:iroh", "mew-daemon/iroh"]

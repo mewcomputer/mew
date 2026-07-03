@@ -49,7 +49,7 @@ pub mod session;
 pub mod iroh_transport;
 
 #[cfg(feature = "iroh")]
-pub use iroh_transport::{run_iroh, NodeIdAllowlist, MewIrohHandler, IrohStream, default_allowlist_path, enable_pairing_mode, MEW_ALPN};
+pub use iroh_transport::{run_iroh, NodeIdAllowlist, MewIrohHandler, IrohStream, default_allowlist_path, default_secret_key_path, load_or_create_secret_key, MEW_ALPN};
 
 pub use client::DaemonClient;
 pub use session::{AttachError, Session, SessionManager};
@@ -589,6 +589,11 @@ where
                 if let Some(session) = &attached_session {
                     session.cancel_turn().await;
                 }
+            }
+            ClientMessage::Ping => {
+                reply(ServerMessage::Pong {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                });
             }
             ClientMessage::PermissionResponse {
                 request_id,

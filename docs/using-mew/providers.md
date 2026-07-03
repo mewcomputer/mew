@@ -30,7 +30,7 @@ Two shapes are supported:
   APIs (DeepSeek, OpenAI, openai-compatible gateways). Streams
   `choices[0].delta.content` as text deltas.
 - **`anthropic`**: SSE, content-block events. Used by Anthropic-compatible
-  APIs (Claude, Z.AI, Umans). Uses named events like `content_block_start`
+  APIs (Claude, Umans). Uses named events like `content_block_start`
   and `content_block_delta`. Thinking blocks become `Part::Reasoning`.
 
 The shape determines how mew parses the SSE stream and maps it to

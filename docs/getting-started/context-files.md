@@ -69,8 +69,9 @@ one at the root), they all get loaded and concatenated.
 
 Both filenames are checked. `AGENTS.md` is the standard name for
 agent-readable context files. `CLAUDE.md` is supported for compatibility
-with Claude Code projects. If both exist in the same directory, both are
-loaded.
+with Claude Code projects. If both exist in the same directory, only
+`AGENTS.md` is loaded; `CLAUDE.md` is used as a fallback only when
+`AGENTS.md` is absent.
 
 The content format is the same for both. Use whichever name your team
 prefers, or both if you work across different tools.

@@ -238,3 +238,58 @@ generate-homebrew-formula version:
 
 site-dev:
     pnpm --filter site dev
+
+# ── iOS mobile core ──────────────────────────────────────────────
+# Build mew-mobile-core for both iOS targets, generate Swift bindings,
+# and create an XCFramework for the SwiftPM package.
+#
+# Prerequisites:
+#   rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+#   cargo install uniffi-bindgen-cli --version 0.32
+#
+# Output:
+#   mew-ios/MewMobileCore/Sources/MewMobileCore/mew_mobile_core.swift  (generated bindings)
+#   mew-ios/MewMobileCore/XCFramework/mew_mobile_core.xcframework      (universal framework)
+ios-core:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "$(dirname "$0")"
+    IOS_DIR="mew-ios/MewMobileCore"
+    FRAMEWORK_DIR="${IOS_DIR}/XCFramework"
+    BINDINGS_DIR="${IOS_DIR}/Sources/MewMobileCore"
+
+    echo "── Building for aarch64-apple-ios (device) ──"
+    cargo build -p mew-mobile-core --release --target aarch64-apple-ios
+
+    echo "── Building for aarch64-apple-ios-sim (simulator) ──"
+    cargo build -p mew-mobile-core --release --target aarch64-apple-ios-sim
+
+    echo "── Generating Swift bindings ──"
+    mkdir -p "${BINDINGS_DIR}"
+    cargo run -p mew-mobile-core --bin uniffi-bindgen -- generate \
+        --library target/release/libmew_mobile_core.dylib \
+        --language swift --out-dir "${BINDINGS_DIR}"
+
+    # SwiftPM binary targets need module.modulemap (not <name>.modulemap)
+    cp "${BINDINGS_DIR}/mew_mobile_coreFFI.modulemap" "${BINDINGS_DIR}/module.modulemap" 2>/dev/null || true
+
+    echo "── Creating XCFramework ──"
+    # Use a temp headers dir so the xcframework only gets FFI headers (not the .swift)
+    HEADERS_TMP=$(mktemp -d)
+    cp "${BINDINGS_DIR}/mew_mobile_coreFFI.h" "${HEADERS_TMP}/"
+    cp "${BINDINGS_DIR}/mew_mobile_coreFFI.modulemap" "${HEADERS_TMP}/"
+    cp "${HEADERS_TMP}/mew_mobile_coreFFI.modulemap" "${HEADERS_TMP}/module.modulemap"
+    rm -rf "${FRAMEWORK_DIR}/mew_mobile_core.xcframework"
+    xcodebuild -create-xcframework \
+        -library "target/aarch64-apple-ios/release/libmew_mobile_core.a" \
+        -headers "${HEADERS_TMP}" \
+        -library "target/aarch64-apple-ios-sim/release/libmew_mobile_core.a" \
+        -headers "${HEADERS_TMP}" \
+        -output "${FRAMEWORK_DIR}/mew_mobile_core.xcframework"
+    rm -rf "${HEADERS_TMP}"
+
+    echo ""
+    echo "✓ mew-mobile-core built for iOS"
+    echo "  Bindings:  ${BINDINGS_DIR}/mew_mobile_core.swift"
+    echo "  Framework: ${FRAMEWORK_DIR}/mew_mobile_core.xcframework"
+
