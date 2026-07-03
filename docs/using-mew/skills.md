@@ -151,3 +151,12 @@ the frontmatter:
 - `[]`: no skills available
 
 See [Personas](/docs/using-mew/personas/) for the full frontmatter reference.
+
+## Skills vs personas vs subagents
+
+Skills, personas, and subagents all customize behavior and it is easy to
+mix them up. A skill is loaded on demand for one procedure; a persona
+changes how the main agent behaves for the whole session; a subagent is a
+separate child agent that returns a summary. Not sure where an instruction
+belongs? See [Comparing Features](/docs/using-mew/comparisons/) for the
+full breakdown, including context files.

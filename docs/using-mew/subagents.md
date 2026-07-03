@@ -180,3 +180,12 @@ sessions/<parent-id>/subagents/<child-id>/session.jsonl
 This means subagent transcripts are persisted and can be resumed. The
 parent session's `meta.json` records child session IDs. See
 [Sessions](/docs/getting-started/sessions/) for the session storage format.
+
+## Subagents vs personas vs skills
+
+Subagents, personas, and skills all customize behavior and it is easy to
+mix them up. A subagent is a separate child agent that returns a summary;
+a persona changes how the main agent behaves for the whole session; a
+skill is loaded on demand for one procedure. See
+[Comparing Features](/docs/using-mew/comparisons/) for the full
+breakdown.

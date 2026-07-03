@@ -170,3 +170,14 @@ entry is needed. Disabled plugins are tracked in `state.toml` under
 - Store per-plugin key-value data persisted to disk
 - Push toast notifications to the TUI
 - Render custom text content beside the input area
+
+## Plugins vs MCP servers
+
+Plugins and MCP servers both spawn an external program and both can add
+tools, so they get confused. Plugins can also hook the agent lifecycle,
+mutate requests, and hold state; MCP servers only expose tools over a
+standard protocol. Need tools only, reach for an
+[MCP server](/docs/using-mew/mcp-servers/). Need to wire into the agent
+itself, reach for a plugin. See
+[Comparing Features](/docs/using-mew/comparisons/) for the full
+breakdown.

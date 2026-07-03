@@ -115,3 +115,11 @@ redaction.
 
 See [Adding a Tool](/docs/development/dev-tools/) for the developer guide on
 implementing and registering new tools.
+
+## Tools vs slash commands
+
+Tools and [slash commands](/docs/using-mew/slash-commands/) both extend
+mew, but they are triggered by different actors. The model calls a tool
+during a turn; you type a slash command into the input box. Tools are
+model-facing and permission-gated, slash commands are user shortcuts. See
+[Comparing Features](/docs/using-mew/comparisons/) for the full breakdown.
