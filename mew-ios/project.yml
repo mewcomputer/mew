@@ -37,13 +37,10 @@ targets:
         NSLocalNetworkUsageDescription: "mew connects to your daemons over the local network and iroh relays."
         NSCameraUsageDescription: "mew uses the camera to scan QR codes when pairing with a daemon."
         UIAppFonts:
-          - MiSansLatin-Regular.woff2
-          - MiSansLatin-Medium.woff2
-          - MiSansLatin-Semibold.woff2
-          - MiSansLatin-Bold.woff2
+          - MiSansLatinVF.ttf
           - Banga-VF.ttf
-          - IoskeleyMono-Regular.woff2
-          - IoskeleyMono-Medium.woff2
+          - IoskeleyMono-Regular.ttf
+          - IoskeleyMono-Medium.ttf
           - JunicodeVF-Roman.ttf
           - JunicodeVF-Italic.ttf
           - OFLGoudyStMTT.ttf

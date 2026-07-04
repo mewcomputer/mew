@@ -7,6 +7,7 @@ struct MewApp: App {
 
     init() {
         // Font is applied per-view in ChatView, not globally.
+        MewFonts.verify()
     }
 
     var body: some Scene {

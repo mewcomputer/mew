@@ -26,13 +26,10 @@
 	<string>mew connects to your daemons over the local network and iroh relays.</string>
 	<key>UIAppFonts</key>
 	<array>
-		<string>MiSansLatin-Regular.woff2</string>
-		<string>MiSansLatin-Medium.woff2</string>
-		<string>MiSansLatin-Semibold.woff2</string>
-		<string>MiSansLatin-Bold.woff2</string>
+		<string>MiSansLatinVF.ttf</string>
 		<string>Banga-VF.ttf</string>
-		<string>IoskeleyMono-Regular.woff2</string>
-		<string>IoskeleyMono-Medium.woff2</string>
+		<string>IoskeleyMono-Regular.ttf</string>
+		<string>IoskeleyMono-Medium.ttf</string>
 		<string>JunicodeVF-Roman.ttf</string>
 		<string>JunicodeVF-Italic.ttf</string>
 		<string>OFLGoudyStMTT.ttf</string>
