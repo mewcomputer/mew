@@ -1852,9 +1852,10 @@ async fn pair_cmd() -> Result<()> {
     println!("╚══════════════════════════════════════════════════════════╝\n");
 
     // Generate ASCII QR code containing the NodeId.
-    // The payload uses a versioned prefix per the accounts plan:
-    // `mew001:<node_id>`
-    let payload = format!("mew001:{node_id_str}");
+    // The payload uses a URL-scheme prefix so iOS camera/QR apps recognize it:
+    // `computer.mew.mew://<node_id>`
+    // parse_dial_info in mew-mobile-core accepts this format.
+    let payload = format!("computer.mew.mew://{node_id_str}");
     let qr = qrcode::QrCode::new(payload)
         .context("generate QR code")?;
     let qr_string = qr

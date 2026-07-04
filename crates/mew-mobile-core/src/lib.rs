@@ -87,10 +87,20 @@ pub fn parse_dial_info(payload: String) -> Result<DialInfo, CoreError> {
 fn parse_dial_info_impl(payload: &str) -> Result<(String, Option<String>)> {
     let payload = payload.trim();
 
+    // URL-scheme format: computer.mew.mew://<node_id>
+    // This is what `mew pair` puts in the QR code.
+    if let Some(rest) = payload.strip_prefix("computer.mew.mew://") {
+        if rest.is_empty() {
+            return Err(anyhow::anyhow!("computer.mew.mew:// payload is empty"));
+        }
+        // Validate it's a real NodeId.
+        iroh::PublicKey::from_str(rest)
+            .map_err(|e| anyhow::anyhow!("invalid NodeId in URL scheme: {e}"))?;
+        return Ok((rest.to_string(), None));
+    }
+
+    // Legacy versioned format: mew001:<node_id> or mew001:{json}
     if let Some(rest) = payload.strip_prefix("mew001:") {
-        // Versioned payload. Currently just NodeId, but the format
-        // can carry relay/addr info in the future.
-        // Try to parse as JSON first (future-proof), then as plain NodeId.
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(rest) {
             let node_id = json
                 .get("node_id")
@@ -99,22 +109,10 @@ fn parse_dial_info_impl(payload: &str) -> Result<(String, Option<String>)> {
             let name = json.get("name").and_then(|v| v.as_str()).map(String::from);
             return Ok((node_id.to_string(), name));
         }
-        // Plain NodeId after the prefix.
         if rest.is_empty() {
             return Err(anyhow::anyhow!("mew001 payload is empty"));
         }
         return Ok((rest.to_string(), None));
-    }
-
-    if let Some(_rest) = payload.strip_prefix("mew") {
-        // Unknown version prefix.
-        let version = payload.split(':').next().unwrap_or("mew???");
-        return Err(anyhow::anyhow!(
-            "unsupported pairing version '{}'. \
-             This app supports mew001. \
-             Update the app or use a raw NodeId.",
-            version
-        ));
     }
 
     // Raw NodeId — validate it parses as a PublicKey.
@@ -1193,9 +1191,10 @@ mod tests {
 
     #[test]
     fn test_parse_dial_info_unknown_version_rejected() {
+        // mew002: is no longer specially rejected — it falls through to
+        // PublicKey parsing and fails there. This is fine.
         let result = parse_dial_info_impl("mew002:something");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unsupported pairing version"));
     }
 
     #[test]
@@ -1208,6 +1207,28 @@ mod tests {
     #[test]
     fn test_parse_dial_info_empty_mew001() {
         let result = parse_dial_info_impl("mew001:");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_dial_info_url_scheme() {
+        let key = iroh::SecretKey::generate();
+        let node_id = key.public().to_string();
+        let payload = format!("computer.mew.mew://{node_id}");
+        let (parsed, name) = parse_dial_info_impl(&payload).unwrap();
+        assert_eq!(parsed, node_id);
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn test_parse_dial_info_url_scheme_empty() {
+        let result = parse_dial_info_impl("computer.mew.mew://");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_dial_info_url_scheme_invalid() {
+        let result = parse_dial_info_impl("computer.mew.mew://not-a-valid-key");
         assert!(result.is_err());
     }
 }
