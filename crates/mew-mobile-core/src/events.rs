@@ -149,6 +149,16 @@ pub struct SessionSummary {
     pub pending_permissions: u32,
     pub pending_questions: u32,
     pub usage_cost: f64,
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub created_at: i64,
+    pub last_message_at: Option<i64>,
+    pub last_turn_failed: bool,
+    pub group_id: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub turns: u32,
 }
 
 /// Summary of an available model.

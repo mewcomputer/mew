@@ -125,6 +125,8 @@ impl SessionState {
         use mew_message::{Part, ProviderEventWire};
         match event {
             ProviderEventWire::PartStart { part } => {
+                // A new part means a turn is in progress.
+                self.running = true;
                 let (part_id, msg_part) = match part {
                     Part::Text(tp) => {
                         let id = tp.base.id.to_string();

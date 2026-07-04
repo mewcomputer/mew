@@ -149,6 +149,8 @@ struct ConnState {
     models: Mutex<Vec<state::ModelInfo>>,
     /// Session title (from SessionTitleChanged).
     session_title: Mutex<Option<String>>,
+    /// Event listener, read per-event so set_listener() after connect works.
+    listener: Mutex<Option<Arc<dyn CoreListener>>>,
 }
 
 impl ConnState {
@@ -159,6 +161,7 @@ impl ConnState {
             daemon_version: Mutex::new(None),
             models: Mutex::new(Vec::new()),
             session_title: Mutex::new(None),
+            listener: Mutex::new(None),
         }
     }
 }
@@ -250,7 +253,13 @@ impl MobileCore {
         let endpoint = self.endpoint.clone();
         let daemon_id = id.node_id.clone();
         let node_id = entry.node_id.clone();
-        let listener = self.listener.lock().unwrap().clone();
+
+        // Sync the listener into ConnState so the background task reads
+        // it per-event (supports set_listener after connect).
+        {
+            let l = self.listener.lock().unwrap().clone();
+            *conn_state.listener.lock().unwrap() = l;
+        }
 
         // Spawn the background connection task.
         let conn_state_for_task = conn_state.clone();
@@ -265,7 +274,6 @@ impl MobileCore {
                     &node_id,
                     &mut rx,
                     &conn_state_for_task,
-                    &listener,
                 )
                 .await;
 
@@ -288,7 +296,7 @@ impl MobileCore {
                 let jitter = rand_jitter() % 500; // 0-499ms jitter
                 let delay = Duration::from_millis(capped * 1000 + jitter);
 
-                if let Some(ref l) = listener {
+                if let Some(ref l) = *conn_state_for_task.listener.lock().unwrap() {
                     l.on_event(CoreEvent::DaemonStatusChanged {
                         daemon: daemon_id.clone(),
                         status: DaemonStatus::Backoff { attempt },
@@ -300,7 +308,7 @@ impl MobileCore {
                 attempt += 1;
             }
 
-            if let Some(ref l) = listener {
+            if let Some(ref l) = *conn_state_for_task.listener.lock().unwrap() {
                 l.on_event(CoreEvent::DaemonStatusChanged {
                     daemon: daemon_id.clone(),
                     status: DaemonStatus::Disconnected,
@@ -462,8 +470,15 @@ impl MobileCore {
     }
 
     /// Set the event listener. Events are delivered on the tokio runtime.
+    /// Also updates existing connections so set_listener works after connect.
     pub fn set_listener(&self, listener: Arc<dyn CoreListener>) {
-        *self.listener.lock().unwrap() = Some(listener);
+        *self.listener.lock().unwrap() = Some(listener.clone());
+        // Push into all active connection states so the background tasks
+        // pick up the new listener on the next event.
+        let conns = self.connections.lock().unwrap();
+        for conn in conns.values() {
+            *conn.state.listener.lock().unwrap() = Some(listener.clone());
+        }
     }
 
     /// Get a full snapshot of a daemon's state.
@@ -508,10 +523,9 @@ async fn connect_and_run(
     node_id: &str,
     rx: &mut mpsc::UnboundedReceiver<ClientMessage>,
     conn_state: &Arc<ConnState>,
-    listener: &Option<Arc<dyn CoreListener>>,
 ) -> Result<bool> {
     let emit_event = |event: CoreEvent| {
-        if let Some(ref l) = listener {
+        if let Some(ref l) = *conn_state.listener.lock().unwrap() {
             l.on_event(event);
         }
     };
@@ -752,6 +766,16 @@ fn translate_message(
                     pending_permissions: s.pending_permissions,
                     pending_questions: s.pending_questions,
                     usage_cost: s.usage.as_ref().map(|u| u.cost).unwrap_or(0.0),
+                    cwd: s.cwd.clone(),
+                    model: s.model.clone(),
+                    provider: s.provider.clone(),
+                    created_at: s.created_at,
+                    last_message_at: s.last_message_at,
+                    last_turn_failed: s.last_turn_failed,
+                    group_id: s.group_id.clone(),
+                    input_tokens: s.usage.as_ref().map(|u| u.input_tokens).unwrap_or(0),
+                    output_tokens: s.usage.as_ref().map(|u| u.output_tokens).unwrap_or(0),
+                    turns: s.usage.as_ref().map(|u| u.turns).unwrap_or(0),
                 })
                 .collect();
             events.push(CoreEvent::SessionList {
