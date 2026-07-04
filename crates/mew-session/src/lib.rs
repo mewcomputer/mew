@@ -484,6 +484,11 @@ impl Writer {
         &self.path
     }
 
+    /// Returns the session's directory (parent of `session.jsonl`).
+    pub fn dir(&self) -> &Path {
+        self.path.parent().unwrap_or(std::path::Path::new("."))
+    }
+
     /// Returns the session's metadata.
     pub fn meta(&self) -> &Meta {
         &self.meta

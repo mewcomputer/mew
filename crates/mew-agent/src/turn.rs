@@ -297,6 +297,35 @@ impl Agent {
             };
 
             let req_for_fallback = req.clone();
+
+            // Log the request to <session_dir>/requests.log for debugging.
+            // Each entry is a JSON line with timestamp, turn number, and the
+            // full request (messages, tools, system) so "weird state" issues
+            // can be inspected after the fact.
+            if let Some(ref session) = self.session {
+                let session = session.lock().await;
+                let log_path = session.dir().join("requests.log");
+                let entry = serde_json::json!({
+                    "ts": Utc::now().to_rfc3339(),
+                    "turn": turn_count,
+                    "provider": self.provider.name(),
+                    "message_count": req.messages.len(),
+                    "messages": req.messages,
+                    "tool_count": req.tools.len(),
+                    "system": req.system,
+                });
+                let line = format!("{}\n", entry);
+                if let Ok(mut f) = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                    .await
+                {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = f.write_all(line.as_bytes()).await;
+                }
+            }
+
             let mut stream = match self.provider.stream(req).await {
                 Ok(s) => s,
                 Err(e) => {

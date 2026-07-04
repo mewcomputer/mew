@@ -1,0 +1,21 @@
+# Sample TUI driver script. Run with:
+#   cargo run -p mew-tui --example tui_driver -- crates/mew-tui/examples/demo.tuiscript
+#
+# Blank lines and lines starting with '#' are ignored.
+
+size 100 30
+
+# Type a prompt and submit it (echoes the user message, sets streaming).
+type what does the run command do?
+submit
+snapshot after-submit
+
+# Simulate the assistant's streamed reply.
+say The run skill launches this project's app to see a change working.
+snapshot after-reply
+
+# Open the keyboard-shortcuts overlay, then close it.
+key ?
+snapshot help-overlay
+key esc
+snapshot closed

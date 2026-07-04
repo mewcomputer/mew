@@ -837,6 +837,149 @@ async fn test_tool_turn_denied() {
     assert!(got_tool_end);
 }
 
+/// Verify that when a tool call is denied, the error message reaches the
+/// provider in the next turn's request messages — not an empty string.
+#[tokio::test]
+async fn test_tool_error_message_reaches_provider() {
+    let script1 = FakeProvider::tool_call("echo", "c1", serde_json::json!({"input": "hi"}));
+    let script2 = FakeProvider::text_response("done");
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![script1, script2]));
+    let agent = Agent::new(
+        provider.clone(),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![std::sync::Arc::new(EchoTool::mutating())],
+        None,
+    );
+
+    let mut rx = agent.run("call echo".into());
+
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::PermissionRequest { tx, .. } => {
+                let _ = tx.send(mew_hooks::PermissionDecision::Deny);
+            }
+            AgentEvent::Provider(ProviderEvent::MessageEnd {
+                finish: Finish::Stop,
+                ..
+            }) => break,
+            _ => {}
+        }
+    }
+
+    // The second captured request should contain the tool error message.
+    // The error state lives on the ToolCallPart in the assistant message;
+    // the user message only has a ToolResultPart with the call_id.
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 2, "should have two provider calls");
+
+    let second_req = &captured[1];
+    let mut found_error = false;
+    for msg in &second_req.messages {
+        for part in &msg.parts {
+            if let Part::ToolCall(tc) = part {
+                if tc.call_id == "c1" {
+                    if let Some(err) = tc.state.error() {
+                        assert!(
+                            err.contains("permission denied"),
+                            "error should mention permission denied, got: {err}"
+                        );
+                        found_error = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        found_error,
+        "tool error message should be in the second request's messages"
+    );
+}
+
+/// Verify that when a tool fails with an error, the error message reaches
+/// the provider — not an empty string.
+#[tokio::test]
+async fn test_tool_execution_error_reaches_provider() {
+    // A tool that always fails
+    struct FailingTool {
+        schema: serde_json::Value,
+    }
+    #[async_trait]
+    impl Tool for FailingTool {
+        fn name(&self) -> &str {
+            "fail"
+        }
+        fn description(&self) -> &str {
+            "always fails"
+        }
+        fn schema(&self) -> &serde_json::Value {
+            &self.schema
+        }
+        fn sensitivity(&self) -> Sensitivity {
+            Sensitivity::ReadOnly
+        }
+        async fn execute(
+            &self,
+            _ctx: ToolCtx,
+            _input: serde_json::Value,
+        ) -> Result<ToolOutput, mew_tools::ToolError> {
+            Err(mew_tools::ToolError::Execution("invalid input: missing path".to_string()))
+        }
+    }
+
+    let script1 = FakeProvider::tool_call("fail", "c1", serde_json::json!({}));
+    let script2 = FakeProvider::text_response("done");
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![script1, script2]));
+    let agent = Agent::new(
+        provider.clone(),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![std::sync::Arc::new(FailingTool {
+            schema: serde_json::json!({"type": "object", "properties": {}}),
+        }) as std::sync::Arc<dyn Tool>],
+        None,
+    );
+
+    let mut rx = agent.run("call fail".into());
+
+    while let Some(ev) = rx.recv().await {
+        if matches!(
+            ev,
+            AgentEvent::Provider(ProviderEvent::MessageEnd {
+                finish: Finish::Stop,
+                ..
+            })
+        ) {
+            break;
+        }
+    }
+
+    let captured = provider.captured.lock().unwrap();
+    assert_eq!(captured.len(), 2, "should have two provider calls");
+
+    let second_req = &captured[1];
+    let mut found_error = false;
+    for msg in &second_req.messages {
+        for part in &msg.parts {
+            if let Part::ToolCall(tc) = part {
+                if tc.call_id == "c1" {
+                    if let Some(err) = tc.state.error() {
+                        assert!(
+                            err.contains("invalid input: missing path"),
+                            "error message should reach provider, got: {err}"
+                        );
+                        found_error = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        found_error,
+        "tool error message should be in the second request's messages"
+    );
+}
+
 #[tokio::test]
 async fn test_cancellation_during_stream() {
     let script = FakeProvider::text_response("a very long response that takes time");
