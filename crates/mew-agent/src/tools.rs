@@ -996,6 +996,7 @@ impl Agent {
         };
 
         let success = is_subagent_success(&result);
+        let error_text = if success { String::new() } else { result.clone() };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
@@ -1048,6 +1049,18 @@ impl Agent {
             },
             call_id: tc.call_id.clone(),
         }));
+        if !success {
+            self.dispatcher
+                .on_tool_error(
+                    &mew_hooks::ToolCall {
+                        tool_name: tc.tool_name.clone(),
+                        call_id: tc.call_id.clone(),
+                        input: input.clone(),
+                    },
+                    &error_text,
+                )
+                .await;
+        }
     }
 
     async fn execute_subagent_start(
@@ -1129,6 +1142,7 @@ impl Agent {
             Err(e) => (format!("error: {}", e), false),
         };
 
+        let error_text = if success { String::new() } else { output.clone() };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
@@ -1181,6 +1195,18 @@ impl Agent {
             },
             call_id: tc.call_id.clone(),
         }));
+        if !success {
+            self.dispatcher
+                .on_tool_error(
+                    &mew_hooks::ToolCall {
+                        tool_name: tc.tool_name.clone(),
+                        call_id: tc.call_id.clone(),
+                        input: input.clone(),
+                    },
+                    &error_text,
+                )
+                .await;
+        }
     }
 
     async fn execute_ask_user(
@@ -1274,6 +1300,7 @@ impl Agent {
             }
         };
 
+        let error_text = if success { String::new() } else { output.clone() };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
@@ -1326,6 +1353,18 @@ impl Agent {
             },
             call_id: tc.call_id.clone(),
         }));
+        if !success {
+            self.dispatcher
+                .on_tool_error(
+                    &mew_hooks::ToolCall {
+                        tool_name: tc.tool_name.clone(),
+                        call_id: tc.call_id.clone(),
+                        input: input.clone(),
+                    },
+                    &error_text,
+                )
+                .await;
+        }
     }
 
     async fn execute_job_tool(
@@ -1645,6 +1684,7 @@ impl Agent {
                 .await;
         }
 
+        let error_text = if success { String::new() } else { output.clone() };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input,
@@ -1692,6 +1732,18 @@ impl Agent {
             },
             call_id: tc.call_id.clone(),
         }));
+        if !success {
+            self.dispatcher
+                .on_tool_error(
+                    &mew_hooks::ToolCall {
+                        tool_name: tc.tool_name.clone(),
+                        call_id: tc.call_id.clone(),
+                        input: tc.input().clone(),
+                    },
+                    &error_text,
+                )
+                .await;
+        }
     }
 
     async fn execute_subagent_wait(
@@ -1756,6 +1808,7 @@ impl Agent {
             Err(e) => (format!("error: {}", e), false),
         };
 
+        let error_text = if success { String::new() } else { output.clone() };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
@@ -1808,6 +1861,18 @@ impl Agent {
             },
             call_id: tc.call_id.clone(),
         }));
+        if !success {
+            self.dispatcher
+                .on_tool_error(
+                    &mew_hooks::ToolCall {
+                        tool_name: tc.tool_name.clone(),
+                        call_id: tc.call_id.clone(),
+                        input: input.clone(),
+                    },
+                    &error_text,
+                )
+                .await;
+        }
     }
 }
 

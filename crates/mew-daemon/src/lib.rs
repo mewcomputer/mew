@@ -920,8 +920,8 @@ where
                         session_manager
                             .broadcast_all(ServerMessage::SessionMetaChanged {
                                 session_id: session_id.clone(),
-                                archived: Some(false),
-                                pinned: Some(false),
+                                archived: None,
+                                pinned: None,
                                 group_id: meta_group_id,
                             })
                             .await;
