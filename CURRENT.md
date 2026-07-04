@@ -1,5 +1,45 @@
 # CURRENT.md — mew Fixes + Right Rail Redesign Progress
 
+## 2026-07-03: Daemon multi-workspace plan (Complete)
+
+Implemented the full plan from `notes/mew-daemon-multi-workspace-plan.md`:
+
+### Commit 1: Socket liveness guard
+- `check_socket_liveness()` in `mew-daemon/src/lib.rs` — before binding, tries connecting to the existing socket. If connect succeeds, bails "daemon already running". If connection refused, stale — remove and bind.
+- Called before `daemonize()` in `main.rs` so the error reaches the terminal.
+- 3 unit tests (live socket rejected, stale socket removed, missing socket ok).
+
+### Commit 2: `Agent.cwd` field
+- Added `pub cwd: PathBuf` to `Agent`, defaulted to `current_dir()` in `Agent::new`.
+- Replaced all 7 runtime `current_dir()` call sites in mew-agent:
+  - `tools.rs:542` — `ToolCtx.cwd` (file tool path resolution)
+  - `tools.rs:276` — permission engine cwd per tool call
+  - `tools.rs:1394/1496` — `shell_background` / `shell_monitor` fallback cwd
+  - `agent.rs:726` — `TemplateContext.cwd` (system prompt template var)
+  - `agent.rs:949` — `plan_path` resolution
+  - `agent.rs:498` — cwd sent to Auto/Auto+ classifier
+  - `runner.rs:184` — subagent template ctx
+- `SimpleRunner::with_cwd(cwd, workspace_roots)` — child agents inherit parent cwd + workspace roots.
+- All 95 existing mew-agent tests pass.
+
+### Commit 3: Thread cwd through daemon build path
+- `build_session_agent` takes `session_cwd: &Path` parameter.
+- All loaders (skills, personas, subagents, context files), permission engine, shell session, workspace_roots, and `agent.cwd` use the session cwd.
+- Daemon builder closure passes `params.cwd.unwrap_or(current_dir())`.
+- Fixed resume bug: `session.rs` was passing `cwd: None` on attach even though `meta.cwd` was available. Now passes `meta.cwd`.
+- Subagent runner wired with `.with_cwd(agent.cwd.clone(), agent.workspace_roots.clone())` at all 3 call sites.
+
+### Commit 4: TUI daemon client sends cwd
+- `client.rs` `new_session()` now sends `current_dir()` instead of `None`.
+
+### Commit 5: Docs
+- CLAUDE.md updated with "Multi-workspace daemon sessions" section.
+- This CURRENT.md entry.
+
+### Build status
+- Zero clippy warnings across mew-agent, mew-daemon, mew.
+- 95 mew-agent tests pass, 3 mew-daemon tests pass.
+
 ## 2026-07-03: mew iOS app M3 — SwiftUI app (Complete)
 
 The full iOS app builds and links on the simulator. Files at `mew-ios/mew/`:
@@ -291,3 +331,7 @@ Decisions: single multi-workspace daemon (not daemon-per-project); project `.env
 ## 2026-07-03 (later): iOS improvement plan
 
 Audited the iOS app + mew-mobile-core against the spec, wrote `notes/mew-ios-improvement-plan.md`. Headline findings: turn lifecycle broken in the core (`running` never set true, cleared mid-turn on `MessageEnd`, `TurnComplete`/`TurnFailed` unhandled); ~11 spec-required ServerMessage variants unhandled (rail staleness, silent errors, no subagent visibility); no scenePhase handling or local notifications (spec m4); markdown rendering inline-only. Spec blocker #1 (unstable daemon NodeId) is fixed in the uncommitted tree via `load_or_create_secret_key`. Plan item 0: land the ~570 uncommitted lines first.
+
+## 2026-07-03 (later): headless TUI harness
+
+Added `mew_tui::harness` — a deterministic, headless driver for the TUI so agents (and tests) can exercise it without a real terminal, provider, or async runtime. Wraps `App` over ratatui's `TestBackend`; feeds synthetic keyboard events and `AgentEvent`s; renders frames to text. Line-based script format (`type`/`key`/`submit`/`say`/`error`/`snapshot`/`size`) via `run_script`, driven by `examples/tui_driver.rs` (`cargo run -p mew-tui --example tui_driver -- <script>`). Sample at `examples/demo.tuiscript`. Zero new deps (reuses mew-message/mew-provider/mew-agent types + ratatui TestBackend). 5 harness unit tests; clippy clean. Deliberately kept out of `main.rs` (a `mew --tui-script` shim can wrap it later) to avoid colliding with the in-flight daemon-multi-workspace work.

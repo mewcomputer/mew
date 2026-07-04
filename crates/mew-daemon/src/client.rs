@@ -139,7 +139,11 @@ impl DaemonClient {
     /// Create a new session on the daemon.
     pub async fn new_session(&self) -> Result<()> {
         let msg = ClientMessage::NewSession {
-            cwd: None,
+            cwd: Some(
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            ),
             client_kind: mew_protocol::ClientKind::Tui,
         };
         let json = mew_protocol::encode_json(&msg)?;

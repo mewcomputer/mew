@@ -132,6 +132,11 @@ pub struct Agent {
     pub shell_jobs: Arc<tokio::sync::Mutex<HashMap<String, ShellJob>>>,
     /// Directories the agent is allowed to read/write within.
     pub workspace_roots: Vec<PathBuf>,
+    /// The working directory for this agent/session. Defaults to the process
+    /// cwd in `Agent::new`. Daemon sessions override it per-session so
+    /// multiple projects can be served by one daemon. All file tools,
+    /// the permission engine, and template context read from this.
+    pub cwd: PathBuf,
     /// Additional directories approved for this session.
     pub workspace_allowances: Arc<tokio::sync::Mutex<HashSet<PathBuf>>>,
     pub(crate) force_compact: Arc<tokio::sync::Mutex<bool>>,
@@ -307,6 +312,7 @@ impl Agent {
             subagent_tasks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             shell_jobs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             workspace_roots: Vec::new(),
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             workspace_allowances: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             force_compact: Arc::new(tokio::sync::Mutex::new(false)),
             flagged_files: Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -495,8 +501,7 @@ impl Agent {
             }
         }
 
-        let cwd = std::env::current_dir().ok();
-        let cwd_str = cwd.as_ref().map(|p| p.to_string_lossy().to_string());
+        let cwd_str = Some(self.cwd.to_string_lossy().to_string());
 
         let model = self
             .classifier_model
@@ -723,9 +728,7 @@ impl Agent {
             model_id: self.model_id.clone(),
             provider_id: self.provider_id.clone(),
             session_id: self.session_id.to_string(),
-            cwd: std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
+            cwd: self.cwd.to_string_lossy().to_string(),
             current_date: mew_prompts::template::TemplateContext::today(),
             tools,
             denied_tools,
@@ -940,7 +943,7 @@ impl Agent {
             let path = if plan_path.is_absolute() {
                 plan_path.clone()
             } else {
-                std::env::current_dir().unwrap_or_default().join(plan_path)
+                self.cwd.join(plan_path)
             };
             if path.exists() {
                 let path = path.clone();

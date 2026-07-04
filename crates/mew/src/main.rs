@@ -352,9 +352,26 @@ fn main() -> Result<()> {
         background: true,
         log,
         pidfile,
+        socket,
+        port,
+        #[cfg(feature = "iroh")]
+        iroh,
         ..
     }) = &cli.command
     {
+        #[cfg(feature = "iroh")]
+        let is_iroh = *iroh;
+        #[cfg(not(feature = "iroh"))]
+        let is_iroh = false;
+
+        // Pre-daemonize socket liveness check — error reaches the terminal.
+        // Only guard the Unix socket if this daemon will actually bind one;
+        // `--iroh` and TCP-only (`--port` without `--socket`) modes do not.
+        if daemon_binds_unix_socket(socket.is_some(), port.is_some(), is_iroh) {
+            let socket_path = socket.clone().unwrap_or_else(default_socket_path);
+            mew_daemon::check_socket_liveness(&socket_path)?;
+        }
+
         let pidfile = pidfile.clone().unwrap_or_else(default_pidfile);
         daemonize(log.as_deref(), &pidfile)?;
         true
@@ -1381,12 +1398,13 @@ fn build_session_agent(
     mode: mew_hooks::PermissionMode,
     writer: Option<mew_session::Writer>,
     session_id: Option<mew_message::SessionId>,
+    session_cwd: &std::path::Path,
 ) -> Result<Agent> {
     let provider =
         build_provider(cfg, cat, provider_id, model_id, raw).context("build provider")?;
 
     let dispatcher = Arc::new(NopDispatcher);
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = session_cwd.to_path_buf();
     let skills_loader = mew_skills::Loader::new(cwd.clone());
     let skills = Arc::new(skills_loader.load().unwrap_or_default());
     let skill_filter = Arc::new(tokio::sync::RwLock::new(None));
@@ -1414,6 +1432,7 @@ fn build_session_agent(
     let permission_engine = build_permission_engine(cfg, mode);
 
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
+    agent.cwd = cwd.clone();
     agent.set_model_info(model_id, provider_id);
     agent.template_ctx = template_ctx;
     agent.flagged_files = flagged_files;
@@ -1427,9 +1446,7 @@ fn build_session_agent(
 
     // Enable a persistent shell session so `cd`, `export`, and other
     // state survive across bash tool calls.
-    let shell_session = mew_tools::tools::shell_session::shared_session(
-        std::env::current_dir().unwrap_or_default(),
-    );
+    let shell_session = mew_tools::tools::shell_session::shared_session(cwd.clone());
     agent.set_shell_session(shell_session);
 
     // Wire the fallback-model provider builder. When the primary provider
@@ -1483,7 +1500,8 @@ fn build_session_agent(
             agent.tools.values().cloned().collect(),
             dispatcher.clone(),
         )
-        .with_model_resolver(resolver);
+        .with_model_resolver(resolver)
+        .with_cwd(agent.cwd.clone(), agent.workspace_roots.clone());
         agent.subagent_runner = Some(Arc::new(runner));
         agent.subagent_defs = subagent_defs.to_vec();
         agent.tools.insert(
@@ -1612,6 +1630,11 @@ async fn build_daemon_server(
                 .session_id
                 .strip_prefix("sess_")
                 .and_then(|s| ulid::Ulid::from_string(s).ok());
+            let session_cwd = params
+                .cwd
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             let agent = build_session_agent(
                 &cfg,
                 cat.as_ref(),
@@ -1621,6 +1644,7 @@ async fn build_daemon_server(
                 mode,
                 Some(params.writer),
                 session_id,
+                &session_cwd,
             )?;
             Ok((
                 agent,
@@ -1740,12 +1764,8 @@ async fn run_daemon(
     // Default to Unix socket at $XDG_RUNTIME_DIR/mew.sock or /tmp/mew.sock,
     // unless `--port` was given and `--socket` was not (in which case the
     // daemon is TCP-only).
-    let socket_path = socket.clone().unwrap_or_else(|| {
-        std::env::var("XDG_RUNTIME_DIR")
-            .map(|d| format!("{d}/mew.sock"))
-            .unwrap_or_else(|_| "/tmp/mew.sock".to_string())
-    });
-    let use_unix = socket.is_some() || port.is_none();
+    let socket_path = socket.clone().unwrap_or_else(default_socket_path);
+    let use_unix = daemon_binds_unix_socket(socket.is_some(), port.is_some(), false);
 
     match (use_unix, port.as_deref()) {
         (true, Some(addr)) => {
@@ -1939,6 +1959,21 @@ fn default_pidfile() -> String {
     std::env::var("XDG_RUNTIME_DIR")
         .map(|d| format!("{d}/mew.pid"))
         .unwrap_or_else(|_| "/tmp/mew.pid".to_string())
+}
+
+/// Default Unix socket path: `$XDG_RUNTIME_DIR/mew.sock` or `/tmp/mew.sock`.
+fn default_socket_path() -> String {
+    std::env::var("XDG_RUNTIME_DIR")
+        .map(|d| format!("{d}/mew.sock"))
+        .unwrap_or_else(|_| "/tmp/mew.sock".to_string())
+}
+
+/// Whether a daemon invocation binds a Unix socket, and therefore needs the
+/// socket-liveness guard. `--iroh` binds no Unix socket; `--port` without
+/// `--socket` is TCP-only. Must stay in sync between the pre-daemonize guard
+/// and the actual bind path in `run_daemon`.
+fn daemon_binds_unix_socket(socket_set: bool, port_set: bool, iroh: bool) -> bool {
+    !iroh && (socket_set || !port_set)
 }
 
 /// Detach from the controlling terminal via the standard double-fork +
@@ -2745,7 +2780,8 @@ async fn run_tui(
             agent.tools.values().cloned().collect(),
             dispatcher.clone(),
         )
-        .with_model_resolver(resolver);
+        .with_model_resolver(resolver)
+        .with_cwd(agent.cwd.clone(), agent.workspace_roots.clone());
         agent.subagent_runner = Some(Arc::new(runner));
         agent.subagent_defs = subagent_defs.to_vec();
 
@@ -4165,7 +4201,8 @@ async fn build_and_run(
             agent.tools.values().cloned().collect(),
             dispatcher.clone(),
         )
-        .with_model_resolver(resolver);
+        .with_model_resolver(resolver)
+        .with_cwd(agent.cwd.clone(), agent.workspace_roots.clone());
         agent.subagent_runner = Some(Arc::new(runner));
         agent.subagent_defs = subagent_defs.to_vec();
         agent.tools.insert(
@@ -4569,5 +4606,37 @@ fn context_display_name(path: &std::path::Path) -> String {
         leaf.to_string()
     } else {
         format!("{leaf} in {dir}/")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_socket_bound_by_default() {
+        // Plain `mew daemon`: no socket, no port, not iroh — binds the default socket.
+        assert!(daemon_binds_unix_socket(false, false, false));
+    }
+
+    #[test]
+    fn explicit_socket_binds_unix() {
+        // `--socket` given: binds unix regardless of `--port`.
+        assert!(daemon_binds_unix_socket(true, false, false));
+        assert!(daemon_binds_unix_socket(true, true, false));
+    }
+
+    #[test]
+    fn tcp_only_does_not_bind_unix() {
+        // `--port` without `--socket`: TCP-only, no unix socket.
+        assert!(!daemon_binds_unix_socket(false, true, false));
+    }
+
+    #[test]
+    fn iroh_never_binds_unix() {
+        // `--iroh` binds no unix socket in any combination.
+        assert!(!daemon_binds_unix_socket(false, false, true));
+        assert!(!daemon_binds_unix_socket(true, false, true));
+        assert!(!daemon_binds_unix_socket(false, true, true));
     }
 }

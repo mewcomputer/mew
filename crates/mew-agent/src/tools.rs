@@ -272,8 +272,7 @@ impl Agent {
                 .get(&tc.tool_name)
                 .map(|t| t.sensitivity())
                 .unwrap_or(Sensitivity::Dangerous);
-            let engine_cwd =
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let engine_cwd = self.cwd.clone();
             let (decision, deny_reason) = self
                 .resolve_permission_decision(
                     &tc.tool_name,
@@ -539,7 +538,7 @@ impl Agent {
             let ctx = ToolCtx::new(
                 std::sync::Arc::new(mew_tools::ToolCtxShared {
                     session_id: self.session_id,
-                    cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                    cwd: self.cwd.clone(),
                     dispatcher: Some(self.dispatcher.clone()),
                     secrets: self.secrets.clone(),
                     shell_session: self.shell_session.clone(),
@@ -1391,7 +1390,7 @@ impl Agent {
                     let cwd_str = input.get("cwd").and_then(|v| v.as_str());
                     let cwd = cwd_str
                         .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                        .unwrap_or_else(|| self.cwd.clone());
                     let hook_call = mew_hooks::ToolCall {
                         tool_name: tc.tool_name.clone(),
                         call_id: tc.call_id.clone(),
@@ -1493,7 +1492,7 @@ impl Agent {
                     let cwd_str = input.get("cwd").and_then(|v| v.as_str());
                     let cwd = cwd_str
                         .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                        .unwrap_or_else(|| self.cwd.clone());
                     let hook_call = mew_hooks::ToolCall {
                         tool_name: tc.tool_name.clone(),
                         call_id: tc.call_id.clone(),

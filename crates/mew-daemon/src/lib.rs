@@ -170,8 +170,8 @@ impl DaemonServer {
     /// Blocks until the listener is closed, a signal (SIGINT/SIGTERM) is
     /// received, or an unrecoverable error occurs.
     pub async fn run(self, socket_path: &str) -> Result<()> {
-        // Remove stale socket.
-        let _ = std::fs::remove_file(socket_path);
+        // Check if the socket is already live; bail if so, remove if stale.
+        check_socket_liveness(socket_path)?;
 
         let listener = UnixListener::bind(socket_path)
             .with_context(|| format!("bind socket {}", socket_path))?;
@@ -1267,6 +1267,29 @@ async fn generate_session_title(agent: &Agent, prompt_text: &str) -> String {
     }
 }
 
+/// Check if a Unix socket path has a live daemon listening.
+///
+/// If a connection succeeds, a daemon is already running — bail with an error.
+/// If the connection is refused (or the path doesn't exist), the socket is stale
+/// (or absent) — remove it and return Ok so the caller can bind.
+///
+/// This should be called before `daemonize()` in `main()` so the error reaches
+/// the terminal, and again inside `run()` as a safety net.
+pub fn check_socket_liveness(socket_path: &str) -> Result<()> {
+    use std::os::unix::net::UnixStream;
+    match UnixStream::connect(socket_path) {
+        Ok(_) => anyhow::bail!(
+            "a mew daemon is already running at {socket_path}. \
+             Stop it first (`mew daemon --stop`) or use a different --socket path."
+        ),
+        Err(_) => {
+            // Connection refused or path doesn't exist — stale or absent.
+            let _ = std::fs::remove_file(socket_path);
+            Ok(())
+        }
+    }
+}
+
 /// Fallback: derive a short session title from the first user message.
 /// Truncates to 60 chars, collapses whitespace, strips newlines.
 fn derive_session_title(text: &str) -> String {
@@ -1711,4 +1734,48 @@ async fn send_msg<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let json = mew_protocol::encode_json(&msg)?;
     ws_tx.send(Message::Text(json)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_socket_liveness_guard_rejects_live_socket() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+
+        // Bind a listener to simulate a running daemon.
+        let _listener = UnixListener::bind(&socket_path).unwrap();
+
+        // check_socket_liveness should fail — a daemon is already listening.
+        let result = check_socket_liveness(socket_path.to_str().unwrap());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("already running"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn test_socket_liveness_guard_removes_stale_socket() {
+        // Create a file at the socket path that isn't a listening socket.
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("stale.sock");
+        std::fs::write(&socket_path, b"stale").unwrap();
+
+        // check_socket_liveness should succeed — connection will be refused,
+        // stale file removed.
+        let result = check_socket_liveness(socket_path.to_str().unwrap());
+        assert!(result.is_ok(), "stale socket should be removed: {result:?}");
+        assert!(!socket_path.exists(), "stale socket file should be removed");
+    }
+
+    #[test]
+    fn test_socket_liveness_guard_ok_when_no_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("nonexistent.sock");
+
+        let result = check_socket_liveness(socket_path.to_str().unwrap());
+        assert!(result.is_ok(), "missing socket should be fine: {result:?}");
+    }
 }
