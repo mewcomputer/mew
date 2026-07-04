@@ -45,6 +45,12 @@ pub struct MessagePart {
     pub text: Option<String>,
     pub tool_name: Option<String>,
     pub tool_state: Option<String>,
+    pub tool_input: Option<String>,
+    pub tool_output: Option<String>,
+    pub tool_error: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub tool_time_start: Option<i64>,
+    pub tool_time_end: Option<i64>,
 }
 
 /// What kind of part this is.
@@ -132,6 +138,12 @@ impl SessionState {
                                 text: Some(tp.text.clone()),
                                 tool_name: None,
                                 tool_state: None,
+                                tool_input: None,
+                                tool_output: None,
+                                tool_error: None,
+                                tool_call_id: None,
+                                tool_time_start: None,
+                                tool_time_end: None,
                             },
                         )
                     }
@@ -143,18 +155,33 @@ impl SessionState {
                             text: Some(rp.text.clone()),
                             tool_name: None,
                             tool_state: None,
+                            tool_input: None,
+                            tool_output: None,
+                            tool_error: None,
+                            tool_call_id: None,
+                            tool_time_start: None,
+                            tool_time_end: None,
                         },
                     ),
-                    Part::ToolCall(tcp) => (
-                        tcp.base.id.to_string(),
-                        MessagePart {
-                            id: tcp.base.id.to_string(),
-                            kind: PartKind::ToolCall,
-                            text: None,
-                            tool_name: Some(tcp.tool_name.clone()),
-                            tool_state: Some(format!("{:?}", tcp.state).to_lowercase()),
-                        },
-                    ),
+                    Part::ToolCall(tcp) => {
+                        let (input_str, output, error, time_start, time_end) = tool_state_fields(&tcp.state);
+                        (
+                            tcp.base.id.to_string(),
+                            MessagePart {
+                                id: tcp.base.id.to_string(),
+                                kind: PartKind::ToolCall,
+                                text: None,
+                                tool_name: Some(tcp.tool_name.clone()),
+                                tool_state: Some(format!("{:?}", tcp.state).to_lowercase()),
+                                tool_input: input_str,
+                                tool_output: output,
+                                tool_error: error,
+                                tool_call_id: Some(tcp.call_id.clone()),
+                                tool_time_start: time_start,
+                                tool_time_end: time_end,
+                            },
+                        )
+                    }
                     _ => return false,
                 };
 
@@ -202,6 +229,35 @@ impl SessionState {
                 true
             }
             _ => false,
+        }
+    }
+}
+
+/// Extracted fields from a `ToolState`.
+type ToolFields = (Option<String>, Option<String>, Option<String>, Option<i64>, Option<i64>);
+
+/// Extract input/output/error/time fields from a `ToolState`.
+pub fn tool_state_fields(state: &mew_message::ToolState) -> ToolFields {
+    use mew_message::ToolState;
+    match state {
+        ToolState::Pending(s) => {
+            let input = serde_json::to_string_pretty(&s.input).ok();
+            (input, None, None, Some(s.time.start), s.time.end)
+        }
+        ToolState::Running(s) => {
+            let input = serde_json::to_string_pretty(&s.input).ok();
+            let output = if s.output.is_empty() { None } else { Some(s.output.clone()) };
+            (input, output, None, Some(s.time.start), s.time.end)
+        }
+        ToolState::Completed(s) => {
+            let input = serde_json::to_string_pretty(&s.input).ok();
+            let output = if s.output.is_empty() { None } else { Some(s.output.clone()) };
+            (input, output, None, Some(s.time.start), s.time.end)
+        }
+        ToolState::Error(s) => {
+            let input = serde_json::to_string_pretty(&s.input).ok();
+            let error = if s.error.is_empty() { None } else { Some(s.error.clone()) };
+            (input, None, error, Some(s.time.start), s.time.end)
         }
     }
 }

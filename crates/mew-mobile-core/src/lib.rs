@@ -776,6 +776,12 @@ fn translate_message(
                                 text: Some(tp.text.clone()),
                                 tool_name: None,
                                 tool_state: None,
+                                tool_input: None,
+                                tool_output: None,
+                                tool_error: None,
+                                tool_call_id: None,
+                                tool_time_start: None,
+                                tool_time_end: None,
                             },
                             Part::Reasoning(rp) => state::MessagePart {
                                 id: rp.base.id.to_string(),
@@ -783,13 +789,28 @@ fn translate_message(
                                 text: Some(rp.text.clone()),
                                 tool_name: None,
                                 tool_state: None,
+                                tool_input: None,
+                                tool_output: None,
+                                tool_error: None,
+                                tool_call_id: None,
+                                tool_time_start: None,
+                                tool_time_end: None,
                             },
-                            Part::ToolCall(tcp) => state::MessagePart {
-                                id: tcp.base.id.to_string(),
-                                kind: state::PartKind::ToolCall,
-                                text: None,
-                                tool_name: Some(tcp.tool_name.clone()),
-                                tool_state: Some(format!("{:?}", tcp.state).to_lowercase()),
+                            Part::ToolCall(tcp) => {
+                                let (input_str, output, error, time_start, time_end) = state::tool_state_fields(&tcp.state);
+                                state::MessagePart {
+                                    id: tcp.base.id.to_string(),
+                                    kind: state::PartKind::ToolCall,
+                                    text: None,
+                                    tool_name: Some(tcp.tool_name.clone()),
+                                    tool_state: Some(format!("{:?}", tcp.state).to_lowercase()),
+                                    tool_input: input_str,
+                                    tool_output: output,
+                                    tool_error: error,
+                                    tool_call_id: Some(tcp.call_id.clone()),
+                                    tool_time_start: time_start,
+                                    tool_time_end: time_end,
+                                }
                             },
                             _ => state::MessagePart {
                                 id: ulid::Ulid::new().to_string(),
@@ -797,6 +818,12 @@ fn translate_message(
                                 text: None,
                                 tool_name: None,
                                 tool_state: None,
+                                tool_input: None,
+                                tool_output: None,
+                                tool_error: None,
+                                tool_call_id: None,
+                                tool_time_start: None,
+                                tool_time_end: None,
                             },
                         })
                         .collect();
@@ -883,8 +910,15 @@ fn translate_message(
                                 p.kind = state::PartKind::Text;
                             }
                             Part::ToolCall(tcp) => {
+                                let (input_str, output, error, time_start, time_end) = state::tool_state_fields(&tcp.state);
                                 p.tool_name = Some(tcp.tool_name.clone());
                                 p.tool_state = Some(format!("{:?}", tcp.state).to_lowercase());
+                                p.tool_input = input_str;
+                                p.tool_output = output;
+                                p.tool_error = error;
+                                p.tool_call_id = Some(tcp.call_id.clone());
+                                p.tool_time_start = time_start;
+                                p.tool_time_end = time_end;
                                 p.kind = state::PartKind::ToolCall;
                             }
                             Part::Reasoning(rp) => {
@@ -931,6 +965,12 @@ fn translate_message(
                         text: Some(text.clone()),
                         tool_name: None,
                         tool_state: None,
+                        tool_input: None,
+                        tool_output: None,
+                        tool_error: None,
+                        tool_call_id: None,
+                        tool_time_start: None,
+                        tool_time_end: None,
                     }],
                 });
             }
