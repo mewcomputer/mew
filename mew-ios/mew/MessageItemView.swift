@@ -40,18 +40,18 @@ struct MessageItemView: View {
                 if part.kind == .text, let text = part.text, !text.isEmpty {
                     Text(markdown(text))
                         .font(.body)
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.primary)
                         .textSelection(.enabled)
                 } else if part.kind == .error, let text = part.text {
                     Text(text)
                         .font(.body)
-                        .foregroundStyle(.white.opacity(0.9))
+                        .foregroundStyle(.red)
                 }
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .frame(maxWidth: 320, alignment: .trailing)
     }
 
@@ -67,7 +67,8 @@ struct MessageItemView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .frame(maxWidth: 360, alignment: .leading)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        // Assistant messages render with no background — the chat surface
+        // shows through and user bubbles provide the only visual separation.
     }
 
     @ViewBuilder
