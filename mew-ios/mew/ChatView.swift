@@ -448,22 +448,22 @@ struct ChatBar: View {
     private let glassShape = RoundedRectangle(cornerRadius: 28, style: .continuous)
 
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 2) {
             // Row 1: textfield only
             textField
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
-                .padding(.bottom, 8)
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
 
             // Row 2: + | modelName | flex | submit
-            HStack(spacing: 14) {
+            HStack(spacing: 10) {
                 attachmentsButton
                 modelPickerChip
-                Spacer(minLength: 12)
+                Spacer(minLength: 8)
                 sendOrCancelButton
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 12)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
         }
         .background(
             glassShape
