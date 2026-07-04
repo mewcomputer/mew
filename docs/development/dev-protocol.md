@@ -35,6 +35,7 @@ Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
 | `ListModels` | | Request the available model list |
 | `SwitchModel` | `provider: String`, `model: String` | Switch to a different model |
 | `SetThinkingVariant` | `variant: String` | Set or clear thinking variant ("off" or "none" disables) |
+| `ListProjects` | | List known projects (recent cwds + `workspace.roots`) |
 
 ## Server → Client messages
 
@@ -80,6 +81,7 @@ Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
 |---------|--------|---------|
 | `ModelList` | `models: Vec<ModelInfo>` | Response to `ListModels` |
 | `ModelSwitched` | `provider`, `model` | Confirms model switch |
+| `ProjectList` | `projects: Vec<ProjectInfo>` | Response to `ListProjects` |
 | `ThinkingVariantChanged` | `variant?: String` | Confirms thinking variant (null = disabled) |
 | `TodosUpdated` | `todos: Vec<Todo>` | Session todo list changed |
 | `PersonaSwitchRequested` | `name` | `switch_persona` tool was called |
@@ -106,6 +108,26 @@ pub struct Session {
     pub provider: Mutex<Option<String>>,
 }
 ```
+
+## Project discovery
+
+`ListProjects` returns `ProjectInfo` entries derived from session metas
+on disk (their `cwd` field) plus configured `workspace.roots`. Paths are
+canonicalized on the daemon for dedupe; clients display `display_name`
+(last path component).
+
+```rust
+pub struct ProjectInfo {
+    pub path: String,
+    pub display_name: String,
+    pub session_count: u32,
+    pub last_used_at: Option<i64>,
+}
+```
+
+`NewSession { cwd }` validates the cwd before creating the session —
+the path must exist and be a directory. Bad paths return
+`ServerMessage::Error` and no session is created.
 
 - **Broadcasting**: `session.broadcast(msg)` sends to all attached clients
   and removes any that have disconnected.

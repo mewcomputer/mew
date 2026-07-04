@@ -335,3 +335,33 @@ Audited the iOS app + mew-mobile-core against the spec, wrote `notes/mew-ios-imp
 ## 2026-07-03 (later): headless TUI harness
 
 Added `mew_tui::harness` — a deterministic, headless driver for the TUI so agents (and tests) can exercise it without a real terminal, provider, or async runtime. Wraps `App` over ratatui's `TestBackend`; feeds synthetic keyboard events and `AgentEvent`s; renders frames to text. Line-based script format (`type`/`key`/`submit`/`say`/`error`/`snapshot`/`size`) via `run_script`, driven by `examples/tui_driver.rs` (`cargo run -p mew-tui --example tui_driver -- <script>`). Sample at `examples/demo.tuiscript`. Zero new deps (reuses mew-message/mew-provider/mew-agent types + ratatui TestBackend). 5 harness unit tests; clippy clean. Deliberately kept out of `main.rs` (a `mew --tui-script` shim can wrap it later) to avoid colliding with the in-flight daemon-multi-workspace work.
+
+## 2026-07-04: Clients multi-workspace plan (Complete)
+
+Implemented the full plan from `notes/mew-clients-multi-workspace-plan.md`:
+
+**Protocol + daemon** (commit c54bd32c):
+- New `ClientMessage::ListProjects` (unit variant) + `ServerMessage::ProjectList { projects: Vec<ProjectInfo> }`
+- New `ProjectInfo` struct: `path`, `display_name`, `session_count`, `last_used_at`
+- Daemon handler walks `session_dir`, reads `meta.json` for each, dedupes by canonicalized path, sorts by recency
+- `NewSession { cwd }` now validates: must exist and be a directory. Bad paths return `ServerMessage::Error`
+- Added to exhaustive tag tests, new roundtrip test
+
+**Web** (commit 67356567):
+- New `ProjectInfo` interface, `project-list` event, `listProjects()` method on MewClient
+- Store: `projects`/`projectsLoading` state, `onProjectList` handler, bridge registration
+- SessionRail: project picker modal (recent projects list + free-text path input). + button opens picker; selecting a project calls `client.newSession(cwd)`
+
+**iOS** (commit 71fa60ce):
+- New `ProjectInfo` UniFFI record, `CoreEvent::ProjectList` variant
+- New `list_projects()` method on mobile-core, handler in `translate_message`
+- AppStore: `projectLists`/`projectsLoading` state, `fetchProjects()`, `newSession(cwd:)`
+- SessionRailView: new `ProjectPickerSheet` opens from + button, lists recent projects + free-text path
+- project.yml: added scheme so xcodebuild can build the app
+
+**Docs**:
+- `docs/using-mew/web-ui.md`: project picker bullet in "What you see"
+- `docs/using-mew/ios-app.md`: project picker behavior in session rail
+- `docs/development/dev-protocol.md`: ListProjects/ProjectList tables + Project discovery section + cwd validation note
+
+70 protocol tests pass, all builds clean (Rust + web + iOS).

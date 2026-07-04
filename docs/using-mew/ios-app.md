@@ -67,7 +67,10 @@ Per-daemon session list, sorted by attention:
 4. **Idle** (gray) — sessions waiting for input
 
 Swipe actions: pin, archive, delete (with confirmation). Tap **+** to
-create a new session.
+create a new session — opens a project picker showing recent projects
+(derived from previous session cwds and `workspace.roots`) plus a
+free-text path input. The daemon validates the chosen cwd before
+creating the session, and rejects bad paths with an error.
 
 ### Chat view
 
