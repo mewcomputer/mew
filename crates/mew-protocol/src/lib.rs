@@ -1552,6 +1552,10 @@ mod tests {
 
     #[test]
     fn every_client_variant_has_distinct_type_tag() {
+        // Exhaustive: every variant of `ClientMessage` must serialize with the
+        // snake_case `type` tag derived from its Rust name, and every tag must
+        // be distinct. Catches typos in `#[serde(rename)]`, camelCase leaks,
+        // and accidental tag collisions.
         let samples: Vec<(&'static str, ClientMessage)> = vec![
             (
                 "new_session",
@@ -1561,6 +1565,35 @@ mod tests {
                 },
             ),
             (
+                "attach_session",
+                ClientMessage::AttachSession {
+                    session_id: "s".into(),
+                    client_kind: ClientKind::Unknown,
+                },
+            ),
+            ("list_sessions", ClientMessage::ListSessions),
+            (
+                "delete_session",
+                ClientMessage::DeleteSession {
+                    session_id: "s".into(),
+                },
+            ),
+            (
+                "rename_session",
+                ClientMessage::RenameSession {
+                    session_id: "s".into(),
+                    title: "t".into(),
+                },
+            ),
+            (
+                "set_auto_title",
+                ClientMessage::SetAutoTitle { enabled: true },
+            ),
+            (
+                "set_auto_summary",
+                ClientMessage::SetAutoSummary { enabled: true },
+            ),
+            (
                 "prompt",
                 ClientMessage::Prompt {
                     text: "x".into(),
@@ -1568,7 +1601,6 @@ mod tests {
                 },
             ),
             ("cancel", ClientMessage::Cancel),
-            ("ping", ClientMessage::Ping),
             (
                 "permission_response",
                 ClientMessage::PermissionResponse {
@@ -1589,16 +1621,470 @@ mod tests {
                     command: "/help".into(),
                 },
             ),
+            ("list_models", ClientMessage::ListModels),
+            (
+                "switch_model",
+                ClientMessage::SwitchModel {
+                    provider: "p".into(),
+                    model: "m".into(),
+                },
+            ),
+            (
+                "set_thinking_variant",
+                ClientMessage::SetThinkingVariant {
+                    variant: "high".into(),
+                },
+            ),
+            (
+                "set_permission_mode",
+                ClientMessage::SetPermissionMode {
+                    mode: "standard".into(),
+                },
+            ),
+            ("yield_control", ClientMessage::YieldControl {}),
+            (
+                "create_group",
+                ClientMessage::CreateGroup {
+                    name: "g".into(),
+                    color: None,
+                },
+            ),
+            (
+                "update_group",
+                ClientMessage::UpdateGroup {
+                    group_id: "g".into(),
+                    name: None,
+                    color: None,
+                    order: None,
+                },
+            ),
+            (
+                "delete_group",
+                ClientMessage::DeleteGroup {
+                    group_id: "g".into(),
+                },
+            ),
+            (
+                "assign_session_group",
+                ClientMessage::AssignSessionGroup {
+                    session_id: "s".into(),
+                    group_id: None,
+                    position: None,
+                },
+            ),
+            (
+                "archive_session",
+                ClientMessage::ArchiveSession {
+                    session_id: "s".into(),
+                    archived: true,
+                },
+            ),
+            (
+                "pin_session",
+                ClientMessage::PinSession {
+                    session_id: "s".into(),
+                    pinned: true,
+                },
+            ),
+            (
+                "list_dir",
+                ClientMessage::ListDir {
+                    session_id: "s".into(),
+                    path: None,
+                },
+            ),
+            (
+                "read_file_preview",
+                ClientMessage::ReadFilePreview {
+                    session_id: "s".into(),
+                    path: "/x".into(),
+                    max_bytes: None,
+                },
+            ),
+            (
+                "git_status",
+                ClientMessage::GitStatus {
+                    session_id: "s".into(),
+                },
+            ),
+            (
+                "watch_workspace",
+                ClientMessage::WatchWorkspace {
+                    session_id: "s".into(),
+                    enabled: true,
+                },
+            ),
+            (
+                "open_path",
+                ClientMessage::OpenPath {
+                    session_id: "s".into(),
+                    path: "/x".into(),
+                },
+            ),
+            (
+                "unflag_file",
+                ClientMessage::UnflagFile {
+                    session_id: "s".into(),
+                    path: "/x".into(),
+                },
+            ),
+            ("ping", ClientMessage::Ping),
         ];
-        for (expected, msg) in samples {
-            let json = encode_json(&msg).unwrap();
+
+        let mut seen: Vec<&'static str> = Vec::with_capacity(samples.len());
+        for (expected, msg) in &samples {
+            let json = encode_json(msg).unwrap();
             assert!(
                 json.contains(&format!(r#""type":"{}""#, expected)),
-                "tag mismatch for {}: {}",
+                "tag mismatch for {}: expected {:?}, got {}",
+                expected,
                 expected,
                 json
             );
+            assert!(
+                !seen.contains(expected),
+                "duplicate expected tag {:?} in client samples",
+                expected
+            );
+            seen.push(*expected);
         }
+        assert_eq!(
+            seen.len(),
+            samples.len(),
+            "client tag list should have no duplicates"
+        );
+    }
+
+    #[test]
+    fn every_server_variant_has_distinct_type_tag() {
+        // Exhaustive: every variant of `ServerMessage` must serialize with the
+        // snake_case `type` tag derived from its Rust name, and every tag must
+        // be distinct. Catches typos in `#[serde(rename)]`, camelCase leaks,
+        // and accidental tag collisions.
+        let part = sample_text_part();
+        let samples: Vec<(&'static str, ServerMessage)> = vec![
+            (
+                "session_ready",
+                ServerMessage::SessionReady {
+                    session_id: "s".into(),
+                    model: None,
+                    provider: None,
+                    permission_mode: None,
+                },
+            ),
+            (
+                "error",
+                ServerMessage::Error {
+                    message: "boom".into(),
+                },
+            ),
+            (
+                "provider",
+                ServerMessage::Provider {
+                    event: mew_message::ProviderEventWire::PartStart { part: part.clone() },
+                },
+            ),
+            (
+                "user_message",
+                ServerMessage::UserMessage {
+                    text: "hi".into(),
+                },
+            ),
+            (
+                "tool_start",
+                ServerMessage::ToolStart {
+                    call_id: "c".into(),
+                },
+            ),
+            (
+                "tool_end",
+                ServerMessage::ToolEnd {
+                    call_id: "c".into(),
+                    success: true,
+                },
+            ),
+            (
+                "part_updated",
+                ServerMessage::PartUpdated {
+                    part_id: mew_message::PartId::new(),
+                    part: part.clone(),
+                },
+            ),
+            (
+                "tool_progress",
+                ServerMessage::ToolProgress {
+                    call_id: "c".into(),
+                    chunk: "x".into(),
+                },
+            ),
+            (
+                "error_event",
+                ServerMessage::ErrorEvent {
+                    message: "boom".into(),
+                },
+            ),
+            (
+                "permission_request",
+                ServerMessage::PermissionRequest {
+                    request_id: 0,
+                    tool_name: "bash".into(),
+                    input: serde_json::Value::Null,
+                },
+            ),
+            (
+                "workspace_permission_request",
+                ServerMessage::WorkspacePermissionRequest {
+                    request_id: 0,
+                    path: "/x".into(),
+                },
+            ),
+            (
+                "ask_user_request",
+                ServerMessage::AskUserRequest {
+                    request_id: 0,
+                    call_id: "c".into(),
+                    questions: vec![],
+                },
+            ),
+            (
+                "subagent_start",
+                ServerMessage::SubagentStart {
+                    parent_call_id: "p".into(),
+                    name: "researcher".into(),
+                    child_session_id: "c".into(),
+                    display_name: None,
+                },
+            ),
+            (
+                "subagent_status",
+                ServerMessage::SubagentStatus {
+                    parent_call_id: "p".into(),
+                    tool_name: "bash".into(),
+                    message: "scanning".into(),
+                },
+            ),
+            (
+                "subagent_end",
+                ServerMessage::SubagentEnd {
+                    parent_call_id: "p".into(),
+                    child_session_id: "c".into(),
+                    outcome: SubagentOutcome::Completed,
+                },
+            ),
+            (
+                "subagent_permission_request",
+                ServerMessage::SubagentPermissionRequest {
+                    request_id: 0,
+                    parent_call_id: "p".into(),
+                    tool_name: "bash".into(),
+                    input: serde_json::Value::Null,
+                },
+            ),
+            (
+                "todos_updated",
+                ServerMessage::TodosUpdated { todos: vec![] },
+            ),
+            (
+                "persona_switch_requested",
+                ServerMessage::PersonaSwitchRequested {
+                    name: "n".into(),
+                },
+            ),
+            (
+                "job_update",
+                ServerMessage::JobUpdate {
+                    job_id: "j".into(),
+                    command: "ls".into(),
+                    state: "running".into(),
+                },
+            ),
+            (
+                "slash_result",
+                ServerMessage::SlashResult {
+                    text: "ok".into(),
+                },
+            ),
+            (
+                "request_resolved",
+                ServerMessage::RequestResolved { request_id: 0 },
+            ),
+            ("session_cleared", ServerMessage::SessionCleared),
+            (
+                "session_list",
+                ServerMessage::SessionList { sessions: vec![] },
+            ),
+            (
+                "session_history",
+                ServerMessage::SessionHistory { messages: vec![] },
+            ),
+            (
+                "model_list",
+                ServerMessage::ModelList { models: vec![] },
+            ),
+            (
+                "model_switched",
+                ServerMessage::ModelSwitched {
+                    provider: "p".into(),
+                    model: "m".into(),
+                },
+            ),
+            (
+                "thinking_variant_changed",
+                ServerMessage::ThinkingVariantChanged { variant: None },
+            ),
+            (
+                "permission_mode_changed",
+                ServerMessage::PermissionModeChanged {
+                    mode: "standard".into(),
+                },
+            ),
+            (
+                "client_attached",
+                ServerMessage::ClientAttached {
+                    client_id: 0,
+                    client_kind: ClientKind::Unknown,
+                },
+            ),
+            (
+                "client_detached",
+                ServerMessage::ClientDetached { client_id: 0 },
+            ),
+            (
+                "control_yielded",
+                ServerMessage::ControlYielded { client_id: 0 },
+            ),
+            (
+                "session_title_changed",
+                ServerMessage::SessionTitleChanged {
+                    session_id: "s".into(),
+                    title: "t".into(),
+                },
+            ),
+            (
+                "session_summary_changed",
+                ServerMessage::SessionSummaryChanged {
+                    session_id: "s".into(),
+                    summary: "sm".into(),
+                },
+            ),
+            (
+                "session_activity_changed",
+                ServerMessage::SessionActivityChanged {
+                    session_id: "s".into(),
+                    activity: SessionState::Active,
+                },
+            ),
+            (
+                "session_stats_changed",
+                ServerMessage::SessionStatsChanged {
+                    session_id: "s".into(),
+                    added: 0,
+                    removed: 0,
+                    files_changed: 0,
+                },
+            ),
+            (
+                "group_list",
+                ServerMessage::GroupList { groups: vec![] },
+            ),
+            (
+                "groups_changed",
+                ServerMessage::GroupsChanged { groups: vec![] },
+            ),
+            (
+                "dir_listing",
+                ServerMessage::DirListing {
+                    path: "/".into(),
+                    entries: vec![],
+                },
+            ),
+            (
+                "file_preview",
+                ServerMessage::FilePreview {
+                    path: "/x".into(),
+                    content: "c".into(),
+                    truncated: false,
+                    language: None,
+                },
+            ),
+            (
+                "git_status_result",
+                ServerMessage::GitStatusResult { entries: vec![] },
+            ),
+            (
+                "fs_changed",
+                ServerMessage::FsChanged { paths: vec![] },
+            ),
+            (
+                "session_usage_changed",
+                ServerMessage::SessionUsageChanged {
+                    session_id: "s".into(),
+                    usage: SessionUsageWire::from(&mew_session::SessionUsage::default()),
+                },
+            ),
+            (
+                "session_alert",
+                ServerMessage::SessionAlert {
+                    session_id: "s".into(),
+                    title: "t".into(),
+                    kind: AlertKind::TurnComplete,
+                    detail: None,
+                },
+            ),
+            (
+                "flagged_files_changed",
+                ServerMessage::FlaggedFilesChanged {
+                    session_id: "s".into(),
+                    files: vec![],
+                },
+            ),
+            (
+                "session_meta_changed",
+                ServerMessage::SessionMetaChanged {
+                    session_id: "s".into(),
+                    archived: None,
+                    pinned: None,
+                    group_id: None,
+                },
+            ),
+            (
+                "session_attention_changed",
+                ServerMessage::SessionAttentionChanged {
+                    session_id: "s".into(),
+                    pending_permissions: 0,
+                    pending_questions: 0,
+                },
+            ),
+            (
+                "pong",
+                ServerMessage::Pong {
+                    version: "0.0.0".into(),
+                },
+            ),
+        ];
+
+        let mut seen: Vec<&'static str> = Vec::with_capacity(samples.len());
+        for (expected, msg) in &samples {
+            let json = encode_json(msg).unwrap();
+            assert!(
+                json.contains(&format!(r#""type":"{}""#, expected)),
+                "tag mismatch for {}: expected {:?}, got {}",
+                expected,
+                expected,
+                json
+            );
+            assert!(
+                !seen.contains(expected),
+                "duplicate expected tag {:?} in server samples",
+                expected
+            );
+            seen.push(*expected);
+        }
+        assert_eq!(
+            seen.len(),
+            samples.len(),
+            "server tag list should have no duplicates"
+        );
     }
 
     // -- Converters ----------------------------------------------------------
