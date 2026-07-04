@@ -213,7 +213,11 @@ impl SessionManager {
     /// Create a brand-new session.
     pub async fn create(&self, cwd: Option<PathBuf>) -> Result<Arc<Session>> {
         let session_id = format!("sess_{}", ulid::Ulid::new());
-        let writer = mew_session::Writer::open_at(&self.session_dir, &session_id)
+        let mut meta = mew_session::Meta::new(&session_id);
+        if let Some(ref c) = cwd {
+            meta.cwd = Some(c.display().to_string());
+        }
+        let writer = mew_session::Writer::open_at_with_meta(&self.session_dir, &session_id, meta)
             .await
             .context("open session writer")?;
         let (agent, model, provider) = (self.builder)(AgentBuildParams {

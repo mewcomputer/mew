@@ -98,6 +98,9 @@ pub struct DaemonServer {
     pub session_manager: Arc<SessionManager>,
     /// Session groups sidecar store (groups.json).
     pub groups_store: Arc<groups::GroupsStore>,
+    /// Daemon-wide flag for auto-summary. Shared across all connections
+    /// so the idle-summary task is spawned once, not per-connection.
+    pub auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DaemonServer {
@@ -141,6 +144,7 @@ impl DaemonServer {
             thinking_setter: None,
             session_manager,
             groups_store,
+            auto_summary_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 
@@ -180,6 +184,17 @@ impl DaemonServer {
         let session_manager = self.session_manager.clone();
         let groups_store = self.groups_store.clone();
         let thinking_setter = self.thinking_setter.clone();
+        let auto_summary_enabled = self.auto_summary_enabled.clone();
+
+        // Spawn the idle-summary task once (daemon-wide, not per-connection).
+        {
+            let sm = session_manager.clone();
+            let flag = auto_summary_enabled.clone();
+            tokio::spawn(async move {
+                idle_summary_task(sm, flag).await;
+            });
+        }
+
         let mut id_counter = 0u64;
 
         let mut sig_term =
@@ -200,9 +215,10 @@ impl DaemonServer {
                             let session_manager = session_manager.clone();
                             let groups_store = groups_store.clone();
                             let thinking_setter = thinking_setter.clone();
+                            let auto_summary_enabled = auto_summary_enabled.clone();
                             tokio::spawn(async move {
                                 info!(conn_id, "connection accepted");
-                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter).await {
+                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter, auto_summary_enabled).await {
                                     if !e.to_string().contains("connection reset") {
                                         warn!(conn_id, error = %e, "connection ended with error");
                                     }
@@ -233,6 +249,17 @@ impl DaemonServer {
         let session_manager = self.session_manager.clone();
         let groups_store = self.groups_store.clone();
         let thinking_setter = self.thinking_setter.clone();
+        let auto_summary_enabled = self.auto_summary_enabled.clone();
+
+        // Spawn the idle-summary task once (daemon-wide, not per-connection).
+        {
+            let sm = session_manager.clone();
+            let flag = auto_summary_enabled.clone();
+            tokio::spawn(async move {
+                idle_summary_task(sm, flag).await;
+            });
+        }
+
         let mut id_counter = 0u64;
 
         let mut sig_term =
@@ -253,9 +280,10 @@ impl DaemonServer {
                             let session_manager = session_manager.clone();
                             let groups_store = groups_store.clone();
                             let thinking_setter = thinking_setter.clone();
+                            let auto_summary_enabled = auto_summary_enabled.clone();
                             tokio::spawn(async move {
                                 info!(conn_id, %peer, "connection accepted (tcp)");
-                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter).await {
+                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter, auto_summary_enabled).await {
                                     if !e.to_string().contains("connection reset") {
                                         warn!(conn_id, error = %e, "connection ended with error");
                                     }
@@ -284,6 +312,7 @@ async fn handle_connection<S>(
     session_manager: Arc<SessionManager>,
     groups_store: Arc<groups::GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
+    auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -299,19 +328,8 @@ where
     let mut client_id: Option<u64> = None;
     let mut auto_title_enabled = true;
 
-    // Shared flag for the idle-summary background task.
-    let auto_summary_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-
-    // Spawn the idle-summary background task. It periodically checks active
-    // sessions and generates a summary for sessions that have been idle
-    // for a while.
-    {
-        let auto_summary_enabled = auto_summary_enabled.clone();
-        let session_manager = session_manager.clone();
-        tokio::spawn(async move {
-            idle_summary_task(session_manager, auto_summary_enabled).await;
-        });
-    }
+    // auto_summary_enabled is passed in from the daemon (daemon-wide task
+    // is spawned once in run()/run_tcp(), not per-connection).
 
     // Spawn a writer task that owns the WebSocket sink.
     let mut ws_tx = ws_tx;
@@ -371,14 +389,8 @@ where
                                 Some(agent.permission_mode().id().to_string()),
                             )
                         };
-                        // Persist cwd on the session meta.
-                        if let Some(cwd_str) = &cwd {
-                            let dir = session_manager.session_dir.clone();
-                            let agent = session.agent.lock().await;
-                            if let Some(mut meta) = agent.session_meta().await {
-                                let _ = meta.set_cwd(&dir, cwd_str.clone()).await;
-                            }
-                        }
+                        // cwd is already persisted in meta at create time;
+                        // no need to set it again here.
                         reply(ServerMessage::SessionReady {
                             session_id,
                             model,
