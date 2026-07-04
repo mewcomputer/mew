@@ -3,8 +3,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use mew_hooks::{PermissionDecision, ToolCall as HookToolCall, ToolOutput};
 use mew_message::{
-    Message, Part, PartBase, PartId, ToolCallPart, ToolResultPart, ToolState, ToolStateCompleted,
-    ToolStateError, ToolStateRunning, ToolTime,
+    Message, MessageId, Part, PartBase, PartId, ToolCallPart, ToolResultPart, ToolState,
+    ToolStateCompleted, ToolStateError, ToolStateRunning, ToolTime,
 };
 use mew_tools::{Sensitivity, ToolCtx, ToolProgress};
 
@@ -160,6 +160,132 @@ impl Agent {
         (decision, deny_reason)
     }
 
+    /// Finalize a tool call with an error state. Handles the full
+    /// error-completion protocol: update assistant message, emit
+    /// PartUpdated, emit ToolEnd, push ToolResultPart, and call
+    /// on_tool_error hook.
+    #[allow(clippy::too_many_arguments)]
+    async fn finalize_tool_error(
+        &self,
+        tc: &ToolCallPart,
+        part_id: PartId,
+        assistant_id: MessageId,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        result_parts: &mut Vec<Part>,
+        input: &serde_json::Value,
+        error: String,
+    ) {
+        let now = Utc::now().timestamp_millis();
+        let error_state = ToolState::Error(ToolStateError {
+            input: input.clone(),
+            error: error.clone(),
+            time: ToolTime {
+                start: now,
+                end: Some(now),
+            },
+        });
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, error_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: error_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::ToolEnd {
+                call_id: tc.call_id.clone(),
+                success: false,
+            })
+            .await;
+        self.dispatcher
+            .on_tool_error(
+                &mew_hooks::ToolCall {
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    input: input.clone(),
+                },
+                &error,
+            )
+            .await;
+        result_parts.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            call_id: tc.call_id.clone(),
+        }));
+    }
+
+    /// Finalize a tool call with a success state. Handles the full
+    /// success-completion protocol: update assistant message, emit
+    /// PartUpdated, emit ToolEnd, push ToolResultPart. Does NOT call
+    /// on_tool_error (use finalize_tool_error for failures).
+    #[allow(clippy::too_many_arguments)]
+    async fn finalize_tool_success(
+        &self,
+        tc: &ToolCallPart,
+        part_id: PartId,
+        assistant_id: MessageId,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        result_parts: &mut Vec<Part>,
+        input: &serde_json::Value,
+        output: &str,
+        metadata: &Option<serde_json::Value>,
+        diff: &Option<String>,
+    ) {
+        let now = Utc::now().timestamp_millis();
+        let completed_state = ToolState::Completed(ToolStateCompleted {
+            input: input.clone(),
+            output: output.to_string(),
+            metadata: metadata.clone(),
+            diff: diff.clone(),
+            time: ToolTime {
+                start: now,
+                end: Some(now),
+            },
+        });
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, completed_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: completed_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::ToolEnd {
+                call_id: tc.call_id.clone(),
+                success: true,
+            })
+            .await;
+        result_parts.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            call_id: tc.call_id.clone(),
+        }));
+    }
+
     pub(crate) async fn execute_pending_tool_calls(
         &self,
         pending: &[ToolCallPart],
@@ -293,89 +419,34 @@ impl Agent {
                     Some(reason) => format!("permission denied: {reason}"),
                     None => "permission denied".to_string(),
                 };
-                let error_state = ToolState::Error(ToolStateError {
-                    input: hook_call.input.clone(),
-                    error: perm_error,
-                    time: ToolTime {
-                        start: Utc::now().timestamp_millis(),
-                        end: Some(Utc::now().timestamp_millis()),
-                    },
-                });
-                if let Some(ref mut msg) = assistant_msg {
-                    self.update_tool_call(msg, part_id, error_state.clone());
-                }
-                let _ = ev_tx
-                    .send(AgentEvent::PartUpdated {
-                        part_id,
-                        part: Part::ToolCall(ToolCallPart {
-                            base: tc.base.clone(),
-                            tool_name: tc.tool_name.clone(),
-                            call_id: tc.call_id.clone(),
-                            state: error_state,
-                            raw_input: tc.raw_input.clone(),
-                        }),
-                    })
-                    .await;
-                let _ = ev_tx
-                    .send(AgentEvent::ToolEnd {
-                        call_id: call_id.clone(),
-                        success: false,
-                    })
-                    .await;
-                result_parts.push(Part::ToolResult(ToolResultPart {
-                    base: PartBase {
-                        id: ulid::Ulid::new(),
-                        message_id: assistant_id,
-                        session_id: self.session_id,
-                    },
-                    call_id: tc.call_id.clone(),
-                }));
+                self.finalize_tool_error(
+                    tc,
+                    part_id,
+                    assistant_id,
+                    assistant_msg,
+                    ev_tx,
+                    &mut result_parts,
+                    &hook_call.input,
+                    perm_error,
+                )
+                .await;
                 continue;
             }
 
             let tool = match self.tools.get(&tc.tool_name) {
                 Some(t) => t,
                 None => {
-                    let error_state = ToolState::Error(ToolStateError {
-                        input: hook_call.input.clone(),
-                        error: format!("unknown tool {:?}", tc.tool_name),
-                        time: ToolTime {
-                            start: Utc::now().timestamp_millis(),
-                            end: Some(Utc::now().timestamp_millis()),
-                        },
-                    });
-                    if let Some(ref mut msg) = assistant_msg {
-                        self.update_tool_call(msg, part_id, error_state.clone());
-                    }
-                    let _ = ev_tx
-                        .send(AgentEvent::PartUpdated {
-                            part_id,
-                            part: Part::ToolCall(ToolCallPart {
-                                base: tc.base.clone(),
-                                tool_name: tc.tool_name.clone(),
-                                call_id: tc.call_id.clone(),
-                                state: error_state,
-                                raw_input: tc.raw_input.clone(),
-                            }),
-                        })
-                        .await;
-                    let _ = ev_tx
-                        .send(AgentEvent::ToolEnd {
-                            call_id: call_id.clone(),
-                            success: false,
-                        })
-                        .await;
-                    self.dispatcher
-                        .on_tool_error(&hook_call, "unknown tool")
-                        .await;
-                    result_parts.push(Part::ToolResult(ToolResultPart {
-                        base: PartBase {
-                            id: ulid::Ulid::new(),
-                            message_id: assistant_id,
-                            session_id: self.session_id,
-                        },
-                        call_id: tc.call_id.clone(),
-                    }));
+                    self.finalize_tool_error(
+                        tc,
+                        part_id,
+                        assistant_id,
+                        assistant_msg,
+                        ev_tx,
+                        &mut result_parts,
+                        &hook_call.input,
+                        format!("unknown tool {:?}", tc.tool_name),
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -401,43 +472,17 @@ impl Agent {
                         reason = %reason,
                         "tool-execute-before hook blocked the call"
                     );
-                    let error_state = ToolState::Error(ToolStateError {
-                        input: hook_call.input.clone(),
-                        error: format!("blocked by hook: {reason}"),
-                        time: ToolTime {
-                            start: Utc::now().timestamp_millis(),
-                            end: Some(Utc::now().timestamp_millis()),
-                        },
-                    });
-                    if let Some(ref mut msg) = assistant_msg {
-                        self.update_tool_call(msg, part_id, error_state.clone());
-                    }
-                    let _ = ev_tx
-                        .send(AgentEvent::PartUpdated {
-                            part_id,
-                            part: Part::ToolCall(ToolCallPart {
-                                base: tc.base.clone(),
-                                tool_name: tc.tool_name.clone(),
-                                call_id: tc.call_id.clone(),
-                                state: error_state,
-                                raw_input: tc.raw_input.clone(),
-                            }),
-                        })
-                        .await;
-                    let _ = ev_tx
-                        .send(AgentEvent::ToolEnd {
-                            call_id: call_id.clone(),
-                            success: false,
-                        })
-                        .await;
-                    result_parts.push(Part::ToolResult(ToolResultPart {
-                        base: PartBase {
-                            id: ulid::Ulid::new(),
-                            message_id: assistant_id,
-                            session_id: self.session_id,
-                        },
-                        call_id: tc.call_id.clone(),
-                    }));
+                    self.finalize_tool_error(
+                        tc,
+                        part_id,
+                        assistant_id,
+                        assistant_msg,
+                        ev_tx,
+                        &mut result_parts,
+                        &hook_call.input,
+                        format!("blocked by hook: {reason}"),
+                    )
+                    .await;
                     continue;
                 }
                 mew_hooks::HookOutcome::Suppress => {
@@ -448,43 +493,17 @@ impl Agent {
                     // Suppress behaves like Block but at debug level — the
                     // model still needs to see a result, so produce an error
                     // state with a generic message.
-                    let error_state = ToolState::Error(ToolStateError {
-                        input: hook_call.input.clone(),
-                        error: "tool call suppressed".into(),
-                        time: ToolTime {
-                            start: Utc::now().timestamp_millis(),
-                            end: Some(Utc::now().timestamp_millis()),
-                        },
-                    });
-                    if let Some(ref mut msg) = assistant_msg {
-                        self.update_tool_call(msg, part_id, error_state.clone());
-                    }
-                    let _ = ev_tx
-                        .send(AgentEvent::PartUpdated {
-                            part_id,
-                            part: Part::ToolCall(ToolCallPart {
-                                base: tc.base.clone(),
-                                tool_name: tc.tool_name.clone(),
-                                call_id: tc.call_id.clone(),
-                                state: error_state,
-                                raw_input: tc.raw_input.clone(),
-                            }),
-                        })
-                        .await;
-                    let _ = ev_tx
-                        .send(AgentEvent::ToolEnd {
-                            call_id: call_id.clone(),
-                            success: false,
-                        })
-                        .await;
-                    result_parts.push(Part::ToolResult(ToolResultPart {
-                        base: PartBase {
-                            id: ulid::Ulid::new(),
-                            message_id: assistant_id,
-                            session_id: self.session_id,
-                        },
-                        call_id: tc.call_id.clone(),
-                    }));
+                    self.finalize_tool_error(
+                        tc,
+                        part_id,
+                        assistant_id,
+                        assistant_msg,
+                        ev_tx,
+                        &mut result_parts,
+                        &hook_call.input,
+                        "tool call suppressed".into(),
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -553,45 +572,17 @@ impl Agent {
             if let Some(arg_path) = self.workspace_path_for_tool(&tc.tool_name, &input) {
                 let resolved = tool_cwd.join(&arg_path);
                 if let Err(msg) = self.ensure_workspace_path(&resolved, ev_tx).await {
-                    let error_msg = msg.clone();
-                    let error_state = ToolState::Error(ToolStateError {
-                        input: input.clone(),
-                        error: msg,
-                        time: ToolTime {
-                            start: Utc::now().timestamp_millis(),
-                            end: Some(Utc::now().timestamp_millis()),
-                        },
-                    });
-                    if let Some(ref mut msg) = assistant_msg {
-                        self.update_tool_call(msg, part_id, error_state.clone());
-                    }
-                    let _ = ev_tx
-                        .send(AgentEvent::PartUpdated {
-                            part_id,
-                            part: Part::ToolCall(ToolCallPart {
-                                base: tc.base.clone(),
-                                tool_name: tc.tool_name.clone(),
-                                call_id: tc.call_id.clone(),
-                                state: error_state,
-                                raw_input: tc.raw_input.clone(),
-                            }),
-                        })
-                        .await;
-                    let _ = ev_tx
-                        .send(AgentEvent::ToolEnd {
-                            call_id: call_id.clone(),
-                            success: false,
-                        })
-                        .await;
-                    self.dispatcher.on_tool_error(&hook_call, &error_msg).await;
-                    result_parts.push(Part::ToolResult(ToolResultPart {
-                        base: PartBase {
-                            id: ulid::Ulid::new(),
-                            message_id: assistant_id,
-                            session_id: self.session_id,
-                        },
-                        call_id: tc.call_id.clone(),
-                    }));
+                    self.finalize_tool_error(
+                        tc,
+                        part_id,
+                        assistant_id,
+                        assistant_msg,
+                        ev_tx,
+                        &mut result_parts,
+                        &input,
+                        msg,
+                    )
+                    .await;
                     continue;
                 }
             }
@@ -628,90 +619,63 @@ impl Agent {
                 .await;
 
             tracing::info!(tool = %tc.tool_name, call_id = %call_id, success = %output.error.is_empty(), "tool finished");
-            let (success, final_state) = if !output.error.is_empty() {
-                (
-                    false,
-                    ToolState::Error(ToolStateError {
-                        input: input.clone(),
-                        error: output.error.clone(),
-                        time: ToolTime {
-                            start: Utc::now().timestamp_millis(),
-                            end: Some(Utc::now().timestamp_millis()),
-                        },
-                    }),
-                )
-            } else {
-                (
-                    true,
-                    ToolState::Completed(ToolStateCompleted {
-                        input: input.clone(),
-                        output: output.output.clone(),
-                        metadata: output.metadata.clone(),
-                        diff: output.diff.clone(),
-                        time: ToolTime {
-                            start: Utc::now().timestamp_millis(),
-                            end: Some(Utc::now().timestamp_millis()),
-                        },
-                    }),
-                )
-            };
 
-            if let Some(ref mut msg) = assistant_msg {
-                self.update_tool_call(msg, part_id, final_state.clone());
-            }
-            let _ = ev_tx
-                .send(AgentEvent::PartUpdated {
+            if !output.error.is_empty() {
+                // Tool returned an error in its output.
+                self.finalize_tool_error(
+                    tc,
                     part_id,
-                    part: Part::ToolCall(ToolCallPart {
-                        base: tc.base.clone(),
-                        tool_name: tc.tool_name.clone(),
-                        call_id: tc.call_id.clone(),
-                        state: final_state,
-                        raw_input: tc.raw_input.clone(),
-                    }),
-                })
+                    assistant_id,
+                    assistant_msg,
+                    ev_tx,
+                    &mut result_parts,
+                    &input,
+                    output.error.clone(),
+                )
                 .await;
-            let _ = ev_tx
-                .send(AgentEvent::ToolEnd {
-                    call_id: call_id.clone(),
-                    success,
-                })
+            } else {
+                // Tool succeeded.
+                // If the tool produced a file delta, emit it so the daemon can
+                // accumulate per-session change stats.
+                if let Some(delta) = &output.file_delta {
+                    let _ = ev_tx
+                        .send(AgentEvent::FileDelta {
+                            path: delta.path.clone(),
+                            added: delta.added,
+                            removed: delta.removed,
+                        })
+                        .await;
+                }
+                // If the flag_important tool ran, emit the current flagged-files set.
+                if tc.tool_name == "flag_important" {
+                    let files: Vec<crate::FlaggedFileInfo> = self
+                        .flagged_files
+                        .lock()
+                        .await
+                        .iter()
+                        .map(|f| crate::FlaggedFileInfo {
+                            path: f.path.display().to_string(),
+                            reason: Some(
+                                mew_tools::tools::flag_important::flag_mode_label(f.mode).to_string(),
+                            ),
+                        })
+                        .collect();
+                    let _ = ev_tx.send(AgentEvent::FlaggedFilesChanged { files }).await;
+                }
+                self.finalize_tool_success(
+                    tc,
+                    part_id,
+                    assistant_id,
+                    assistant_msg,
+                    ev_tx,
+                    &mut result_parts,
+                    &input,
+                    &output.output,
+                    &output.metadata,
+                    &output.diff,
+                )
                 .await;
-            // If the tool produced a file delta, emit it so the daemon can
-            // accumulate per-session change stats.
-            if let Some(delta) = &output.file_delta {
-                let _ = ev_tx
-                    .send(AgentEvent::FileDelta {
-                        path: delta.path.clone(),
-                        added: delta.added,
-                        removed: delta.removed,
-                    })
-                    .await;
             }
-            // If the flag_important tool ran, emit the current flagged-files set.
-            if tc.tool_name == "flag_important" {
-                let files: Vec<crate::FlaggedFileInfo> = self
-                    .flagged_files
-                    .lock()
-                    .await
-                    .iter()
-                    .map(|f| crate::FlaggedFileInfo {
-                        path: f.path.display().to_string(),
-                        reason: Some(
-                            mew_tools::tools::flag_important::flag_mode_label(f.mode).to_string(),
-                        ),
-                    })
-                    .collect();
-                let _ = ev_tx.send(AgentEvent::FlaggedFilesChanged { files }).await;
-            }
-            result_parts.push(Part::ToolResult(ToolResultPart {
-                base: PartBase {
-                    id: ulid::Ulid::new(),
-                    message_id: assistant_id,
-                    session_id: self.session_id,
-                },
-                call_id: tc.call_id.clone(),
-            }));
         }
         result_parts
     }
