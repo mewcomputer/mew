@@ -188,6 +188,8 @@ interface SessionState {
   // Session list
   availableSessions: SessionInfo[];
   sessionsLoading: boolean;
+  projects: import("@mew/web-client").ProjectInfo[];
+  projectsLoading: boolean;
 
   // Session titles (session_id → title)
   sessionTitles: Map<string, string>;
@@ -269,6 +271,8 @@ interface SessionState {
   // Shared-session actions
   setAvailableSessions: (sessions: SessionInfo[]) => void;
   setSessionsLoading: (loading: boolean) => void;
+  onProjectList: (projects: import("@mew/web-client").ProjectInfo[]) => void;
+  setProjectsLoading: (loading: boolean) => void;
   onSessionHistory: (messages: Message[]) => void;
   onSessionCleared: () => void;
 
@@ -312,6 +316,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   yieldedByClient: null,
   availableSessions: [],
   sessionsLoading: false,
+  projects: [],
+  projectsLoading: false,
   sessionTitles: new Map(),
   sessionSummaries: new Map(),
   groups: [],
@@ -841,6 +847,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setSessionsLoading: (loading) => set({ sessionsLoading: loading }),
 
+  onProjectList: (projects) =>
+    set({
+      projects: projects as import("@mew/web-client").ProjectInfo[],
+      projectsLoading: false,
+    }),
+
+  setProjectsLoading: (loading) => set({ projectsLoading: loading }),
+
   onSessionHistory: (messages) =>
     set({
       // Replace the message list with the resumed history. Map wire parts
@@ -1172,6 +1186,9 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("session-list", (data) => {
     store.getState().setAvailableSessions(data.sessions);
     store.getState().setSessionsLoading(false);
+  });
+  client.on("project-list", (data) => {
+    store.getState().onProjectList(data.projects);
   });
   client.on("session-history", (data) => store.getState().onSessionHistory(data.messages));
   client.on("session-cleared", () => store.getState().onSessionCleared());

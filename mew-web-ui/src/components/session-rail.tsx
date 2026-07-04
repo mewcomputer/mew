@@ -35,6 +35,11 @@ export function SessionRail({ client }: SessionRailProps) {
   const router = useRouter();
   const [view, setView] = useState<ViewMode>("timeline");
   const [showArchived, setShowArchived] = useState(false);
+  const [showProjectPicker, setShowProjectPicker] = useState(false);
+  const [projectCwd, setProjectCwd] = useState("");
+  const [projectError, setProjectError] = useState<string | null>(null);
+  const projects = useSessionStore((s) => s.projects);
+  const projectsLoading = useSessionStore((s) => s.projectsLoading);
 
   useEffect(() => {
     if (client && connectionState === "connected") {
@@ -46,10 +51,10 @@ export function SessionRail({ client }: SessionRailProps) {
     }
   }, [client, connectionState]);
 
-  const handleNewSession = async () => {
+  const handleNewSession = async (cwd: string | null = null) => {
     if (!client) return;
     useSessionStore.getState().reset();
-    const newId = await client.newSession();
+    const newId = await client.newSession(cwd);
     try {
       localStorage.setItem("mew.sessionId", newId);
     } catch {
@@ -57,6 +62,22 @@ export function SessionRail({ client }: SessionRailProps) {
     }
     router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
     setOpenMobile(false);
+    setShowProjectPicker(false);
+    setProjectError(null);
+    setProjectCwd("");
+  };
+
+  const openProjectPicker = async () => {
+    if (!client) return;
+    setShowProjectPicker(true);
+    setProjectError(null);
+    setProjectCwd("");
+    try {
+      const list = await client.listProjects();
+      useSessionStore.getState().onProjectList(list);
+    } catch (e) {
+      setProjectError(`Failed to list projects: ${(e as Error).message}`);
+    }
   };
 
   const handleAttach = (sessionId: string) => {
@@ -139,6 +160,7 @@ export function SessionRail({ client }: SessionRailProps) {
   }, [sorted, view, groups]);
 
   return (
+    <>
     <Sidebar side="left" variant="floating" collapsible="icon">
       <SidebarHeader className="px-3 py-2">
         <div className="flex items-center justify-between">
@@ -160,7 +182,7 @@ export function SessionRail({ client }: SessionRailProps) {
       <SidebarContent>
         <SidebarGroup>
           <div className="space-y-1.5 p-2">
-            <Button onClick={handleNewSession} disabled={!client} variant="default" size="sm" className="w-full">
+            <Button onClick={openProjectPicker} disabled={!client} variant="default" size="sm" className="w-full">
               <Plus className="h-3.5 w-3.5" />
               New session
             </Button>
@@ -207,6 +229,19 @@ export function SessionRail({ client }: SessionRailProps) {
         ))}
       </SidebarContent>
     </Sidebar>
+
+    {showProjectPicker && (
+      <ProjectPickerDialog
+        projects={projects}
+        loading={projectsLoading}
+        error={projectError}
+        cwd={projectCwd}
+        onCwdChange={setProjectCwd}
+        onPick={(cwd) => handleNewSession(cwd)}
+        onClose={() => setShowProjectPicker(false)}
+      />
+    )}
+    </>
   );
 }
 
@@ -342,4 +377,98 @@ function formatRelativeAge(timestampMs: number): string {
 function formatCost(cost: number): string {
   if (cost < 0.01) return "<1¢";
   return `$${cost.toFixed(2)}`;
+}
+
+interface ProjectPickerDialogProps {
+  projects: import("@mew/web-client").ProjectInfo[];
+  loading: boolean;
+  error: string | null;
+  cwd: string;
+  onCwdChange: (cwd: string) => void;
+  onPick: (cwd: string) => void;
+  onClose: () => void;
+}
+
+function ProjectPickerDialog({
+  projects,
+  loading,
+  error,
+  cwd,
+  onCwdChange,
+  onPick,
+  onClose,
+}: ProjectPickerDialogProps) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      onClick={onClose}
+    >
+      <div
+        className="bg-background border rounded-lg shadow-lg w-full max-w-md p-4 space-y-3"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-semibold">New session</h2>
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            ✕
+          </Button>
+        </div>
+
+        {error && (
+          <div className="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded">
+            {error}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="text-sm text-muted-foreground py-4 text-center">
+            Loading projects…
+          </div>
+        ) : projects.length === 0 ? (
+          <div className="text-sm text-muted-foreground py-2">
+            No recent projects. Enter a path below.
+          </div>
+        ) : (
+          <div className="space-y-1 max-h-64 overflow-y-auto">
+            {projects.map((p) => (
+              <button
+                key={p.path}
+                onClick={() => onPick(p.path)}
+                className="w-full text-left px-3 py-2 rounded hover:bg-muted transition-colors"
+              >
+                <div className="font-medium text-sm">{p.display_name}</div>
+                <div className="text-xs text-muted-foreground truncate">{p.path}</div>
+                <div className="text-xs text-muted-foreground mt-0.5">
+                  {p.session_count} session{p.session_count === 1 ? "" : "s"}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="border-t pt-3 space-y-2">
+          <label className="text-xs text-muted-foreground">Or enter a path:</label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={cwd}
+              onChange={(e) => onCwdChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && cwd.trim()) onPick(cwd.trim());
+              }}
+              placeholder="/path/to/project"
+              className="flex-1 px-2 py-1 text-sm border rounded bg-background"
+            />
+            <Button
+              size="sm"
+              disabled={!cwd.trim()}
+              onClick={() => cwd.trim() && onPick(cwd.trim())}
+            >
+              Open
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }

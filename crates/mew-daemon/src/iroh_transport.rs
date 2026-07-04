@@ -19,7 +19,7 @@ use iroh::{Endpoint, SecretKey};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
-use crate::{handle_connection, groups::GroupsStore, session::SessionManager, ThinkingSetter};
+use crate::{groups::GroupsStore, handle_connection, session::SessionManager, ThinkingSetter};
 
 /// ALPN protocol identifier for mew wire protocol over iroh.
 pub const MEW_ALPN: &[u8] = b"mew/wire/0";
@@ -32,10 +32,7 @@ pub struct IrohStream {
 }
 
 impl IrohStream {
-    pub fn new(
-        send: iroh::endpoint::SendStream,
-        recv: iroh::endpoint::RecvStream,
-    ) -> Self {
+    pub fn new(send: iroh::endpoint::SendStream, recv: iroh::endpoint::RecvStream) -> Self {
         Self { send, recv }
     }
 }
@@ -170,6 +167,7 @@ pub struct MewIrohHandler {
     pub session_manager: Arc<SessionManager>,
     pub groups_store: Arc<GroupsStore>,
     pub thinking_setter: Option<ThinkingSetter>,
+    pub auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for MewIrohHandler {
@@ -204,6 +202,8 @@ impl ProtocolHandler for MewIrohHandler {
             self.session_manager.clone(),
             self.groups_store.clone(),
             self.thinking_setter.clone(),
+            // TODO: hook this in properly
+            self.auto_summary_enabled.clone(),
         )
         .await
         {
@@ -242,7 +242,11 @@ pub async fn run_iroh(
     info!("connecting to iroh relay servers...");
     tokio::time::timeout(std::time::Duration::from_secs(15), endpoint.online())
         .await
-        .map_err(|_| anyhow::anyhow!("iroh endpoint failed to come online within 15s — check network connectivity"))?;
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "iroh endpoint failed to come online within 15s — check network connectivity"
+            )
+        })?;
 
     let node_id = endpoint.id();
     info!(node_id = %node_id, "mew daemon listening (iroh)");
@@ -255,11 +259,11 @@ pub async fn run_iroh(
         session_manager,
         groups_store,
         thinking_setter,
+        // TODO: hook this in properly
+        auto_summary_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };
 
-    let router = Router::builder(endpoint)
-        .accept(MEW_ALPN, handler)
-        .spawn();
+    let router = Router::builder(endpoint).accept(MEW_ALPN, handler).spawn();
 
     // Wait for shutdown signal.
     let mut sig_term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -307,16 +311,15 @@ pub fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
     if path.exists() {
         let bytes = std::fs::read(path)
             .with_context(|| format!("read iroh secret key {}", path.display()))?;
-        let key: SecretKey = serde_json::from_slice(&bytes)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "corrupted iroh secret key at {}: {e}. \
+        let key: SecretKey = serde_json::from_slice(&bytes).map_err(|e| {
+            anyhow::anyhow!(
+                "corrupted iroh secret key at {}: {e}. \
                      Delete the file and restart to generate a new key. \
                      WARNING: this will change the daemon's NodeId and \
                      break all paired mobile clients.",
-                    path.display()
-                )
-            })?;
+                path.display()
+            )
+        })?;
         Ok(key)
     } else {
         let key = SecretKey::generate();

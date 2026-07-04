@@ -82,6 +82,7 @@ export type ClientMessage =
   | { type: "watch_workspace"; session_id: string; enabled: boolean }
   | { type: "open_path"; session_id: string; path: string }
   | { type: "unflag_file"; session_id: string; path: string }
+  | { type: "list_projects" }
   | { type: "ping" };
 
 // Provider events — see mew_message::ProviderEventWire.
@@ -267,6 +268,14 @@ export interface SessionInfo {
   pending_questions?: number;
 }
 
+/** A known project directory, returned by `list_projects`. */
+export interface ProjectInfo {
+  path: string;
+  display_name: string;
+  session_count: number;
+  last_used_at?: number;
+}
+
 /** A session group. */
 export interface GroupInfo {
   id: string;
@@ -437,7 +446,8 @@ export type ServerMessage =
       pending_permissions: number;
       pending_questions: number;
     }
-  | { type: "pong"; version: string };
+  | { type: "pong"; version: string }
+  | { type: "project_list"; projects: ProjectInfo[] };
 
 // ---------------------------------------------------------------------------
 // Minimal WebSocket interface — lets Node users pass `ws` while browsers
@@ -544,6 +554,7 @@ export interface MewClientEvents {
   "session-history": (data: { messages: Message[] }) => void;
   "model-list": (data: { models: ModelInfo[] }) => void;
   "model-switched": (data: { provider: string; model: string }) => void;
+  "project-list": (data: { projects: ProjectInfo[] }) => void;
   "thinking-variant-changed": (data: { variant: string | null }) => void;
   "permission-mode-changed": (data: { mode: string }) => void;
   "client-attached": (data: { client_id: number; client_kind: string }) => void;
@@ -794,6 +805,18 @@ export class MewClient {
       };
       this.on("session-list", onList);
       this.send({ type: "list_sessions" });
+    });
+  }
+
+  /** List known projects (recent session cwds + workspace.roots). */
+  listProjects(): Promise<ProjectInfo[]> {
+    return new Promise<ProjectInfo[]>((resolve) => {
+      const onList = (data: { projects: ProjectInfo[] }) => {
+        this.off("project-list", onList);
+        resolve(data.projects);
+      };
+      this.on("project-list", onList);
+      this.send({ type: "list_projects" });
     });
   }
 
@@ -1080,6 +1103,9 @@ export class MewClient {
           provider: msg.provider,
           model: msg.model,
         });
+        break;
+      case "project_list":
+        this.emit("project-list", { projects: msg.projects });
         break;
       case "thinking_variant_changed":
         this.emit("thinking-variant-changed", {

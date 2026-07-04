@@ -64,6 +64,8 @@ final class AppStore: ObservableObject {
 
     // Per-daemon session lists
     @Published var sessionLists: [String: [SessionSummary]] = [:]
+    @Published var projectLists: [String: [ProjectInfo]] = [:]
+    @Published var projectsLoading: Set<String> = []
 
     // Active daemon + session
     @Published var selectedDaemonId: DaemonId?
@@ -201,9 +203,15 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func newSession() {
+    func newSession(cwd: String? = nil) {
         guard let daemonId = selectedDaemonId, let core else { return }
-        core.newSession(id: daemonId, cwd: nil)
+        core.newSession(id: daemonId, cwd: cwd)
+    }
+
+    func fetchProjects() {
+        guard let daemonId = selectedDaemonId, let core else { return }
+        projectsLoading.insert(daemonId.nodeId)
+        core.listProjects(id: daemonId)
     }
 
     func sendPrompt(_ text: String) {
@@ -275,6 +283,11 @@ final class AppStore: ObservableObject {
 
         case .sessionList(let daemon, let sessions):
             sessionLists[daemon] = sessions
+
+        case .projectList(let daemon, let projects):
+            projectLists[daemon] = projects
+            projectsLoading.remove(daemon)
+            objectWillChange.send()
 
         case .sessionReloaded(_, let sessionId):
             // Pull snapshot after reload
