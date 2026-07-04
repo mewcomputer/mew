@@ -379,11 +379,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 (p) => p.type === "text" && p.streaming,
               );
               if (!hasStreaming) {
-                last.parts.push({
-                  type: "text" as const,
-                  text: "",
-                  streaming: true,
-                });
+                msgs[msgs.length - 1] = {
+                  ...last,
+                  parts: [
+                    ...last.parts,
+                    { type: "text" as const, text: "", streaming: true },
+                  ],
+                };
               }
             }
             return { messages: msgs };
@@ -406,11 +408,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               last.role === "assistant" &&
               last.parts.some((p) => (p.type === "text" || p.type === "reasoning") && p.streaming);
             if (isActiveAssistant) {
-              last.parts.push({
-                type: "reasoning" as const,
-                text: "",
-                streaming: true,
-              });
+              msgs[msgs.length - 1] = {
+                ...last,
+                parts: [
+                  ...last.parts,
+                  { type: "reasoning" as const, text: "", streaming: true },
+                ],
+              };
             } else {
               // New turn — create a fresh assistant message.
               msgs.push({
@@ -434,13 +438,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               last.role === "assistant" &&
               last.parts.some((p) => (p.type === "text" || p.type === "reasoning") && p.streaming);
             if (isActiveAssistant) {
-              last.parts.push({
-                type: "tool-call",
-                toolName: tc.tool_name,
-                callId: tc.call_id,
-                input: tc.state.input,
-                state: "pending",
-              });
+              msgs[msgs.length - 1] = {
+                ...last,
+                parts: [
+                  ...last.parts,
+                  {
+                    type: "tool-call",
+                    toolName: tc.tool_name,
+                    callId: tc.call_id,
+                    input: tc.state.input,
+                    state: "pending",
+                  },
+                ],
+              };
             } else {
               // New turn — create a fresh assistant message.
               msgs.push({
@@ -483,12 +493,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             const msgs = [...s.messages];
             const last = msgs[msgs.length - 1];
             if (last && last.role === "assistant") {
-              const textPart = last.parts.find(
+              const textIdx = last.parts.findIndex(
                 (p) => p.type === "text" && p.streaming,
               );
-              if (textPart && textPart.type === "text") {
-                textPart.text = s.streamingText;
-                textPart.streaming = false;
+              if (textIdx >= 0) {
+                const oldPart = last.parts[textIdx];
+                if (oldPart && oldPart.type === "text") {
+                  const newParts = [...last.parts];
+                  newParts[textIdx] = {
+                    ...oldPart,
+                    text: s.streamingText,
+                    streaming: false,
+                  };
+                  msgs[msgs.length - 1] = { ...last, parts: newParts };
+                }
               }
             }
             return {
@@ -503,12 +521,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             const msgs = [...s.messages];
             const last = msgs[msgs.length - 1];
             if (last && last.role === "assistant") {
-              const reasoningPart = last.parts.find(
+              const reasoningIdx = last.parts.findIndex(
                 (p) => p.type === "reasoning" && p.streaming,
               );
-              if (reasoningPart && reasoningPart.type === "reasoning") {
-                reasoningPart.text = s.streamingReasoningText;
-                reasoningPart.streaming = false;
+              if (reasoningIdx >= 0) {
+                const oldPart = last.parts[reasoningIdx];
+                if (oldPart && oldPart.type === "reasoning") {
+                  const newParts = [...last.parts];
+                  newParts[reasoningIdx] = {
+                    ...oldPart,
+                    text: s.streamingReasoningText,
+                    streaming: false,
+                  };
+                  msgs[msgs.length - 1] = { ...last, parts: newParts };
+                }
               }
             }
             return {
@@ -591,20 +617,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         for (let i = msgs.length - 1; i >= 0; i--) {
           const msg = msgs[i];
           if (!msg || msg.role !== "assistant") break;
-          const tcPart = msg.parts.find(
+          const tcIdx = msg.parts.findIndex(
             (p) => p.type === "tool-call" && p.callId === callId,
           );
-          if (tcPart && tcPart.type === "tool-call") {
-            tcPart.state = newState;
-            // Update input from the part_updated event (the initial part_start
-            // may not have the full input if it arrived before parsing).
-            if (part.state.input !== undefined) {
-              tcPart.input = part.state.input;
+          if (tcIdx >= 0) {
+            const oldTc = msg.parts[tcIdx];
+            if (oldTc && oldTc.type === "tool-call") {
+              const newParts = [...msg.parts];
+              newParts[tcIdx] = {
+                ...oldTc,
+                state: newState,
+                input: part.state.input !== undefined ? part.state.input : oldTc.input,
+                time: part.state.time ?? oldTc.time,
+                output: output ?? oldTc.output,
+              };
+              msgs[i] = { ...msg, parts: newParts };
             }
-            if (part.state.time) {
-              tcPart.time = part.state.time;
-            }
-            if (output) tcPart.output = output;
+            break;
           }
         }
         const ts = new Map(s.toolStates);
@@ -993,6 +1022,14 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("tool-start", (data) => store.getState().onToolStart(data.call_id));
   client.on("tool-end", (data) => store.getState().onToolEnd(data.call_id, data.success));
   client.on("tool-progress", (data) => store.getState().onToolProgress(data.call_id, data.chunk));
+
+  // Background job updates — not yet surfaced in the UI, but logged so they're
+  // not silently dropped. Will be wired into a store field when job UI lands.
+  client.on("job-update", (data) => {
+    if (data.state === "failed" || data.state === "done") {
+      console.debug("[job]", data.job_id, data.state, data.command ?? "");
+    }
+  });
 
   client.on("part-updated", (data) => store.getState().onPartUpdated(data.part_id, data.part));
 
