@@ -161,7 +161,7 @@ impl Adapter {
             for p in &m.parts {
                 if let Part::ToolCall(tc) = p {
                     if tc.call_id == call_id {
-                        return tc.state.output().unwrap_or("").to_string();
+                        return tc.state.result_content().unwrap_or("").to_string();
                     }
                 }
             }
@@ -711,6 +711,7 @@ fn new_tool_call_part() -> ToolCallPart {
 mod tests {
     use super::*;
     use mew_message::AssistantMeta;
+    use mew_message::ToolResultPart;
 
     fn make_minimal_png() -> Vec<u8> {
         vec![
@@ -814,6 +815,78 @@ mod tests {
         assert!(wire[0]["tool_calls"].is_array());
         assert_eq!(wire[0]["tool_calls"][0]["id"], "call_123");
         assert_eq!(wire[0]["tool_calls"][0]["function"]["name"], "echo");
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_tool_result_error() {
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        // Assistant message with a tool call in Error state
+        let assistant_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                tool_name: "write".to_string(),
+                call_id: "call_err".to_string(),
+                state: ToolState::Error(mew_message::ToolStateError {
+                    input: serde_json::json!({}),
+                    error: "invalid input: missing path".to_string(),
+                    time: ToolTime {
+                        start: 0,
+                        end: Some(1),
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: Some(AssistantMeta {
+                provider_id: String::new(),
+                model_id: String::new(),
+                cost: 0.0,
+                tokens: Tokens::default(),
+                finish: None,
+                error: None,
+            }),
+        };
+        let user_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![Part::ToolResult(ToolResultPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                call_id: "call_err".to_string(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let all = vec![assistant_msg, user_msg.clone()];
+        let wire = adapter.build_wire_message(&all, &user_msg).await;
+        // OpenAI shape: one tool result message
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["role"], "tool");
+        assert_eq!(wire[0]["tool_call_id"], "call_err");
+        // Error message is the content — not empty
+        assert_eq!(wire[0]["content"], "invalid input: missing path");
     }
 
     #[tokio::test]

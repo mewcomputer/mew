@@ -222,6 +222,29 @@ impl ToolState {
             _ => None,
         }
     }
+
+    /// Returns the error message if the tool is in an error state.
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            ToolState::Error(s) => Some(&s.error),
+            _ => None,
+        }
+    }
+
+    /// Returns the text a provider should send back to the model as the
+    /// tool result content: the output on success, the error message on
+    /// failure. Never empty when the tool has reached a terminal state.
+    pub fn result_content(&self) -> Option<&str> {
+        match self {
+            ToolState::Completed(s) => Some(&s.output),
+            ToolState::Error(s) => Some(&s.error),
+            _ => None,
+        }
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(self, ToolState::Error(_))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
