@@ -445,25 +445,25 @@ struct ChatBar: View {
 
     @FocusState private var localFocus: Bool
 
-    private let glassShape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+    private let glassShape = RoundedRectangle(cornerRadius: 28, style: .continuous)
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: 4) {
             // Row 1: textfield only
             textField
-                .padding(.horizontal, 12)
-                .padding(.top, 10)
-                .padding(.bottom, 6)
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+                .padding(.bottom, 8)
 
             // Row 2: + | modelName | flex | submit
-            HStack(spacing: 10) {
+            HStack(spacing: 14) {
                 attachmentsButton
                 modelPickerChip
-                Spacer(minLength: 8)
+                Spacer(minLength: 12)
                 sendOrCancelButton
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 8)
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
         }
         .background(
             glassShape
@@ -493,9 +493,9 @@ struct ChatBar: View {
             Text("Attachments coming soon")
         } label: {
             Image(systemName: "plus")
-                .font(.system(size: 18, weight: .medium))
+                .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 36, height: 36)
+                .frame(width: 44, height: 44)
                 .background(
                     Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
                 )
@@ -537,8 +537,8 @@ struct ChatBar: View {
                     .font(.caption)
                     .lineLimit(1)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
             .background(
                 Capsule().fill(.clear).glassEffect(
                     .regular,
@@ -555,7 +555,7 @@ struct ChatBar: View {
                 onSubmit()
             } label: {
                 Image(systemName: "stop.circle.fill")
-                    .font(.system(size: 30))
+                    .font(.system(size: 36))
                     .foregroundStyle(.red)
             }
             .accessibilityLabel("Stop generating")
@@ -564,7 +564,7 @@ struct ChatBar: View {
                 onSubmit()
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 30))
+                    .font(.system(size: 36))
                     .foregroundStyle(canSend ? .accentColor : Color(.tertiaryLabel))
             }
             .disabled(!canSend)
