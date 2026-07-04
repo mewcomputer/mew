@@ -11,6 +11,9 @@ struct SessionRailView: View {
     @EnvironmentObject private var store: AppStore
     @State private var showArchived = false
     @State private var sessionToDelete: SessionSummary?
+    @State private var showingProjectPicker = false
+    @State private var pickerCwd = ""
+    @State private var pickerError: String?
 
     private var daemon: DaemonEntry? {
         store.daemons.first { $0.nodeId == daemonNodeId }
@@ -44,7 +47,10 @@ struct SessionRailView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    store.newSession()
+                    showingProjectPicker = true
+                    pickerError = nil
+                    pickerCwd = ""
+                    store.fetchProjects()
                 } label: {
                     Image(systemName: "plus")
                 }
@@ -69,6 +75,19 @@ struct SessionRailView: View {
             if let session = sessionToDelete {
                 Text("Delete \"\(displayName(session))\"? This cannot be undone.")
             }
+        }
+        .sheet(isPresented: $showingProjectPicker) {
+            ProjectPickerSheet(
+                projects: store.projectLists[daemonNodeId] ?? [],
+                loading: store.projectsLoading.contains(daemonNodeId),
+                error: pickerError,
+                cwd: $pickerCwd,
+                onPick: { cwd in
+                    showingProjectPicker = false
+                    store.newSession(cwd: cwd)
+                },
+                onClose: { showingProjectPicker = false }
+            )
         }
     }
 
@@ -356,6 +375,95 @@ struct SessionRailView: View {
     private func ensureDaemonSelected() {
         if store.selectedDaemonId?.nodeId != daemonNodeId {
             store.selectedDaemonId = DaemonId(nodeId: daemonNodeId)
+        }
+    }
+}
+
+// MARK: - Project picker sheet
+
+struct ProjectPickerSheet: View {
+    let projects: [ProjectInfo]
+    let loading: Bool
+    let error: String?
+    @Binding var cwd: String
+    let onPick: (String) -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                if let error {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .padding(.horizontal)
+                }
+
+                if loading {
+                    Spacer()
+                    ProgressView().padding()
+                    Spacer()
+                } else if projects.isEmpty {
+                    Spacer()
+                    Text("No recent projects. Enter a path below.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding()
+                    Spacer()
+                } else {
+                    List {
+                        ForEach(projects, id: \.path) { project in
+                            Button {
+                                onPick(project.path)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(project.displayName)
+                                        .font(.body)
+                                        .foregroundStyle(.primary)
+                                    Text(project.path)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                    Text("\(project.sessionCount) session\(project.sessionCount == 1 ? "" : "s")")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.plain)
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Or enter a path")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        TextField("/path/to/project", text: $cwd)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .padding(8)
+                            .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 6))
+                        Button("Open") {
+                            let trimmed = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !trimmed.isEmpty { onPick(trimmed) }
+                        }
+                        .disabled(cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("New session")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Cancel", action: onClose)
+                }
+            }
         }
     }
 }

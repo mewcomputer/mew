@@ -253,7 +253,13 @@ site-dev:
 ios-core:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd "$(dirname "$0")"
+    cd "{{justfile_directory()}}"
+    # Match the app's iOS deployment target. Without this, rustc builds with a
+    # legacy target (~iOS 10) and emits the old LC_VERSION_MIN_IPHONEOS load
+    # command. Mixed into an iOS 17 app, that inconsistent platform metadata
+    # makes modern iOS (26+) mis-initialize libdispatch's OS_object classes, and
+    # the app aborts in libxpc's initializer at launch before main() runs.
+    export IPHONEOS_DEPLOYMENT_TARGET=17.0
     IOS_DIR="mew-ios/MewMobileCore"
     FRAMEWORK_DIR="${IOS_DIR}/XCFramework"
     BINDINGS_DIR="${IOS_DIR}/Sources/MewMobileCore"
@@ -263,6 +269,14 @@ ios-core:
 
     echo "── Building for aarch64-apple-ios-sim (simulator) ──"
     cargo build -p mew-mobile-core --release --target aarch64-apple-ios-sim
+
+    # Build the host cdylib too: uniffi-bindgen extracts the FFI contract from
+    # it below. Without this the bindings are generated from a stale (or
+    # missing) target/release/libmew_mobile_core.dylib and drift out of sync
+    # with the freshly built iOS .a files, which breaks the build and can crash
+    # the app at runtime on an FFI contract mismatch.
+    echo "── Building host cdylib (bindings source) ──"
+    cargo build -p mew-mobile-core --release
 
     echo "── Generating Swift bindings ──"
     mkdir -p "${BINDINGS_DIR}"

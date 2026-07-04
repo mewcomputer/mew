@@ -879,6 +879,12 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     func listModels(id: DaemonId) 
     
     /**
+     * Request the list of known projects (recent session cwds + workspace.roots).
+     * Response arrives as a `CoreEvent::ProjectList` event.
+     */
+    func listProjects(id: DaemonId) 
+    
+    /**
      * List sessions on a daemon.
      */
     func listSessions(id: DaemonId) 
@@ -925,6 +931,7 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     
     /**
      * Set the event listener. Events are delivered on the tokio runtime.
+     * Also updates existing connections so set_listener works after connect.
      */
     func setListener(listener: CoreListener) 
     
@@ -1137,6 +1144,19 @@ open func listModels(id: DaemonId)  {try! rustCall() {
 }
     
     /**
+     * Request the list of known projects (recent session cwds + workspace.roots).
+     * Response arrives as a `CoreEvent::ProjectList` event.
+     */
+open func listProjects(id: DaemonId)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_list_projects(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * List sessions on a daemon.
      */
 open func listSessions(id: DaemonId)  {try! rustCall() {
@@ -1256,6 +1276,7 @@ open func respondPermission(id: DaemonId, requestId: UInt64, decision: Decision)
     
     /**
      * Set the event listener. Events are delivered on the tokio runtime.
+     * Also updates existing connections so set_listener works after connect.
      */
 open func setListener(listener: CoreListener)  {try! rustCall() {
         uniffiCallStatus in
@@ -2075,6 +2096,71 @@ public func FfiConverterTypePendingPermission_lower(_ value: PendingPermission) 
 
 
 /**
+ * A known project directory, returned by `list_projects`.
+ */
+public struct ProjectInfo: Equatable, Hashable {
+    public var path: String
+    public var displayName: String
+    public var sessionCount: UInt32
+    public var lastUsedAt: Int64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, displayName: String, sessionCount: UInt32, lastUsedAt: Int64?) {
+        self.path = path
+        self.displayName = displayName
+        self.sessionCount = sessionCount
+        self.lastUsedAt = lastUsedAt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension ProjectInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProjectInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProjectInfo {
+        return
+            try ProjectInfo(
+                path: FfiConverterString.read(from: &buf), 
+                displayName: FfiConverterString.read(from: &buf), 
+                sessionCount: FfiConverterUInt32.read(from: &buf), 
+                lastUsedAt: FfiConverterOptionInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProjectInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterString.write(value.displayName, into: &buf)
+        FfiConverterUInt32.write(value.sessionCount, into: &buf)
+        FfiConverterOptionInt64.write(value.lastUsedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProjectInfo_lift(_ buf: RustBuffer) throws -> ProjectInfo {
+    return try FfiConverterTypeProjectInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProjectInfo_lower(_ value: ProjectInfo) -> RustBuffer {
+    return FfiConverterTypeProjectInfo.lower(value)
+}
+
+
+/**
  * A session in the snapshot.
  */
 public struct SessionInfo: Equatable, Hashable {
@@ -2163,10 +2249,20 @@ public struct SessionSummary: Equatable, Hashable {
     public var pendingPermissions: UInt32
     public var pendingQuestions: UInt32
     public var usageCost: Double
+    public var cwd: String?
+    public var model: String?
+    public var provider: String?
+    public var createdAt: Int64
+    public var lastMessageAt: Int64?
+    public var lastTurnFailed: Bool
+    public var groupId: String?
+    public var inputTokens: UInt64
+    public var outputTokens: UInt64
+    public var turns: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sessionId: String, title: String, state: String, archived: Bool, pinned: Bool, pendingPermissions: UInt32, pendingQuestions: UInt32, usageCost: Double) {
+    public init(sessionId: String, title: String, state: String, archived: Bool, pinned: Bool, pendingPermissions: UInt32, pendingQuestions: UInt32, usageCost: Double, cwd: String?, model: String?, provider: String?, createdAt: Int64, lastMessageAt: Int64?, lastTurnFailed: Bool, groupId: String?, inputTokens: UInt64, outputTokens: UInt64, turns: UInt32) {
         self.sessionId = sessionId
         self.title = title
         self.state = state
@@ -2175,6 +2271,16 @@ public struct SessionSummary: Equatable, Hashable {
         self.pendingPermissions = pendingPermissions
         self.pendingQuestions = pendingQuestions
         self.usageCost = usageCost
+        self.cwd = cwd
+        self.model = model
+        self.provider = provider
+        self.createdAt = createdAt
+        self.lastMessageAt = lastMessageAt
+        self.lastTurnFailed = lastTurnFailed
+        self.groupId = groupId
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.turns = turns
     }
 
     
@@ -2200,7 +2306,17 @@ public struct FfiConverterTypeSessionSummary: FfiConverterRustBuffer {
                 pinned: FfiConverterBool.read(from: &buf), 
                 pendingPermissions: FfiConverterUInt32.read(from: &buf), 
                 pendingQuestions: FfiConverterUInt32.read(from: &buf), 
-                usageCost: FfiConverterDouble.read(from: &buf)
+                usageCost: FfiConverterDouble.read(from: &buf), 
+                cwd: FfiConverterOptionString.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                provider: FfiConverterOptionString.read(from: &buf), 
+                createdAt: FfiConverterInt64.read(from: &buf), 
+                lastMessageAt: FfiConverterOptionInt64.read(from: &buf), 
+                lastTurnFailed: FfiConverterBool.read(from: &buf), 
+                groupId: FfiConverterOptionString.read(from: &buf), 
+                inputTokens: FfiConverterUInt64.read(from: &buf), 
+                outputTokens: FfiConverterUInt64.read(from: &buf), 
+                turns: FfiConverterUInt32.read(from: &buf)
         )
     }
 
@@ -2213,6 +2329,16 @@ public struct FfiConverterTypeSessionSummary: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.pendingPermissions, into: &buf)
         FfiConverterUInt32.write(value.pendingQuestions, into: &buf)
         FfiConverterDouble.write(value.usageCost, into: &buf)
+        FfiConverterOptionString.write(value.cwd, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.provider, into: &buf)
+        FfiConverterInt64.write(value.createdAt, into: &buf)
+        FfiConverterOptionInt64.write(value.lastMessageAt, into: &buf)
+        FfiConverterBool.write(value.lastTurnFailed, into: &buf)
+        FfiConverterOptionString.write(value.groupId, into: &buf)
+        FfiConverterUInt64.write(value.inputTokens, into: &buf)
+        FfiConverterUInt64.write(value.outputTokens, into: &buf)
+        FfiConverterUInt32.write(value.turns, into: &buf)
     }
 }
 
@@ -2363,6 +2489,11 @@ public enum CoreEvent: Equatable, Hashable {
     case sessionList(daemon: String, sessions: [SessionSummary]
     )
     /**
+     * Project list for a daemon (response to list_projects).
+     */
+    case projectList(daemon: String, projects: [ProjectInfo]
+    )
+    /**
      * A session was reloaded after reconnect. Swift should pull `snapshot()`.
      */
     case sessionReloaded(daemon: String, sessionId: String
@@ -2454,43 +2585,46 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
         case 2: return .sessionList(daemon: try FfiConverterString.read(from: &buf), sessions: try FfiConverterSequenceTypeSessionSummary.read(from: &buf)
         )
         
-        case 3: return .sessionReloaded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
+        case 3: return .projectList(daemon: try FfiConverterString.read(from: &buf), projects: try FfiConverterSequenceTypeProjectInfo.read(from: &buf)
         )
         
-        case 4: return .textDelta(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), delta: try FfiConverterString.read(from: &buf)
+        case 4: return .sessionReloaded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
         )
         
-        case 5: return .partUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), partKind: try FfiConverterString.read(from: &buf), state: try FfiConverterOptionString.read(from: &buf)
+        case 5: return .textDelta(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), delta: try FfiConverterString.read(from: &buf)
         )
         
-        case 6: return .turnEnded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), inputTokens: try FfiConverterUInt64.read(from: &buf), outputTokens: try FfiConverterUInt64.read(from: &buf), cost: try FfiConverterDouble.read(from: &buf), failed: try FfiConverterBool.read(from: &buf)
+        case 6: return .partUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), partKind: try FfiConverterString.read(from: &buf), state: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 7: return .permissionRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterUInt64.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), input: try FfiConverterString.read(from: &buf)
+        case 7: return .turnEnded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), inputTokens: try FfiConverterUInt64.read(from: &buf), outputTokens: try FfiConverterUInt64.read(from: &buf), cost: try FfiConverterDouble.read(from: &buf), failed: try FfiConverterBool.read(from: &buf)
         )
         
-        case 8: return .askUserRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterUInt64.read(from: &buf), callId: try FfiConverterString.read(from: &buf), questions: try FfiConverterSequenceString.read(from: &buf)
+        case 8: return .permissionRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterUInt64.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), input: try FfiConverterString.read(from: &buf)
         )
         
-        case 9: return .requestResolved(daemon: try FfiConverterString.read(from: &buf), requestId: try FfiConverterUInt64.read(from: &buf)
+        case 9: return .askUserRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterUInt64.read(from: &buf), callId: try FfiConverterString.read(from: &buf), questions: try FfiConverterSequenceString.read(from: &buf)
         )
         
-        case 10: return .alert(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), kind: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
+        case 10: return .requestResolved(daemon: try FfiConverterString.read(from: &buf), requestId: try FfiConverterUInt64.read(from: &buf)
         )
         
-        case 11: return .attentionChanged(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), pendingPermissions: try FfiConverterUInt32.read(from: &buf), pendingQuestions: try FfiConverterUInt32.read(from: &buf)
+        case 11: return .alert(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), kind: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 12: return .todosUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
+        case 12: return .attentionChanged(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), pendingPermissions: try FfiConverterUInt32.read(from: &buf), pendingQuestions: try FfiConverterUInt32.read(from: &buf)
         )
         
-        case 13: return .modelList(daemon: try FfiConverterString.read(from: &buf), models: try FfiConverterSequenceTypeModelSummary.read(from: &buf)
+        case 13: return .todosUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf)
         )
         
-        case 14: return .slashResult(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf)
+        case 14: return .modelList(daemon: try FfiConverterString.read(from: &buf), models: try FfiConverterSequenceTypeModelSummary.read(from: &buf)
         )
         
-        case 15: return .daemonVersion(daemon: try FfiConverterString.read(from: &buf), version: try FfiConverterString.read(from: &buf)
+        case 15: return .slashResult(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 16: return .daemonVersion(daemon: try FfiConverterString.read(from: &buf), version: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -2513,14 +2647,20 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             FfiConverterSequenceTypeSessionSummary.write(sessions, into: &buf)
             
         
-        case let .sessionReloaded(daemon,sessionId):
+        case let .projectList(daemon,projects):
             writeInt(&buf, Int32(3))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterSequenceTypeProjectInfo.write(projects, into: &buf)
+            
+        
+        case let .sessionReloaded(daemon,sessionId):
+            writeInt(&buf, Int32(4))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             
         
         case let .textDelta(daemon,sessionId,partId,delta):
-            writeInt(&buf, Int32(4))
+            writeInt(&buf, Int32(5))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(partId, into: &buf)
@@ -2528,7 +2668,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .partUpdated(daemon,sessionId,partId,partKind,state):
-            writeInt(&buf, Int32(5))
+            writeInt(&buf, Int32(6))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(partId, into: &buf)
@@ -2537,7 +2677,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .turnEnded(daemon,sessionId,inputTokens,outputTokens,cost,failed):
-            writeInt(&buf, Int32(6))
+            writeInt(&buf, Int32(7))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterUInt64.write(inputTokens, into: &buf)
@@ -2547,7 +2687,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .permissionRequested(daemon,sessionId,requestId,toolName,input):
-            writeInt(&buf, Int32(7))
+            writeInt(&buf, Int32(8))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterUInt64.write(requestId, into: &buf)
@@ -2556,7 +2696,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .askUserRequested(daemon,sessionId,requestId,callId,questions):
-            writeInt(&buf, Int32(8))
+            writeInt(&buf, Int32(9))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterUInt64.write(requestId, into: &buf)
@@ -2565,13 +2705,13 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .requestResolved(daemon,requestId):
-            writeInt(&buf, Int32(9))
+            writeInt(&buf, Int32(10))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterUInt64.write(requestId, into: &buf)
             
         
         case let .alert(daemon,sessionId,kind,title,detail):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(11))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(kind, into: &buf)
@@ -2580,7 +2720,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .attentionChanged(daemon,sessionId,pendingPermissions,pendingQuestions):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(12))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterUInt32.write(pendingPermissions, into: &buf)
@@ -2588,26 +2728,26 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .todosUpdated(daemon,sessionId):
-            writeInt(&buf, Int32(12))
+            writeInt(&buf, Int32(13))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             
         
         case let .modelList(daemon,models):
-            writeInt(&buf, Int32(13))
+            writeInt(&buf, Int32(14))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterSequenceTypeModelSummary.write(models, into: &buf)
             
         
         case let .slashResult(daemon,sessionId,text):
-            writeInt(&buf, Int32(14))
+            writeInt(&buf, Int32(15))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(text, into: &buf)
             
         
         case let .daemonVersion(daemon,version):
-            writeInt(&buf, Int32(15))
+            writeInt(&buf, Int32(16))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(version, into: &buf)
             
@@ -3188,6 +3328,31 @@ fileprivate struct FfiConverterSequenceTypePendingPermission: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeProjectInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [ProjectInfo]
+
+    public static func write(_ value: [ProjectInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeProjectInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ProjectInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ProjectInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeProjectInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeSessionInfo: FfiConverterRustBuffer {
     typealias SwiftType = [SessionInfo]
 
@@ -3340,6 +3505,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_list_models() != 64841) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_list_projects() != 7466) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_list_sessions() != 24240) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3367,7 +3535,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_permission() != 15307) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_listener() != 31930) {
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_listener() != 46926) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_permission_mode() != 55825) {

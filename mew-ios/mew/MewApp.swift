@@ -1,5 +1,5 @@
-import SwiftUI
 import MewMobileCore
+import SwiftUI
 
 @main
 struct MewApp: App {

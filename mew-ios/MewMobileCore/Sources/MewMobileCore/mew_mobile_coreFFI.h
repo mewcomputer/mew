@@ -319,6 +319,11 @@ RustBuffer uniffi_mew_mobile_core_fn_method_mobilecore_list_daemons(uint64_t ptr
 void uniffi_mew_mobile_core_fn_method_mobilecore_list_models(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_PROJECTS
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_PROJECTS
+void uniffi_mew_mobile_core_fn_method_mobilecore_list_projects(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_SESSIONS
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_SESSIONS
 void uniffi_mew_mobile_core_fn_method_mobilecore_list_sessions(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
@@ -726,6 +731,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_daemons(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_MODELS
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_MODELS
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_models(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_PROJECTS
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_PROJECTS
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_projects(void
     
 );
 #endif
