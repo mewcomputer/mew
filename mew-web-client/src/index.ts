@@ -427,8 +427,8 @@ export type ServerMessage =
   | {
       type: "session_meta_changed";
       session_id: string;
-      archived: boolean;
-      pinned: boolean;
+      archived: boolean | null;
+      pinned: boolean | null;
       group_id?: string;
     }
   | {
@@ -973,6 +973,7 @@ export class MewClient {
           session_id: msg.session_id,
           model: msg.model,
           provider: msg.provider,
+          permission_mode: msg.permission_mode,
         });
         break;
       case "provider":

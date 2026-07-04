@@ -16,7 +16,11 @@ function HomeComponent() {
 
     const createNew = () => {
       client.newSession().then((newId) => {
-        localStorage.setItem(SESSION_ID_KEY, newId);
+        try {
+          localStorage.setItem(SESSION_ID_KEY, newId);
+        } catch {
+          /* localStorage may be unavailable (e.g. private mode); ignore */
+        }
         router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
       });
     };

@@ -50,13 +50,21 @@ export function SessionRail({ client }: SessionRailProps) {
     if (!client) return;
     useSessionStore.getState().reset();
     const newId = await client.newSession();
-    localStorage.setItem("mew.sessionId", newId);
+    try {
+      localStorage.setItem("mew.sessionId", newId);
+    } catch {
+      /* localStorage may be unavailable (e.g. private mode); ignore */
+    }
     router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
     setOpenMobile(false);
   };
 
   const handleAttach = (sessionId: string) => {
-    localStorage.setItem("mew.sessionId", sessionId);
+    try {
+      localStorage.setItem("mew.sessionId", sessionId);
+    } catch {
+      /* localStorage may be unavailable (e.g. private mode); ignore */
+    }
     router.navigate({ to: "/session/$sessionId", params: { sessionId } });
     setOpenMobile(false);
   };

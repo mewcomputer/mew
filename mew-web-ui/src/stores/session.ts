@@ -130,7 +130,12 @@ export interface TodoItem {
   dependsOn: number[];
 }
 
-export type ConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting";
+export type ConnectionState =
+  | "disconnected"
+  | "connecting"
+  | "connected"
+  // NOTE: "reconnecting" is reserved for future reconnection support; not yet set anywhere.
+  | "reconnecting";
 
 // ---------------------------------------------------------------------------
 // Store
@@ -709,7 +714,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       ),
     })),
 
-  onSessionStatsChanged: (sessionId, added, removed, filesChanged) =>
+  onSessionStatsChanged: (sessionId, added, removed, _filesChanged) =>
     set((state) => ({
       availableSessions: state.availableSessions.map((s) =>
         s.session_id === sessionId
@@ -718,7 +723,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               change_stats: {
                 added,
                 removed,
-                files: Array.from({ length: filesChanged }, (_, i) => `file_${i}`),
+                files: [],
               },
             }
           : s,
@@ -1172,7 +1177,4 @@ function showNotification(
  * when the user clicks Allow/Deny. */
 export const permissionResponders = new Map<number, (decision: PermissionDecision) => void>();
 
-/** Side-channel map: request_id → respond callback for AskUserRequest.
- * The new protocol sends responses via a separate AskUserResponse message,
- * so the UI calls client.respondToAskUser(request_id, answers) directly. */
-export const askUserResponders = new Map<number, (answers: string[]) => void>();
+
