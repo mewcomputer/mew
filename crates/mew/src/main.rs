@@ -1777,7 +1777,8 @@ async fn run_daemon(
                     Arc::clone(server.model_switcher.as_ref().unwrap()),
                     Arc::clone(server.model_lister.as_ref().unwrap()),
                 )
-                .with_thinking_setter(Arc::clone(server.thinking_setter.as_ref().unwrap()));
+                .with_thinking_setter(Arc::clone(server.thinking_setter.as_ref().unwrap()))
+                .share_session_state(&server);
             tokio::try_join!(
                 async move { server_unix.run(&socket_path).await },
                 async move { server.run_tcp(parsed).await }

@@ -170,6 +170,20 @@ impl DaemonServer {
         self
     }
 
+    /// Adopt the shared session state (`session_manager`, `groups_store`,
+    /// and `auto_summary_enabled`) from `other`.
+    ///
+    /// Because these fields are all `Arc`s, copying them shares the same
+    /// underlying state instead of creating fresh copies. This is what the
+    /// dual-listener (Unix + TCP) setup uses so that both listeners see the
+    /// same sessions and only one `idle_summary_task` scans them all.
+    pub fn share_session_state(mut self, other: &DaemonServer) -> Self {
+        self.session_manager = Arc::clone(&other.session_manager);
+        self.groups_store = Arc::clone(&other.groups_store);
+        self.auto_summary_enabled = Arc::clone(&other.auto_summary_enabled);
+        self
+    }
+
     /// Run the daemon, listening on the given Unix socket path.
     /// Blocks until the listener is closed, a signal (SIGINT/SIGTERM) is
     /// received, or an unrecoverable error occurs.
