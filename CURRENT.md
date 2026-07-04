@@ -278,3 +278,16 @@ New workspace crate at `crates/mew-mobile-core/`. Implements the iOS spec's core
 - `SessionAttentionChanged` broadcast on permission/ask-user create + resolve
 - `statePriority()` tier 0 = needs attention (amber pulsing dot), excludes current session
 - Session rail sorts needs-attention above running above active above idle
+
+## 2026-07-03: multi-workspace daemon — audit + plans
+
+Audited what blocks one daemon serving sessions across multiple project directories, wrote two plans:
+
+- `notes/mew-daemon-multi-workspace-plan.md` — daemon/agent side. Key findings: `AgentBuildParams.cwd` is ignored by `build_session_agent` (everything keyed on process cwd); seven `std::env::current_dir()` call sites inside mew-agent core (ToolCtx, permission engine, template ctx, plan path, classifier, shell fallbacks, subagent runner); resume drops `meta.cwd` (`session.rs:279`); second daemon steals the socket (`lib.rs:174`); `mew chat --connect` sends `cwd: None` (`client.rs:142`). Plan: `Agent.cwd` field (defaulted, TUI unchanged), thread cwd through builder + daemon + attach, socket liveness guard, 5 commits on `daemon-multi-workspace`.
+- `notes/mew-clients-multi-workspace-plan.md` — web + iOS side, depends on the daemon plan. Web rail already groups by `SessionInfo.cwd`; mobile core drops cwd in its `SessionSummary` mapping. Plan: `ListProjects`/`ProjectList` protocol messages (recent cwds from session metas + workspace.roots — no remote fs browsing), `NewSession` cwd validation, project picker UI on both clients.
+
+Decisions: single multi-workspace daemon (not daemon-per-project); project `.env` not applied per-session (documented limitation, `on_shell_env` later); MCP-in-daemon out of scope.
+
+## 2026-07-03 (later): iOS improvement plan
+
+Audited the iOS app + mew-mobile-core against the spec, wrote `notes/mew-ios-improvement-plan.md`. Headline findings: turn lifecycle broken in the core (`running` never set true, cleared mid-turn on `MessageEnd`, `TurnComplete`/`TurnFailed` unhandled); ~11 spec-required ServerMessage variants unhandled (rail staleness, silent errors, no subagent visibility); no scenePhase handling or local notifications (spec m4); markdown rendering inline-only. Spec blocker #1 (unstable daemon NodeId) is fixed in the uncommitted tree via `load_or_create_secret_key`. Plan item 0: land the ~570 uncommitted lines first.
