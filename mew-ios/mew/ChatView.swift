@@ -493,9 +493,9 @@ struct ChatBar: View {
             Text("Attachments coming soon")
         } label: {
             Image(systemName: "plus")
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 44, height: 44)
+                .frame(width: 36, height: 36)
                 .background(
                     Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
                 )
@@ -530,21 +530,17 @@ struct ChatBar: View {
                 }
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "cpu")
-                    .font(.caption)
-                Text(model?.model ?? "Model")
-                    .font(.caption)
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(
-                Capsule().fill(.clear).glassEffect(
-                    .regular,
-                    in: Capsule()
+            Text(model?.model ?? "Model")
+                .font(.callout)
+                .lineLimit(1)
+                .padding(.horizontal, 14)
+                .frame(height: 36)
+                .background(
+                    Capsule().fill(.clear).glassEffect(
+                        .regular,
+                        in: Capsule()
+                    )
                 )
-            )
         }
     }
 
@@ -555,7 +551,7 @@ struct ChatBar: View {
                 onSubmit()
             } label: {
                 Image(systemName: "stop.circle.fill")
-                    .font(.system(size: 36))
+                    .font(.system(size: 28))
                     .foregroundStyle(.red)
             }
             .accessibilityLabel("Stop generating")
@@ -564,7 +560,7 @@ struct ChatBar: View {
                 onSubmit()
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 36))
+                    .font(.system(size: 28))
                     .foregroundStyle(canSend ? .accentColor : Color(.tertiaryLabel))
             }
             .disabled(!canSend)
