@@ -93,7 +93,18 @@ struct ChatView: View {
     }
 
     private var title: String {
-        sessionId.count > 12 ? String(sessionId.prefix(8)) + "…" : sessionId
+        // Prefer the AI-generated (or first-prompt) session title from the
+        // session list. Fall back to the session ID if the list hasn't
+        // arrived yet.
+        let daemonKey = store.selectedDaemonId?.nodeId ?? ""
+        let sessionTitle = store.sessionLists[daemonKey]?
+            .first(where: { $0.sessionId == sessionId })?
+            .title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let sessionTitle, !sessionTitle.isEmpty {
+            return sessionTitle
+        }
+        return sessionId.count > 12 ? String(sessionId.prefix(8)) + "…" : sessionId
     }
 
     // MARK: Message list
@@ -185,25 +196,26 @@ struct ChatView: View {
         }
     }
 
-    // MARK: Composer
+    // MARK: Composer (liquid glass chatbar)
 
     @ViewBuilder
     private var composer: some View {
-        VStack(spacing: 0) {
-            Divider()
-            HStack(alignment: .bottom, spacing: 10) {
-                TextField("Message mew…", text: $inputText, axis: .vertical)
-                    .lineLimit(1...6)
-                    .focused($composerFocused)
-                    .submitLabel(.send)
-                    .onSubmit { send() }
-
-                sendOrCancelButton
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(.bar)
-        }
+        ChatBar(
+            text: $inputText,
+            focused: $composerFocused,
+            model: currentModel,
+            availableModels: store.availableModels,
+            isStreaming: store.isStreaming,
+            canSend: canSend,
+            onSubmit: send,
+            onPickModel: { model in
+                store.switchModel(provider: model.provider, model: model.model)
+                currentModel = model
+            },
+            onRefreshModels: { store.listModels() }
+        )
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
     }
 
     @ViewBuilder
@@ -243,66 +255,18 @@ struct ChatView: View {
         inputText = ""
     }
 
-    // MARK: Toolbar (model picker)
+    // MARK: Toolbar (intentionally empty — model picker lives in the chatbar)
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
-            modelPicker
+            EmptyView()
         }
     }
 
     @ViewBuilder
     private var modelPicker: some View {
-        Menu {
-            Section("Models") {
-                ForEach(store.availableModels, id: \.id) { model in
-                    Button {
-                        store.switchModel(provider: model.provider, model: model.model)
-                        currentModel = model
-                    } label: {
-                        HStack {
-                            Text(modelLabel(model))
-                            if currentModel?.id == model.id {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
-                if store.availableModels.isEmpty {
-                    Text("No models loaded").foregroundStyle(.secondary)
-                }
-            }
-            Section {
-                Button {
-                    store.listModels()
-                } label: {
-                    Label("Refresh models", systemImage: "arrow.clockwise")
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "cpu")
-                Text(currentModel?.model ?? "Model")
-                    .lineLimit(1)
-            }
-            .font(.footnote)
-        }
-    }
-
-    private func modelLabel(_ model: ModelSummary) -> String {
-        if let window = model.contextWindow, window > 0 {
-            return "\(model.provider)/\(model.model) · \(formatContext(window))"
-        }
-        return "\(model.provider)/\(model.model)"
-    }
-
-    private func formatContext(_ bytes: Int64) -> String {
-        let kb = Double(bytes) / 1024
-        if kb >= 1024 {
-            return String(format: "%.0fK", kb / 1024) + " ctx"
-        }
-        return String(format: "%.0fK", kb) + " ctx"
+        EmptyView()
     }
 }
 
@@ -459,5 +423,142 @@ private struct AskUserSheet: View {
         let trimmed = answers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         onRespond(trimmed)
         dismiss()
+    }
+}
+
+// MARK: - ChatBar (liquid glass composer)
+
+/// Bottom-anchored composer + model picker chip, rendered as a single
+/// liquid glass capsule. The model picker used to live in the navigation
+/// toolbar; moving it here keeps "interacting with the model" close to
+/// the text field that produces the interaction.
+struct ChatBar: View {
+    @Binding var text: String
+    var focused: FocusState<Bool>.Binding
+    let model: ModelSummary?
+    let availableModels: [ModelSummary]
+    let isStreaming: Bool
+    let canSend: Bool
+    let onSubmit: () -> Void
+    let onPickModel: (ModelSummary) -> Void
+    let onRefreshModels: () -> Void
+
+    @FocusState private var localFocus: Bool
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            modelPickerChip
+            textField
+            sendOrCancelButton
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(.clear)
+                .glassEffect(
+                    .regular.interactive(true),
+                    in: RoundedRectangle(cornerRadius: 24, style: .continuous)
+                )
+        )
+        .onAppear { localFocus = focused.wrappedValue }
+        .onChange(of: focused.wrappedValue) { _, new in
+            localFocus = new
+        }
+    }
+
+    @ViewBuilder
+    private var modelPickerChip: some View {
+        Menu {
+            Section("Models") {
+                ForEach(availableModels, id: \.id) { m in
+                    Button {
+                        onPickModel(m)
+                    } label: {
+                        HStack {
+                            Text(modelLabel(m))
+                            if model?.id == m.id {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+                if availableModels.isEmpty {
+                    Text("No models loaded").foregroundStyle(.secondary)
+                }
+            }
+            Section {
+                Button {
+                    onRefreshModels()
+                } label: {
+                    Label("Refresh models", systemImage: "arrow.clockwise")
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "cpu")
+                    .font(.caption)
+                Text(model?.model ?? "Model")
+                    .font(.caption)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Capsule().fill(.clear).glassEffect(
+                    .regular,
+                    in: Capsule()
+                )
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var textField: some View {
+        TextField("Message mew…", text: $text, axis: .vertical)
+            .lineLimit(1...6)
+            .focused($localFocus)
+            .submitLabel(.send)
+            .onSubmit(onSubmit)
+            .padding(.horizontal, 4)
+    }
+
+    @ViewBuilder
+    private var sendOrCancelButton: some View {
+        if isStreaming {
+            Button {
+                onSubmit()
+            } label: {
+                Image(systemName: "stop.circle.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(.red)
+            }
+            .accessibilityLabel("Stop generating")
+        } else {
+            Button {
+                onSubmit()
+            } label: {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(canSend ? .accentColor : Color(.tertiaryLabel))
+            }
+            .disabled(!canSend)
+            .accessibilityLabel("Send")
+        }
+    }
+
+    private func modelLabel(_ m: ModelSummary) -> String {
+        if let window = m.contextWindow, window > 0 {
+            return "\(m.provider)/\(m.model) · \(formatContext(window))"
+        }
+        return "\(m.provider)/\(m.model)"
+    }
+
+    private func formatContext(_ bytes: Int64) -> String {
+        let kb = Double(bytes) / 1024
+        if kb >= 1024 {
+            return String(format: "%.0fK", kb / 1024) + " ctx"
+        }
+        return String(format: "%.0fK", kb) + " ctx"
     }
 }

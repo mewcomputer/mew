@@ -2,12 +2,12 @@ name: mew
 options:
   bundleIdPrefix: computer.mew
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "26.0"
   createIntermediateGroups: true
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
     # Disable Xcode 16's "debug dylib" launch split (a stub exe that loads
     # mew.debug.dylib). It's the one non-standard thing in the pre-main launch
     # path, where the app aborts inside libxpc's initializer. Link normally.
