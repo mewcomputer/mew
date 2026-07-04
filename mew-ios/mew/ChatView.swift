@@ -445,25 +445,60 @@ struct ChatBar: View {
 
     @FocusState private var localFocus: Bool
 
+    private let glassShape = RoundedRectangle(cornerRadius: 24, style: .continuous)
+
     var body: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            modelPickerChip
+        VStack(spacing: 0) {
+            // Row 1: textfield only
             textField
-            sendOrCancelButton
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
+
+            // Row 2: + | modelName | flex | submit
+            HStack(spacing: 10) {
+                attachmentsButton
+                modelPickerChip
+                Spacer(minLength: 8)
+                sendOrCancelButton
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 8)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
         .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
+            glassShape
                 .fill(.clear)
-                .glassEffect(
-                    .regular.interactive(true),
-                    in: RoundedRectangle(cornerRadius: 24, style: .continuous)
-                )
+                .glassEffect(.regular.interactive(true), in: glassShape)
         )
         .onAppear { localFocus = focused.wrappedValue }
         .onChange(of: focused.wrappedValue) { _, new in
             localFocus = new
+        }
+    }
+
+    @ViewBuilder
+    private var textField: some View {
+        TextField("Message mew…", text: $text, axis: .vertical)
+            .lineLimit(1...6)
+            .focused($localFocus)
+            .submitLabel(.send)
+            .onSubmit(onSubmit)
+    }
+
+    @ViewBuilder
+    private var attachmentsButton: some View {
+        // Placeholder for the attachments menu (image, file, project switch).
+        // Disabled until attachments land; kept here so the layout is stable.
+        Menu {
+            Text("Attachments coming soon")
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 36, height: 36)
+                .background(
+                    Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
+                )
         }
     }
 
@@ -511,16 +546,6 @@ struct ChatBar: View {
                 )
             )
         }
-    }
-
-    @ViewBuilder
-    private var textField: some View {
-        TextField("Message mew…", text: $text, axis: .vertical)
-            .lineLimit(1...6)
-            .focused($localFocus)
-            .submitLabel(.send)
-            .onSubmit(onSubmit)
-            .padding(.horizontal, 4)
     }
 
     @ViewBuilder
