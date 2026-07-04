@@ -131,6 +131,9 @@ pub struct MobileCore {
     registry: Mutex<DaemonRegistry>,
     connections: Mutex<HashMap<String, DaemonConnection>>,
     listener: Mutex<Option<Arc<dyn CoreListener>>>,
+    /// Handle to the tokio runtime, captured during `new()`.
+    /// Used by sync methods (connect, etc.) to spawn background tasks.
+    runtime: tokio::runtime::Handle,
 }
 
 /// Shared connection state, accessible from both the background task
@@ -192,11 +195,15 @@ impl MobileCore {
             .await
             .map_err(|e| CoreError::EndpointBindFailed { reason: e.to_string() })?;
 
+        // Capture the tokio runtime handle so sync methods can spawn tasks.
+        let runtime = tokio::runtime::Handle::current();
+
         Ok(Self {
             endpoint,
             registry: Mutex::new(registry),
             connections: Mutex::new(HashMap::new()),
             listener: Mutex::new(None),
+            runtime,
         })
     }
 
@@ -247,16 +254,16 @@ impl MobileCore {
 
         // Spawn the background connection task.
         let conn_state_for_task = conn_state.clone();
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             // Reconnect loop with exponential backoff (spec: 1s, 2s, 4s… cap 30s).
             let mut attempt: u32 = 0;
-            let mut rx = Some(rx);
+            let mut rx = rx;
             loop {
                 let result = connect_and_run(
                     &endpoint,
                     &daemon_id,
                     &node_id,
-                    rx.take(),
+                    &mut rx,
                     &conn_state_for_task,
                     &listener,
                 )
@@ -266,9 +273,12 @@ impl MobileCore {
                     Err(e) => {
                         warn!(daemon = %daemon_id, error = %e, attempt, "connection failed");
                     }
-                    Ok(()) => {
-                        // Clean disconnect — stop retrying.
-                        break;
+                    Ok(should_stop) => {
+                        // Ok(true) = channel closed (user disconnected) — stop.
+                        // Ok(false) = connection dropped — retry.
+                        if should_stop {
+                            break;
+                        }
                     }
                 }
 
@@ -496,14 +506,10 @@ async fn connect_and_run(
     endpoint: &Endpoint,
     daemon_id: &str,
     node_id: &str,
-    rx: Option<mpsc::UnboundedReceiver<ClientMessage>>,
+    rx: &mut mpsc::UnboundedReceiver<ClientMessage>,
     conn_state: &Arc<ConnState>,
     listener: &Option<Arc<dyn CoreListener>>,
-) -> Result<()> {
-    let mut rx = match rx {
-        Some(r) => r,
-        None => return Ok(()), // Channel already consumed (shouldn't happen on first connect)
-    };
+) -> Result<bool> {
     let emit_event = |event: CoreEvent| {
         if let Some(ref l) = listener {
             l.on_event(event);
@@ -562,6 +568,7 @@ async fn connect_and_run(
     }
 
     let mut last_sent_prompt: Option<String> = None;
+    let mut user_disconnected = false;
 
     // TextDelta coalescing buffer (spec note #8).
     let mut delta_buffer = String::new();
@@ -584,7 +591,7 @@ async fn connect_and_run(
                             break;
                         }
                     }
-                    None => break, // Channel closed — daemon removed.
+                    None => { user_disconnected = true; break; }, // Channel closed — daemon removed.
                 }
             }
             // Receive server messages.
@@ -701,7 +708,7 @@ async fn connect_and_run(
         }
     }
 
-    Ok(())
+    Ok(user_disconnected)
 }
 
 /// Translate a `ServerMessage` into zero or more `CoreEvent`s, updating
