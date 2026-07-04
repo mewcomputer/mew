@@ -49,6 +49,8 @@ targets:
           - JunicodeVF-Italic.ttf
           - OFLGoudyStMTT.ttf
           - OFLGoudyStMTT-Italic.ttf
+          - garamontio.ttf
+          - garamontio_it.ttf
 schemes:
   mew:
     build:

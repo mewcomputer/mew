@@ -33,6 +33,14 @@ extension Font {
         Font.custom("OFLGoudyStMTT-Italic", size: size)
     }
 
+    // Garamontio — secondary serif font (regular and italic)
+    static func mewGaramontio(_ size: CGFloat) -> Font {
+        Font.custom("Garamontio-Regular", size: size)
+    }
+    static func mewGaramontioItalic(_ size: CGFloat) -> Font {
+        Font.custom("Garamontio-Italic", size: size)
+    }
+
     /// Convenience: mewSans at a specific size
     static func mewSans(_ size: CGFloat) -> Font {
         Font.custom("MiSansLatinVF", size: size)
@@ -61,6 +69,9 @@ enum MewFonts {
     static var goudyAvailable: Bool {
         UIFont(name: "OFLGoudyStMTT", size: 12) != nil
     }
+    static var garamontioAvailable: Bool {
+        UIFont(name: "Garamontio-Regular", size: 12) != nil
+    }
 
     /// Log any custom fonts that failed to register. A miss means the
     /// PostScript name here disagrees with the font's `name` table or the
@@ -76,6 +87,8 @@ enum MewFonts {
             ("JunicodeVF-Italic (serif italic)", UIFont(name: "JunicodeVF-Italic", size: 12) != nil),
             ("OFLGoudyStMTT (goudy)", goudyAvailable),
             ("OFLGoudyStMTT-Italic (goudy italic)", UIFont(name: "OFLGoudyStMTT-Italic", size: 12) != nil),
+            ("Garamontio-Regular (garamontio)", garamontioAvailable),
+            ("Garamontio-Italic (garamontio italic)", UIFont(name: "Garamontio-Italic", size: 12) != nil),
         ]
         let missing = checks.filter { !$0.1 }.map(\.0)
         if missing.isEmpty {
