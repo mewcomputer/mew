@@ -388,6 +388,26 @@ where
 
         match client_msg {
             ClientMessage::NewSession { cwd, client_kind } => {
+                // Validate cwd if provided: must exist and be a directory.
+                if let Some(ref cwd_str) = cwd {
+                    let cwd_path = PathBuf::from(cwd_str);
+                    if !cwd_path.exists() {
+                        reply(ServerMessage::Error {
+                            message: format!(
+                                "session cwd does not exist: {cwd_str}"
+                            ),
+                        });
+                        continue;
+                    }
+                    if !cwd_path.is_dir() {
+                        reply(ServerMessage::Error {
+                            message: format!(
+                                "session cwd is not a directory: {cwd_str}"
+                            ),
+                        });
+                        continue;
+                    }
+                }
                 match session_manager.create(cwd.clone().map(PathBuf::from)).await {
                     Ok(session) => {
                         let (cid, was_first) =
@@ -620,6 +640,10 @@ where
                 reply(ServerMessage::Pong {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                 });
+            }
+            ClientMessage::ListProjects => {
+                let projects = list_projects(&session_manager).await;
+                reply(ServerMessage::ProjectList { projects });
             }
             ClientMessage::PermissionResponse {
                 request_id,
@@ -1333,6 +1357,57 @@ fn derive_session_title(text: &str) -> String {
     } else {
         cleaned
     }
+}
+
+/// Collect known projects from session metas.
+/// Deduped by canonicalized path, sorted by recency (most recent first).
+async fn list_projects(
+    session_manager: &std::sync::Arc<crate::session::SessionManager>,
+) -> Vec<mew_protocol::ProjectInfo> {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let dir = session_manager.session_dir.clone();
+    let mut projects: HashMap<PathBuf, mew_protocol::ProjectInfo> = HashMap::new();
+
+    // Walk session dirs and read meta.json for each.
+    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            let Ok(Some(meta)) = mew_session::Meta::read(&dir, &file_name).await else {
+                continue;
+            };
+            let Some(cwd_str) = &meta.cwd else {
+                continue;
+            };
+            let path = PathBuf::from(cwd_str);
+            let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
+            let display_name = canonical
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| cwd_str.clone());
+            let last_used = meta.last_message_at.or(Some(meta.created_at));
+            let entry = projects.entry(canonical).or_insert_with(|| {
+                mew_protocol::ProjectInfo {
+                    path: cwd_str.clone(),
+                    display_name: display_name.clone(),
+                    session_count: 0,
+                    last_used_at: None,
+                }
+            });
+            entry.session_count += 1;
+            if let Some(ts) = last_used {
+                entry.last_used_at = Some(
+                    entry.last_used_at.map(|e| e.max(ts)).unwrap_or(ts),
+                );
+            }
+        }
+    }
+
+    // Sort by last_used_at descending (None sorts last).
+    let mut result: Vec<_> = projects.into_values().collect();
+    result.sort_by(|a, b| b.last_used_at.unwrap_or(0).cmp(&a.last_used_at.unwrap_or(0)));
+    result
 }
 
 /// Background task that generates AI summaries for sessions that have

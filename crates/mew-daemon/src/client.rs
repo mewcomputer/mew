@@ -513,6 +513,7 @@ async fn translate_server_message(
         | ServerMessage::FlaggedFilesChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }
         | ServerMessage::SessionAttentionChanged { .. }
+        | ServerMessage::ProjectList { .. }
         | ServerMessage::Pong { .. } => {
             // These are handled by the DaemonClient directly or are web-UI
             // specific; they don't map to AgentEvents for the TUI.

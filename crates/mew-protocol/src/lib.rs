@@ -156,6 +156,12 @@ pub enum ClientMessage {
         pinned: bool,
     },
 
+    // -- Projects --
+    /// List known projects (recent session cwds + configured workspace.roots).
+    /// Does NOT require a session — used before creating one to populate a
+    /// project picker. The daemon responds with `ServerMessage::ProjectList`.
+    ListProjects,
+
     // -- Phase 3: File service --
     ListDir {
         session_id: String,
@@ -617,6 +623,14 @@ pub enum ServerMessage {
         groups: Vec<GroupInfo>,
     },
 
+    // -- Projects --
+    /// Response to `ListProjects`. Contains deduped project directories
+    /// derived from session metas + configured workspace.roots, sorted by
+    /// recency (most recent first).
+    ProjectList {
+        projects: Vec<ProjectInfo>,
+    },
+
     // -- Phase 3: File service responses --
     DirListing {
         path: String,
@@ -749,6 +763,20 @@ pub struct GroupInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     pub order: u32,
+}
+
+/// A known project directory, returned by `ListProjects`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectInfo {
+    /// Absolute path to the project directory.
+    pub path: String,
+    /// Human-friendly display name (last path component).
+    pub display_name: String,
+    /// Number of sessions in this project.
+    pub session_count: u32,
+    /// Timestamp of the last activity in this project (epoch millis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<i64>,
 }
 
 /// One entry in a directory listing.
@@ -930,6 +958,33 @@ mod tests {
         let msg = ClientMessage::Cancel;
         let json = encode_json(&msg).unwrap();
         assert!(json.contains(r#""type":"cancel""#));
+    }
+
+    #[test]
+    fn test_list_projects_roundtrip() {
+        let msg = ClientMessage::ListProjects;
+        let decoded = round_trip(&msg);
+        assert!(matches!(decoded, ClientMessage::ListProjects));
+
+        let msg = ServerMessage::ProjectList {
+            projects: vec![ProjectInfo {
+                path: "/home/user/myproject".to_string(),
+                display_name: "myproject".to_string(),
+                session_count: 3,
+                last_used_at: Some(1700000000),
+            }],
+        };
+        let decoded = round_trip(&msg);
+        match decoded {
+            ServerMessage::ProjectList { projects } => {
+                assert_eq!(projects.len(), 1);
+                assert_eq!(projects[0].path, "/home/user/myproject");
+                assert_eq!(projects[0].display_name, "myproject");
+                assert_eq!(projects[0].session_count, 3);
+                assert_eq!(projects[0].last_used_at, Some(1700000000));
+            }
+            _ => panic!("expected ProjectList"),
+        }
     }
 
     // -- ClientMessage: exhaustive variant coverage --------------------------
@@ -1729,6 +1784,7 @@ mod tests {
                 },
             ),
             ("ping", ClientMessage::Ping),
+            ("list_projects", ClientMessage::ListProjects),
         ];
 
         let mut seen: Vec<&'static str> = Vec::with_capacity(samples.len());
@@ -2059,6 +2115,12 @@ mod tests {
                 "pong",
                 ServerMessage::Pong {
                     version: "0.0.0".into(),
+                },
+            ),
+            (
+                "project_list",
+                ServerMessage::ProjectList {
+                    projects: vec![],
                 },
             ),
         ];

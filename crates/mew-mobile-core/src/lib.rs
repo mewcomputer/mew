@@ -404,6 +404,15 @@ impl MobileCore {
         }
     }
 
+    /// Request the list of known projects (recent session cwds + workspace.roots).
+    /// Response arrives as a `CoreEvent::ProjectList` event.
+    pub fn list_projects(&self, id: DaemonId) {
+        let conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(&id.node_id) {
+            let _ = conn.tx.send(ClientMessage::ListProjects);
+        }
+    }
+
     /// List available models from the daemon.
     pub fn list_models(&self, id: DaemonId) {
         let conns = self.connections.lock().unwrap();
@@ -781,6 +790,22 @@ fn translate_message(
             events.push(CoreEvent::SessionList {
                 daemon: d,
                 sessions: summaries,
+            });
+        }
+
+        ServerMessage::ProjectList { projects } => {
+            let infos: Vec<_> = projects
+                .iter()
+                .map(|p| events::ProjectInfo {
+                    path: p.path.clone(),
+                    display_name: p.display_name.clone(),
+                    session_count: p.session_count,
+                    last_used_at: p.last_used_at,
+                })
+                .collect();
+            events.push(CoreEvent::ProjectList {
+                daemon: d,
+                projects: infos,
             });
         }
 

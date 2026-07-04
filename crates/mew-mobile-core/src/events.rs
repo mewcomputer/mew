@@ -26,6 +26,12 @@ pub enum CoreEvent {
         sessions: Vec<SessionSummary>,
     },
 
+    /// Project list for a daemon (response to list_projects).
+    ProjectList {
+        daemon: String,
+        projects: Vec<ProjectInfo>,
+    },
+
     /// A session was reloaded after reconnect. Swift should pull `snapshot()`.
     SessionReloaded {
         daemon: String,
@@ -159,6 +165,15 @@ pub struct SessionSummary {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub turns: u32,
+}
+
+/// A known project directory, returned by `list_projects`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ProjectInfo {
+    pub path: String,
+    pub display_name: String,
+    pub session_count: u32,
+    pub last_used_at: Option<i64>,
 }
 
 /// Summary of an available model.
