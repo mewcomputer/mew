@@ -27,19 +27,36 @@ struct ChatView: View {
     @State private var autoScroll: Bool = true
     @State private var containerHeight: CGFloat = 0
 
+    // Loading state while waiting for session history replay
+    @State private var isLoadingSession: Bool = false
+
     // Sheets
     @State private var permissionSheet: PermissionSheetItem?
     @State private var askUserSheet: AskUserSheetItem?
 
     var body: some View {
         VStack(spacing: 0) {
-            messageList
-            composer
+            if store.visibleMessages.isEmpty && !store.isStreaming && store.streamingText.isEmpty {
+                if isLoadingSession {
+                    ProgressView("Loading session…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    emptyState
+                }
+            } else {
+                messageList
+                composer
+            }
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
         .task {
+            store.selectSession(sessionId)
+            isLoadingSession = true
+            // Give the attach + history replay a moment to arrive
+            try? await Task.sleep(for: .seconds(15))
+            isLoadingSession = false
             store.listModels()
         }
         // Permission sheet
@@ -67,6 +84,12 @@ struct ChatView: View {
         .onChange(of: store.availableModels) { models in
             if currentModel == nil { currentModel = models.first }
         }
+        // Dismiss loading spinner as soon as messages arrive
+        .onChange(of: store.visibleMessages) { _ in
+            if !store.visibleMessages.isEmpty {
+                isLoadingSession = false
+            }
+        }
     }
 
     private var title: String {
@@ -89,7 +112,7 @@ struct ChatView: View {
         ScrollView {
             ScrollViewReader { proxy in
                 LazyVStack(alignment: .leading, spacing: 4) {
-                    ForEach(store.messages, id: \.id) { message in
+                    ForEach(store.visibleMessages, id: \.id) { message in
                         MessageItemView(message: message)
                     }
 
@@ -117,7 +140,7 @@ struct ChatView: View {
                     autoScroll = bottomY <= containerHeight + 80
                 }
                 // Auto-scroll on new messages and streaming deltas.
-                .onChange(of: store.messages.count) { _ in
+                .onChange(of: store.visibleMessages.count) { _ in
                     scrollToBottom(proxy: proxy)
                 }
                 .onChange(of: store.streamingText) { _ in

@@ -29,4 +29,5 @@ mew-ios/DerivedData/
 mew-ios/mew.xcodeproj
 mew-ios/mew.xcodeproj/project.xcworkspace/
 mew-ios/mew.xcodeproj/xcuserdata/
+mew-ios/**/.swiftpm/xcode/xcuserdata/
 *.xcuserstate

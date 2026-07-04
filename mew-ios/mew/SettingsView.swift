@@ -15,6 +15,7 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            fontSection
             phoneSection
             daemonsSection
             aboutSection
@@ -51,6 +52,40 @@ struct SettingsView: View {
                 renameTarget = nil
             }
             Button("Cancel", role: .cancel) { renameTarget = nil }
+        }
+    }
+
+    // MARK: - Font
+
+    @ViewBuilder
+    private var fontSection: some View {
+        Section {
+            ForEach(MewFontChoice.allCases, id: \.self) { choice in
+                Button {
+                    store.fontChoice = choice
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(choice.displayName)
+                                .font(choice.swiftUIFont(17))
+                                .foregroundStyle(.primary)
+                            Text(choice.previewText)
+                                .font(choice.swiftUIFont(13))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if store.fontChoice == choice {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(.tint)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        } header: {
+            Text("Font")
+        } footer: {
+            Text("Choose the body font for the app. Changes apply immediately.")
         }
     }
 

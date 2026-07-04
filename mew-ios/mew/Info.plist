@@ -20,8 +20,24 @@
 	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>NSCameraUsageDescription</key>
+	<string>mew uses the camera to scan QR codes when pairing with a daemon.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>mew connects to your daemons over the local network and iroh relays.</string>
+	<key>UIAppFonts</key>
+	<array>
+		<string>MiSansLatin-Regular.woff2</string>
+		<string>MiSansLatin-Medium.woff2</string>
+		<string>MiSansLatin-Semibold.woff2</string>
+		<string>MiSansLatin-Bold.woff2</string>
+		<string>Banga-VF.ttf</string>
+		<string>IoskeleyMono-Regular.woff2</string>
+		<string>IoskeleyMono-Medium.woff2</string>
+		<string>JunicodeVF-Roman.ttf</string>
+		<string>JunicodeVF-Italic.ttf</string>
+		<string>OFLGoudyStMTT.ttf</string>
+		<string>OFLGoudyStMTT-Italic.ttf</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

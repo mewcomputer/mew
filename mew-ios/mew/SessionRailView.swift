@@ -111,15 +111,27 @@ struct SessionRailView: View {
 
     @ViewBuilder
     private var connectingState: some View {
-        ContentUnavailableView {
-            Label(statusTitle, systemImage: statusIcon)
-                .font(.title2)
-        } description: {
-            Text(statusDescription)
-                .foregroundStyle(.secondary)
+        ScrollView {
+            ContentUnavailableView {
+                Label(statusTitle, systemImage: statusIcon)
+                    .font(.title2)
+            } description: {
+                Text(statusDescription)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 80)
         }
         .refreshable {
-            ensureDaemonSelected()
+            // Force a reconnect attempt
+            if let id = store.selectedDaemonId {
+                store.connect(daemonId: id)
+            } else {
+                ensureDaemonSelected()
+                if let id = store.selectedDaemonId {
+                    store.connect(daemonId: id)
+                }
+            }
         }
     }
 
@@ -158,9 +170,6 @@ struct SessionRailView: View {
             }
             .tint(.indigo)
         }
-        .simultaneousGesture(TapGesture().onEnded {
-            store.selectSession(session.sessionId)
-        })
     }
 
     @ViewBuilder

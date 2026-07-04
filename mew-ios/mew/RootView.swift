@@ -19,6 +19,7 @@ struct RootView: View {
                     }
                 }
         }
+        .tint(.accentColor)
     }
 }
 

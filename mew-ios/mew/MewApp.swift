@@ -5,6 +5,10 @@ import MewMobileCore
 struct MewApp: App {
     @StateObject private var appStore = AppStore()
 
+    init() {
+        // Font is applied per-view in ChatView, not globally.
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()

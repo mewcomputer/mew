@@ -161,20 +161,93 @@ private struct ToolCallRow: View {
                 Spacer(minLength: 4)
 
                 stateIndicator
+
+                if let duration = formattedDuration {
+                    Text(duration)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                }
             }
             .contentShape(Rectangle())
             .onTapGesture { withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() } }
 
-            if expanded, let input = part.text, !input.isEmpty {
-                Text(input)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .background(Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            if expanded {
+                detailContent
             }
         }
+    }
+
+    @ViewBuilder
+    private var detailContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Input
+            if let input = part.toolInput, !input.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Input")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(prettyJSON(input))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+
+            // Output (completed or running)
+            if let output = part.toolOutput, !output.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Output")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(output)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+
+            // Error
+            if let error = part.toolError, !error.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Error")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.red)
+                    Text(error)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    private var formattedDuration: String? {
+        guard let start = part.toolTimeStart else { return nil }
+        let end = part.toolTimeEnd ?? Int64(Date().timeIntervalSince1970)
+        let elapsed = end - start
+        if elapsed < 1 { return nil }
+        if elapsed < 60 { return "\(elapsed)s" }
+        return "\(elapsed / 60)m\(elapsed % 60)s"
+    }
+
+    private func prettyJSON(_ raw: String) -> String {
+        guard let data = raw.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data),
+              let pretty = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]),
+              let result = String(data: pretty, encoding: .utf8) else {
+            return raw
+        }
+        return result
     }
 
     @ViewBuilder

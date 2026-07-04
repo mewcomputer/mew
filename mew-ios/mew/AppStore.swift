@@ -1,6 +1,57 @@
 import SwiftUI
 import MewMobileCore
 
+// MARK: - Font preference
+
+enum MewFontChoice: String, CaseIterable {
+    case system = "System"
+    case miSans = "Mi Sans"
+    case junicode = "Junicode"
+    case goudy = "OFL Goudy"
+
+    var displayName: String { rawValue }
+
+    /// Apply this font choice to the UIKit appearance.
+    func apply() {
+        switch self {
+        case .system:
+            UILabel.appearance().font = UIFont.systemFont(ofSize: UIFont.systemFontSize)
+        case .miSans:
+            if MewFonts.sansAvailable {
+                UILabel.appearance().font = UIFont(name: "MiSans", size: UIFont.systemFontSize)
+            }
+        case .junicode:
+            if MewFonts.serifAvailable {
+                UILabel.appearance().font = UIFont(name: "JunicodeVF-Roman", size: UIFont.systemFontSize)
+            }
+        case .goudy:
+            if MewFonts.goudyAvailable {
+                UILabel.appearance().font = UIFont(name: "OFLGoudyStMTT", size: UIFont.systemFontSize)
+            }
+        }
+    }
+
+    /// The SwiftUI font for a given size.
+    func swiftUIFont(_ size: CGFloat) -> Font {
+        switch self {
+        case .system:       return .system(size: size)
+        case .miSans:       return .mewSans(size)
+        case .junicode:      return .mewSerif(size)
+        case .goudy:         return .mewGoudy(size)
+        }
+    }
+
+    /// Preview text in the picker.
+    var previewText: String {
+        switch self {
+        case .system:   return "The quick brown fox"
+        case .miSans:    return "The quick brown fox"
+        case .junicode:  return "The quick brown fox"
+        case .goudy:     return "The quick brown fox"
+        }
+    }
+}
+
 // MARK: - App Store
 
 /// The single source of truth for the app, mirroring the web UI's session store.
@@ -20,6 +71,24 @@ final class AppStore: ObservableObject {
 
     // Chat state for the active session
     @Published var messages: [ChatMessage] = []
+
+    /// Messages filtered to exclude empty entries (no visible content).
+    var visibleMessages: [ChatMessage] {
+        messages.filter { msg in
+            msg.parts.contains { part in
+                switch part.kind {
+                case .text:
+                    return (part.text?.isEmpty == false)
+                case .reasoning:
+                    return (part.text?.isEmpty == false)
+                case .toolCall:
+                    return part.toolName != nil
+                case .error:
+                    return (part.text?.isEmpty == false)
+                }
+            }
+        }
+    }
     @Published var streamingText: String = ""
     @Published var streamingPartId: String?
     @Published var isStreaming: Bool = false
@@ -36,6 +105,13 @@ final class AppStore: ObservableObject {
 
     // Connection
     @Published var isConnecting: Bool = false
+
+    // Font preference (persisted to UserDefaults)
+    @Published var fontChoice: MewFontChoice = MewFontChoice(rawValue: UserDefaults.standard.string(forKey: "mew.fontChoice") ?? "Mi Sans") ?? .miSans {
+        didSet {
+            UserDefaults.standard.set(fontChoice.rawValue, forKey: "mew.fontChoice")
+        }
+    }
 
     // The core
     private var core: MobileCore?
@@ -64,6 +140,12 @@ final class AppStore: ObservableObject {
             self.core = core
             self.listener = listener
             self.daemons = core.listDaemons()
+
+            // Auto-connect to all known daemons
+            for daemon in self.daemons {
+                let id = DaemonId(nodeId: daemon.nodeId)
+                self.connect(daemonId: id)
+            }
         } catch {
             print("Failed to initialize mobile core: \(error)")
         }
@@ -181,8 +263,9 @@ final class AppStore: ObservableObject {
         case .daemonStatusChanged(let daemon, let status):
             daemonStatuses[daemon] = status
             if case .connected = status {
-                // Auto-list sessions on connect
-                if let id = selectedDaemonId, id.nodeId == daemon, let core {
+                // Auto-list sessions for any daemon that connects
+                if let core {
+                    let id = DaemonId(nodeId: daemon)
                     core.listSessions(id: id)
                 }
             }
