@@ -579,8 +579,8 @@ export interface MewClientEvents {
   "flagged-files-changed": (data: { session_id: string; files: FlaggedFileWire[] }) => void;
   "session-meta-changed": (data: {
     session_id: string;
-    archived: boolean;
-    pinned: boolean;
+    archived: boolean | null;
+    pinned: boolean | null;
     group_id?: string;
   }) => void;
   "session-attention-changed": (data: {

@@ -258,7 +258,7 @@ interface SessionState {
   clearAlertsForSession: (sessionId: string) => void;
   dismissAlert: (sessionId: string, timestamp: number) => void;
   onFlaggedFilesChanged: (files: { path: string; reason?: string }[]) => void;
-  onSessionMetaChanged: (sessionId: string, archived: boolean, pinned: boolean, groupId?: string) => void;
+  onSessionMetaChanged: (sessionId: string, archived: boolean | null, pinned: boolean | null, groupId?: string) => void;
   onSessionAttentionChanged: (sessionId: string, pendingPermissions: number, pendingQuestions: number) => void;
 
   // Shared-session actions
@@ -784,7 +784,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((state) => ({
       availableSessions: state.availableSessions.map((s) =>
         s.session_id === sessionId
-          ? { ...s, archived, pinned, group_id: groupId }
+          ? {
+              ...s,
+              archived: archived ?? s.archived,
+              pinned: pinned ?? s.pinned,
+              group_id: groupId ?? s.group_id,
+            }
           : s,
       ),
     })),

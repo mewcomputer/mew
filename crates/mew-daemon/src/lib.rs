@@ -908,8 +908,8 @@ where
                         session_manager
                             .broadcast_all(ServerMessage::SessionMetaChanged {
                                 session_id: session_id.clone(),
-                                archived: false,
-                                pinned: false,
+                                archived: Some(false),
+                                pinned: Some(false),
                                 group_id: meta_group_id,
                             })
                             .await;
@@ -932,8 +932,8 @@ where
                 session_manager
                     .broadcast_all(ServerMessage::SessionMetaChanged {
                         session_id: session_id.clone(),
-                        archived,
-                        pinned: false,
+                        archived: Some(archived),
+                        pinned: None,
                         group_id: None,
                     })
                     .await;
@@ -946,8 +946,8 @@ where
                 session_manager
                     .broadcast_all(ServerMessage::SessionMetaChanged {
                         session_id: session_id.clone(),
-                        archived: false,
-                        pinned,
+                        archived: None,
+                        pinned: Some(pinned),
                         group_id: None,
                     })
                     .await;

@@ -666,10 +666,10 @@ pub enum ServerMessage {
     /// so all clients can update their session rail.
     SessionMetaChanged {
         session_id: String,
-        #[serde(default)]
-        archived: bool,
-        #[serde(default)]
-        pinned: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        archived: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pinned: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         group_id: Option<String>,
     },

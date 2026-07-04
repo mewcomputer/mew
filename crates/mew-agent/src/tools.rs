@@ -208,7 +208,7 @@ impl Agent {
 
             if matches!(
                 tc.tool_name.as_str(),
-                "shell_background" | "job_status" | "job_block" | "job_cancel"
+                "shell_background" | "shell_monitor" | "job_status" | "job_block" | "job_cancel"
             ) {
                 self.execute_job_tool(tc, assistant_msg, ev_tx, &mut result_parts)
                     .await;
@@ -1608,16 +1608,18 @@ impl Agent {
                 success,
             })
             .await;
-        self.dispatcher
-            .on_tool_error(
-                &mew_hooks::ToolCall {
-                    tool_name: tc.tool_name.clone(),
-                    call_id: tc.call_id.clone(),
-                    input: input.clone(),
-                },
-                if success { "" } else { &error_for_hook },
-            )
-            .await;
+        if !success {
+            self.dispatcher
+                .on_tool_error(
+                    &mew_hooks::ToolCall {
+                        tool_name: tc.tool_name.clone(),
+                        call_id: tc.call_id.clone(),
+                        input: input.clone(),
+                    },
+                    &error_for_hook,
+                )
+                .await;
+        }
         result_parts.push(Part::ToolResult(ToolResultPart {
             base: PartBase {
                 id: ulid::Ulid::new(),
