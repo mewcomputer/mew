@@ -704,7 +704,7 @@ async fn debug_cmd(command: DebugCommands) -> Result<()> {
             sensitivity,
         } => {
             let cfg = mew_config::load().context("load config")?;
-            let engine = build_permission_engine(&cfg, mew_hooks::PermissionMode::Standard);
+            let engine = build_permission_engine(&cfg, mew_hooks::PermissionMode::Standard, std::env::current_dir().unwrap_or_default());
 
             let input_json: serde_json::Value = match input {
                 Some(s) => serde_json::from_str(&s).context("failed to parse input JSON")?,
@@ -1042,6 +1042,7 @@ async fn drain_pending_persona_switch(
 fn build_permission_engine(
     cfg: &Config,
     mode: mew_hooks::PermissionMode,
+    default_cwd: std::path::PathBuf,
 ) -> Arc<mew_config::permissions::PermissionEngine> {
     let secret_globs: Vec<String> = cfg
         .secrets
@@ -1049,10 +1050,6 @@ fn build_permission_engine(
         .iter()
         .flat_map(|f| f.paths.iter().cloned())
         .collect();
-    // Default cwd for the escape tier: the process's current directory.
-    // The 4 call sites all hand the same `cfg` to this helper, so the
-    // escape tier gets the same default cwd everywhere.
-    let default_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     Arc::new(
         mew_config::permissions::PermissionEngine::new(cfg.permissions.rules.clone())
             .with_secret_files(secret_globs)
@@ -1429,7 +1426,7 @@ fn build_session_agent(
     let mut tools = tools;
     tools.push(Arc::new(FlagImportant::new(flagged_files.clone())));
 
-    let permission_engine = build_permission_engine(cfg, mode);
+    let permission_engine = build_permission_engine(cfg, mode, cwd.clone());
 
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
     agent.cwd = cwd.clone();
@@ -1603,6 +1600,9 @@ async fn build_daemon_server(
                         Vec::new(),
                         session_id,
                     );
+                    a.cwd = params.cwd.clone().unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_default()
+                    });
                     a.set_model_info("fake", "fake");
                     a
                 },
@@ -2675,7 +2675,7 @@ async fn run_tui(
         _mcp_clients = mcp_cls;
     }
 
-    let permission_engine = build_permission_engine(cfg, mode);
+    let permission_engine = build_permission_engine(cfg, mode, std::env::current_dir().unwrap_or_default());
 
     // Load project context files.
     let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());
@@ -4132,7 +4132,7 @@ async fn build_and_run(
         _mcp_clients = mcp_cls;
     }
 
-    let permission_engine = build_permission_engine(cfg, mode);
+    let permission_engine = build_permission_engine(cfg, mode, std::env::current_dir().unwrap_or_default());
 
     let mut agent = Agent::new(
         provider,

@@ -7,6 +7,9 @@ bin/
 *.pem
 *.key
 
+# Session logs (requests.log, etc.)
+*.log
+
 # Rust
 target/
 Cargo.lock

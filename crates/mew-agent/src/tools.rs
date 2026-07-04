@@ -263,10 +263,9 @@ impl Agent {
 
             // Permission check. The escape tier inside the engine reads
             // the cwd to resolve relative path args. The agent layer's
-            // `ToolCtx` is constructed a few lines below with
-            // `std::env::current_dir()` as its cwd — we mirror that here
-            // so the engine sees the same working directory the tool
-            // itself will see.
+            // `ToolCtx` is constructed a few lines below with `self.cwd`
+            // as its cwd — we mirror that here so the engine sees the same
+            // working directory the tool itself will see.
             let sensitivity = self
                 .tools
                 .get(&tc.tool_name)
