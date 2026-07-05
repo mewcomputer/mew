@@ -39,7 +39,7 @@ struct ChatView: View {
     @State private var fileBrowserPath: String?
 
     var body: some View {
-        VStack(spacing: 0) {
+        Group {
             if store.visibleMessages.isEmpty && !store.isStreaming && store.streamingText.isEmpty {
                 if isLoadingSession {
                     ProgressView("Loading session…")
@@ -50,6 +50,10 @@ struct ChatView: View {
             } else {
                 messageList
             }
+        }
+        // Float the composer over the content so messages scroll under the
+        // liquid-glass chatbar; the inset doubles as the bottom scroll padding.
+        .safeAreaInset(edge: .bottom) {
             composer
         }
         .navigationTitle(title)
@@ -183,8 +187,10 @@ struct ChatView: View {
                 .onPreferenceChange(BottomOffsetKey.self) { bottomY in
                     autoScroll = bottomY <= containerHeight + 80
                 }
-                // Auto-scroll on new messages and streaming deltas.
-                .onChange(of: store.visibleMessages.count) { _ in
+                // Auto-scroll on any content change (new messages, streaming
+                // deltas, and growing reasoning/tool output within a message),
+                // not just when the message count changes.
+                .onChange(of: store.visibleMessages) { _ in
                     scrollToBottom(proxy: proxy)
                 }
                 .onChange(of: store.streamingText) { _ in
@@ -192,6 +198,7 @@ struct ChatView: View {
                 }
             }
         }
+        .scrollDismissesKeyboard(.interactively)
         .coordinateSpace(name: "chatScroll")
         .background(
             GeometryReader { geo in

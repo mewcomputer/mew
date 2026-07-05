@@ -55,6 +55,12 @@ extension MarkdownRenderConfig {
             ))
     }()
 
+    /// Same as `mew` but without the text fade-in. Committed messages use this
+    /// so they don't replay the stream-in animation every time they scroll
+    /// off-screen and back (which remounts the view). Only the live streaming
+    /// bubble should animate.
+    static let mewStatic: MarkdownRenderConfig = mew.withShouldAnimateText(value: false)
+
     /// A MiSans font set at `size`, with italic/bold synthesized from traits.
     private static func bodyFonts(_ size: CGFloat) -> TextFonts {
         makeFonts(mewUIFont("MiSansLatinVF", size))

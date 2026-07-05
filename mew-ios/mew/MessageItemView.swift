@@ -77,7 +77,7 @@ struct MessageItemView: View {
         switch part.kind {
         case .text:
             if let text = part.text, !text.isEmpty {
-                MarkdownView(text: text, config: .mew)
+                MarkdownView(text: text, config: .mewStatic)
             }
         case .reasoning:
             reasoningView(part)
