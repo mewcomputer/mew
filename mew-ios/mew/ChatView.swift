@@ -451,9 +451,9 @@ struct ChatBar: View {
         VStack(spacing: 2) {
             // Row 1: textfield only
             textField
-                .padding(.horizontal, 28)
-                .padding(.top, 10)
-                .padding(.bottom, 4)
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 10)
 
             // Row 2: + | modelName | flex | submit
             HStack(spacing: 10) {
