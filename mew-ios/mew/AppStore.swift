@@ -252,6 +252,10 @@ final class AppStore: ObservableObject {
 
     func sendPrompt(_ text: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
+        // Optimistically enter the streaming state so the "working" indicator
+        // (typing dots) shows immediately, before the first token arrives.
+        // Cleared on turnEnded.
+        isStreaming = true
         core.prompt(id: daemonId, text: text)
     }
 
