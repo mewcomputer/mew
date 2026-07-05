@@ -160,7 +160,11 @@ struct ChatView: View {
     private var scrollContent: some View {
         ScrollView {
             ScrollViewReader { proxy in
-                LazyVStack(alignment: .leading, spacing: 4) {
+                // Non-lazy so each message's MarkdownView parses once on load and
+                // isn't re-parsed (with a layout jump) every time it scrolls back
+                // into view. Trades more upfront work in long sessions for
+                // smoother scrolling.
+                VStack(alignment: .leading, spacing: 4) {
                     ForEach(store.visibleMessages, id: \.id) { message in
                         MessageItemView(message: message)
                     }
