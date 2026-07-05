@@ -339,9 +339,44 @@ impl MobileCore {
     pub fn prompt(&self, id: DaemonId, text: String) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            // Store for UserMessage dedup (spec note #9).
-            if let Some(ss) = conn.state.session_state.lock().unwrap().as_mut() {
-                ss.last_sent_prompt = Some(text.clone());
+            // Optimistically add the user message so it renders immediately, and
+            // mark it so the daemon's echoed UserMessage is deduped (spec note
+            // #9) rather than double-added.
+            let session_id = {
+                let mut ss_lock = conn.state.session_state.lock().unwrap();
+                if let Some(ss) = ss_lock.as_mut() {
+                    ss.last_sent_prompt = Some(text.clone());
+                    ss.messages.push(state::ChatMessage {
+                        id: ulid::Ulid::new().to_string(),
+                        role: "user".into(),
+                        parts: vec![state::MessagePart {
+                            id: ulid::Ulid::new().to_string(),
+                            kind: state::PartKind::Text,
+                            text: Some(text.clone()),
+                            tool_name: None,
+                            tool_state: None,
+                            tool_input: None,
+                            tool_output: None,
+                            tool_error: None,
+                            tool_call_id: None,
+                            tool_time_start: None,
+                            tool_time_end: None,
+                        }],
+                    });
+                    Some(ss.session_id.clone())
+                } else {
+                    None
+                }
+            };
+            // Refresh the UI so the optimistic message shows without waiting for
+            // a turn to start.
+            if let Some(sid) = session_id {
+                if let Some(ref l) = *conn.state.listener.lock().unwrap() {
+                    l.on_event(CoreEvent::SessionReloaded {
+                        daemon: id.node_id.clone(),
+                        session_id: sid,
+                    });
+                }
             }
             let _ = conn.tx.send(ClientMessage::Prompt {
                 text,

@@ -215,8 +215,18 @@ final class AppStore: ObservableObject {
 
     func newSession(cwd: String? = nil) {
         guard let daemonId = selectedDaemonId, let core else { return }
-        pendingNewSessionDaemon = daemonId.nodeId
+        let nodeId = daemonId.nodeId
+        pendingNewSessionDaemon = nodeId
         core.newSession(id: daemonId, cwd: cwd)
+        // Safety net: if the session never comes back (e.g. the daemon rejects
+        // the cwd), clear the flag so a later reload for this daemon doesn't
+        // spuriously navigate.
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            if self?.pendingNewSessionDaemon == nodeId {
+                self?.pendingNewSessionDaemon = nil
+            }
+        }
     }
 
     func fetchProjects() {
