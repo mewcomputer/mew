@@ -703,7 +703,7 @@ struct FileBrowserSheet: View {
                         ForEach(entries, id: \.name) { entry in
                             Button {
                                 let fullPath = joinPath(currentPath, entry.name)
-                                if entry.is_dir {
+                                if entry.isDir {
                                     onNavigate(fullPath)
                                 } else {
                                     onPick(fullPath)
@@ -746,9 +746,9 @@ struct FileBrowserSheet: View {
     @ViewBuilder
     private func row(_ entry: DirEntry) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: entry.is_dir ? "folder.fill" : "doc.fill")
+            Image(systemName: entry.isDir ? "folder.fill" : "doc.fill")
                 .font(.callout)
-                .foregroundStyle(entry.is_dir ? .accentColor : .secondary)
+                .foregroundStyle(entry.isDir ? Color.accentColor : Color.secondary)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.name)
