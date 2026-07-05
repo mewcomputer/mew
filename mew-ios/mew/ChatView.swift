@@ -451,7 +451,7 @@ struct ChatBar: View {
         VStack(spacing: 2) {
             // Row 1: textfield only
             textField
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 18)
                 .padding(.top, 14)
                 .padding(.bottom, 10)
 
