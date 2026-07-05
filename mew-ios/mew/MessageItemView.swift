@@ -277,10 +277,35 @@ private struct ToolCallRow: View {
 
 // MARK: - Streaming bubble
 
-/// Lightweight assistant-style bubble used for live streaming text that hasn't
-/// been committed to a `ChatMessage` yet.
+/// Bridges the accumulating streaming text into the `AsyncStream<String>` that
+/// `StreamedMarkdownView` consumes. Each yield is the complete snapshot so far;
+/// the newest-wins buffer drops intermediate snapshots the parser can't keep up
+/// with. Owned as a `@StateObject` so its lifetime matches the bubble.
+final class LiveMarkdownSource: ObservableObject, StreamedMarkdownSource {
+    let text: AsyncStream<String>
+    private let continuation: AsyncStream<String>.Continuation
+
+    init() {
+        var captured: AsyncStream<String>.Continuation!
+        text = AsyncStream(bufferingPolicy: .bufferingNewest(1)) { captured = $0 }
+        continuation = captured
+    }
+
+    func yield(_ snapshot: String) {
+        continuation.yield(snapshot)
+    }
+
+    deinit {
+        continuation.finish()
+    }
+}
+
+/// Assistant-style bubble for live streaming text that hasn't been committed to
+/// a `ChatMessage` yet. Renders incrementally via `StreamedMarkdownView` so
+/// blocks stay stable and newly appended text fades in as it arrives.
 struct StreamingBubble: View {
     let text: String
+    @StateObject private var source = LiveMarkdownSource()
 
     var body: some View {
         HStack {
@@ -292,7 +317,7 @@ struct StreamingBubble: View {
                         TypingDot(delay: 0.4)
                     }
                 } else {
-                    MarkdownView(text: text, config: .mew)
+                    StreamedMarkdownView(source: source, config: .mew)
                 }
             }
             .padding(.horizontal, 14)
@@ -304,6 +329,9 @@ struct StreamingBubble: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 3)
+        .onChange(of: text, initial: true) { _, newValue in
+            source.yield(newValue)
+        }
     }
 }
 
