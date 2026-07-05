@@ -69,9 +69,17 @@ final class AppStore: ObservableObject {
     @Published var directoryLoading: Set<String> = []
     @Published var projectsLoading: Set<String> = []
 
+    // Navigation stack, driven both by NavigationLinks and programmatically
+    // (e.g. to push a freshly created session).
+    @Published var path: [NavigationRoute] = []
+
     // Active daemon + session
     @Published var selectedDaemonId: DaemonId?
     @Published var selectedSessionId: String?
+
+    // Node id of the daemon we just asked for a new session on, so the
+    // resulting SessionReloaded can navigate into it. Cleared once consumed.
+    private var pendingNewSessionDaemon: String?
 
     // Chat state for the active session
     @Published var messages: [ChatMessage] = []
@@ -207,6 +215,7 @@ final class AppStore: ObservableObject {
 
     func newSession(cwd: String? = nil) {
         guard let daemonId = selectedDaemonId, let core else { return }
+        pendingNewSessionDaemon = daemonId.nodeId
         core.newSession(id: daemonId, cwd: cwd)
     }
 
@@ -317,13 +326,17 @@ final class AppStore: ObservableObject {
             directoryLoading.remove(key)
             objectWillChange.send()
 
-        case .sessionReloaded(_, let sessionId):
+        case .sessionReloaded(let daemon, let sessionId):
             // Pull snapshot after reload
-            guard let daemonId = selectedDaemonId, let core else { return }
-            if let snap = core.snapshot(id: daemonId) {
+            if let snap = core?.snapshot(id: DaemonId(nodeId: daemon)) {
                 applySnapshot(snap)
             }
-            if selectedSessionId == nil {
+            // If we just created this session via "new chat", navigate into it.
+            if pendingNewSessionDaemon == daemon {
+                pendingNewSessionDaemon = nil
+                selectedSessionId = sessionId
+                path.append(.chat(daemonNodeId: daemon, sessionId: sessionId))
+            } else if selectedSessionId == nil {
                 selectedSessionId = sessionId
             }
 

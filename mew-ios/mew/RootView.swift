@@ -6,7 +6,7 @@ struct RootView: View {
     @EnvironmentObject var store: AppStore
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $store.path) {
             DaemonListView()
                 .navigationDestination(for: NavigationRoute.self) { route in
                     switch route {

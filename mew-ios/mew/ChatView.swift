@@ -49,8 +49,8 @@ struct ChatView: View {
                 }
             } else {
                 messageList
-                composer
             }
+            composer
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
@@ -58,10 +58,13 @@ struct ChatView: View {
         .task {
             store.selectSession(sessionId)
             isLoadingSession = true
-            // Give the attach + history replay a moment to arrive
-            try? await Task.sleep(for: .seconds(15))
+            // Short fallback; history replay clears it sooner via onChange below.
+            try? await Task.sleep(for: .seconds(2))
             isLoadingSession = false
             store.listModels()
+        }
+        .onChange(of: store.visibleMessages.isEmpty) { _, isEmpty in
+            if !isEmpty { isLoadingSession = false }
         }
         // Permission sheet
         .sheet(item: $permissionSheet) { item in
