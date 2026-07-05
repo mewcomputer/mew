@@ -44,6 +44,47 @@ jobs:
       - name: cargo test
         run: cargo test --all
 
+  ios-ci:
+    name: iOS core (check + bindings drift)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (+ iOS targets)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (device)
+        run: cargo check -p mew-mobile-core --target aarch64-apple-ios
+
+      - name: cargo check (simulator)
+        run: cargo check -p mew-mobile-core --target aarch64-apple-ios-sim
+
+      # Regenerate the UniFFI Swift bindings from the current Rust interface and
+      # fail if the committed bindings differ. This is the guard against the
+      # mew_mobile_core.swift bindings drifting behind the Rust core (which
+      # breaks the Xcode build and can crash the app on an FFI mismatch).
+      - name: Regenerate UniFFI Swift bindings
+        run: |
+          cargo build -p mew-mobile-core --release
+          cargo run -p mew-mobile-core --bin uniffi-bindgen -- generate \
+            --library target/release/libmew_mobile_core.dylib \
+            --language swift --out-dir mew-ios/MewMobileCore/Sources/MewMobileCore
+
+      - name: Fail if committed bindings are stale
+        run: |
+          files="mew-ios/MewMobileCore/Sources/MewMobileCore/mew_mobile_core.swift mew-ios/MewMobileCore/Sources/MewMobileCore/mew_mobile_coreFFI.h"
+          if ! git diff --quiet -- $files; then
+            echo "::error::UniFFI Swift bindings are out of date. Run 'just ios-core' and commit the regenerated mew_mobile_core.swift and mew_mobile_coreFFI.h."
+            git diff -- $files
+            exit 1
+          fi
+
   web-ci:
     name: Web UI + Client typecheck
     runs-on: ubuntu-latest
