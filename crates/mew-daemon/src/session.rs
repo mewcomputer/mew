@@ -69,9 +69,9 @@ pub struct Session {
         )>,
     >,
     /// Pending permission / workspace-permission / subagent-permission requests.
-    pub pending_permissions: Mutex<HashMap<u64, oneshot::Sender<PermissionDecision>>>,
+    pub pending_permissions: Mutex<HashMap<u64, PendingRequest<PermissionDecision>>>,
     /// Pending ask-user requests.
-    pub pending_ask_user: Mutex<HashMap<u64, oneshot::Sender<Vec<String>>>>,
+    pub pending_ask_user: Mutex<HashMap<u64, PendingRequest<Vec<String>>>>,
     /// Monotonically increasing IDs for both clients and permission requests.
     pub next_id: AtomicU64,
     /// Token for the turn currently in progress, if any.
@@ -85,6 +85,14 @@ pub struct Session {
     pub is_running: Mutex<bool>,
     /// Sessions root directory (for meta persistence).
     pub session_dir: PathBuf,
+}
+
+/// A request awaiting a client response. Keeps the wire payload so it can be
+/// replayed to a client that attaches while the request is still outstanding,
+/// alongside the channel that delivers the response back to the agent.
+pub struct PendingRequest<T> {
+    pub payload: mew_protocol::ServerMessage,
+    pub responder: oneshot::Sender<T>,
 }
 
 impl Session {

@@ -374,20 +374,25 @@ final class AppStore: ObservableObject {
             refreshMessages()
 
         case .permissionRequested(_, _, let requestId, let toolName, let input):
-            pendingPermissions.append(PendingPermission(
-                requestId: requestId,
-                sessionId: selectedSessionId ?? "",
-                toolName: toolName,
-                input: input
-            ))
+            // Dedup: the daemon replays outstanding requests on re-attach.
+            if !pendingPermissions.contains(where: { $0.requestId == requestId }) {
+                pendingPermissions.append(PendingPermission(
+                    requestId: requestId,
+                    sessionId: selectedSessionId ?? "",
+                    toolName: toolName,
+                    input: input
+                ))
+            }
 
         case .askUserRequested(_, _, let requestId, let callId, let questions):
-            pendingAskUser.append(PendingAskUser(
-                requestId: requestId,
-                sessionId: selectedSessionId ?? "",
-                callId: callId,
-                questions: questions
-            ))
+            if !pendingAskUser.contains(where: { $0.requestId == requestId }) {
+                pendingAskUser.append(PendingAskUser(
+                    requestId: requestId,
+                    sessionId: selectedSessionId ?? "",
+                    callId: callId,
+                    questions: questions
+                ))
+            }
 
         case .requestResolved(_, let requestId):
             pendingPermissions.removeAll { $0.requestId == requestId }

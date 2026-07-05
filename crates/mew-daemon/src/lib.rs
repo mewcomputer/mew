@@ -52,7 +52,7 @@ pub mod iroh_transport;
 pub use iroh_transport::{run_iroh, NodeIdAllowlist, MewIrohHandler, IrohStream, default_allowlist_path, default_secret_key_path, load_or_create_secret_key, MEW_ALPN};
 
 pub use client::DaemonClient;
-pub use session::{AttachError, Session, SessionManager};
+pub use session::{AttachError, PendingRequest, Session, SessionManager};
 
 /// Parameters passed to the agent-builder closure.
 pub struct AgentBuildParams {
@@ -484,6 +484,22 @@ where
                         };
                         reply(ServerMessage::SessionHistory { messages });
 
+                        // Replay any outstanding permission / ask-user requests
+                        // so a client attaching while the agent is blocked can
+                        // answer them (the payloads aren't in the history).
+                        {
+                            let perms = session.pending_permissions.lock().await;
+                            for pending in perms.values() {
+                                reply(pending.payload.clone());
+                            }
+                        }
+                        {
+                            let asks = session.pending_ask_user.lock().await;
+                            for pending in asks.values() {
+                                reply(pending.payload.clone());
+                            }
+                        }
+
                         // Replay current flagged-files set so the UI has it
                         // immediately after attach.
                         {
@@ -650,9 +666,9 @@ where
                 decision,
             } => {
                 if let Some(session) = &attached_session {
-                    let tx = session.pending_permissions.lock().await.remove(&request_id);
-                    if let Some(tx) = tx {
-                        let _ = tx.send(decision.into());
+                    let pending = session.pending_permissions.lock().await.remove(&request_id);
+                    if let Some(pending) = pending {
+                        let _ = pending.responder.send(decision.into());
                     }
                     session
                         .broadcast(ServerMessage::RequestResolved { request_id })
@@ -674,9 +690,9 @@ where
                 answers,
             } => {
                 if let Some(session) = &attached_session {
-                    let tx = session.pending_ask_user.lock().await.remove(&request_id);
-                    if let Some(tx) = tx {
-                        let _ = tx.send(answers);
+                    let pending = session.pending_ask_user.lock().await.remove(&request_id);
+                    if let Some(pending) = pending {
+                        let _ = pending.responder.send(answers);
                     }
                     session
                         .broadcast(ServerMessage::RequestResolved { request_id })
@@ -1628,20 +1644,26 @@ async fn translate_event(
         }
         AgentEvent::PermissionRequest { call, tx } => {
             let id = session.next_request_id();
-            session.pending_permissions.lock().await.insert(id, tx);
-            let title = session.display_title().await;
+            let request = ServerMessage::PermissionRequest {
+                request_id: id,
+                tool_name: call.tool_name.clone(),
+                input: call.input,
+            };
+            session.pending_permissions.lock().await.insert(
+                id,
+                PendingRequest {
+                    payload: request.clone(),
+                    responder: tx,
+                },
+            );
             let alert = ServerMessage::SessionAlert {
                 session_id: session.id.clone(),
-                title,
+                title: session.display_title().await,
                 kind: mew_protocol::AlertKind::PermissionNeeded,
-                detail: Some(call.tool_name.clone()),
+                detail: Some(call.tool_name),
             };
             vec![
-                ServerMessage::PermissionRequest {
-                    request_id: id,
-                    tool_name: call.tool_name,
-                    input: call.input,
-                },
+                request,
                 alert,
                 ServerMessage::SessionAttentionChanged {
                     session_id: session.id.clone(),
@@ -1652,11 +1674,18 @@ async fn translate_event(
         }
         AgentEvent::WorkspacePermissionRequest { path, tx } => {
             let id = session.next_request_id();
-            session.pending_permissions.lock().await.insert(id, tx);
-            vec![ServerMessage::WorkspacePermissionRequest {
+            let request = ServerMessage::WorkspacePermissionRequest {
                 request_id: id,
                 path: path.display().to_string(),
-            }]
+            };
+            session.pending_permissions.lock().await.insert(
+                id,
+                PendingRequest {
+                    payload: request.clone(),
+                    responder: tx,
+                },
+            );
+            vec![request]
         }
         AgentEvent::AskUser {
             call_id,
@@ -1664,26 +1693,33 @@ async fn translate_event(
             tx,
         } => {
             let id = session.next_request_id();
-            session.pending_ask_user.lock().await.insert(id, tx);
-            vec![
-                ServerMessage::AskUserRequest {
-                    request_id: id,
-                    call_id,
-                    questions: questions
-                        .into_iter()
-                        .map(|q| Question {
-                            prompt: q.prompt,
-                            options: q
-                                .options
-                                .into_iter()
-                                .map(|o| QuestionOption {
-                                    label: o.label,
-                                    description: o.description,
-                                })
-                                .collect(),
-                        })
-                        .collect(),
+            let request = ServerMessage::AskUserRequest {
+                request_id: id,
+                call_id,
+                questions: questions
+                    .into_iter()
+                    .map(|q| Question {
+                        prompt: q.prompt,
+                        options: q
+                            .options
+                            .into_iter()
+                            .map(|o| QuestionOption {
+                                label: o.label,
+                                description: o.description,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            };
+            session.pending_ask_user.lock().await.insert(
+                id,
+                PendingRequest {
+                    payload: request.clone(),
+                    responder: tx,
                 },
+            );
+            vec![
+                request,
                 ServerMessage::SessionAlert {
                     session_id: session.id.clone(),
                     title: session.display_title().await,
@@ -1738,13 +1774,20 @@ async fn translate_event(
             tx,
         } => {
             let id = session.next_request_id();
-            session.pending_permissions.lock().await.insert(id, tx);
-            vec![ServerMessage::SubagentPermissionRequest {
+            let request = ServerMessage::SubagentPermissionRequest {
                 request_id: id,
                 parent_call_id,
                 tool_name: call.tool_name,
                 input: call.input,
-            }]
+            };
+            session.pending_permissions.lock().await.insert(
+                id,
+                PendingRequest {
+                    payload: request.clone(),
+                    responder: tx,
+                },
+            );
+            vec![request]
         }
         AgentEvent::SubagentProgress { .. } => {
             // Recurse into the child event. The boxed child event is
