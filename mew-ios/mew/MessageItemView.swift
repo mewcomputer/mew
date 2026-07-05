@@ -131,10 +131,7 @@ struct MessageItemView: View {
         let text = part.text ?? ""
         DisclosureGroup {
             if !text.isEmpty {
-                Text(markdown(text))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
+                MarkdownView(text: text, config: .mewReasoning)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         } label: {

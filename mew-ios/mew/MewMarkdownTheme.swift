@@ -61,6 +61,16 @@ extension MarkdownRenderConfig {
     /// bubble should animate.
     static let mewStatic: MarkdownRenderConfig = mew.withShouldAnimateText(value: false)
 
+    /// Subdued, smaller config for reasoning traces so they read as secondary
+    /// content but still render block markdown (code, lists) via the library.
+    static let mewReasoning: MarkdownRenderConfig = mew
+        .withShouldAnimateText(value: false)
+        .withBlockSpacing(value: 8)
+        .withParagraphStyle(value: MarkdownTextStyle(
+            textFonts: bodyFonts(13),
+            textColor: .secondary
+        ))
+
     /// A MiSans font set at `size`, with italic/bold synthesized from traits.
     private static func bodyFonts(_ size: CGFloat) -> TextFonts {
         makeFonts(mewUIFont("MiSansLatinVF", size))

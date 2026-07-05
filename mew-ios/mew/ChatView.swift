@@ -194,8 +194,10 @@ struct ChatView: View {
                 .onChange(of: store.visibleMessages) { _ in
                     scrollToBottom(proxy: proxy)
                 }
+                // Streaming deltas arrive rapidly; scroll without animation so
+                // the growing text and an animated scroll don't fight (jitter).
                 .onChange(of: store.streamingText) { _ in
-                    scrollToBottom(proxy: proxy)
+                    scrollToBottom(proxy: proxy, animated: false)
                 }
             }
         }
@@ -230,9 +232,13 @@ struct ChatView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func scrollToBottom(proxy: ScrollViewProxy) {
+    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool = true) {
         guard autoScroll else { return }
-        withAnimation(.easeOut(duration: 0.2)) {
+        if animated {
+            withAnimation(.easeOut(duration: 0.2)) {
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
+        } else {
             proxy.scrollTo("bottom", anchor: .bottom)
         }
     }
