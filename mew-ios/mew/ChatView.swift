@@ -31,8 +31,6 @@ struct ChatView: View {
     @State private var isLoadingSession: Bool = false
 
     // Sheets
-    @State private var permissionSheet: PermissionSheetItem?
-    @State private var askUserSheet: AskUserSheetItem?
 
     // File browser: nil = closed; non-nil = showing that path. The path
     // is the current directory being browsed; tap a folder to navigate in.
@@ -70,19 +68,29 @@ struct ChatView: View {
         .onChange(of: store.visibleMessages.isEmpty) { _, isEmpty in
             if !isEmpty { isLoadingSession = false }
         }
-        // Permission sheet
-        .sheet(item: $permissionSheet) { item in
+        // Permission sheet: driven directly by the pending queue (filtered to
+        // this session) so it re-appears on re-entry and can't be lost to an
+        // accidental swipe — the agent stays blocked until it's answered.
+        .sheet(item: Binding(
+            get: { store.pendingPermissions.first { $0.sessionId == sessionId }.map { PermissionSheetItem(permission: $0) } },
+            set: { _ in }
+        )) { item in
             PermissionSheet(permission: item.permission) { decision in
                 store.respondPermission(requestId: item.permission.requestId, decision: decision)
             }
             .presentationDetents([.medium, .large])
+            .interactiveDismissDisabled()
         }
-        // Ask-user sheet
-        .sheet(item: $askUserSheet) { item in
+        // Ask-user sheet: same store-driven, non-dismissable treatment.
+        .sheet(item: Binding(
+            get: { store.pendingAskUser.first { $0.sessionId == sessionId }.map { AskUserSheetItem(ask: $0) } },
+            set: { _ in }
+        )) { item in
             AskUserSheet(ask: item.ask) { answers in
                 store.respondAskUser(requestId: item.ask.requestId, answers: answers)
             }
             .presentationDetents([.medium, .large])
+            .interactiveDismissDisabled()
         }
         // File browser — opens from the + button. When non-nil, the sheet
         // shows the listing for that path; tap a folder to navigate in
@@ -109,13 +117,6 @@ struct ChatView: View {
                 onClose: { fileBrowserPath = nil }
             )
             .presentationDetents([.large])
-        }
-        // Drive sheets from the store's pending queues.
-        .onChange(of: store.pendingPermissions.count) { _ in
-            permissionSheet = store.pendingPermissions.last.map { PermissionSheetItem(permission: $0) }
-        }
-        .onChange(of: store.pendingAskUser.count) { _ in
-            askUserSheet = store.pendingAskUser.last.map { AskUserSheetItem(ask: $0) }
         }
         // Mirror the first available model into the picker label.
         .onChange(of: store.availableModels) { models in
