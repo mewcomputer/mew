@@ -34,6 +34,10 @@ struct ChatView: View {
     @State private var permissionSheet: PermissionSheetItem?
     @State private var askUserSheet: AskUserSheetItem?
 
+    // File browser: nil = closed; non-nil = showing that path. The path
+    // is the current directory being browsed; tap a folder to navigate in.
+    @State private var fileBrowserPath: String?
+
     var body: some View {
         VStack(spacing: 0) {
             if store.visibleMessages.isEmpty && !store.isStreaming && store.streamingText.isEmpty {
@@ -72,6 +76,32 @@ struct ChatView: View {
                 store.respondAskUser(requestId: item.ask.requestId, answers: answers)
             }
             .presentationDetents([.medium, .large])
+        }
+        // File browser — opens from the + button. When non-nil, the sheet
+        // shows the listing for that path; tap a folder to navigate in
+        // (sets fileBrowserPath to the new path) or tap a file to insert
+        // its path into the composer.
+        .sheet(item: Binding(
+            get: { fileBrowserPath.map { FileBrowserItem(path: $0) } },
+            set: { newValue in fileBrowserPath = newValue?.path }
+        )) { item in
+            FileBrowserSheet(
+                sessionId: sessionId,
+                currentPath: item.path,
+                onNavigate: { newPath in fileBrowserPath = newPath },
+                onPick: { path in
+                    // Append the picked path to the composer text,
+                    // separated by a space if the user already has
+                    // something typed.
+                    if !inputText.isEmpty, !inputText.hasSuffix(" ") {
+                        inputText += " "
+                    }
+                    inputText += path
+                    fileBrowserPath = nil
+                },
+                onClose: { fileBrowserPath = nil }
+            )
+            .presentationDetents([.large])
         }
         // Drive sheets from the store's pending queues.
         .onChange(of: store.pendingPermissions.count) { _ in
@@ -212,10 +242,24 @@ struct ChatView: View {
                 store.switchModel(provider: model.provider, model: model.model)
                 currentModel = model
             },
-            onRefreshModels: { store.listModels() }
+            onRefreshModels: { store.listModels() },
+            onAttachments: { fileBrowserPath = initialBrowserPath() }
         )
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
+    }
+
+    /// Default the file browser to the session's cwd (if set) or
+    /// fall back to the home directory. The daemon resolves and
+    /// returns the listing.
+    private func initialBrowserPath() -> String? {
+        if let cwd = store.sessionLists[store.selectedDaemonId?.nodeId ?? ""]?
+            .first(where: { $0.sessionId == sessionId })?
+            .cwd
+        {
+            return cwd
+        }
+        return nil // daemon defaults to its cwd
     }
 
     @ViewBuilder
@@ -442,6 +486,7 @@ struct ChatBar: View {
     let onSubmit: () -> Void
     let onPickModel: (ModelSummary) -> Void
     let onRefreshModels: () -> Void
+    let onAttachments: () -> Void
 
     @FocusState private var localFocus: Bool
 
@@ -487,10 +532,10 @@ struct ChatBar: View {
 
     @ViewBuilder
     private var attachmentsButton: some View {
-        // Placeholder for the attachments menu (image, file, project switch).
-        // Disabled until attachments land; kept here so the layout is stable.
-        Menu {
-            Text("Attachments coming soon")
+        // + button — opens the file browser sheet. Tapping a file or
+        // directory in the browser inserts its path into the composer.
+        Button {
+            onAttachments()
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 16, weight: .semibold))
@@ -500,6 +545,7 @@ struct ChatBar: View {
                     Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
                 )
         }
+        .accessibilityLabel("Browse files")
     }
 
     @ViewBuilder
@@ -581,5 +627,155 @@ struct ChatBar: View {
             return String(format: "%.0fK", kb / 1024) + " ctx"
         }
         return String(format: "%.0fK", kb) + " ctx"
+    }
+}
+
+// MARK: - FileBrowserSheet
+
+private struct FileBrowserItem: Identifiable {
+    let path: String
+    var id: String { path }
+}
+
+/// A modal directory browser. Lists entries for `currentPath`; tapping a
+/// folder navigates in (calls `onNavigate` with the new path), tapping a
+/// file inserts its full path into the composer and closes the sheet.
+struct FileBrowserSheet: View {
+    let sessionId: String
+    let currentPath: String
+    let onNavigate: (String) -> Void
+    let onPick: (String) -> Void
+    let onClose: () -> Void
+
+    @EnvironmentObject private var store: AppStore
+
+    private var directoryKey: String {
+        "\(sessionId)::\(currentPath)"
+    }
+
+    private var listing: DirListing? {
+        store.directoryListings[directoryKey]
+    }
+
+    private var isLoading: Bool {
+        store.directoryLoading.contains(directoryKey)
+    }
+
+    var body: some View {
+        NavigationStack {
+            content
+                .navigationTitle(currentPath.isEmpty ? "Files" : (currentPath as NSString).lastPathComponent)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done", action: onClose)
+                    }
+                    ToolbarItem(placement: .topBarLeading) {
+                        if !currentPath.isEmpty {
+                            Button {
+                                onNavigate(parentPath(of: currentPath))
+                            } label: {
+                                Image(systemName: "chevron.left")
+                            }
+                        }
+                    }
+                }
+        }
+        .task(id: currentPath) {
+            // Fetch on open and on every navigation. Idempotent on the
+            // daemon side.
+            store.fetchDirectory(sessionId: sessionId, path: currentPath.isEmpty ? nil : currentPath)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if isLoading && listing == nil {
+            VStack {
+                Spacer()
+                ProgressView("Loading…")
+                Spacer()
+            }
+        } else if let listing {
+            List {
+                Section {
+                    if let entries = listing.entries.isEmpty ? nil : listing.entries {
+                        ForEach(entries, id: \.name) { entry in
+                            Button {
+                                let fullPath = joinPath(currentPath, entry.name)
+                                if entry.is_dir {
+                                    onNavigate(fullPath)
+                                } else {
+                                    onPick(fullPath)
+                                }
+                            } label: {
+                                row(entry)
+                            }
+                        }
+                    } else {
+                        Text("Empty directory")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text(currentPath)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textCase(nil)
+                }
+            }
+            .listStyle(.plain)
+        } else {
+            VStack {
+                Spacer()
+                Image(systemName: "folder")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.tertiary)
+                Text("Couldn't list directory")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Button("Retry") {
+                    store.fetchDirectory(sessionId: sessionId, path: currentPath.isEmpty ? nil : currentPath)
+                }
+                .buttonStyle(.borderedProminent)
+                Spacer()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ entry: DirEntry) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: entry.is_dir ? "folder.fill" : "doc.fill")
+                .font(.callout)
+                .foregroundStyle(entry.is_dir ? .accentColor : .secondary)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.name)
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                if let size = entry.size {
+                    Text(formatSize(size))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    private func parentPath(of path: String) -> String {
+        (path as NSString).deletingLastPathComponent
+    }
+
+    private func joinPath(_ base: String, _ component: String) -> String {
+        if base.isEmpty { return component }
+        return (base as NSString).appendingPathComponent(component)
+    }
+
+    private func formatSize(_ bytes: UInt64) -> String {
+        let f = ByteCountFormatter()
+        f.countStyle = .file
+        return f.string(fromByteCount: Int64(bytes))
     }
 }

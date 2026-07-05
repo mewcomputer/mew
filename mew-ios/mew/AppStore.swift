@@ -65,6 +65,8 @@ final class AppStore: ObservableObject {
     // Per-daemon session lists
     @Published var sessionLists: [String: [SessionSummary]] = [:]
     @Published var projectLists: [String: [ProjectInfo]] = [:]
+    @Published var directoryListings: [String: DirListing] = [:]
+    @Published var directoryLoading: Set<String> = []
     @Published var projectsLoading: Set<String> = []
 
     // Active daemon + session
@@ -214,6 +216,21 @@ final class AppStore: ObservableObject {
         core.listProjects(id: daemonId)
     }
 
+    /// Browse a directory on the daemon. The result arrives as a
+    /// `CoreEvent::DirListing` which the `onEvent` handler stores in
+    /// `directoryListings`.
+    func fetchDirectory(sessionId: String, path: String?) {
+        guard let daemonId = selectedDaemonId, let core else { return }
+        let key = directoryKey(sessionId: sessionId, path: path)
+        directoryLoading.insert(key)
+        core.listDir(id: daemonId, sessionId: sessionId, path: path)
+    }
+
+    private func directoryKey(sessionId: String, path: String?) -> String {
+        let p = path ?? ""
+        return "\(sessionId)::\(p)"
+    }
+
     func sendPrompt(_ text: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
         core.prompt(id: daemonId, text: text)
@@ -287,6 +304,17 @@ final class AppStore: ObservableObject {
         case .projectList(let daemon, let projects):
             projectLists[daemon] = projects
             projectsLoading.remove(daemon)
+            objectWillChange.send()
+
+        case .dirListing(let daemon, let sessionId, let path, let entries):
+            let key = directoryKey(sessionId: sessionId, path: path)
+            directoryListings[key] = DirListing(
+                daemon: daemon,
+                sessionId: sessionId,
+                path: path,
+                entries: entries
+            )
+            directoryLoading.remove(key)
             objectWillChange.send()
 
         case .sessionReloaded(_, let sessionId):
@@ -379,6 +407,17 @@ final class AppStore: ObservableObject {
         // The Rust core already updated its internal state; pull a fresh snapshot
         refreshMessages()
     }
+}
+
+// MARK: - Directory listing
+
+/// A single directory listing fetched from the daemon. The view layer
+/// treats path as the canonical key alongside sessionId.
+struct DirListing {
+    let daemon: String
+    let sessionId: String
+    let path: String
+    let entries: [DirEntry]
 }
 
 // MARK: - Alert item

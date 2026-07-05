@@ -413,6 +413,15 @@ impl MobileCore {
         }
     }
 
+    /// List files in a directory on the daemon. The result arrives as a
+    /// `CoreEvent::DirListing` event.
+    pub fn list_dir(&self, id: DaemonId, session_id: String, path: Option<String>) {
+        let conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(&id.node_id) {
+            let _ = conn.tx.send(ClientMessage::ListDir { session_id, path });
+        }
+    }
+
     /// List available models from the daemon.
     pub fn list_models(&self, id: DaemonId) {
         let conns = self.connections.lock().unwrap();
@@ -806,6 +815,31 @@ fn translate_message(
             events.push(CoreEvent::ProjectList {
                 daemon: d,
                 projects: infos,
+            });
+        }
+
+        ServerMessage::DirListing { path, entries } => {
+            // Need the session_id for the event — use whatever's currently
+            // attached on this connection.
+            let sid = conn_state
+                .attached_session
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default();
+            let entries: Vec<events::DirEntry> = entries
+                .iter()
+                .map(|e| events::DirEntry {
+                    name: e.name.clone(),
+                    is_dir: e.is_dir,
+                    size: e.size,
+                })
+                .collect();
+            events.push(CoreEvent::DirListing {
+                daemon: d,
+                session_id: sid,
+                path: path.clone(),
+                entries,
             });
         }
 

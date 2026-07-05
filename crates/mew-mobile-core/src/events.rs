@@ -32,6 +32,14 @@ pub enum CoreEvent {
         projects: Vec<ProjectInfo>,
     },
 
+    /// Directory listing (response to list_dir).
+    DirListing {
+        daemon: String,
+        session_id: String,
+        path: String,
+        entries: Vec<DirEntry>,
+    },
+
     /// A session was reloaded after reconnect. Swift should pull `snapshot()`.
     SessionReloaded {
         daemon: String,
@@ -174,6 +182,14 @@ pub struct ProjectInfo {
     pub display_name: String,
     pub session_count: u32,
     pub last_used_at: Option<i64>,
+}
+
+/// One entry in a directory listing (response to list_dir).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DirEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: Option<u64>,
 }
 
 /// Summary of an available model.

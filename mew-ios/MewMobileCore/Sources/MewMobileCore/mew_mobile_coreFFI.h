@@ -314,6 +314,11 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_disconnect(uint64_t ptr, RustBu
 RustBuffer uniffi_mew_mobile_core_fn_method_mobilecore_list_daemons(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_DIR
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_DIR
+void uniffi_mew_mobile_core_fn_method_mobilecore_list_dir(uint64_t ptr, RustBuffer id, RustBuffer session_id, RustBuffer path, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_MODELS
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_MODELS
 void uniffi_mew_mobile_core_fn_method_mobilecore_list_models(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
@@ -725,6 +730,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_disconnect(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_DAEMONS
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_DAEMONS
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_daemons(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_DIR
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_DIR
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_dir(void
     
 );
 #endif
