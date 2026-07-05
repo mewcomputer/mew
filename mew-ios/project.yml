@@ -15,6 +15,13 @@ settings:
 packages:
   MewMobileCore:
     path: ./MewMobileCore
+  SwiftStreamingMarkdown:
+    url: https://github.com/microsoft/SwiftStreamingMarkdown
+    # Pinned by revision, not version: this package pins its own deps
+    # (highlightswift, iosMath) to git revisions, and SPM refuses to resolve a
+    # stable-versioned package with unstable-pinned transitive deps. Bump this
+    # SHA deliberately to update.
+    revision: 947e958edf0d5b4352ac9383ec4de7a9bf8f13b9
 targets:
   mew:
     type: application
@@ -23,6 +30,7 @@ targets:
       - path: mew
     dependencies:
       - package: MewMobileCore
+      - package: SwiftStreamingMarkdown
       - sdk: SystemConfiguration.framework
       - sdk: Security.framework
       - sdk: Network.framework

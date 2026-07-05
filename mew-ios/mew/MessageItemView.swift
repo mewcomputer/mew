@@ -1,5 +1,6 @@
 import SwiftUI
 import MewMobileCore
+import SwiftStreamingMarkdown
 
 // MARK: - MessageItemView
 
@@ -76,9 +77,7 @@ struct MessageItemView: View {
         switch part.kind {
         case .text:
             if let text = part.text, !text.isEmpty {
-                Text(markdown(text))
-                    .font(.body)
-                    .textSelection(.enabled)
+                MarkdownView(text: text, config: .mew)
             }
         case .reasoning:
             reasoningView(part)
@@ -293,9 +292,7 @@ struct StreamingBubble: View {
                         TypingDot(delay: 0.4)
                     }
                 } else {
-                    Text(markdown(text))
-                        .font(.body)
-                        .textSelection(.enabled)
+                    MarkdownView(text: text, config: .mew)
                 }
             }
             .padding(.horizontal, 14)
@@ -307,13 +304,6 @@ struct StreamingBubble: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 3)
-    }
-
-    private func markdown(_ string: String) -> AttributedString {
-        if let attr = try? AttributedString(markdown: string) {
-            return attr
-        }
-        return AttributedString(string)
     }
 }
 
