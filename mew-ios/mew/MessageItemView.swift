@@ -61,8 +61,12 @@ struct MessageItemView: View {
     @ViewBuilder
     private var assistantContent: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(message.parts, id: \.id) { part in
-                partView(part)
+            ForEach(partGroups) { group in
+                if group.parts.count > 1 {
+                    ToolGroupRow(parts: group.parts)
+                } else {
+                    partView(group.parts[0])
+                }
             }
         }
         .padding(.horizontal, 14)
@@ -70,6 +74,35 @@ struct MessageItemView: View {
         .frame(maxWidth: 360, alignment: .leading)
         // Assistant messages render with no background — the chat surface
         // shows through and user bubbles provide the only visual separation.
+    }
+
+    /// Parts to render, with runs of consecutive tool calls to the *same* tool
+    /// collapsed into a single group so a burst of e.g. Read calls shows as one
+    /// batched row instead of many.
+    private var partGroups: [PartGroup] {
+        var groups: [PartGroup] = []
+        var run: [MessagePart] = []
+        func flushRun() {
+            if !run.isEmpty {
+                groups.append(PartGroup(id: run[0].id, parts: run))
+                run = []
+            }
+        }
+        for part in message.parts {
+            if part.kind == .toolCall,
+               let name = part.toolName,
+               name == run.last?.toolName {
+                run.append(part)
+            } else {
+                flushRun()
+                run = part.kind == .toolCall ? [part] : []
+                if run.isEmpty {
+                    groups.append(PartGroup(id: part.id, parts: [part]))
+                }
+            }
+        }
+        flushRun()
+        return groups
     }
 
     @ViewBuilder
@@ -126,6 +159,81 @@ struct MessageItemView: View {
             return attr
         }
         return AttributedString(string)
+    }
+}
+
+// MARK: - Part grouping
+
+/// A run of message parts rendered as a unit. A single-element group renders as
+/// its part; a multi-element group is a batch of same-tool calls.
+private struct PartGroup: Identifiable {
+    let id: String
+    let parts: [MessagePart]
+}
+
+// MARK: - Tool group row
+
+/// A collapsed batch of consecutive calls to the same tool, e.g. `Read ×4`.
+/// Expands to the individual `ToolCallRow`s.
+private struct ToolGroupRow: View {
+    let parts: [MessagePart]
+
+    @State private var expanded = false
+
+    private var toolName: String { parts.first?.toolName ?? "tool" }
+    private var anyActive: Bool {
+        parts.contains { $0.toolState == "running" || $0.toolState == "pending" }
+    }
+    private var anyError: Bool { parts.contains { $0.toolState == "error" } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "wrench.and.screwdriver")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                Text("\(toolName) ×\(parts.count)")
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                aggregateIndicator
+
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() } }
+
+            if expanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(parts, id: \.id) { part in
+                        ToolCallRow(part: part)
+                    }
+                }
+                .padding(.leading, 8)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var aggregateIndicator: some View {
+        if anyActive {
+            ProgressView()
+                .controlSize(.small)
+                .tint(.blue)
+        } else if anyError {
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(.red)
+                .font(.caption)
+        } else {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .font(.caption)
+        }
     }
 }
 
