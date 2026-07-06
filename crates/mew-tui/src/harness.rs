@@ -128,6 +128,116 @@ impl Harness {
         self.agent(AgentEvent::Error(message.to_string()));
     }
 
+    /// Inject a completed tool call with `output` and optional `diff`.
+    /// Mirrors the real event sequence: PartStart(ToolCall) → ToolStart →
+    /// ToolEnd → PartUpdated(Completed). The resulting `ToolDisplayState`
+    /// carries the output + diff that the chat renderer reads.
+    pub fn say_tool_call(&mut self, tool_name: &str, output: &str, diff: Option<&str>) {
+        use mew_message::{PartBase, ToolCallPart, ToolState, ToolStateCompleted, ToolTime};
+        let part_id = PartId::new();
+        let msg_id = MessageId::new();
+        let session_id = SessionId::new();
+        let call_id = format!("call_{}", ulid::Ulid::new());
+        let base = PartBase {
+            id: part_id,
+            message_id: msg_id,
+            session_id,
+        };
+        // Ensure an assistant message exists to hold the tool call part.
+        if !self.app.messages.iter().any(|m| m.role == Role::Assistant) {
+            self.app.messages.push(Message {
+                id: msg_id,
+                session_id,
+                role: Role::Assistant,
+                parts: vec![],
+                time: Time {
+                    created: chrono::Utc::now().timestamp_millis(),
+                    completed: None,
+                },
+                assistant: None,
+            });
+        }
+        let part = Part::ToolCall(ToolCallPart {
+            base: base.clone(),
+            tool_name: tool_name.to_string(),
+            call_id: call_id.clone(),
+            state: ToolState::Pending(mew_message::ToolStatePending {
+                input: serde_json::json!({}),
+                time: ToolTime {
+                    start: 0,
+                    end: None,
+                },
+            }),
+            sensitivity: Some("readonly".into()),
+            raw_input: String::new(),
+        });
+        self.agent(AgentEvent::Provider(ProviderEvent::PartStart {
+            part: part.clone(),
+        }));
+        self.agent(AgentEvent::ToolStart {
+            call_id: call_id.clone(),
+        });
+        self.agent(AgentEvent::ToolEnd {
+            call_id: call_id.clone(),
+            success: true,
+        });
+        let completed = Part::ToolCall(ToolCallPart {
+            base: base.clone(),
+            tool_name: tool_name.to_string(),
+            call_id: call_id.clone(),
+            state: ToolState::Completed(ToolStateCompleted {
+                input: serde_json::json!({}),
+                output: output.to_string(),
+                metadata: None,
+                diff: diff.map(|s| s.to_string()),
+                time: ToolTime {
+                    start: 0,
+                    end: Some(0),
+                },
+            }),
+            sensitivity: Some("readonly".into()),
+            raw_input: String::new(),
+        });
+        self.agent(AgentEvent::PartUpdated {
+            part_id,
+            part: completed,
+        });
+    }
+
+    /// Inject a reasoning/thinking part with `text`. The block renders
+    /// collapsed by default (header line only) unless expanded.
+    pub fn say_reasoning(&mut self, text: &str) {
+        use mew_message::{PartBase, ReasoningPart};
+        let part_id = PartId::new();
+        let msg_id = MessageId::new();
+        let session_id = SessionId::new();
+        if !self.app.messages.iter().any(|m| m.role == Role::Assistant) {
+            self.app.messages.push(Message {
+                id: msg_id,
+                session_id,
+                role: Role::Assistant,
+                parts: vec![],
+                time: Time {
+                    created: chrono::Utc::now().timestamp_millis(),
+                    completed: None,
+                },
+                assistant: None,
+            });
+        }
+        self.agent(AgentEvent::Provider(ProviderEvent::PartStart {
+            part: Part::Reasoning(ReasoningPart {
+                base: PartBase {
+                    id: part_id,
+                    message_id: msg_id,
+                    session_id,
+                },
+                text: text.to_string(),
+                signature: None,
+            }),
+        }));
+        self.agent(AgentEvent::Provider(ProviderEvent::PartEnd { part_id }));
+    }
+
     /// Feed a raw `AgentEvent` to the app, exactly as the real event loop does.
     pub fn agent(&mut self, event: AgentEvent) {
         self.app.handle_agent_event(event);
@@ -230,7 +340,9 @@ pub fn run_script(script: &str, width: u16, height: u16) -> String {
 }
 
 fn parse_size(s: &str) -> Option<(u16, u16)> {
-    let mut parts = s.split(|c: char| c == 'x' || c.is_whitespace()).filter(|p| !p.is_empty());
+    let mut parts = s
+        .split(|c: char| c == 'x' || c.is_whitespace())
+        .filter(|p| !p.is_empty());
     let w = parts.next()?.parse().ok()?;
     let h = parts.next()?.parse().ok()?;
     Some((w, h))

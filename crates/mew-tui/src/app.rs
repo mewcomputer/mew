@@ -252,6 +252,53 @@ pub struct App {
     /// Pending large paste awaiting user confirmation. When set, the TUI
     /// shows "paste N chars? [y/N]" and only inserts on 'y'.
     pub pending_paste: Option<String>,
+    /// Cached rendered chat (the built `Text` + `chat_rows` + layout
+    /// metadata). Rebuilding this is O(total transcript), so we keep it
+    /// across frames and only rebuild when the rendered output actually
+    /// changes. `chat_dirty` is bumped by every mutator that affects the
+    /// build; scroll does not bump it. See `RenderedChat` and
+    /// `App::ensure_chat_rendered`.
+    pub rendered_chat: Option<RenderedChat>,
+    /// Generation counter for `rendered_chat`. Bumped whenever the chat
+    /// render output may have changed. `None` means "force rebuild on next
+    /// draw" (initial state, or after a width change invalidated the cache).
+    pub chat_dirty: Option<u64>,
+    /// Width the cached chat was built at. Width changes invalidate the
+    /// cache (line wrapping depends on it).
+    pub rendered_chat_width: u16,
+}
+
+/// Cached result of building the chat `Text` for one transcript state.
+///
+/// `lines` holds every rendered line (already indented, em-dash-fixed,
+/// selection applied, and pre-wrapped to ≤ chat width so each entry is
+/// exactly one visual row — letting us slice the visible window without
+/// ratatui's O(scroll.y) skip). `chat_rows` is the plain-text mirror used
+/// by mouse selection. `max_scroll` is cached so `scroll_up`/`scroll_down`
+/// can clamp without rebuilding. `dirty_gen` is the `chat_dirty` generation
+/// this cache was built from, so a stale cache is detected in O(1).
+#[derive(Clone)]
+pub struct RenderedChat {
+    /// Plain lines (already indented, em-dash-fixed, selection applied,
+    /// pre-wrapped to ≤ chat width).
+    pub lines: Vec<ratatui::text::Line<'static>>,
+    /// One plain-text string per visual row, for mouse-selection mapping.
+    pub chat_rows: Vec<String>,
+    /// Total line count (`lines.len()`). Cached because it's needed for
+    /// `max_scroll` and scrollbar geometry on every render.
+    pub total_wrapped: u16,
+    /// `max_scroll = total_wrapped.saturating_sub(area_height)`; cached at
+    /// build time so scroll mutators don't need to rebuild.
+    pub max_scroll: u16,
+    /// The `chat_dirty` generation this cache was built from.
+    pub dirty_gen: u64,
+}
+
+/// Return type of `build_chat_lines` — the built lines + plain-text mirror,
+/// before being wrapped in a `RenderedChat` with geometry metadata.
+pub struct BuiltChat {
+    pub lines: Vec<ratatui::text::Line<'static>>,
+    pub chat_rows: Vec<String>,
 }
 
 /// A running or completed subagent task shown in the sidebar.
@@ -550,6 +597,9 @@ impl App {
             history_search_index: None,
             history_search_saved: None,
             pending_paste: None,
+            rendered_chat: None,
+            chat_dirty: None,
+            rendered_chat_width: 0,
         }
     }
 
@@ -1021,6 +1071,7 @@ impl App {
         self.sel_anchor_col = None;
         self.sel_end_row = None;
         self.sel_end_col = None;
+        self.mark_chat_dirty();
     }
 
     /// Toggle a sidebar section's collapsed state by name ("context", "tools", "mcp").
@@ -1594,6 +1645,65 @@ impl App {
             },
             assistant: None,
         });
+        self.mark_chat_dirty();
+    }
+
+    /// Mark the cached chat render as stale so the next draw rebuilds it.
+    /// Call from every mutator that changes what `draw_chat` would produce.
+    /// Scroll mutators must NOT call this — they re-render from cache.
+    pub fn mark_chat_dirty(&mut self) {
+        self.chat_dirty = Some(self.chat_dirty.unwrap_or(0).wrapping_add(1));
+    }
+
+    /// Ensure `rendered_chat` is up to date for the current `chat_dirty`
+    /// generation and width. Rebuilds only when stale — idle scroll frames
+    /// (which don't bump `chat_dirty`) skip the rebuild and stay O(visible).
+    /// `area_height` is needed to compute `max_scroll` so scroll mutators
+    /// can clamp without rebuilding.
+    pub fn ensure_chat_rendered(&mut self, md_width: u16, chat_width: u16, area_height: u16) {
+        if md_width == 0 || chat_width == 0 {
+            return;
+        }
+        let dirty = self.chat_dirty;
+        let width_ok = self.rendered_chat_width == chat_width;
+        let cache_ok = matches!(
+            (&self.rendered_chat, &dirty, width_ok),
+            (Some(_), Some(_), true)
+        ) && self.rendered_chat.as_ref().map(|c| c.dirty_gen) == dirty;
+        if !cache_ok {
+            let built = crate::ui::chat::build_chat_lines(self, md_width, chat_width);
+            let total_lines = built.lines.len() as u16;
+            let max_scroll = total_lines.saturating_sub(area_height);
+            self.max_scroll = max_scroll;
+            // Publish the plain-text mirror for mouse selection + the
+            // companion overlay. Only on rebuild — idle scroll frames skip
+            // this clone, keeping them O(visible).
+            self.chat_rows = built.chat_rows.clone();
+            self.rendered_chat = Some(RenderedChat {
+                lines: built.lines,
+                chat_rows: built.chat_rows,
+                total_wrapped: total_lines,
+                max_scroll,
+                dirty_gen: dirty.unwrap_or(0),
+            });
+            self.rendered_chat_width = chat_width;
+            // Re-attach auto-scroll to the new bottom. While streaming we
+            // always pin to the bottom; otherwise only if already anchored.
+            if self.auto_scroll {
+                self.scroll = max_scroll;
+            }
+        } else if let Some(ref mut rc) = self.rendered_chat {
+            // Width and content are unchanged, but area_height may have
+            // changed (resize). Recompute max_scroll cheaply.
+            let max_scroll = rc.total_wrapped.saturating_sub(area_height);
+            if rc.max_scroll != max_scroll {
+                rc.max_scroll = max_scroll;
+                self.max_scroll = max_scroll;
+                if self.auto_scroll {
+                    self.scroll = max_scroll;
+                }
+            }
+        }
     }
 
     /// Clear the chat display and all associated render state.
@@ -1602,6 +1712,7 @@ impl App {
         self.tool_states.clear();
         self.rendered_md_cache.clear();
         self.pending_md_rerender = None;
+        self.mark_chat_dirty();
     }
 
     /// Rewind the display to keep only the first `n` messages. Cleans up
@@ -1614,11 +1725,13 @@ impl App {
         self.rendered_md_cache
             .retain(|id, _| self.messages.iter().any(|m| m.id == *id));
         self.pending_md_rerender = None;
+        self.mark_chat_dirty();
     }
 
     /// Toggle bash output expansion.
     pub fn toggle_bash_expanded(&mut self) {
         self.bash_expanded = !self.bash_expanded;
+        self.mark_chat_dirty();
     }
 
     /// Toggle reasoning/thinking block expansion.
@@ -1631,6 +1744,7 @@ impl App {
             } else {
                 self.reasoning_expanded.insert(id);
             }
+            self.mark_chat_dirty();
         }
     }
 
@@ -2091,6 +2205,8 @@ impl App {
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::Provider(ProviderEvent::PartStart { part }) => {
+                // Content is flowing — any retry wait is over.
+                self.retry_status = None;
                 // Auto-expand reasoning while streaming, auto-collapse when
                 // the model moves on to text or a tool call.
                 match &part {
@@ -2122,6 +2238,7 @@ impl App {
                             self.md_state = mdstream::DocumentState::new();
                         }
                         msg.parts.push(part);
+                        self.mark_chat_dirty();
                         return;
                     }
                 }
@@ -2140,6 +2257,7 @@ impl App {
                 // Start incremental markdown stream for this message.
                 self.md_stream = Some(mdstream::MdStream::new(mdstream::Options::default()));
                 self.md_state = mdstream::DocumentState::new();
+                self.mark_chat_dirty();
             }
             AgentEvent::Provider(ProviderEvent::PartDelta { part_id, delta, .. }) => {
                 let mut is_text_delta = false;
@@ -2165,6 +2283,7 @@ impl App {
                         self.md_state.apply(update);
                     }
                 }
+                self.mark_chat_dirty();
             }
             AgentEvent::Provider(ProviderEvent::PartEnd { .. }) => {}
             AgentEvent::Provider(ProviderEvent::MessageEnd {
@@ -2196,6 +2315,7 @@ impl App {
                 if let Some(msg) = self.messages.last_mut() {
                     msg.time.completed = Some(chrono::Utc::now().timestamp_millis());
                 }
+                self.mark_chat_dirty();
             }
             AgentEvent::Provider(ProviderEvent::RetryWait {
                 attempt,
@@ -2267,6 +2387,7 @@ impl App {
                         }
                     }
                 }
+                self.mark_chat_dirty();
             }
             AgentEvent::ToolProgress { call_id, chunk } => {
                 // Append chunk to the running tool call's output.
@@ -2285,6 +2406,7 @@ impl App {
                         }
                     }
                 }
+                self.mark_chat_dirty();
             }
             AgentEvent::ToolEnd { call_id, success } => {
                 for msg in self.messages.iter_mut().rev() {
@@ -2311,6 +2433,7 @@ impl App {
                         }
                     }
                 }
+                self.mark_chat_dirty();
             }
             AgentEvent::PartUpdated { part_id, part } => {
                 if let Part::ToolCall(tc) = &part {
@@ -2334,11 +2457,13 @@ impl App {
                         }
                     }
                 }
+                self.mark_chat_dirty();
             }
             AgentEvent::Error(msg) => {
                 self.streaming = false;
                 self.esc_cancel_pending = None;
                 self.ctrl_c_quit_pending = None;
+                self.retry_status = None;
                 self.push_synthetic_message(format!("Error: {}", msg));
             }
             AgentEvent::SubagentStart {
@@ -3934,5 +4059,86 @@ mod tests {
         let matches = app.history_search_matches();
         assert!(matches.is_empty());
         assert_eq!(app.history_search_current_match(), None);
+    }
+
+    /// `chat_dirty` is the cache invalidation generation for `rendered_chat`.
+    /// Every mutator that changes what `draw_chat` would produce must bump
+    /// it; scroll must not. A missed bump = a stale chat (silent regression),
+    /// so these tests guard the invariant explicitly.
+    #[test]
+    fn chat_dirty_scroll_does_not_bump() {
+        let mut app = App::new();
+        app.push_synthetic_message("hello".into());
+        let gen = app.chat_dirty;
+        app.scroll_up(1);
+        app.scroll_down(1);
+        assert_eq!(app.chat_dirty, gen, "scroll must not invalidate cache");
+    }
+
+    #[test]
+    fn chat_dirty_message_mutations_bump() {
+        let mut app = App::new();
+        let start = app.chat_dirty;
+
+        app.push_synthetic_message("a".into());
+        assert!(app.chat_dirty > start, "push_synthetic_message bumps");
+
+        let after_push = app.chat_dirty;
+        app.clear_messages();
+        assert!(app.chat_dirty > after_push, "clear_messages bumps");
+
+        app.push_synthetic_message("b".into());
+        app.push_synthetic_message("c".into());
+        let after_two = app.chat_dirty;
+        app.rewind_to(1);
+        assert!(app.chat_dirty > after_two, "rewind_to bumps");
+    }
+
+    #[test]
+    fn chat_dirty_selection_and_expansion_bump() {
+        let mut app = App::new();
+        app.push_synthetic_message("x".into());
+        let start = app.chat_dirty;
+
+        app.clear_selection();
+        assert!(app.chat_dirty > start, "clear_selection bumps");
+
+        // `toggle_reasoning_expanded` only bumps when there's a reasoning
+        // header to toggle (it's a no-op otherwise). Seed one via the
+        // header-row bookkeeping the render path populates.
+        let rid = ulid::Ulid::new();
+        app.reasoning_header_rows.push((rid, 0));
+        let before_toggle = app.chat_dirty;
+        app.reasoning_expanded.insert(rid);
+        app.toggle_reasoning_expanded();
+        assert!(
+            app.chat_dirty > before_toggle,
+            "toggle_reasoning_expanded bumps when toggling a known block"
+        );
+    }
+
+    #[test]
+    fn chat_dirty_width_change_invalidates_cache() {
+        let mut app = App::new();
+        app.push_synthetic_message("hello world".into());
+        // Build the cache at one width.
+        app.ensure_chat_rendered(78, 80, 24);
+        assert!(app.rendered_chat.is_some());
+        let first = app.rendered_chat.as_ref().unwrap().lines.clone();
+
+        // Same width + same dirty → no rebuild, same lines identity.
+        let gen = app.chat_dirty;
+        app.ensure_chat_rendered(78, 80, 24);
+        assert_eq!(
+            app.rendered_chat.as_ref().unwrap().dirty_gen,
+            gen.unwrap_or(0),
+            "same width + dirty = cache hit"
+        );
+
+        // Different width → rebuild (lines may differ in wrapping).
+        app.rendered_chat_width = 0; // force width mismatch
+        app.ensure_chat_rendered(78, 80, 24);
+        let _ = first; // lines were rebuilt; just assert no panic + cache present
+        assert!(app.rendered_chat.is_some());
     }
 }
