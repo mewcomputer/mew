@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
-import { CheckCircle2, HelpCircle, Loader2, PlayCircle, XCircle, AlertCircle, Pin, X } from "lucide-react";
-import { useSessionStore, type TodoItem, type SubagentInfo, type PendingAskUser } from "../stores/session";
+import { CheckCircle2, HelpCircle, Loader2, PlayCircle, XCircle, AlertCircle, Pin, X, Terminal } from "lucide-react";
+import { useSessionStore, type TodoItem, type SubagentInfo, type PendingAskUser, type JobInfo } from "../stores/session";
 import { cn } from "../lib/utils";
 import { AskUserForm } from "./ask-user-card";
 import { getClient } from "../lib/client-ref";
@@ -12,7 +12,7 @@ import {
   SheetDescription,
 } from "@/components/ui/sheet";
 
-type TabKey = "todos" | "subagents" | "questions";
+type TabKey = "todos" | "subagents" | "questions" | "jobs";
 
 interface RightRailProps {
   open: boolean;
@@ -25,13 +25,17 @@ export function RightRail({ open, onOpenChange }: RightRailProps) {
   const subagents = useSessionStore((s) => s.subagents);
   const questions = useSessionStore((s) => s.pendingAskUser);
   const flaggedFiles = useSessionStore((s) => s.flaggedFiles);
+  const jobs = useSessionStore((s) => s.jobs);
 
   const activeCounts = {
     todos: todos.filter((t) => t.status === "in_progress" || t.status === "pending").length,
     subagents: [...subagents.values()].filter((s) => s.status === "running").length,
     questions: questions.length,
+    jobs: [...jobs.values()].filter(
+      (j) => j.state !== "done" && j.state !== "failed" && j.state !== "cancelled",
+    ).length,
   };
-  const totalActive = activeCounts.todos + activeCounts.subagents + activeCounts.questions;
+  const totalActive = activeCounts.todos + activeCounts.subagents + activeCounts.questions + activeCounts.jobs;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -105,6 +109,12 @@ export function RightRail({ open, onOpenChange }: RightRailProps) {
             active={activeTab === "questions"}
             onClick={() => setActiveTab("questions")}
           />
+          <TabButton
+            label="Jobs"
+            count={activeCounts.jobs}
+            active={activeTab === "jobs"}
+            onClick={() => setActiveTab("jobs")}
+          />
         </div>
 
         {/* Content */}
@@ -117,6 +127,7 @@ export function RightRail({ open, onOpenChange }: RightRailProps) {
               onResolved={() => onOpenChange(false)}
             />
           )}
+          {activeTab === "jobs" && <JobsRailPanel jobs={jobs} />}
         </div>
       </SheetContent>
     </Sheet>
@@ -316,6 +327,48 @@ function QuestionsRailPanel({ questions, onResolved }: { questions: PendingAskUs
           }}
         />
       ))}
+    </div>
+  );
+}
+
+function JobsRailPanel({ jobs }: { jobs: Map<string, JobInfo> }) {
+  const list = [...jobs.values()];
+  if (list.length === 0) {
+    return <EmptyState icon={<Terminal className="h-4 w-4" />} text="No background jobs" />;
+  }
+  return (
+    <div className="space-y-1.5">
+      {list.map((job) => (
+        <JobRailRow key={job.jobId} job={job} />
+      ))}
+    </div>
+  );
+}
+
+function JobRailRow({ job }: { job: JobInfo }) {
+  const isTerminal = job.state === "done" || job.state === "failed" || job.state === "cancelled";
+  const dotColor = isTerminal
+    ? job.state === "done"
+      ? "bg-green-500"
+      : job.state === "failed"
+        ? "bg-destructive"
+        : "bg-muted-foreground"
+    : "bg-blue-500 animate-pulse";
+
+  return (
+    <div className="rounded-md border border-border bg-card/50 px-2 py-1.5">
+      <div className="flex items-center gap-2">
+        <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", dotColor)} />
+        <span className="truncate font-mono text-[11px] text-foreground">
+          {job.command}
+        </span>
+        {isTerminal && (
+          <span className="ml-auto text-[10px] capitalize text-muted-foreground">{job.state}</span>
+        )}
+      </div>
+      <div className="mt-0.5 truncate text-[10px] text-muted-foreground">
+        {job.jobId.slice(0, 8)}
+      </div>
     </div>
   );
 }

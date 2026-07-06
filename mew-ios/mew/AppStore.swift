@@ -126,6 +126,10 @@ final class AppStore: ObservableObject {
     // Alerts
     @Published var alerts: [AlertItem] = []
 
+    // Retry: last prompt per session + per-session turn-failure tracking
+    @Published var lastPrompt: [String: String] = [:]
+    @Published var lastTurnFailed: [String: Bool] = [:]
+
     // Connection
     @Published var isConnecting: Bool = false
 
@@ -267,7 +271,22 @@ final class AppStore: ObservableObject {
         // (typing dots) shows immediately, before the first token arrives.
         // Cleared on turnEnded.
         isStreaming = true
+        if let sessionId = selectedSessionId {
+            lastPrompt[sessionId] = text
+        }
         core.prompt(id: daemonId, text: text)
+    }
+
+    /// Re-send the last prompt for the selected session (retry after a failed
+    /// turn). No-op if there's no stored prompt to retry.
+    func retryLastTurn() {
+        guard let daemonId = selectedDaemonId, let core else { return }
+        guard let sessionId = selectedSessionId,
+              let prompt = lastPrompt[sessionId],
+              !prompt.isEmpty else { return }
+        isStreaming = true
+        lastTurnFailed[sessionId] = false
+        core.prompt(id: daemonId, text: prompt)
     }
 
     func cancelTurn() {
@@ -334,6 +353,12 @@ final class AppStore: ObservableObject {
 
         case .sessionList(let daemon, let sessions):
             sessionLists[daemon] = sessions
+            // Seed per-session turn-failure state from the rail summaries so
+            // the ChatView retry banner is correct on fresh attach (before any
+            // turnEnded event fires for this session).
+            for session in sessions {
+                lastTurnFailed[session.sessionId] = session.lastTurnFailed
+            }
 
         case .projectList(let daemon, let projects):
             projectLists[daemon] = projects
@@ -377,10 +402,13 @@ final class AppStore: ObservableObject {
             // Update the message part in place
             updatePartInMessages(partId: partId)
 
-        case .turnEnded(_, _, _, _, _, _):
+        case .turnEnded(_, _, _, _, _, let failed):
             isStreaming = false
             streamingPartId = nil
             streamingText = ""
+            if let sessionId = selectedSessionId {
+                lastTurnFailed[sessionId] = failed
+            }
             // Refresh messages from snapshot
             refreshMessages()
 

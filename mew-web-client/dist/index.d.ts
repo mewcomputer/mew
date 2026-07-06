@@ -107,6 +107,8 @@ export type ClientMessage = {
     type: "unflag_file";
     session_id: string;
     path: string;
+} | {
+    type: "ping";
 };
 export type ProviderEventWire = {
     type: "part_start";
@@ -530,6 +532,9 @@ export type ServerMessage = {
     session_id: string;
     pending_permissions: number;
     pending_questions: number;
+} | {
+    type: "pong";
+    version: string;
 };
 export interface MewWebSocket {
     send(data: string): void;
@@ -723,6 +728,9 @@ export interface MewClientEvents {
     errorEvent: (data: {
         message: string;
     }) => void;
+    pong: (data: {
+        version: string;
+    }) => void;
 }
 export type MewEventName = keyof MewClientEvents;
 export interface MewClientOptions {
@@ -817,6 +825,8 @@ export declare class MewClient {
     watchWorkspace(sessionId: string, enabled: boolean): void;
     openPath(sessionId: string, path: string): void;
     unflagFile(sessionId: string, path: string): void;
+    /** Ping the daemon; resolves with the daemon version once a pong arrives. */
+    ping(): Promise<string>;
     on<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     off<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     private emit;

@@ -52,8 +52,14 @@ struct ChatView: View {
         // Float the composer over the content so messages scroll under the
         // liquid-glass chatbar; the inset doubles as the bottom scroll padding.
         .safeAreaInset(edge: .bottom) {
-            composer
+            VStack(spacing: 0) {
+                if showsRetryBanner {
+                    retryBanner
+                }
+                composer
+            }
         }
+        .animation(.easeInOut(duration: 0.25), value: showsRetryBanner)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
@@ -218,6 +224,50 @@ struct ChatView: View {
 
     private var showsStreamingBubble: Bool {
         store.isStreaming || !store.streamingText.isEmpty
+    }
+
+    /// Whether the retry banner should appear: only when the latest turn for
+    /// this session failed, the agent isn't currently streaming, and there's
+    /// message content to show below.
+    private var showsRetryBanner: Bool {
+        guard !store.isStreaming else { return false }
+        return store.lastTurnFailed[sessionId] == true
+    }
+
+    /// Retry is enabled when we have a stored prompt to re-send. When the
+    /// session was attached fresh after a failure (no Swift-side prompt
+    /// captured), the button is disabled.
+    private var canRetry: Bool {
+        (store.lastPrompt[sessionId]?.isEmpty == false)
+    }
+
+    @ViewBuilder
+    private var retryBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Turn failed")
+                    .font(.subheadline.weight(.semibold))
+                Text(canRetry ? "Tap Retry to send the last message again."
+                              : "The last turn failed. No prompt to retry.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button("Retry") {
+                store.retryLastTurn()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(!canRetry)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            Color(.secondarySystemBackground)
+        )
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     @ViewBuilder

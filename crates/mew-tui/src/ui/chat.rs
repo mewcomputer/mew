@@ -214,7 +214,351 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
 
         let last_text_part_idx = msg.parts.iter().rposition(|p| matches!(p, Part::Text(_)));
 
-        for (part_idx, part) in msg.parts.iter().enumerate() {
+        let mut part_idx = 0usize;
+        while part_idx < msg.parts.len() {
+            let part = &msg.parts[part_idx];
+
+            // Check if this starts a run of consecutive ToolCall parts.
+            if matches!(part, Part::ToolCall(_)) {
+                // Find the end of the consecutive ToolCall run.
+                let run_start = part_idx;
+                while part_idx < msg.parts.len()
+                    && matches!(msg.parts[part_idx], Part::ToolCall(_))
+                {
+                    part_idx += 1;
+                }
+                let run_end = part_idx; // exclusive
+                let run_len = run_end - run_start;
+
+                // Determine batch expansion state.
+                let first_id = if let Part::ToolCall(tc) = &msg.parts[run_start] {
+                    tc.base.id
+                } else {
+                    unreachable!()
+                };
+                let is_expanded = app.tool_batch_expanded.contains(&first_id);
+                let is_active = run_end == msg.parts.len() && is_streaming;
+                let show_expanded = is_expanded || is_active || run_len <= 1;
+
+                if show_expanded {
+                    // Render each tool call individually (the original
+                    // inline rendering path). For a single tool call, this
+                    // is identical to the old behavior.
+                    for i in run_start..run_end {
+                        let tc = if let Part::ToolCall(tc) = &msg.parts[i] {
+                            tc
+                        } else {
+                            unreachable!()
+                        };
+                        let (state_label, state_color) = tool_call_label_and_color(app, tc);
+
+                        if let Some(line) =
+                            push_tool_edge(tool_width, true, app.theme.tokens.tool_bg)
+                        {
+                            sel_ctx.push_line(line);
+                        }
+
+                        sel_ctx.push_line(push_tool_line(
+                            tool_width,
+                            vec![
+                                Span::styled("  ", tool_bg_style),
+                                Span::styled(
+                                    format!("{} {}", state_label, tc.tool_name),
+                                    Style::default()
+                                        .fg(state_color)
+                                        .bg(app.theme.tokens.tool_bg)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ],
+                            tool_bg_style,
+                        ));
+
+                        if let Some(args) = tool_call_args_summary(tc) {
+                            sel_ctx.push_line(push_tool_line(
+                                tool_width,
+                                vec![
+                                    Span::styled("      ", tool_bg_style),
+                                    Span::styled(
+                                        args,
+                                        Style::default()
+                                            .fg(Color::DarkGray)
+                                            .bg(app.theme.tokens.tool_bg),
+                                    ),
+                                ],
+                                tool_bg_style,
+                            ));
+                        }
+                        message_had_content = true;
+
+                        if let ToolState::Running(ref running) = tc.state {
+                            if !running.output.is_empty() {
+                                let parsed =
+                                    running.output.as_str().into_text().unwrap_or_default();
+                                let lines = parsed.lines;
+                                let skip = lines.len().saturating_sub(TOOL_LINES_LIVE);
+                                for line in lines.into_iter().skip(skip) {
+                                    for wrapped in wrap_tool_line(
+                                        tool_width,
+                                        line,
+                                        "      ",
+                                        app.theme.tokens.tool_bg,
+                                    ) {
+                                        sel_ctx.push_line(wrapped);
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(ToolDisplayState::Completed { output, diff }) =
+                            app.tool_states.get(&tc.base.id)
+                        {
+                            if !output.is_empty() {
+                                let parsed =
+                                    output.as_str().into_text().unwrap_or_default();
+                                let is_bash = tc.tool_name == "bash";
+                                let lines = parsed.lines;
+                                let line_count = lines.len();
+
+                                if is_bash {
+                                    let limit = if app.bash_expanded {
+                                        BASH_LINES_EXPANDED
+                                    } else {
+                                        BASH_LINES_COLLAPSED
+                                    };
+                                    let skip = line_count.saturating_sub(limit);
+                                    if skip > 0 {
+                                        sel_ctx.push_line(push_tool_line(
+                                            tool_width,
+                                            vec![
+                                                Span::styled("      ", tool_bg_style),
+                                                Span::styled(
+                                                    format!(
+                                                        "... ({} earlier lines)",
+                                                        skip
+                                                    ),
+                                                    Style::default()
+                                                        .fg(Color::DarkGray)
+                                                        .bg(app.theme.tokens.tool_bg),
+                                                ),
+                                            ],
+                                            tool_bg_style,
+                                        ));
+                                    }
+                                    for line in lines.into_iter().skip(skip) {
+                                        for wrapped in wrap_tool_line(
+                                            tool_width,
+                                            line,
+                                            "      ",
+                                            app.theme.tokens.tool_bg,
+                                        ) {
+                                            sel_ctx.push_line(wrapped);
+                                        }
+                                    }
+                                } else {
+                                    for line in lines.into_iter().take(TOOL_LINES_MAX) {
+                                        for wrapped in wrap_tool_line(
+                                            tool_width,
+                                            line,
+                                            "      ",
+                                            app.theme.tokens.tool_bg,
+                                        ) {
+                                            sel_ctx.push_line(wrapped);
+                                        }
+                                    }
+                                    if line_count > TOOL_LINES_MAX {
+                                        sel_ctx.push_line(push_tool_line(
+                                            tool_width,
+                                            vec![
+                                                Span::styled("      ", tool_bg_style),
+                                                Span::styled(
+                                                    format!(
+                                                        "... ({} more lines)",
+                                                        line_count - TOOL_LINES_MAX
+                                                    ),
+                                                    Style::default()
+                                                        .fg(Color::DarkGray)
+                                                        .bg(app.theme.tokens.tool_bg),
+                                                ),
+                                            ],
+                                            tool_bg_style,
+                                        ));
+                                    }
+                                }
+                            }
+                            if let Some(diff) = diff {
+                                for line in diff.lines().take(DIFF_LINES_MAX) {
+                                    let style = if line.starts_with('+') {
+                                        Style::default()
+                                            .fg(Color::Green)
+                                            .bg(app.theme.tokens.tool_bg)
+                                    } else if line.starts_with('-') {
+                                        Style::default()
+                                            .fg(Color::Red)
+                                            .bg(app.theme.tokens.tool_bg)
+                                    } else {
+                                        Style::default()
+                                            .fg(Color::DarkGray)
+                                            .bg(app.theme.tokens.tool_bg)
+                                    };
+                                    sel_ctx.push_line(push_tool_line(
+                                        tool_width,
+                                        vec![
+                                            Span::styled("      ", tool_bg_style),
+                                            Span::styled(line, style),
+                                        ],
+                                        tool_bg_style,
+                                    ));
+                                }
+                                let diff_lines = diff.lines().count();
+                                if diff_lines > DIFF_LINES_MAX {
+                                    sel_ctx.push_line(push_tool_line(
+                                        tool_width,
+                                        vec![
+                                            Span::styled("      ", tool_bg_style),
+                                            Span::styled(
+                                                format!(
+                                                    "... ({} more lines)",
+                                                    diff_lines - DIFF_LINES_MAX
+                                                ),
+                                                Style::default()
+                                                    .fg(Color::DarkGray)
+                                                    .bg(app.theme.tokens.tool_bg),
+                                            ),
+                                        ],
+                                        tool_bg_style,
+                                    ));
+                                }
+                            }
+                        }
+                        if let Some(ToolDisplayState::Error(err)) =
+                            app.tool_states.get(&tc.base.id)
+                        {
+                            if !err.is_empty() {
+                                let parsed =
+                                    err.as_str().into_text().unwrap_or_default();
+                                for line in parsed.lines {
+                                    for wrapped in wrap_tool_line(
+                                        tool_width,
+                                        line,
+                                        "      ",
+                                        app.theme.tokens.tool_bg,
+                                    ) {
+                                        sel_ctx.push_line(wrapped);
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(line) =
+                            push_tool_edge(tool_width, false, app.theme.tokens.tool_bg)
+                        {
+                            sel_ctx.push_line(line);
+                        }
+                    }
+                } else {
+                    // Collapsed summary row for 2+ consecutive tool calls.
+                    let tool_names: Vec<&str> = msg.parts[run_start..run_end]
+                        .iter()
+                        .map(|p| {
+                            if let Part::ToolCall(tc) = p {
+                                tc.tool_name.as_str()
+                            } else {
+                                unreachable!()
+                            }
+                        })
+                        .collect();
+                    let all_completed = msg.parts[run_start..run_end].iter().all(|p| {
+                        if let Part::ToolCall(tc) = p {
+                            matches!(tc.state, ToolState::Completed(_))
+                        } else {
+                            unreachable!()
+                        }
+                    });
+                    let any_error = msg.parts[run_start..run_end].iter().any(|p| {
+                        if let Part::ToolCall(tc) = p {
+                            matches!(tc.state, ToolState::Error(_))
+                        } else {
+                            unreachable!()
+                        }
+                    });
+                    let any_running = msg.parts[run_start..run_end].iter().any(|p| {
+                        if let Part::ToolCall(tc) = p {
+                            matches!(tc.state, ToolState::Running(_))
+                        } else {
+                            unreachable!()
+                        }
+                    });
+
+                    let state_glyph = if any_error {
+                        "✗"
+                    } else if any_running {
+                        "◐"
+                    } else if all_completed {
+                        "✓"
+                    } else {
+                        "○"
+                    };
+                    let state_color = if any_error {
+                        Color::Red
+                    } else if any_running {
+                        Color::Yellow
+                    } else {
+                        Color::Green
+                    };
+
+                    // Deduplicate tool names for the summary.
+                    let mut seen = std::collections::HashSet::new();
+                    let unique_names: Vec<&str> = tool_names
+                        .iter()
+                        .filter(|n| seen.insert(**n))
+                        .copied()
+                        .collect();
+                    let names_str = if unique_names.len() <= 3 {
+                        unique_names.join(", ")
+                    } else {
+                        format!("{}, +{}", unique_names[0], unique_names.len() - 1)
+                    };
+
+                    if let Some(line) =
+                        push_tool_edge(tool_width, true, app.theme.tokens.tool_bg)
+                    {
+                        sel_ctx.push_line(line);
+                    }
+                    sel_ctx.push_line(push_tool_line(
+                        tool_width,
+                        vec![
+                            Span::styled("  ", tool_bg_style),
+                            Span::styled(
+                                format!(
+                                    "{} {} tool calls: {}",
+                                    state_glyph,
+                                    run_len,
+                                    names_str
+                                ),
+                                Style::default()
+                                    .fg(state_color)
+                                    .bg(app.theme.tokens.tool_bg)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                "  (click to expand)",
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .bg(app.theme.tokens.tool_bg),
+                            ),
+                        ],
+                        tool_bg_style,
+                    ));
+                    if let Some(line) =
+                        push_tool_edge(tool_width, false, app.theme.tokens.tool_bg)
+                    {
+                        sel_ctx.push_line(line);
+                    }
+                    message_had_content = true;
+                }
+                continue; // part_idx already advanced past the run
+            }
+
             match part {
                 Part::Text(tp) => {
                     if prefix.is_empty() {
@@ -321,199 +665,9 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                     }
                     message_had_content = true;
                 }
-                Part::ToolCall(tc) => {
-                    let (state_label, state_color) = tool_call_label_and_color(app, tc);
-
-                    if let Some(line) = push_tool_edge(tool_width, true, app.theme.tokens.tool_bg) {
-                        sel_ctx.push_line(line);
-                    }
-
-                    sel_ctx.push_line(push_tool_line(
-                        tool_width,
-                        vec![
-                            Span::styled("  ", tool_bg_style),
-                            Span::styled(
-                                format!("{} {}", state_label, tc.tool_name),
-                                Style::default()
-                                    .fg(state_color)
-                                    .bg(app.theme.tokens.tool_bg)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ],
-                        tool_bg_style,
-                    ));
-
-                    if let Some(args) = tool_call_args_summary(tc) {
-                        sel_ctx.push_line(push_tool_line(
-                            tool_width,
-                            vec![
-                                Span::styled("      ", tool_bg_style),
-                                Span::styled(
-                                    args,
-                                    Style::default()
-                                        .fg(Color::DarkGray)
-                                        .bg(app.theme.tokens.tool_bg),
-                                ),
-                            ],
-                            tool_bg_style,
-                        ));
-                    }
-                    message_had_content = true;
-
-                    if let ToolState::Running(ref running) = tc.state {
-                        if !running.output.is_empty() {
-                            let parsed = running.output.as_str().into_text().unwrap_or_default();
-                            let lines = parsed.lines;
-                            let skip = lines.len().saturating_sub(TOOL_LINES_LIVE);
-                            for line in lines.into_iter().skip(skip) {
-                                for wrapped in wrap_tool_line(
-                                    tool_width,
-                                    line,
-                                    "      ",
-                                    app.theme.tokens.tool_bg,
-                                ) {
-                                    sel_ctx.push_line(wrapped);
-                                }
-                            }
-                        }
-                    }
-
-                    if let Some(ToolDisplayState::Completed { output, diff }) =
-                        app.tool_states.get(&tc.base.id)
-                    {
-                        if !output.is_empty() {
-                            let parsed = output.as_str().into_text().unwrap_or_default();
-                            let is_bash = tc.tool_name == "bash";
-                            let lines = parsed.lines;
-                            let line_count = lines.len();
-
-                            if is_bash {
-                                let limit = if app.bash_expanded {
-                                    BASH_LINES_EXPANDED
-                                } else {
-                                    BASH_LINES_COLLAPSED
-                                };
-                                let skip = line_count.saturating_sub(limit);
-                                if skip > 0 {
-                                    sel_ctx.push_line(push_tool_line(
-                                        tool_width,
-                                        vec![
-                                            Span::styled("      ", tool_bg_style),
-                                            Span::styled(
-                                                format!("... ({} earlier lines)", skip),
-                                                Style::default()
-                                                    .fg(Color::DarkGray)
-                                                    .bg(app.theme.tokens.tool_bg),
-                                            ),
-                                        ],
-                                        tool_bg_style,
-                                    ));
-                                }
-                                for line in lines.into_iter().skip(skip) {
-                                    for wrapped in wrap_tool_line(
-                                        tool_width,
-                                        line,
-                                        "      ",
-                                        app.theme.tokens.tool_bg,
-                                    ) {
-                                        sel_ctx.push_line(wrapped);
-                                    }
-                                }
-                            } else {
-                                for line in lines.into_iter().take(TOOL_LINES_MAX) {
-                                    for wrapped in wrap_tool_line(
-                                        tool_width,
-                                        line,
-                                        "      ",
-                                        app.theme.tokens.tool_bg,
-                                    ) {
-                                        sel_ctx.push_line(wrapped);
-                                    }
-                                }
-                                if line_count > TOOL_LINES_MAX {
-                                    sel_ctx.push_line(push_tool_line(
-                                        tool_width,
-                                        vec![
-                                            Span::styled("      ", tool_bg_style),
-                                            Span::styled(
-                                                format!(
-                                                    "... ({} more lines)",
-                                                    line_count - TOOL_LINES_MAX
-                                                ),
-                                                Style::default()
-                                                    .fg(Color::DarkGray)
-                                                    .bg(app.theme.tokens.tool_bg),
-                                            ),
-                                        ],
-                                        tool_bg_style,
-                                    ));
-                                }
-                            }
-                        }
-                        if let Some(diff) = diff {
-                            for line in diff.lines().take(DIFF_LINES_MAX) {
-                                let style = if line.starts_with('+') {
-                                    Style::default()
-                                        .fg(Color::Green)
-                                        .bg(app.theme.tokens.tool_bg)
-                                } else if line.starts_with('-') {
-                                    Style::default().fg(Color::Red).bg(app.theme.tokens.tool_bg)
-                                } else {
-                                    Style::default()
-                                        .fg(Color::DarkGray)
-                                        .bg(app.theme.tokens.tool_bg)
-                                };
-                                sel_ctx.push_line(push_tool_line(
-                                    tool_width,
-                                    vec![
-                                        Span::styled("      ", tool_bg_style),
-                                        Span::styled(line, style),
-                                    ],
-                                    tool_bg_style,
-                                ));
-                            }
-                            let diff_lines = diff.lines().count();
-                            if diff_lines > DIFF_LINES_MAX {
-                                sel_ctx.push_line(push_tool_line(
-                                    tool_width,
-                                    vec![
-                                        Span::styled("      ", tool_bg_style),
-                                        Span::styled(
-                                            format!(
-                                                "... ({} more lines)",
-                                                diff_lines - DIFF_LINES_MAX
-                                            ),
-                                            Style::default()
-                                                .fg(Color::DarkGray)
-                                                .bg(app.theme.tokens.tool_bg),
-                                        ),
-                                    ],
-                                    tool_bg_style,
-                                ));
-                            }
-                        }
-                    }
-                    if let Some(ToolDisplayState::Error(err)) = app.tool_states.get(&tc.base.id) {
-                        if !err.is_empty() {
-                            let parsed = err.as_str().into_text().unwrap_or_default();
-                            for line in parsed.lines {
-                                for wrapped in wrap_tool_line(
-                                    tool_width,
-                                    line,
-                                    "      ",
-                                    app.theme.tokens.tool_bg,
-                                ) {
-                                    sel_ctx.push_line(wrapped);
-                                }
-                            }
-                        }
-                    }
-
-                    if let Some(line) = push_tool_edge(tool_width, false, app.theme.tokens.tool_bg)
-                    {
-                        sel_ctx.push_line(line);
-                    }
-                }
+                // ToolCall parts are handled by the batching logic above
+                // (before this match). This arm is unreachable.
+                Part::ToolCall(_) => {}
                 Part::File(fp) => {
                     let name = fp
                         .filename
@@ -530,6 +684,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                 Part::ToolResult(_) => {}
                 _ => {}
             }
+            part_idx += 1;
         }
 
         if message_had_content {

@@ -43,6 +43,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     const [menuOpen, setMenuOpen] = useState<"slash" | "persona" | null>(null);
     const [menuIndex, setMenuIndex] = useState(0);
     const [focused, setFocused] = useState(false);
+    const [historyIndex, setHistoryIndex] = useState<number | null>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -50,6 +51,8 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
 
     const hasStreaming = useSessionStore((s) => s.streamingPartId !== null);
     const setPersona = useSessionStore((s) => s.setCurrentPersona);
+    const promptHistory = useSessionStore((s) => s.promptHistory);
+    const pushPromptHistory = useSessionStore((s) => s.pushPromptHistory);
 
     const filteredSlash = SLASH_COMMANDS.filter(
       (c) =>
@@ -88,6 +91,46 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
         }
       }
 
+      // Prompt history recall (only when the slash/persona menu is closed).
+      if (!menuOpen && promptHistory.length > 0) {
+        if (e.key === "ArrowUp") {
+          const el = textareaRef.current;
+          // Only recall when the caret is on the first line.
+          const onFirstLine = el ? el.value.lastIndexOf("\n", el.selectionStart - 1) === -1 : true;
+          if (onFirstLine) {
+            e.preventDefault();
+            setHistoryIndex((prev) => {
+              const next = prev === null ? promptHistory.length - 1 : Math.max(0, prev - 1);
+              setText(promptHistory[next] ?? "");
+              return next;
+            });
+            return;
+          }
+        }
+        if (e.key === "ArrowDown") {
+          if (historyIndex !== null) {
+            const el = textareaRef.current;
+            const onLastLine = el
+              ? el.value.indexOf("\n", el.selectionStart) === -1
+              : true;
+            if (onLastLine) {
+              e.preventDefault();
+              setHistoryIndex((prev) => {
+                if (prev === null) return null;
+                const next = prev + 1;
+                if (next >= promptHistory.length) {
+                  setText("");
+                  return null;
+                }
+                setText(promptHistory[next] ?? "");
+                return next;
+              });
+              return;
+            }
+          }
+        }
+      }
+
       if (isMobile) {
         if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
@@ -108,6 +151,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
 
     const handleChange = (value: string) => {
       setText(value);
+      setHistoryIndex(null);
       if (value.startsWith("/")) {
         setMenuOpen("slash");
         setMenuIndex(0);
@@ -137,7 +181,9 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
         return;
       }
       onSend(trimmed);
+      pushPromptHistory(trimmed);
       setText("");
+      setHistoryIndex(null);
       setFiles([]);
       closeMenu();
       if (textareaRef.current) textareaRef.current.style.height = "auto";

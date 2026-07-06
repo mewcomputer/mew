@@ -31,6 +31,16 @@ export function useMewConnection() {
         reconnectAttemptRef.current = 0;
         setConnected(true);
         client.listModels();
+        // Best-effort daemon version fetch. The ping/pong wire types are
+        // defined in the client; the daemon replies with `pong { version }`
+        // once it implements the handler. Until then this is a no-op that
+        // never resolves — harmless.
+        client
+          .ping()
+          .then((version) => useSessionStore.getState().setDaemonVersion(version))
+          .catch(() => {
+            /* daemon may not support ping yet — ignore */
+          });
       } catch (e) {
         console.error("[mew] connect failed:", e);
         if (!intentionalDisconnectRef.current) {

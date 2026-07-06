@@ -252,6 +252,28 @@ pub struct App {
     /// Pending large paste awaiting user confirmation. When set, the TUI
     /// shows "paste N chars? [y/N]" and only inserts on 'y'.
     pub pending_paste: Option<String>,
+
+    // ── Daemon-mode state ──────────────────────────────────────────
+    // All fields below are daemon-only. In local mode (`run_tui`), they
+    // stay at their Default values and are never populated. `daemon_mode`
+    // is the single gate — UI surfaces check it before rendering.
+    /// True when connected to a daemon (set in `chat_with_daemon`).
+    pub daemon_mode: bool,
+    /// Sessions known to the daemon (populated from `SessionList`).
+    pub daemon_sessions: Vec<mew_protocol::SessionInfo>,
+    /// Session titles keyed by session ID (from `SessionTitleChanged`).
+    pub session_titles: std::collections::HashMap<String, String>,
+    /// Session summaries keyed by session ID (from `SessionSummaryChanged`).
+    pub session_summaries: std::collections::HashMap<String, String>,
+    /// Pending attention count per session: (permissions, questions).
+    pub session_attention: std::collections::HashMap<String, (u32, u32)>,
+    /// Whether auto-title is enabled (write-only toggle; no getter).
+    pub auto_title: bool,
+    /// Whether auto-summary is enabled (write-only toggle; no getter).
+    pub auto_summary: bool,
+    /// Tool-call batch expansion state. Keys are the first tool call's
+    /// `PartId` in a batch; presence means the batch is expanded.
+    pub tool_batch_expanded: std::collections::HashSet<mew_message::PartId>,
 }
 
 /// A running or completed subagent task shown in the sidebar.
@@ -550,6 +572,118 @@ impl App {
             history_search_index: None,
             history_search_saved: None,
             pending_paste: None,
+            daemon_mode: false,
+            daemon_sessions: Vec::new(),
+            session_titles: std::collections::HashMap::new(),
+            session_summaries: std::collections::HashMap::new(),
+            session_attention: std::collections::HashMap::new(),
+            auto_title: false,
+            auto_summary: false,
+            tool_batch_expanded: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Process a daemon `ServerMessage` notification. Only called in daemon
+    /// mode (when `daemon_mode` is true). Updates the daemon-scoped state
+    /// fields; UI surfaces read those fields during `draw()`.
+    pub fn apply_daemon_notification(&mut self, msg: &mew_protocol::ServerMessage) {
+        use mew_protocol::ServerMessage;
+        match msg {
+            ServerMessage::SessionList { sessions } => {
+                self.daemon_sessions = sessions.clone();
+            }
+            ServerMessage::SessionTitleChanged {
+                session_id,
+                title,
+            } => {
+                self.session_titles.insert(session_id.clone(), title.clone());
+            }
+            ServerMessage::SessionSummaryChanged {
+                session_id,
+                summary,
+            } => {
+                self.session_summaries
+                    .insert(session_id.clone(), summary.clone());
+            }
+            ServerMessage::SessionAttentionChanged {
+                session_id,
+                pending_permissions,
+                pending_questions,
+            } => {
+                self.session_attention.insert(
+                    session_id.clone(),
+                    (*pending_permissions, *pending_questions),
+                );
+            }
+            ServerMessage::SessionAlert {
+                title,
+                kind,
+                detail,
+                session_id,
+            } => {
+                // Show a toast for the alert. If it's for a non-active
+                // session, prefix with the session title.
+                let prefix = if session_id != &self.status.session_id {
+                    let name = self
+                        .session_titles
+                        .get(session_id)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            session_id.chars().take(8).collect::<String>()
+                        });
+                    format!("[{}] ", name)
+                } else {
+                    String::new()
+                };
+                let kind_label = match kind {
+                    mew_protocol::AlertKind::PermissionNeeded => "⚠ ",
+                    mew_protocol::AlertKind::InputNeeded => "? ",
+                    mew_protocol::AlertKind::TurnComplete => "✓ ",
+                    mew_protocol::AlertKind::TurnFailed => "✗ ",
+                };
+                let detail_str = detail
+                    .as_deref()
+                    .filter(|d| !d.is_empty())
+                    .map(|d| format!(": {}", d))
+                    .unwrap_or_default();
+                self.set_alert(format!("{}{}{}{}", prefix, kind_label, title, detail_str));
+            }
+            ServerMessage::SessionHistory { messages, .. } => {
+                // Replay: replace the current chat with the session's
+                // history. This is the /resume path — the daemon sends
+                // the full message list on attach.
+                self.messages.clear();
+                self.md_stream = None;
+                self.md_state = mdstream::DocumentState::new();
+                for msg in messages {
+                    self.messages.push(msg.clone());
+                }
+                self.auto_scroll = true;
+                self.pending_md_rerender = self.messages.last().map(|m| m.id);
+            }
+            ServerMessage::ModelSwitched { provider, model, .. } => {
+                self.status.provider = provider.clone();
+                self.status.model = model.clone();
+            }
+            ServerMessage::PermissionModeChanged { mode, .. } => {
+                if let Some(pm) = mew_hooks::PermissionMode::from_id(mode) {
+                    self.permission_mode = pm;
+                }
+            }
+            ServerMessage::SessionMetaChanged { session_id, .. } => {
+                // A session's metadata changed (pinned, archived, etc.).
+                // The next SessionList will refresh the rail.
+                let _ = session_id;
+            }
+            ServerMessage::FlaggedFilesChanged { files, .. } => {
+                // Store flagged files for the Changes sidebar section.
+                // (Item 8 will render these; for now just log.)
+                let _ = files;
+            }
+            _ => {
+                // Other notifications (ClientAttached, FsChanged, etc.)
+                // are not yet consumed by the TUI.
+            }
         }
     }
 

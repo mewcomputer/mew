@@ -3,6 +3,7 @@ import { useState, useEffect } from "react";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { SessionRail } from "@/components/session-rail";
 import { CommandPalette } from "@/components/command-palette";
+import { Toaster } from "@/components/ui/sonner";
 import { getClient } from "@/lib/client";
 import { routerRef } from "@/lib/router-ref";
 import { useSessionStore } from "@/stores/session";
@@ -89,6 +90,7 @@ function RootComponent() {
         open={paletteOpen}
         onOpenChange={setPaletteOpen}
       />
+      <Toaster />
     </SidebarProvider>
   );
 }

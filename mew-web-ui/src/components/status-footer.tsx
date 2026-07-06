@@ -12,6 +12,7 @@ export function StatusFooter() {
   const cost = useSessionStore((s) => s.totalCost);
   const subagents = useSessionStore((s) => s.subagents);
   const pendingPermissions = useSessionStore((s) => s.pendingPermissions);
+  const daemonVersion = useSessionStore((s) => s.daemonVersion);
 
   if (connectionState === "disconnected") {
     return null;
@@ -55,8 +56,12 @@ export function StatusFooter() {
           </span>
         )}
       </div>
-      {/* Right: empty atm */}
-      <div className="flex items-center gap-2"></div>
+      {/* Right: daemon version */}
+      <div className="flex items-center gap-2">
+        {daemonVersion && (
+          <span className="text-muted-foreground/60">v{daemonVersion}</span>
+        )}
+      </div>
     </footer>
   );
 }

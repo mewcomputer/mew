@@ -11,6 +11,8 @@ struct SessionRailView: View {
     @EnvironmentObject private var store: AppStore
     @State private var showArchived = false
     @State private var sessionToDelete: SessionSummary?
+    @State private var sessionToRename: SessionSummary?
+    @State private var renameText = ""
     @State private var showingProjectPicker = false
     @State private var pickerCwd = ""
     @State private var pickerError: String?
@@ -74,6 +76,26 @@ struct SessionRailView: View {
         } message: {
             if let session = sessionToDelete {
                 Text("Delete \"\(displayName(session))\"? This cannot be undone.")
+            }
+        }
+        .alert("Rename Session", isPresented: Binding(
+            get: { sessionToRename != nil },
+            set: { if !$0 { sessionToRename = nil } }
+        )) {
+            TextField("Title", text: $renameText)
+            Button("Save") {
+                if let session = sessionToRename {
+                    let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        store.renameSession(session.sessionId, title: trimmed)
+                    }
+                }
+                sessionToRename = nil
+                renameText = ""
+            }
+            Button("Cancel", role: .cancel) {
+                sessionToRename = nil
+                renameText = ""
             }
         }
         .sheet(isPresented: $showingProjectPicker) {
@@ -179,6 +201,13 @@ struct SessionRailView: View {
             } label: {
                 Label("Delete", systemImage: "trash")
             }
+            Button {
+                renameText = session.title.isEmpty ? displayName(session) : session.title
+                sessionToRename = session
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            .tint(.blue)
             Button {
                 store.archiveSession(session.sessionId,
                                      archived: !session.archived)

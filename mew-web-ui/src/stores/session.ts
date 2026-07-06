@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { toast } from "sonner";
 import { navigateToSession } from "../lib/router-ref";
 import type {
   MewClient,
@@ -130,6 +131,13 @@ export interface TodoItem {
   dependsOn: number[];
 }
 
+/** A background job tracked via the job-update wire stream. */
+export interface JobInfo {
+  jobId: string;
+  command: string;
+  state: string;
+}
+
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting";
 
 // ---------------------------------------------------------------------------
@@ -212,6 +220,15 @@ interface SessionState {
   // Todo list
   todos: TodoItem[];
 
+  // Background jobs (job_id → latest update)
+  jobs: Map<string, JobInfo>;
+
+  // Daemon version (from pong reply; null until received)
+  daemonVersion: string | null;
+
+  // Prompt history (most-recent-last)
+  promptHistory: string[];
+
   // Actions
   setConnectionState: (s: ConnectionState) => void;
   setSessionId: (id: string | null) => void;
@@ -277,6 +294,15 @@ interface SessionState {
   // Todo actions
   onTodosUpdated: (todos: WireTodo[]) => void;
 
+  // Job actions
+  onJobUpdate: (data: { jobId: string; command: string; state: string }) => void;
+
+  // Daemon version
+  setDaemonVersion: (version: string) => void;
+
+  // Prompt history
+  pushPromptHistory: (text: string) => void;
+
   reset: () => void;
 }
 
@@ -317,6 +343,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   subagents: new Map(),
   pendingAskUser: [],
   todos: [],
+  jobs: new Map(),
+  daemonVersion: null,
+  promptHistory: [],
 
   setConnectionState: (s) => set({ connectionState: s }),
   setSessionId: (id) => set({ sessionId: id }),
@@ -522,7 +551,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         break;
       }
       case "retry_wait": {
-        // Could show a toast; for now just log
+        toast(
+          `Provider retry ${ev.attempt}/${ev.max_attempts} — waiting ${ev.delay_secs}s (${ev.reason})`,
+        );
         break;
       }
       case "error": {
@@ -835,6 +866,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       pendingAskUser: [],
       subagents: new Map(),
       todos: [],
+      jobs: new Map(),
       totalInputTokens: 0,
       totalOutputTokens: 0,
       totalCost: 0,
@@ -912,6 +944,38 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       })),
     }),
 
+  onJobUpdate: (data) =>
+    set((state) => {
+      const jobs = new Map(state.jobs);
+      jobs.set(data.jobId, {
+        jobId: data.jobId,
+        command: data.command,
+        state: data.state,
+      });
+      // Drop terminal jobs after 5s so the panel stays tidy.
+      if (data.state === "done" || data.state === "failed" || data.state === "cancelled") {
+        setTimeout(() => {
+          useSessionStore.setState((s) => {
+            const next = new Map(s.jobs);
+            next.delete(data.jobId);
+            return { jobs: next };
+          });
+        }, 5000);
+      }
+      return { jobs };
+    }),
+
+  setDaemonVersion: (version) => set({ daemonVersion: version }),
+
+  pushPromptHistory: (text) =>
+    set((state) => {
+      // Skip empty or exact-duplicates of the last entry.
+      if (!text.trim()) return {};
+      const hist = state.promptHistory;
+      if (hist.length > 0 && hist[hist.length - 1] === text) return {};
+      return { promptHistory: [...hist, text] };
+    }),
+
   reset: () =>
     set({
       messages: [],
@@ -925,6 +989,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       pendingAskUser: [],
       subagents: new Map(),
       todos: [],
+      jobs: new Map(),
       totalInputTokens: 0,
       totalOutputTokens: 0,
       totalCost: 0,
@@ -1009,6 +1074,16 @@ export function bridgeClientToStore(client: MewClient) {
   });
 
   client.on("todos-updated", (data) => store.getState().onTodosUpdated(data.todos));
+
+  client.on("job-update", (data) =>
+    store.getState().onJobUpdate({
+      jobId: data.job_id,
+      command: data.command,
+      state: data.state,
+    }),
+  );
+
+  client.on("pong", (data) => store.getState().setDaemonVersion(data.version));
 
   client.on("model-list", (data) => store.getState().setAvailableModels(data.models));
   client.on("model-switched", (data) =>

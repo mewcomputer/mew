@@ -303,6 +303,17 @@ export class MewClient {
     unflagFile(sessionId, path) {
         this.send({ type: "unflag_file", session_id: sessionId, path });
     }
+    /** Ping the daemon; resolves with the daemon version once a pong arrives. */
+    ping() {
+        return new Promise((resolve) => {
+            const handler = (data) => {
+                this.off("pong", handler);
+                resolve(data.version);
+            };
+            this.on("pong", handler);
+            this.send({ type: "ping" });
+        });
+    }
     // -------------------------------------------------------------------------
     // Event registration
     // -------------------------------------------------------------------------
@@ -550,6 +561,9 @@ export class MewClient {
                 break;
             case "error_event":
                 this.emit("errorEvent", { message: msg.message });
+                break;
+            case "pong":
+                this.emit("pong", { version: msg.version });
                 break;
         }
     }

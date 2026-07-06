@@ -41,6 +41,12 @@ struct ClientState {
     /// receiver is dropped). The background reader uses this to forward
     /// translated AgentEvents.
     event_tx: Mutex<Option<mpsc::Sender<AgentEvent>>>,
+    /// Persistent notification channel — always alive, unlike `event_tx`
+    /// which is prompt-scoped. Session-management `ServerMessage`s
+    /// (SessionList, SessionTitleChanged, etc.) are forwarded here as raw
+    /// wire types so the TUI can maintain a live session rail, alerts,
+    /// and metadata without being in the middle of a turn.
+    notify_tx: mpsc::Sender<ServerMessage>,
     /// Outgoing message channel (JSON strings to the WebSocket).
     ws_out: mpsc::Sender<String>,
     /// Session ID set when `SessionReady` arrives.
@@ -58,7 +64,14 @@ pub struct DaemonClient {
 
 impl DaemonClient {
     /// Connect to a daemon at the given WebSocket URL.
-    pub async fn connect(url: &str) -> Result<Self> {
+    ///
+    /// Returns the `DaemonClient` and a `Receiver<ServerMessage>` for
+    /// session-management notifications. The notification channel is
+    /// always alive (unlike the prompt-scoped event channel) and receives
+    /// raw `ServerMessage`s that don't map to `AgentEvent`s — SessionList,
+    /// SessionTitleChanged, SessionAlert, etc. The caller should drain
+    /// it in the main event loop via `tokio::select!`.
+    pub async fn connect(url: &str) -> Result<(Self, mpsc::Receiver<ServerMessage>)> {
         let (ws_stream, _response) = connect_async(url).await.context("connect to daemon")?;
 
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
@@ -74,10 +87,13 @@ impl DaemonClient {
             }
         });
 
+        let (notify_tx, notify_rx) = mpsc::channel::<ServerMessage>(128);
+
         let state = Arc::new(ClientState {
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
             event_tx: Mutex::new(None),
+            notify_tx,
             ws_out: outgoing_tx.clone(),
             session_id: Mutex::new(None),
         });
@@ -133,7 +149,7 @@ impl DaemonClient {
             }
         });
 
-        Ok(Self { state })
+        Ok((Self { state }, notify_rx))
     }
 
     /// Create a new session on the daemon.
@@ -206,6 +222,78 @@ impl DaemonClient {
     /// Send a slash command to the daemon.
     pub async fn slash_command(&self, command: String) {
         let msg = ClientMessage::SlashCommand { command };
+        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
+        let _ = self.state.ws_out.send(json).await;
+    }
+
+    /// Request the daemon's session list. The response arrives as
+    /// `ServerMessage::SessionList` on the notification channel.
+    pub async fn list_sessions(&self) {
+        let msg = ClientMessage::ListSessions;
+        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
+        let _ = self.state.ws_out.send(json).await;
+    }
+
+    /// Create a new session in the given cwd.
+    pub async fn new_session_in(&self, cwd: &str) {
+        let msg = ClientMessage::NewSession {
+            cwd: Some(cwd.to_string()),
+            client_kind: mew_protocol::ClientKind::Tui,
+        };
+        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
+        let _ = self.state.ws_out.send(json).await;
+    }
+
+    /// Archive or unarchive a session.
+    pub async fn archive_session(&self, session_id: &str, archived: bool) {
+        let msg = ClientMessage::ArchiveSession {
+            session_id: session_id.to_string(),
+            archived,
+        };
+        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
+        let _ = self.state.ws_out.send(json).await;
+    }
+
+    /// Pin or unpin a session.
+    pub async fn pin_session(&self, session_id: &str, pinned: bool) {
+        let msg = ClientMessage::PinSession {
+            session_id: session_id.to_string(),
+            pinned,
+        };
+        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
+        let _ = self.state.ws_out.send(json).await;
+    }
+
+    /// Toggle auto-title for the current session.
+    pub async fn set_auto_title(&self, enabled: bool) {
+        let msg = ClientMessage::SetAutoTitle { enabled };
+        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
+        let _ = self.state.ws_out.send(json).await;
+    }
+
+    /// Toggle auto-summary for the current session.
+    pub async fn set_auto_summary(&self, enabled: bool) {
+        let msg = ClientMessage::SetAutoSummary { enabled };
+        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
+        let _ = self.state.ws_out.send(json).await;
+    }
+
+    /// Rename a session.
+    pub async fn rename_session(&self, session_id: &str, title: &str) {
+        let msg = ClientMessage::RenameSession {
+            session_id: session_id.to_string(),
+            title: title.to_string(),
+        };
+        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
+        let _ = self.state.ws_out.send(json).await;
+    }
+
+    /// Unflag a file in a session.
+    pub async fn unflag_file(&self, session_id: &str, path: &str) {
+        let msg = ClientMessage::UnflagFile {
+            session_id: session_id.to_string(),
+            path: path.to_string(),
+        };
         let json = mew_protocol::encode_json(&msg).unwrap_or_default();
         let _ = self.state.ws_out.send(json).await;
     }
@@ -485,8 +573,6 @@ async fn translate_server_message(
 
         ServerMessage::ModelList { .. }
         | ServerMessage::ModelSwitched { .. }
-        | ServerMessage::SessionList { .. }
-        | ServerMessage::SessionHistory { .. }
         | ServerMessage::RequestResolved { .. }
         | ServerMessage::SessionCleared
         | ServerMessage::ThinkingVariantChanged { .. }
@@ -494,8 +580,6 @@ async fn translate_server_message(
         | ServerMessage::ClientAttached { .. }
         | ServerMessage::ClientDetached { .. }
         | ServerMessage::ControlYielded { .. }
-        | ServerMessage::SessionTitleChanged { .. }
-        | ServerMessage::SessionSummaryChanged { .. }
         | ServerMessage::SessionActivityChanged { .. }
         | ServerMessage::SessionStatsChanged { .. }
         | ServerMessage::GroupList { .. }
@@ -505,12 +589,25 @@ async fn translate_server_message(
         | ServerMessage::GitStatusResult { .. }
         | ServerMessage::FsChanged { .. }
         | ServerMessage::SessionUsageChanged { .. }
-        | ServerMessage::SessionAlert { .. }
-        | ServerMessage::FlaggedFilesChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }
         | ServerMessage::SessionAttentionChanged { .. } => {
-            // These are handled by the DaemonClient directly or are web-UI
-            // specific; they don't map to AgentEvents for the TUI.
+            // Forward to the notification channel for the TUI's daemon
+            // session rail / alerts / metadata. These don't map to
+            // AgentEvents.
+            let _ = state.notify_tx.send(msg.clone()).await;
+            Vec::new()
+        }
+
+        // These carry data the TUI needs (session list, history, titles,
+        // alerts, flagged files). Forward to notify AND produce no
+        // AgentEvent — the TUI handles them via the reducer.
+        ServerMessage::SessionList { .. }
+        | ServerMessage::SessionHistory { .. }
+        | ServerMessage::SessionTitleChanged { .. }
+        | ServerMessage::SessionSummaryChanged { .. }
+        | ServerMessage::SessionAlert { .. }
+        | ServerMessage::FlaggedFilesChanged { .. } => {
+            let _ = state.notify_tx.send(msg.clone()).await;
             Vec::new()
         }
     }

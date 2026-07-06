@@ -1848,7 +1848,7 @@ fn stop_daemon(pidfile: &str) -> Result<()> {
 async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()> {
     use std::sync::Arc;
 
-    let client = mew_daemon::DaemonClient::connect(connect_url).await?;
+    let (client, mut notify_rx) = mew_daemon::DaemonClient::connect(connect_url).await?;
     let client = Arc::new(client);
 
     if let Some(session_id) = attach {
@@ -1858,6 +1858,7 @@ async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()>
     }
 
     let mut app = mew_tui::App::new();
+    app.daemon_mode = true;
     // Set the session ID from the daemon client.
     if let Some(sid) = client.session_id().await {
         app.status.session_id = sid;
@@ -1874,6 +1875,9 @@ async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()>
     app.theme = mew_tui::theme::Theme::load(theme_name);
     app.status.model = "daemon".to_string();
     app.status.provider = "mewd".to_string();
+
+    // Request the session list so the sidebar rail is populated immediately.
+    client.list_sessions().await;
 
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -1899,9 +1903,20 @@ async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()>
             mew_tui::title::set_terminal_title(mew_tui::title::title_for_streaming(app.streaming));
         }
 
-        let event = match event_rx.recv().await {
-            Some(e) => e,
-            None => break Ok(()),
+        let event = tokio::select! {
+            ev = event_rx.recv() => match ev {
+                Some(e) => e,
+                None => break Ok(()),
+            },
+            msg = notify_rx.recv() => {
+                // Daemon session-management notification. Update App state
+                // via the reducer, then continue the loop (don't block on
+                // input).
+                if let Some(msg) = msg {
+                    app.apply_daemon_notification(&msg);
+                }
+                continue;
+            }
         };
 
         last_event_was_tick = matches!(event, mew_tui::Event::Tick);

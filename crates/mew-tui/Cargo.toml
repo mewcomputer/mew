@@ -11,6 +11,7 @@ mew-agent = { workspace = true }
 mew-provider = { workspace = true }
 mew-session = { workspace = true }
 mew-hooks = { workspace = true }
+mew-protocol = { workspace = true }
 tokio = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }

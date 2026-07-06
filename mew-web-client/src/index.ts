@@ -81,7 +81,8 @@ export type ClientMessage =
   | { type: "git_status"; session_id: string }
   | { type: "watch_workspace"; session_id: string; enabled: boolean }
   | { type: "open_path"; session_id: string; path: string }
-  | { type: "unflag_file"; session_id: string; path: string };
+  | { type: "unflag_file"; session_id: string; path: string }
+  | { type: "ping" };
 
 // Provider events — see mew_message::ProviderEventWire.
 export type ProviderEventWire =
@@ -433,7 +434,8 @@ export type ServerMessage =
       session_id: string;
       pending_permissions: number;
       pending_questions: number;
-    };
+    }
+  | { type: "pong"; version: string };
 
 // ---------------------------------------------------------------------------
 // Minimal WebSocket interface — lets Node users pass `ws` while browsers
@@ -587,6 +589,7 @@ export interface MewClientEvents {
 
   errorMessage: (data: { message: string }) => void;
   errorEvent: (data: { message: string }) => void;
+  pong: (data: { version: string }) => void;
 }
 
 export type MewEventName = keyof MewClientEvents;
@@ -909,6 +912,18 @@ export class MewClient {
     this.send({ type: "unflag_file", session_id: sessionId, path });
   }
 
+  /** Ping the daemon; resolves with the daemon version once a pong arrives. */
+  ping(): Promise<string> {
+    return new Promise<string>((resolve) => {
+      const handler = (data: { version: string }) => {
+        this.off("pong", handler);
+        resolve(data.version);
+      };
+      this.on("pong", handler);
+      this.send({ type: "ping" });
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Event registration
   // -------------------------------------------------------------------------
@@ -1170,6 +1185,9 @@ export class MewClient {
         break;
       case "error_event":
         this.emit("errorEvent", { message: msg.message });
+        break;
+      case "pong":
+        this.emit("pong", { version: msg.version });
         break;
     }
   }
