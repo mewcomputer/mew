@@ -196,6 +196,7 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: error_state,
+                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -266,6 +267,7 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: completed_state,
+                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -371,6 +373,7 @@ impl Agent {
                         tool_name: tc.tool_name.clone(),
                         call_id: tc.call_id.clone(),
                         state: running_state,
+                        sensitivity: tc.sensitivity.clone(),
                         raw_input: tc.raw_input.clone(),
                     }),
                 })
@@ -656,7 +659,8 @@ impl Agent {
                         .map(|f| crate::FlaggedFileInfo {
                             path: f.path.display().to_string(),
                             reason: Some(
-                                mew_tools::tools::flag_important::flag_mode_label(f.mode).to_string(),
+                                mew_tools::tools::flag_important::flag_mode_label(f.mode)
+                                    .to_string(),
                             ),
                         })
                         .collect();
@@ -725,6 +729,7 @@ impl Agent {
                             tool_name: tc.tool_name.clone(),
                             call_id: tc.call_id.clone(),
                             state: error_state,
+                            sensitivity: tc.sensitivity.clone(),
                             raw_input: tc.raw_input.clone(),
                         }),
                     })
@@ -766,6 +771,7 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: running_state,
+                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -996,7 +1002,11 @@ impl Agent {
         };
 
         let success = is_subagent_success(&result);
-        let error_text = if success { String::new() } else { result.clone() };
+        let error_text = if success {
+            String::new()
+        } else {
+            result.clone()
+        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
@@ -1030,6 +1040,7 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: final_state,
+                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -1142,7 +1153,11 @@ impl Agent {
             Err(e) => (format!("error: {}", e), false),
         };
 
-        let error_text = if success { String::new() } else { output.clone() };
+        let error_text = if success {
+            String::new()
+        } else {
+            output.clone()
+        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
@@ -1176,6 +1191,7 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: final_state,
+                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -1300,7 +1316,11 @@ impl Agent {
             }
         };
 
-        let error_text = if success { String::new() } else { output.clone() };
+        let error_text = if success {
+            String::new()
+        } else {
+            output.clone()
+        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
@@ -1334,6 +1354,7 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: final_state,
+                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -1601,6 +1622,7 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: final_state,
+                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -1684,7 +1706,11 @@ impl Agent {
                 .await;
         }
 
-        let error_text = if success { String::new() } else { output.clone() };
+        let error_text = if success {
+            String::new()
+        } else {
+            output.clone()
+        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input,
@@ -1718,6 +1744,7 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: final_state,
+                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -1808,7 +1835,11 @@ impl Agent {
             Err(e) => (format!("error: {}", e), false),
         };
 
-        let error_text = if success { String::new() } else { output.clone() };
+        let error_text = if success {
+            String::new()
+        } else {
+            output.clone()
+        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
@@ -1842,6 +1873,7 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: final_state,
+                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })

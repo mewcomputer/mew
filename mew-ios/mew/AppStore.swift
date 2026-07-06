@@ -41,6 +41,17 @@ enum MewFontChoice: String, CaseIterable {
         }
     }
 
+    /// The PostScript font name for UIKit/AttributedString rendering, or `nil`
+    /// for the system font (which has no single PostScript name).
+    var uiFontName: String? {
+        switch self {
+        case .system:   return nil
+        case .miSans:   return "MiSansLatinVF"
+        case .junicode: return "JunicodeVF-Regular"
+        case .goudy:    return "OFLGoudyStMTT"
+        }
+    }
+
     /// Preview text in the picker.
     var previewText: String {
         switch self {

@@ -66,8 +66,9 @@ as one of:
 
 Headers tolerate whitespace before/after the brackets. The hash is optional
 but required by the patcher. Operation keywords accept several range
-separators (`.=`, `..`, `-`, `…`) and both dotted insert forms (`INS.POST 1:`
-and `INS .POST 1:`).
+separators (`.=`, `..`, `-`, `…`, `:`) and both dotted insert forms (`INS.POST 1:`
+and `INS .POST 1:`). The `:` separator is only treated as a range separator
+when followed by a digit; otherwise it's the payload delimiter.
 
 ## Parser
 
@@ -82,8 +83,9 @@ old range. `INS.*` becomes one or more `Insert`s. `Block` operations become
 `Edit::Block` nodes that are resolved later.
 
 The parser also detects common contamination (unified-diff hunk headers,
-`apply_patch` sentinels, `-old` payload rows) and rejects them with a clear
-error.
+`apply_patch` sentinels) and rejects them with a clear error. `-old` rows
+(unified-diff deletion markers) are ignored with a warning since the
+SWAP/DEL range already specifies what's being deleted.
 
 ## Patch sections
 

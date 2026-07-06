@@ -225,6 +225,7 @@ pub async fn run_iroh(
     session_manager: Arc<SessionManager>,
     groups_store: Arc<GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
+    auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
     allowlist_path: PathBuf,
     secret_key: SecretKey,
 ) -> Result<()> {
@@ -254,13 +255,22 @@ pub async fn run_iroh(
     // Print pairing info to stdout for `mew pair` to capture.
     println!("iroh-node-id:{node_id}");
 
+    // Spawn the idle-summary task once (daemon-wide, not per-connection),
+    // matching the Unix/TCP listener behavior.
+    {
+        let sm = session_manager.clone();
+        let flag = auto_summary_enabled.clone();
+        tokio::spawn(async move {
+            crate::idle_summary_task(sm, flag).await;
+        });
+    }
+
     let handler = MewIrohHandler {
         allowlist: allowlist.clone(),
         session_manager,
         groups_store,
         thinking_setter,
-        // TODO: hook this in properly
-        auto_summary_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        auto_summary_enabled,
     };
 
     let router = Router::builder(endpoint).accept(MEW_ALPN, handler).spawn();

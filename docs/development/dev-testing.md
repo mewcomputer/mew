@@ -21,7 +21,7 @@ just test-v      # verbose output
 consistency across deltas, streaming semantics, empty script, multi-byte
 text round-trip, delta count matches chunked text.
 
-**`mew-protocol`** (63 tests): exhaustive roundtrip for every `ClientMessage`
+**`mew-protocol`** (70 tests): exhaustive roundtrip for every `ClientMessage`
 and `ServerMessage` variant, nested structures (SubagentStart, TodosUpdated,
 AskUserRequest), negative tests (malformed JSON, missing fields, wrong types,
 unknown tags), `PermissionDecision` ↔ hooks conversions.
@@ -71,6 +71,23 @@ invalid name rejected, template flag parsed.
 included unless overridden, user override replaces built-in, tool allowlist
 parses, empty dir yields built-ins, display-name pool has 10+ entries,
 deterministic per seed, distribution varies, all names from pool.
+
+## CI jobs
+
+The full CI gate (`just ci`) runs fmt + clippy + `cargo test --all` + the
+web UI typecheck. GitHub Actions (`.github/workflows/ci.yml`) adds
+three platform-specific jobs:
+
+- **`rust-ci`** (Linux): `cargo fmt --check`, `cargo clippy -- -D warnings`,
+  `cargo test --all`.
+- **`web-ci`** (Linux): pnpm install, TypeScript typecheck for
+  `mew-web-client` and `mew-web-ui`.
+- **`ios-ci`** (macOS): `cargo check` for both iOS targets
+  (`aarch64-apple-ios`, `aarch64-apple-ios-sim`), then regenerates the
+  UniFFI Swift bindings and fails if the committed bindings differ. This
+  guards against `mew_mobile_core.swift` drifting behind the Rust core,
+  which breaks the Xcode build and can crash the app on an FFI mismatch.
+  Fix: run `just ios-core` and commit the regenerated files.
 
 ## The fake provider
 

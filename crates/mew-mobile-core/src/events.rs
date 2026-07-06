@@ -41,10 +41,7 @@ pub enum CoreEvent {
     },
 
     /// A session was reloaded after reconnect. Swift should pull `snapshot()`.
-    SessionReloaded {
-        daemon: String,
-        session_id: String,
-    },
+    SessionReloaded { daemon: String, session_id: String },
 
     /// Streaming text delta for a part. Coalesced in Rust before FFI.
     TextDelta {
@@ -92,10 +89,7 @@ pub enum CoreEvent {
     },
 
     /// A request was resolved (by this device or another). Dismiss the sheet.
-    RequestResolved {
-        daemon: String,
-        request_id: u64,
-    },
+    RequestResolved { daemon: String, request_id: u64 },
 
     /// Cross-session alert from the daemon.
     Alert {
@@ -115,10 +109,7 @@ pub enum CoreEvent {
     },
 
     /// Todo list updated for a session.
-    TodosUpdated {
-        daemon: String,
-        session_id: String,
-    },
+    TodosUpdated { daemon: String, session_id: String },
 
     /// Available models from the daemon.
     ModelList {
@@ -134,10 +125,7 @@ pub enum CoreEvent {
     },
 
     /// Daemon version from Pong.
-    DaemonVersion {
-        daemon: String,
-        version: String,
-    },
+    DaemonVersion { daemon: String, version: String },
 }
 
 /// Connection status for a daemon.
@@ -147,7 +135,9 @@ pub enum DaemonStatus {
     Connecting,
     Connected,
     /// Backing off before reconnect attempt N.
-    Backoff { attempt: u32 },
+    Backoff {
+        attempt: u32,
+    },
     /// Pairing was lost (NodeId changed or unauthorized).
     PairedLost,
 }

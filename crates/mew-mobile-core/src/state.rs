@@ -51,6 +51,9 @@ pub struct MessagePart {
     pub tool_call_id: Option<String>,
     pub tool_time_start: Option<i64>,
     pub tool_time_end: Option<i64>,
+    /// Sensitivity tier ("ReadOnly", "Mutating", "Dangerous") stamped by the
+    /// agent from the tool registry. None for non-tool parts or old sessions.
+    pub tool_sensitivity: Option<String>,
 }
 
 /// What kind of part this is.
@@ -146,6 +149,7 @@ impl SessionState {
                                 tool_call_id: None,
                                 tool_time_start: None,
                                 tool_time_end: None,
+                                tool_sensitivity: None,
                             },
                         )
                     }
@@ -163,10 +167,12 @@ impl SessionState {
                             tool_call_id: None,
                             tool_time_start: None,
                             tool_time_end: None,
+                            tool_sensitivity: None,
                         },
                     ),
                     Part::ToolCall(tcp) => {
-                        let (input_str, output, error, time_start, time_end) = tool_state_fields(&tcp.state);
+                        let (input_str, output, error, time_start, time_end) =
+                            tool_state_fields(&tcp.state);
                         (
                             tcp.base.id.to_string(),
                             MessagePart {
@@ -181,6 +187,7 @@ impl SessionState {
                                 tool_call_id: Some(tcp.call_id.clone()),
                                 tool_time_start: time_start,
                                 tool_time_end: time_end,
+                                tool_sensitivity: tcp.sensitivity.clone(),
                             },
                         )
                     }
@@ -236,7 +243,13 @@ impl SessionState {
 }
 
 /// Extracted fields from a `ToolState`.
-type ToolFields = (Option<String>, Option<String>, Option<String>, Option<i64>, Option<i64>);
+type ToolFields = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+);
 
 /// Extract input/output/error/time fields from a `ToolState`.
 pub fn tool_state_fields(state: &mew_message::ToolState) -> ToolFields {
@@ -248,17 +261,29 @@ pub fn tool_state_fields(state: &mew_message::ToolState) -> ToolFields {
         }
         ToolState::Running(s) => {
             let input = serde_json::to_string_pretty(&s.input).ok();
-            let output = if s.output.is_empty() { None } else { Some(s.output.clone()) };
+            let output = if s.output.is_empty() {
+                None
+            } else {
+                Some(s.output.clone())
+            };
             (input, output, None, Some(s.time.start), s.time.end)
         }
         ToolState::Completed(s) => {
             let input = serde_json::to_string_pretty(&s.input).ok();
-            let output = if s.output.is_empty() { None } else { Some(s.output.clone()) };
+            let output = if s.output.is_empty() {
+                None
+            } else {
+                Some(s.output.clone())
+            };
             (input, output, None, Some(s.time.start), s.time.end)
         }
         ToolState::Error(s) => {
             let input = serde_json::to_string_pretty(&s.input).ok();
-            let error = if s.error.is_empty() { None } else { Some(s.error.clone()) };
+            let error = if s.error.is_empty() {
+                None
+            } else {
+                Some(s.error.clone())
+            };
             (input, None, error, Some(s.time.start), s.time.end)
         }
     }

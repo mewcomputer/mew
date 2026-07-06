@@ -108,6 +108,8 @@ export type ClientMessage = {
     session_id: string;
     path: string;
 } | {
+    type: "list_projects";
+} | {
     type: "ping";
 };
 export type ProviderEventWire = {
@@ -155,6 +157,7 @@ export type Part = {
     tool_name: string;
     call_id: string;
     state: ToolState;
+    sensitivity?: string;
 } | {
     type: "tool_result";
     base: PartBase;
@@ -298,6 +301,13 @@ export interface SessionInfo {
     usage?: SessionUsageWire;
     pending_permissions?: number;
     pending_questions?: number;
+}
+/** A known project directory, returned by `list_projects`. */
+export interface ProjectInfo {
+    path: string;
+    display_name: string;
+    session_count: number;
+    last_used_at?: number;
 }
 /** A session group. */
 export interface GroupInfo {
@@ -526,8 +536,8 @@ export type ServerMessage = {
 } | {
     type: "session_meta_changed";
     session_id: string;
-    archived: boolean;
-    pinned: boolean;
+    archived: boolean | null;
+    pinned: boolean | null;
     group_id?: string;
 } | {
     type: "session_attention_changed";
@@ -537,6 +547,9 @@ export type ServerMessage = {
 } | {
     type: "pong";
     version: string;
+} | {
+    type: "project_list";
+    projects: ProjectInfo[];
 };
 export interface MewWebSocket {
     send(data: string): void;
@@ -643,6 +656,9 @@ export interface MewClientEvents {
         provider: string;
         model: string;
     }) => void;
+    "project-list": (data: {
+        projects: ProjectInfo[];
+    }) => void;
     "thinking-variant-changed": (data: {
         variant: string | null;
     }) => void;
@@ -715,8 +731,8 @@ export interface MewClientEvents {
     }) => void;
     "session-meta-changed": (data: {
         session_id: string;
-        archived: boolean;
-        pinned: boolean;
+        archived: boolean | null;
+        pinned: boolean | null;
         group_id?: string;
     }) => void;
     "session-attention-changed": (data: {
@@ -788,6 +804,8 @@ export declare class MewClient {
     /** List all sessions known to the daemon (active + persisted idle).
      *  The daemon responds with a `session-list` event. */
     listSessions(): Promise<SessionInfo[]>;
+    /** List known projects (recent session cwds + workspace.roots). */
+    listProjects(): Promise<ProjectInfo[]>;
     /** Delete a session from disk and remove it from the active list. */
     deleteSession(session_id: string): void;
     /** Rename a session (set a custom title). Persists to disk and broadcasts. */

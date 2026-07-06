@@ -80,6 +80,7 @@ impl FakeProvider {
                         end: None,
                     },
                 }),
+                sensitivity: None,
                 raw_input: String::new(),
             }),
         });

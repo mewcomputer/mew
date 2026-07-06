@@ -97,6 +97,7 @@ pub struct ToolDef {
 /// (e.g. `include_str!()`). Plugins in Rust should define their own
 /// types with `field: String` and convert.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)] // Part is already large; boxing would ripple everywhere
 pub enum ProviderEvent {
     PartStart {
         part: Part,
@@ -175,6 +176,30 @@ impl RetryPolicy {
                 (self.initial_backoff, true)
             }
             _ => (Duration::ZERO, false),
+        }
+    }
+
+    /// Determine whether a network-level error (connection refused, DNS
+    /// failure, TLS error, timeout, etc.) should be retried.  Network
+    /// errors are always retryable up to `max_retries`, using the same
+    /// exponential backoff as 429s.
+    pub fn should_retry_network_error(&self, attempt: usize) -> (Duration, bool) {
+        if attempt >= self.max_retries {
+            return (Duration::ZERO, false);
+        }
+        let backoff = self.initial_backoff * 2_u32.pow(attempt as u32);
+        let backoff = backoff.min(self.max_backoff);
+        (backoff, true)
+    }
+
+    /// The maximum number of retry attempts the UI should display for a
+    /// given status code.  429 and network errors retry up to
+    /// `max_retries` times; 5xx retries only once.
+    pub fn max_attempts_for(&self, status_code: u16) -> u32 {
+        match status_code {
+            429 => self.max_retries as u32,
+            500..=599 if self.retry_5xx => 1,
+            _ => self.max_retries as u32, // network errors use max_retries
         }
     }
 }
@@ -385,5 +410,50 @@ mod tests {
                 "client error (400): bad request".to_string()
             )
         );
+    }
+
+    #[test]
+    fn test_retry_network_error_backoff() {
+        let policy = RetryPolicy::default();
+
+        // Same exponential backoff as 429
+        let (backoff, retry) = policy.should_retry_network_error(0);
+        assert!(retry);
+        assert_eq!(backoff, Duration::from_secs(1));
+
+        let (backoff, retry) = policy.should_retry_network_error(1);
+        assert!(retry);
+        assert_eq!(backoff, Duration::from_secs(2));
+
+        let (backoff, retry) = policy.should_retry_network_error(3);
+        assert!(retry);
+        assert_eq!(backoff, Duration::from_secs(8));
+
+        // Exceeds max_retries=4
+        let (backoff, retry) = policy.should_retry_network_error(4);
+        assert!(!retry);
+        assert_eq!(backoff, Duration::ZERO);
+    }
+
+    #[test]
+    fn test_max_attempts_for() {
+        let policy = RetryPolicy::default();
+
+        // 429 uses max_retries
+        assert_eq!(policy.max_attempts_for(429), 4);
+
+        // 5xx with retry_5xx=true → 1
+        assert_eq!(policy.max_attempts_for(500), 1);
+        assert_eq!(policy.max_attempts_for(503), 1);
+
+        // 5xx with retry_5xx=false falls through to the catch-all
+        let no_5xx = RetryPolicy {
+            retry_5xx: false,
+            ..Default::default()
+        };
+        assert_eq!(no_5xx.max_attempts_for(500), 4);
+
+        // Other status codes (network errors use the catch-all)
+        assert_eq!(policy.max_attempts_for(0), 4);
     }
 }

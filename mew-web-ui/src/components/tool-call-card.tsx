@@ -5,15 +5,12 @@ import { cn } from "../lib/utils";
 
 type Sensitivity = "readonly" | "mutating" | "dangerous";
 
-function inferSensitivity(toolName: string): Sensitivity {
-  const t = toolName.toLowerCase();
-  if (t.includes("read") || t.includes("glob") || t.includes("grep") || t.includes("find") || t.includes("ls")) {
-    return "readonly";
+function partSensitivity(part: Extract<MessagePart, { type: "tool-call" }>): Sensitivity {
+  switch (part.sensitivity?.toLowerCase()) {
+    case "readonly":  return "readonly";
+    case "mutating":  return "mutating";
+    default:          return "dangerous";
   }
-  if (t.includes("bash") || t.includes("shell") || t.includes("exit")) {
-    return "dangerous";
-  }
-  return "mutating";
 }
 
 function sensitivityMeta(s: Sensitivity) {
@@ -70,7 +67,7 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
   const state = toolState ?? part.state ?? "pending";
   const hasOutput = toolOutput && toolOutput.length > 0;
   const summary = inputSummary(part.input);
-  const sensitivity = inferSensitivity(part.toolName);
+  const sensitivity = partSensitivity(part);
   const sens = sensitivityMeta(sensitivity);
   const elapsed = useElapsed(part.time?.start, part.time?.end, state === "running");
 

@@ -135,6 +135,18 @@ tool call states, pending permission/ask requests, session usage.
 `PartUpdated` is authoritative — when it arrives for a part built from
 accumulated deltas, replace the accumulated state wholesale.
 
+### File browser
+
+The core exposes a `list_dir(daemon_id, session_id, path?)` method that
+sends `ClientMessage::ListDir`. The daemon responds with
+`ServerMessage::DirListing { path, entries: Vec<DirEntry> }`, which the
+core translates to `CoreEvent::DirListing`. `DirEntry` is a UniFFI
+record with `name`, `is_dir`, and `size`.
+
+The iOS app drives this from a `+` button on the chatbar: tapping a
+folder navigates in, tapping a file appends its path to the composer.
+Defaults to the session cwd (if known) or the daemon default.
+
 ### TextDelta coalescing
 
 UniFFI callbacks cross the ObjC bridge per call. A callback per token
@@ -162,6 +174,21 @@ spin up a real daemon with a fake provider over real iroh endpoints
 Integration tests use `#[tokio::test(flavor = "multi_thread")]` because
 `MobileCore::connect()` calls `tokio::spawn` for the background
 connection task.
+
+## CI
+
+The `ios-ci` job (`.github/workflows/ci.yml`) runs on macOS and does
+three things:
+
+1. `cargo check` for both iOS targets (`aarch64-apple-ios` and
+   `aarch64-apple-ios-sim`).
+2. Regenerates the UniFFI Swift bindings from the current Rust interface.
+3. Fails if the committed bindings (`mew_mobile_core.swift` and
+   `mew_mobile_coreFFI.h`) differ from the regenerated ones.
+
+This is the guard against bindings drifting behind the Rust core, which
+breaks the Xcode build and can crash the app on an FFI mismatch. If the
+job fails, run `just ios-core` and commit the regenerated files.
 
 ## Adding a new CoreEvent variant
 

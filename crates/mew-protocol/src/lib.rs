@@ -1842,9 +1842,7 @@ mod tests {
             ),
             (
                 "user_message",
-                ServerMessage::UserMessage {
-                    text: "hi".into(),
-                },
+                ServerMessage::UserMessage { text: "hi".into() },
             ),
             (
                 "tool_start",
@@ -1942,9 +1940,7 @@ mod tests {
             ),
             (
                 "persona_switch_requested",
-                ServerMessage::PersonaSwitchRequested {
-                    name: "n".into(),
-                },
+                ServerMessage::PersonaSwitchRequested { name: "n".into() },
             ),
             (
                 "job_update",
@@ -1956,9 +1952,7 @@ mod tests {
             ),
             (
                 "slash_result",
-                ServerMessage::SlashResult {
-                    text: "ok".into(),
-                },
+                ServerMessage::SlashResult { text: "ok".into() },
             ),
             (
                 "request_resolved",
@@ -1973,10 +1967,7 @@ mod tests {
                 "session_history",
                 ServerMessage::SessionHistory { messages: vec![] },
             ),
-            (
-                "model_list",
-                ServerMessage::ModelList { models: vec![] },
-            ),
+            ("model_list", ServerMessage::ModelList { models: vec![] }),
             (
                 "model_switched",
                 ServerMessage::ModelSwitched {
@@ -2039,10 +2030,7 @@ mod tests {
                     files_changed: 0,
                 },
             ),
-            (
-                "group_list",
-                ServerMessage::GroupList { groups: vec![] },
-            ),
+            ("group_list", ServerMessage::GroupList { groups: vec![] }),
             (
                 "groups_changed",
                 ServerMessage::GroupsChanged { groups: vec![] },
@@ -2067,10 +2055,7 @@ mod tests {
                 "git_status_result",
                 ServerMessage::GitStatusResult { entries: vec![] },
             ),
-            (
-                "fs_changed",
-                ServerMessage::FsChanged { paths: vec![] },
-            ),
+            ("fs_changed", ServerMessage::FsChanged { paths: vec![] }),
             (
                 "session_usage_changed",
                 ServerMessage::SessionUsageChanged {
@@ -2119,9 +2104,7 @@ mod tests {
             ),
             (
                 "project_list",
-                ServerMessage::ProjectList {
-                    projects: vec![],
-                },
+                ServerMessage::ProjectList { projects: vec![] },
             ),
         ];
 

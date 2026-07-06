@@ -19,9 +19,35 @@ impl Tool for EditHashline {
 
     fn description(&self) -> &str {
         "Edit files using the hashline format: line-numbered operations with \
-         file-hash staleness detection. Supports SWAP/DEL/INS, SWAP.BLK/\
-         DEL.BLK/INS.BLK.POST, REM, and MV across one or more [path#hash] \
-         sections. The file hash comes from the most recent `read` output."
+         file-hash staleness detection. The file hash comes from the most \
+         recent `read` output.\n\
+         \n\
+         Patch structure: one or more [path#hash] sections, each followed by \
+         operations. Payload lines start with `+`.\n\
+         \n\
+         Operations:\n\
+         SWAP 2.=5:     replace lines 2-5 (range separators: .= .. - … :)\n\
+         SWAP 2:        replace single line 2\n\
+         DEL 5          delete line 5\n\
+         DEL 2.=5       delete lines 2-5\n\
+         INS.POST 3:    insert after line 3\n\
+         INS.PRE 3:     insert before line 3\n\
+         INS.HEAD:      insert at top of file\n\
+         INS.TAIL:      insert at end of file\n\
+         SWAP.BLK 5:    replace syntax block containing line 5\n\
+         DEL.BLK 5      delete syntax block containing line 5\n\
+         INS.BLK.POST 5:  insert after syntax block containing line 5\n\
+         REM            delete the file (no body)\n\
+         MV newpath     rename the file (no body)\n\
+         \n\
+         Example:\n\
+         [src/lib.rs#A1B2]\n\
+         SWAP 2.=3:\n\
+         +    a + b + 1\n\
+         +    c + d\n\
+         DEL 5\n\
+         INS.POST 4:\n\
+         +pub fn new_fn() {}"
     }
 
     fn schema(&self) -> &Value {

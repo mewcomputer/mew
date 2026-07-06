@@ -74,9 +74,18 @@ creating the session, and rejects bad paths with an error.
 
 ### Chat view
 
-- **Messages**: streaming markdown with basic formatting. Reasoning
-  parts are collapsed by default. Tool calls show as compact rows with
-  state indicators (pending → running → completed/error).
+- **Messages**: streaming markdown rendered via SwiftStreamingMarkdown
+  with full theme coverage (headings, lists, code blocks, blockquotes,
+  inline styles). Reasoning parts render as markdown too. Consecutive
+  same-tool calls batch into a single row. Text streams incrementally
+  with de-jittered autoscroll.
+- **File browser**: tap the **+** button on the chatbar to browse the
+  session's working directory. Folders navigate in, files append their
+  path to the composer. Defaults to the session cwd (or daemon default).
+- **Chatbar**: liquid glass two-row layout — text field on top, controls
+  on the bottom. Includes the model picker and real session titles.
+- **Working indicator**: appears immediately on send, before the first
+  provider event arrives.
 - **Composer**: type a prompt and tap send. While a turn is running,
   the send button becomes a cancel (stop) button. Slash commands
   (`/clear`, `/compact`, etc.) are passed through to the daemon.
@@ -84,9 +93,10 @@ creating the session, and rejects bad paths with an error.
   Pulls the available list from the daemon.
 - **Permission sheet**: when the agent requests permission to run a
   tool, a sheet appears with the tool name, pretty-printed input, and
-  three buttons: Allow Once, Allow Session, Deny.
+  three buttons: Allow Once, Allow Session, Deny. The sheet is
+  un-dismissable while pending — you must answer it.
 - **Ask-user sheet**: when the agent asks questions, a sheet appears
-  with one text field per question.
+  with one text field per question. Also un-dismissable while pending.
 
 ### Settings
 
@@ -103,6 +113,10 @@ The app handles reconnection automatically:
 - After reconnect, the app re-sends `AttachSession` so the daemon
   replays the full message history. The UI swaps state in one
   operation — no delta storm.
+- If the agent is blocked on a permission or ask-user request when the
+  app attaches, the daemon replays those pending requests too (they
+  aren't in the message history). The app deduplicates by request ID so
+  a re-attach doesn't double up sheets.
 - When the app returns to the foreground after being backgrounded, iOS
   kills QUIC connections within ~30 seconds. The app redials and
   re-attaches automatically.
@@ -117,12 +131,11 @@ and `RequestResolved` dismisses the prompt on all devices.
   while backgrounded. When the app is open, in-app alerts fire for
   sessions that need your attention. Background push is planned for a
   future release via a push relay.
-- **No file browser**: the protocol supports directory listings and
-  file previews, but the iOS app defers this UI.
 - **No prompt attachments**: sending a photo from the phone has no
   protocol support yet.
-- **Basic markdown**: uses `AttributedString` markdown rendering. No
-  syntax-highlighted code blocks (yet).
+- **No syntax highlighting in code blocks**: markdown renders via
+  SwiftStreamingMarkdown, which does not theme code blocks with
+  language-specific highlighting (unlike the web UI's Shiki).
 
 ## Architecture
 

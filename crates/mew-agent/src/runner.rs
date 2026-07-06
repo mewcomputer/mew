@@ -556,6 +556,7 @@ mod tests {
                         },
                     }),
                     raw_input: String::new(),
+                    sensitivity: None,
                 }),
             },
             mew_provider::ProviderEvent::PartEnd { part_id },
@@ -918,6 +919,7 @@ mod tests {
                             },
                         }),
                         raw_input: String::new(),
+                        sensitivity: None,
                     }),
                 },
                 mew_provider::ProviderEvent::PartEnd {
@@ -1021,6 +1023,7 @@ mod tests {
                             },
                         }),
                         raw_input: String::new(),
+                        sensitivity: None,
                     }),
                 },
                 mew_provider::ProviderEvent::PartEnd {

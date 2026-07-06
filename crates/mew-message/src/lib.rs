@@ -99,6 +99,7 @@ pub enum ErrorKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // already 288+ bytes; sensitivity field is negligible
 pub enum Part {
     Text(TextPart),
     Reasoning(ReasoningPart),
@@ -163,6 +164,13 @@ pub struct ToolCallPart {
     pub tool_name: String,
     pub call_id: String,
     pub state: ToolState,
+    /// Sensitivity tier of the tool ("readonly", "mutating", "dangerous").
+    /// Stamped by the agent from the tool registry on PartStart so clients can
+    /// group/label tool calls without their own name→tier map. `None` for
+    /// parts created before the agent stamps them (provider adapters) or for
+    /// historical sessions that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitivity: Option<String>,
     #[serde(skip)]
     pub raw_input: String,
 }
@@ -301,6 +309,7 @@ fn is_default<T: Default + PartialEq>(t: &T) -> bool {
 /// serializes cleanly for the daemon protocol.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // Part is already large; boxing would ripple everywhere
 pub enum ProviderEventWire {
     PartStart {
         part: Part,
@@ -485,6 +494,7 @@ mod tests {
                 },
             }),
             raw_input: String::new(),
+            sensitivity: None,
         });
         roundtrip("tool call pending", &p);
     }
@@ -506,6 +516,7 @@ mod tests {
                 },
             }),
             raw_input: String::new(),
+            sensitivity: None,
         });
         roundtrip("tool call running", &p);
     }
@@ -529,6 +540,7 @@ mod tests {
                 },
             }),
             raw_input: String::new(),
+            sensitivity: None,
         });
         roundtrip("tool call completed", &p);
     }
@@ -550,6 +562,7 @@ mod tests {
                 },
             }),
             raw_input: String::new(),
+            sensitivity: None,
         });
         roundtrip("tool call error", &p);
     }
@@ -638,6 +651,7 @@ mod tests {
                         },
                     }),
                     raw_input: String::new(),
+                    sensitivity: None,
                 }),
             ],
             time: Time {

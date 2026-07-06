@@ -166,11 +166,11 @@ struct ChatView: View {
                 // smoother scrolling.
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(store.visibleMessages, id: \.id) { message in
-                        MessageItemView(message: message)
+                        MessageItemView(message: message, fontChoice: store.fontChoice)
                     }
 
                     if showsStreamingBubble {
-                        StreamingBubble(text: store.streamingText)
+                        StreamingBubble(text: store.streamingText, fontChoice: store.fontChoice)
                             .id("streaming")
                     }
 

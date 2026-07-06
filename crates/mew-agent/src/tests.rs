@@ -585,6 +585,7 @@ fn test_pending_tool_calls() {
             },
         }),
         raw_input: String::new(),
+        sensitivity: None,
     };
     let completed_part = ToolCallPart {
         base: PartBase {
@@ -605,6 +606,7 @@ fn test_pending_tool_calls() {
             },
         }),
         raw_input: String::new(),
+        sensitivity: None,
     };
 
     let msg = Message {
@@ -663,6 +665,7 @@ fn test_update_tool_call() {
                 },
             }),
             raw_input: String::new(),
+            sensitivity: None,
         })],
         time: Time {
             created: now,
@@ -923,7 +926,9 @@ async fn test_tool_execution_error_reaches_provider() {
             _ctx: ToolCtx,
             _input: serde_json::Value,
         ) -> Result<ToolOutput, mew_tools::ToolError> {
-            Err(mew_tools::ToolError::Execution("invalid input: missing path".to_string()))
+            Err(mew_tools::ToolError::Execution(
+                "invalid input: missing path".to_string(),
+            ))
         }
     }
 
@@ -1082,6 +1087,7 @@ async fn test_multi_tool_call_turn() {
                     },
                 }),
                 raw_input: String::new(),
+                sensitivity: None,
             }),
         },
         mew_provider::ProviderEvent::PartEnd {
@@ -1104,6 +1110,7 @@ async fn test_multi_tool_call_turn() {
                     },
                 }),
                 raw_input: String::new(),
+                sensitivity: None,
             }),
         },
         mew_provider::ProviderEvent::PartEnd {
@@ -1171,6 +1178,7 @@ async fn test_permission_engine_session_allow() {
                     },
                 }),
                 raw_input: String::new(),
+                sensitivity: None,
             }),
         },
         mew_provider::ProviderEvent::PartEnd {
@@ -1193,6 +1201,7 @@ async fn test_permission_engine_session_allow() {
                     },
                 }),
                 raw_input: String::new(),
+                sensitivity: None,
             }),
         },
         mew_provider::ProviderEvent::PartEnd {
@@ -1436,6 +1445,7 @@ fn test_reconcile_tool_call_input_parses_streamed_arguments() {
                 },
             }),
             raw_input: r#"{"name":"explore","prompt":"what is the repo vibe?"}"#.into(),
+            sensitivity: None,
         })],
         time: Time {
             created: now,
@@ -1501,6 +1511,7 @@ fn test_reconcile_tool_call_input_leaves_other_parts_alone() {
                     },
                 }),
                 raw_input: r#"{"input":"hi"}"#.into(),
+                sensitivity: None,
             }),
         ],
         time: Time {
@@ -1563,6 +1574,7 @@ fn test_reconcile_tool_call_input_no_op_on_empty_raw_input() {
                 },
             }),
             raw_input: String::new(),
+            sensitivity: None,
         })],
         time: Time {
             created: now,
@@ -1604,6 +1616,7 @@ async fn test_streaming_tool_call_appends_with_parsed_input() {
                     },
                 }),
                 raw_input: String::new(),
+                sensitivity: None,
             }),
         },
         mew_provider::ProviderEvent::PartDelta {
@@ -2169,6 +2182,7 @@ fn long_reasoning_then_tool_call_script(
                 },
             }),
             raw_input: String::new(),
+            sensitivity: None,
         }),
     });
     events.push(mew_provider::ProviderEvent::PartEnd { part_id: tc_id });

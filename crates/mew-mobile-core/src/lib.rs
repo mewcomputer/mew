@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use iroh::{Endpoint, SecretKey};
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::{client::ClientRequestBuilder, Message};
 use tokio_tungstenite::client_async;
+use tokio_tungstenite::tungstenite::{client::ClientRequestBuilder, Message};
 use tracing::{info, warn};
 
 use mew_message::{Part, ProviderEventWire};
@@ -26,7 +26,7 @@ pub mod registry;
 pub mod state;
 
 pub use codec::decode_server_message_lenient;
-pub use events::{CoreEvent, CoreListener, Decision, DaemonStatus};
+pub use events::{CoreEvent, CoreListener, DaemonStatus, Decision};
 pub use registry::{DaemonEntry, DaemonId, DaemonRegistry};
 pub use state::{DaemonSnapshot, SessionState};
 
@@ -49,8 +49,12 @@ impl std::fmt::Display for CoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CoreError::InvalidSecretKey => write!(f, "invalid secret key (must be 32 bytes)"),
-            CoreError::EndpointBindFailed { reason } => write!(f, "failed to bind iroh endpoint: {reason}"),
-            CoreError::RegistryLoadFailed { reason } => write!(f, "failed to load daemon registry: {reason}"),
+            CoreError::EndpointBindFailed { reason } => {
+                write!(f, "failed to bind iroh endpoint: {reason}")
+            }
+            CoreError::RegistryLoadFailed { reason } => {
+                write!(f, "failed to load daemon registry: {reason}")
+            }
             CoreError::InvalidNodeId { reason } => write!(f, "invalid NodeId: {reason}"),
             CoreError::ParseFailed { reason } => write!(f, "parse failed: {reason}"),
         }
@@ -81,7 +85,9 @@ pub struct DialInfo {
 pub fn parse_dial_info(payload: String) -> Result<DialInfo, CoreError> {
     parse_dial_info_impl(&payload)
         .map(|(node_id, name)| DialInfo { node_id, name })
-        .map_err(|e| CoreError::ParseFailed { reason: e.to_string() })
+        .map_err(|e| CoreError::ParseFailed {
+            reason: e.to_string(),
+        })
 }
 
 fn parse_dial_info_impl(payload: &str) -> Result<(String, Option<String>)> {
@@ -189,14 +195,18 @@ impl MobileCore {
             .map_err(|_| CoreError::InvalidSecretKey)?;
         let secret_key = SecretKey::from_bytes(&secret_key_bytes);
         let registry_path = PathBuf::from(data_dir).join("daemons.json");
-        let registry = DaemonRegistry::load(registry_path)
-            .map_err(|e| CoreError::RegistryLoadFailed { reason: e.to_string() })?;
+        let registry =
+            DaemonRegistry::load(registry_path).map_err(|e| CoreError::RegistryLoadFailed {
+                reason: e.to_string(),
+            })?;
 
         let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(secret_key)
             .bind()
             .await
-            .map_err(|e| CoreError::EndpointBindFailed { reason: e.to_string() })?;
+            .map_err(|e| CoreError::EndpointBindFailed {
+                reason: e.to_string(),
+            })?;
 
         // Capture the tokio runtime handle so sync methods can spawn tasks.
         let runtime = tokio::runtime::Handle::current();
@@ -361,6 +371,7 @@ impl MobileCore {
                             tool_call_id: None,
                             tool_time_start: None,
                             tool_time_end: None,
+                            tool_sensitivity: None,
                         }],
                     });
                     Some(ss.session_id.clone())
@@ -485,10 +496,9 @@ impl MobileCore {
     pub fn rename_session(&self, id: DaemonId, session_id: String, title: String) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::RenameSession {
-                session_id,
-                title,
-            });
+            let _ = conn
+                .tx
+                .send(ClientMessage::RenameSession { session_id, title });
         }
     }
 
@@ -507,10 +517,9 @@ impl MobileCore {
     pub fn pin_session(&self, id: DaemonId, session_id: String, pinned: bool) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::PinSession {
-                session_id,
-                pinned,
-            });
+            let _ = conn
+                .tx
+                .send(ClientMessage::PinSession { session_id, pinned });
         }
     }
 
@@ -764,8 +773,13 @@ async fn connect_and_run(
     // Flush remaining delta buffer.
     if !delta_buffer.is_empty() {
         if let Some(pid) = &delta_part_id {
-            let session_id = conn_state.session_state.lock().unwrap()
-                .as_ref().map(|s| s.session_id.clone()).unwrap_or_default();
+            let session_id = conn_state
+                .session_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|s| s.session_id.clone())
+                .unwrap_or_default();
             emit_event(CoreEvent::TextDelta {
                 daemon: daemon_id.to_string(),
                 session_id,
@@ -900,6 +914,7 @@ fn translate_message(
                                 tool_call_id: None,
                                 tool_time_start: None,
                                 tool_time_end: None,
+                                tool_sensitivity: None,
                             },
                             Part::Reasoning(rp) => state::MessagePart {
                                 id: rp.base.id.to_string(),
@@ -913,9 +928,11 @@ fn translate_message(
                                 tool_call_id: None,
                                 tool_time_start: None,
                                 tool_time_end: None,
+                                tool_sensitivity: None,
                             },
                             Part::ToolCall(tcp) => {
-                                let (input_str, output, error, time_start, time_end) = state::tool_state_fields(&tcp.state);
+                                let (input_str, output, error, time_start, time_end) =
+                                    state::tool_state_fields(&tcp.state);
                                 state::MessagePart {
                                     id: tcp.base.id.to_string(),
                                     kind: state::PartKind::ToolCall,
@@ -928,8 +945,9 @@ fn translate_message(
                                     tool_call_id: Some(tcp.call_id.clone()),
                                     tool_time_start: time_start,
                                     tool_time_end: time_end,
+                                    tool_sensitivity: tcp.sensitivity.clone(),
                                 }
-                            },
+                            }
                             _ => state::MessagePart {
                                 id: ulid::Ulid::new().to_string(),
                                 kind: state::PartKind::Error,
@@ -942,6 +960,7 @@ fn translate_message(
                                 tool_call_id: None,
                                 tool_time_start: None,
                                 tool_time_end: None,
+                                tool_sensitivity: None,
                             },
                         })
                         .collect();
@@ -996,7 +1015,11 @@ fn translate_message(
                             state: Some("completed".into()),
                         });
                     }
-                    ProviderEventWire::MessageEnd { usage, cost, finish } => {
+                    ProviderEventWire::MessageEnd {
+                        usage,
+                        cost,
+                        finish,
+                    } => {
                         ss.apply_provider_event(event);
                         let failed = *finish == mew_message::Finish::Error;
                         events.push(CoreEvent::TurnEnded {
@@ -1028,7 +1051,8 @@ fn translate_message(
                                 p.kind = state::PartKind::Text;
                             }
                             Part::ToolCall(tcp) => {
-                                let (input_str, output, error, time_start, time_end) = state::tool_state_fields(&tcp.state);
+                                let (input_str, output, error, time_start, time_end) =
+                                    state::tool_state_fields(&tcp.state);
                                 p.tool_name = Some(tcp.tool_name.clone());
                                 p.tool_state = Some(format!("{:?}", tcp.state).to_lowercase());
                                 p.tool_input = input_str;
@@ -1089,15 +1113,23 @@ fn translate_message(
                         tool_call_id: None,
                         tool_time_start: None,
                         tool_time_end: None,
+                        tool_sensitivity: None,
                     }],
                 });
             }
         }
 
-        ServerMessage::PermissionRequest { request_id, tool_name, input } => {
+        ServerMessage::PermissionRequest {
+            request_id,
+            tool_name,
+            input,
+        } => {
             let input_str = serde_json::to_string_pretty(input).unwrap_or_default();
             let mut ss_lock = conn_state.session_state.lock().unwrap();
-            let session_id = ss_lock.as_ref().map(|s| s.session_id.clone()).unwrap_or_default();
+            let session_id = ss_lock
+                .as_ref()
+                .map(|s| s.session_id.clone())
+                .unwrap_or_default();
             if let Some(ss) = ss_lock.as_mut() {
                 ss.pending_permissions += 1;
             }
@@ -1110,9 +1142,16 @@ fn translate_message(
             });
         }
 
-        ServerMessage::AskUserRequest { request_id, call_id, questions } => {
+        ServerMessage::AskUserRequest {
+            request_id,
+            call_id,
+            questions,
+        } => {
             let mut ss_lock = conn_state.session_state.lock().unwrap();
-            let session_id = ss_lock.as_ref().map(|s| s.session_id.clone()).unwrap_or_default();
+            let session_id = ss_lock
+                .as_ref()
+                .map(|s| s.session_id.clone())
+                .unwrap_or_default();
             if let Some(ss) = ss_lock.as_mut() {
                 ss.pending_questions += 1;
             }
@@ -1136,7 +1175,12 @@ fn translate_message(
             });
         }
 
-        ServerMessage::SessionAlert { session_id, title, kind, detail } => {
+        ServerMessage::SessionAlert {
+            session_id,
+            title,
+            kind,
+            detail,
+        } => {
             events.push(CoreEvent::Alert {
                 daemon: d,
                 session_id: session_id.clone(),
@@ -1146,7 +1190,11 @@ fn translate_message(
             });
         }
 
-        ServerMessage::SessionAttentionChanged { session_id, pending_permissions, pending_questions } => {
+        ServerMessage::SessionAttentionChanged {
+            session_id,
+            pending_permissions,
+            pending_questions,
+        } => {
             let mut ss_lock = conn_state.session_state.lock().unwrap();
             if let Some(ss) = ss_lock.as_mut() {
                 ss.pending_permissions = *pending_permissions;
@@ -1188,8 +1236,13 @@ fn translate_message(
         }
 
         ServerMessage::SlashResult { text } => {
-            let session_id = conn_state.session_state.lock().unwrap()
-                .as_ref().map(|s| s.session_id.clone()).unwrap_or_default();
+            let session_id = conn_state
+                .session_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|s| s.session_id.clone())
+                .unwrap_or_default();
             events.push(CoreEvent::SlashResult {
                 daemon: d,
                 session_id,
@@ -1212,8 +1265,13 @@ fn translate_message(
         }
 
         ServerMessage::TodosUpdated { .. } => {
-            let session_id = conn_state.session_state.lock().unwrap()
-                .as_ref().map(|s| s.session_id.clone()).unwrap_or_default();
+            let session_id = conn_state
+                .session_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|s| s.session_id.clone())
+                .unwrap_or_default();
             events.push(CoreEvent::TodosUpdated {
                 daemon: d,
                 session_id,
@@ -1223,7 +1281,10 @@ fn translate_message(
         // Pass through events that need permission handling but no state assembly.
         ServerMessage::WorkspacePermissionRequest { request_id, path } => {
             let mut ss_lock = conn_state.session_state.lock().unwrap();
-            let session_id = ss_lock.as_ref().map(|s| s.session_id.clone()).unwrap_or_default();
+            let session_id = ss_lock
+                .as_ref()
+                .map(|s| s.session_id.clone())
+                .unwrap_or_default();
             if let Some(ss) = ss_lock.as_mut() {
                 ss.pending_permissions += 1;
             }
@@ -1236,9 +1297,17 @@ fn translate_message(
             });
         }
 
-        ServerMessage::SubagentPermissionRequest { request_id, tool_name, input, .. } => {
+        ServerMessage::SubagentPermissionRequest {
+            request_id,
+            tool_name,
+            input,
+            ..
+        } => {
             let mut ss_lock = conn_state.session_state.lock().unwrap();
-            let session_id = ss_lock.as_ref().map(|s| s.session_id.clone()).unwrap_or_default();
+            let session_id = ss_lock
+                .as_ref()
+                .map(|s| s.session_id.clone())
+                .unwrap_or_default();
             if let Some(ss) = ss_lock.as_mut() {
                 ss.pending_permissions += 1;
             }

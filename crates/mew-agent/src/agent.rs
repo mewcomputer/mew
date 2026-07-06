@@ -1392,7 +1392,7 @@ fn expand_tool_tags(
 /// Map a tool's `Sensitivity` to the label string the classifier prompt
 /// expects. Kept here (next to `Agent::classify_permission`) so the
 /// classifier call site doesn't have to know about `mew_tools` directly.
-fn sensitivity_label(s: mew_tools::Sensitivity) -> &'static str {
+pub(crate) fn sensitivity_label(s: mew_tools::Sensitivity) -> &'static str {
     match s {
         mew_tools::Sensitivity::ReadOnly => "ReadOnly",
         mew_tools::Sensitivity::Mutating => "Mutating",

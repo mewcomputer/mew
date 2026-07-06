@@ -28,7 +28,11 @@ impl Adapter {
             base_url: base_url.trim_end_matches('/').to_string(),
             model,
             api_key,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(300))
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             dump: false,
         }
     }
@@ -76,33 +80,62 @@ impl Provider for Adapter {
             let req = request.try_clone().ok_or_else(|| {
                 ProviderError::Message("request cannot be cloned for retry".to_string())
             })?;
-            let r = self.client.execute(req).await?;
-            if r.status().is_success() {
-                resp = Some(r);
-                break;
+            match self.client.execute(req).await {
+                Ok(r) => {
+                    if r.status().is_success() {
+                        resp = Some(r);
+                        break;
+                    }
+                    let status = r.status().as_u16();
+                    let data = r.text().await.unwrap_or_default();
+                    let (backoff, retry) = policy.should_retry(status, attempt);
+                    if !retry {
+                        let (kind, msg) = classify_error(status, &data);
+                        let _ = retry_tx
+                            .send(ProviderEvent::Error(mew_message::MessageError {
+                                kind,
+                                message: msg.clone(),
+                            }))
+                            .await;
+                        return Err(ProviderError::Classified { kind, message: msg });
+                    }
+                    let _ = retry_tx
+                        .send(ProviderEvent::RetryWait {
+                            attempt: attempt as u32 + 1,
+                            max_attempts: policy.max_attempts_for(status),
+                            delay_secs: backoff.as_secs(),
+                            reason: classify_reason(status),
+                        })
+                        .await;
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(e) => {
+                    // Network-level error (connection refused, DNS failure,
+                    // TLS error, timeout, etc.).  Retry with the same
+                    // exponential backoff as 429s instead of propagating
+                    // immediately.
+                    let (backoff, retry) = policy.should_retry_network_error(attempt);
+                    if !retry {
+                        let msg = e.to_string();
+                        let _ = retry_tx
+                            .send(ProviderEvent::Error(mew_message::MessageError {
+                                kind: ErrorKind::Unknown,
+                                message: msg.clone(),
+                            }))
+                            .await;
+                        return Err(ProviderError::Http(e));
+                    }
+                    let _ = retry_tx
+                        .send(ProviderEvent::RetryWait {
+                            attempt: attempt as u32 + 1,
+                            max_attempts: policy.max_retries as u32,
+                            delay_secs: backoff.as_secs(),
+                            reason: "connection error".into(),
+                        })
+                        .await;
+                    tokio::time::sleep(backoff).await;
+                }
             }
-            let status = r.status().as_u16();
-            let data = r.text().await.unwrap_or_default();
-            let (backoff, retry) = policy.should_retry(status, attempt);
-            if !retry {
-                let (kind, msg) = classify_error(status, &data);
-                let _ = retry_tx
-                    .send(ProviderEvent::Error(mew_message::MessageError {
-                        kind,
-                        message: msg.clone(),
-                    }))
-                    .await;
-                return Err(ProviderError::Classified { kind, message: msg });
-            }
-            let _ = retry_tx
-                .send(ProviderEvent::RetryWait {
-                    attempt: attempt as u32 + 1,
-                    max_attempts: 4,
-                    delay_secs: backoff.as_secs(),
-                    reason: classify_reason(status),
-                })
-                .await;
-            tokio::time::sleep(backoff).await;
         }
 
         drop(retry_tx);
@@ -703,6 +736,7 @@ fn new_tool_call_part() -> ToolCallPart {
                 end: None,
             },
         }),
+        sensitivity: None,
         raw_input: String::new(),
     }
 }
@@ -794,6 +828,7 @@ mod tests {
                         },
                     }),
                     raw_input: String::new(),
+                    sensitivity: None,
                 }),
             ],
             time: mew_message::Time {
@@ -847,6 +882,7 @@ mod tests {
                     },
                 }),
                 raw_input: String::new(),
+                sensitivity: None,
             })],
             time: mew_message::Time {
                 created: 0,

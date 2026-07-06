@@ -113,6 +113,7 @@ async fn iroh_peer_connects_and_exchanges_protocol() -> Result<()> {
         session_manager: server.session_manager.clone(),
         groups_store: server.groups_store.clone(),
         thinking_setter: None,
+        auto_summary_enabled: server.auto_summary_enabled.clone(),
     };
 
     // Create the daemon (accept) endpoint.
@@ -174,10 +175,7 @@ async fn iroh_peer_connects_and_exchanges_protocol() -> Result<()> {
     .await;
 
     // Expect SessionReady.
-    let msgs = recv_until(&mut ws, |m| {
-        matches!(m, ServerMessage::SessionReady { .. })
-    })
-    .await;
+    let msgs = recv_until(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
     let session_id = match &msgs[0] {
         ServerMessage::SessionReady { session_id, .. } => session_id.clone(),
         _ => unreachable!(),
@@ -238,6 +236,7 @@ async fn iroh_unauthorized_peer_is_rejected() -> Result<()> {
         session_manager: server.session_manager.clone(),
         groups_store: server.groups_store.clone(),
         thinking_setter: None,
+        auto_summary_enabled: server.auto_summary_enabled.clone(),
     };
 
     let daemon_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)

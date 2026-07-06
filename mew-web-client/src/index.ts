@@ -114,6 +114,7 @@ export type Part =
       tool_name: string;
       call_id: string;
       state: ToolState;
+      sensitivity?: string;
     }
   | { type: "tool_result"; base: PartBase; call_id: string; output?: string }
   | {

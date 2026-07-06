@@ -13,7 +13,9 @@ use tracing::warn;
 /// Returns `Ok(None)` if the frame is valid JSON but contains an unknown
 /// `type` tag (or a known type with unexpected fields). Returns `Err` only
 /// if the frame is not valid JSON at all.
-pub fn decode_server_message_lenient(text: &str) -> Result<Option<ServerMessage>, serde_json::Error> {
+pub fn decode_server_message_lenient(
+    text: &str,
+) -> Result<Option<ServerMessage>, serde_json::Error> {
     // First try direct decode — fast path for known messages.
     match serde_json::from_str::<ServerMessage>(text) {
         Ok(msg) => Ok(Some(msg)),
@@ -36,7 +38,9 @@ pub fn decode_server_message_lenient(text: &str) -> Result<Option<ServerMessage>
 }
 
 /// Encode a ClientMessage to a JSON string.
-pub fn encode_client_message(msg: &mew_protocol::ClientMessage) -> Result<String, serde_json::Error> {
+pub fn encode_client_message(
+    msg: &mew_protocol::ClientMessage,
+) -> Result<String, serde_json::Error> {
     serde_json::to_string(msg)
 }
 
@@ -73,6 +77,9 @@ mod tests {
         // Pong expects "version" field; missing it should be dropped, not crash.
         let json = r#"{"type":"pong"}"#;
         let result = decode_server_message_lenient(json).unwrap();
-        assert!(result.is_none(), "malformed known message should be dropped");
+        assert!(
+            result.is_none(),
+            "malformed known message should be dropped"
+        );
     }
 }

@@ -64,6 +64,8 @@ Browser ──ws/http──▶ mew-web-bridge (127.0.0.1:9847)
 | `mew-skills` | Skill discovery + loading from `.mew/skills`, `.opencode/skills`, etc. | `Skill`, `SkillRegistry` |
 | `mew-personas` | Switchable system prompts + model pinning + tool allowlists | `Persona`, `PersonaLoader` |
 | `ratatui-mdstream` | Streaming markdown to ratatui Lines | `MdStream`, `DocumentState` |
+| `mew-mobile-core` | Rust core for iOS: iroh endpoint, protocol codec, state assembly | `MobileCore`, `CoreEvent`, `CoreListener` |
+| `mew-ios` | SwiftUI iOS app (thin layer over mew-mobile-core) | `AppStore`, `ChatView`, `RootView` |
 
 ## Startup: building the agent
 
@@ -223,6 +225,8 @@ translated to `ServerMessage` and broadcast to every attached client:
 | `ToolEnd { call_id, success }` | Tool execution finished |
 | `PartUpdated { part_id, part }` | A part's content/state changed |
 | `PermissionRequest { call, tx }` | Request user approval (oneshot channel) |
+| `WorkspacePermissionRequest { path, tx }` | Approve a path outside workspace |
+| `SubagentPermissionRequest { ... }` | Permission for a subagent's tool call |
 | `SubagentStart { ... }` | A subagent was spawned |
 | `SubagentStatus { ... }` | Subagent progress update |
 | `SubagentEnd { ... }` | Subagent finished |
@@ -232,9 +236,14 @@ translated to `ServerMessage` and broadcast to every attached client:
 | `Error(String)` | Terminal error |
 | `AskUser { questions, tx }` | Ask the user free-text questions |
 
-Channel-bearing variants (`PermissionRequest`, `AskUser`) use `oneshot::Sender`
-to receive the user's response. In daemon mode, these become ID-paired wire
-requests via `ServerMessage::PermissionRequest` / `AskUserRequest`.
+Channel-bearing variants (`PermissionRequest`,
+`WorkspacePermissionRequest`, `SubagentPermissionRequest`, `AskUser`) use
+`oneshot::Sender` to receive the user's response. In daemon mode, these
+become ID-paired wire requests via `ServerMessage::PermissionRequest` /
+`WorkspacePermissionRequest` / `SubagentPermissionRequest` /
+`AskUserRequest`. The daemon stores a `PendingRequest { payload, responder }`
+for each so it can replay the wire payload to clients that attach while
+the request is outstanding.
 
 ## Sessions and multisession
 
@@ -252,13 +261,17 @@ lists sessions, attaches to them, renames them, and deletes them.
 
 A WebSocket connection is bound to exactly one session, but a session can have
 many attached clients at the same time. `Session::attach_client` assigns each
-client a monotonically increasing `client_id`. `Session::broadcast` sends every
-server message to all attached clients, dropping any that have disconnected.
+client a monotonically increasing `client_id` and records its `ClientKind`.
+`Session::broadcast` sends every server message to all attached clients,
+dropping any that have disconnected.
 
-This means you can have the web UI and another frontend viewing the same
+This means you can have the web UI, the TUI, and the iOS app viewing the same
 conversation simultaneously. All clients see `UserMessage`, tool progress, and
 `RequestResolved`. `SessionHistory` is sent only to the client that just
-attached; other clients already have the state.
+attached; other clients already have the state. If the agent is blocked on a
+permission or ask-user request when a client attaches, the daemon replays
+those pending request payloads to the new client (they aren't in the history).
+Clients deduplicate by `request_id` to avoid double-showing.
 
 ### Active vs idle sessions
 
@@ -298,10 +311,12 @@ Wire messages that change or inspect sessions:
 | Active session registry | `SessionManager.active` in the daemon |
 | Per-session load lock | `SessionManager.loading` |
 | Attached client list | `Session.clients` in the daemon |
-| Pending permission / ask-user requests | `Session.pending_permissions` / `pending_ask_user` |
-| Display/render state | Each frontend (TUI `App`, web UI store) |
+| Pending permission / ask-user requests | `Session.pending_permissions` / `pending_ask_user` (each stores `PendingRequest { payload, responder }`) |
+| Display/render state | Each frontend (TUI `App`, web UI store, iOS `AppStore`) |
 | Model/provider per session | `Session.model` / `Session.provider` |
 | Permission mode per session | `Agent.permission_mode` |
+| Running indicator | `Session.is_running` |
+| Client kind | `ClientKind` (Tui, Web, Cli, Mobile) sent with `NewSession`/`AttachSession` |
 
 ### Lifecycle
 
@@ -310,10 +325,13 @@ Client connects
   → NewSession { cwd }  or  AttachSession { session_id }
   → SessionManager creates or resumes the session
   → SessionReady + SessionHistory (to attaching client)
+  → (replay) outstanding PermissionRequest / AskUserRequest payloads
+  → (replay) current flagged-files set
   → Prompt and streaming events broadcast to all clients
 Client disconnects
   → detach_client
-  → if last client: cancel any in-flight turn, remove session from active
+  → if last client: cancel any in-flight turn, drain pending requests,
+    remove session from active
 ```
 
 Idle sessions are loaded from disk on `AttachSession`. The JSONL log is replayed

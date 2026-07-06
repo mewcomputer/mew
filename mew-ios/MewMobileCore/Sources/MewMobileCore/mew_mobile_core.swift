@@ -1835,10 +1835,19 @@ public struct MessagePart: Equatable, Hashable {
     public var toolCallId: String?
     public var toolTimeStart: Int64?
     public var toolTimeEnd: Int64?
+    /**
+     * Sensitivity tier ("ReadOnly", "Mutating", "Dangerous") stamped by the
+     * agent from the tool registry. None for non-tool parts or old sessions.
+     */
+    public var toolSensitivity: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, kind: PartKind, text: String?, toolName: String?, toolState: String?, toolInput: String?, toolOutput: String?, toolError: String?, toolCallId: String?, toolTimeStart: Int64?, toolTimeEnd: Int64?) {
+    public init(id: String, kind: PartKind, text: String?, toolName: String?, toolState: String?, toolInput: String?, toolOutput: String?, toolError: String?, toolCallId: String?, toolTimeStart: Int64?, toolTimeEnd: Int64?, 
+        /**
+         * Sensitivity tier ("ReadOnly", "Mutating", "Dangerous") stamped by the
+         * agent from the tool registry. None for non-tool parts or old sessions.
+         */toolSensitivity: String?) {
         self.id = id
         self.kind = kind
         self.text = text
@@ -1850,6 +1859,7 @@ public struct MessagePart: Equatable, Hashable {
         self.toolCallId = toolCallId
         self.toolTimeStart = toolTimeStart
         self.toolTimeEnd = toolTimeEnd
+        self.toolSensitivity = toolSensitivity
     }
 
     
@@ -1878,7 +1888,8 @@ public struct FfiConverterTypeMessagePart: FfiConverterRustBuffer {
                 toolError: FfiConverterOptionString.read(from: &buf), 
                 toolCallId: FfiConverterOptionString.read(from: &buf), 
                 toolTimeStart: FfiConverterOptionInt64.read(from: &buf), 
-                toolTimeEnd: FfiConverterOptionInt64.read(from: &buf)
+                toolTimeEnd: FfiConverterOptionInt64.read(from: &buf), 
+                toolSensitivity: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1894,6 +1905,7 @@ public struct FfiConverterTypeMessagePart: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.toolCallId, into: &buf)
         FfiConverterOptionInt64.write(value.toolTimeStart, into: &buf)
         FfiConverterOptionInt64.write(value.toolTimeEnd, into: &buf)
+        FfiConverterOptionString.write(value.toolSensitivity, into: &buf)
     }
 }
 

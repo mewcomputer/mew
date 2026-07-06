@@ -293,6 +293,20 @@ fn parse_range(s: &str, allow_single: bool) -> crate::Result<(usize, usize, &str
     let (start, after_start) = parse_lid_no_trim(s)?;
 
     let after = after_start.trim_start();
+
+    // Accept `:` as a range separator when followed by a digit, so
+    // `SWAP 77:79` works like `SWAP 77.=79`. When `:` is not followed by
+    // a digit it's the payload delimiter (single-line range like `SWAP 5:`).
+    if let Some(rest) = after.strip_prefix(':') {
+        if rest.trim_start().starts_with(|c: char| c.is_ascii_digit()) {
+            let (end, after_end) = parse_lid_no_trim(rest.trim_start())?;
+            if end < start {
+                return Err(crate::HashlineError::InvalidRange { start, end });
+            }
+            return Ok((start, end, after_end.trim_start()));
+        }
+    }
+
     if after.is_empty() || after.starts_with(':') {
         if !allow_single {
             return Err(crate::HashlineError::parse(
@@ -313,7 +327,10 @@ fn parse_range(s: &str, allow_single: bool) -> crate::Result<(usize, usize, &str
     } else {
         return Err(crate::HashlineError::parse(
             0,
-            format!("expected range separator after {start}"),
+            format!(
+                "expected range separator (.=, .., -, …, or :) after line {start}; \
+                 e.g. SWAP {start}.={start}: for a single line, SWAP {start}.=10: for a range"
+            ),
         ));
     };
 
@@ -348,7 +365,11 @@ fn require_colon_only(tail: &str) -> crate::Result<()> {
     }
     Err(crate::HashlineError::parse(
         0,
-        format!("unexpected trailing text: {trimmed}"),
+        format!(
+            "unexpected trailing text: {trimmed}. \
+             Use a range like SWAP 2.=5: to replace multiple lines, \
+             or SWAP 2: for a single line"
+        ),
     ))
 }
 
@@ -457,5 +478,38 @@ INS.TAIL:
     fn rejects_invalid_range() {
         let err = tokenize("[f#ABCD]\nSWAP 5.=2:\n").unwrap_err();
         assert!(err.to_string().contains("ends before it starts"));
+    }
+
+    #[test]
+    fn colon_as_range_separator() {
+        // `SWAP 2:5:` — colon as range separator, colon as payload delimiter.
+        let tokens = tokenize("[f#ABCD]\nSWAP 2:5:\n+a\n").unwrap();
+        assert!(matches!(
+            tokens[1].token,
+            Token::Op {
+                target: OpTarget::Replace { start: 2, end: 5 }
+            }
+        ));
+    }
+
+    #[test]
+    fn colon_single_line_still_works() {
+        // `SWAP 2:` — colon is the payload delimiter, not a range separator.
+        let tokens = tokenize("[f#ABCD]\nSWAP 2:\n+a\n").unwrap();
+        assert!(matches!(
+            tokens[1].token,
+            Token::Op {
+                target: OpTarget::Replace { start: 2, end: 2 }
+            }
+        ));
+    }
+
+    #[test]
+    fn colon_range_error_suggests_syntax() {
+        // `SWAP 2:foo` — colon not followed by a digit, so it's treated as
+        // a single-line range with trailing text. The error should suggest
+        // the correct range syntax.
+        let err = tokenize("[f#ABCD]\nSWAP 2:foo\n").unwrap_err();
+        assert!(err.to_string().contains("SWAP 2.=5:"));
     }
 }

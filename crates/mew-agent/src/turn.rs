@@ -698,6 +698,7 @@ mod tests {
                 },
             }),
             raw_input: "{}".to_string(),
+            sensitivity: None,
         })
     }
 

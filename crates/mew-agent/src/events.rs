@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use mew_message::{AssistantMeta, Message, Part, PartId, Role, Time, Tokens};
 use mew_provider::ProviderEvent;
 
-use crate::agent::Agent;
+use crate::agent::{sensitivity_label, Agent};
 use crate::AgentEvent;
 
 impl Agent {
@@ -19,13 +19,24 @@ impl Agent {
                 if assistant_msg.is_none() {
                     *assistant_msg = Some(self.start_assistant_message());
                 }
+                // Stamp sensitivity from the tool registry onto tool-call
+                // parts. Providers don't know the registry; the agent does.
+                let part = if let Part::ToolCall(mut tc) = part.clone() {
+                    if tc.sensitivity.is_none() {
+                        tc.sensitivity = self
+                            .tools
+                            .get(&tc.tool_name)
+                            .map(|t| sensitivity_label(t.sensitivity()).to_string());
+                    }
+                    Part::ToolCall(tc)
+                } else {
+                    part.clone()
+                };
                 if let Some(ref mut msg) = assistant_msg {
                     msg.parts.push(part.clone());
                 }
                 let _ = ev_tx
-                    .send(AgentEvent::Provider(ProviderEvent::PartStart {
-                        part: part.clone(),
-                    }))
+                    .send(AgentEvent::Provider(ProviderEvent::PartStart { part }))
                     .await;
             }
             ProviderEvent::PartDelta {

@@ -34,6 +34,8 @@
 		<string>JunicodeVF-Italic.ttf</string>
 		<string>OFLGoudyStMTT.ttf</string>
 		<string>OFLGoudyStMTT-Italic.ttf</string>
+		<string>garamontio.ttf</string>
+		<string>garamontio_it.ttf</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>

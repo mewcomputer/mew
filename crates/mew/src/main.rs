@@ -507,9 +507,7 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             .await
         }
         #[cfg(feature = "iroh")]
-        Some(Commands::Pair) => {
-            pair_cmd().await
-        }
+        Some(Commands::Pair) => pair_cmd().await,
         Some(Commands::Config { command }) => {
             config_cmd(command)?;
             Ok(())
@@ -704,7 +702,11 @@ async fn debug_cmd(command: DebugCommands) -> Result<()> {
             sensitivity,
         } => {
             let cfg = mew_config::load().context("load config")?;
-            let engine = build_permission_engine(&cfg, mew_hooks::PermissionMode::Standard, std::env::current_dir().unwrap_or_default());
+            let engine = build_permission_engine(
+                &cfg,
+                mew_hooks::PermissionMode::Standard,
+                std::env::current_dir().unwrap_or_default(),
+            );
 
             let input_json: serde_json::Value = match input {
                 Some(s) => serde_json::from_str(&s).context("failed to parse input JSON")?,
@@ -1600,9 +1602,10 @@ async fn build_daemon_server(
                         Vec::new(),
                         session_id,
                     );
-                    a.cwd = params.cwd.clone().unwrap_or_else(|| {
-                        std::env::current_dir().unwrap_or_default()
-                    });
+                    a.cwd = params
+                        .cwd
+                        .clone()
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
                     a.set_model_info("fake", "fake");
                     a
                 },
@@ -1611,16 +1614,12 @@ async fn build_daemon_server(
             ))
         })
     } else {
-        let (provider_id, model_id) =
-            resolve_model(&cfg, (*cat).as_ref(), &provider, model);
+        let (provider_id, model_id) = resolve_model(&cfg, (*cat).as_ref(), &provider, model);
         let provider_id = Arc::new(provider_id);
         let model_id = Arc::new(model_id);
         let model_id_display = model_id.clone();
         let provider_id_display = Arc::clone(&provider_id);
-        info!(
-            "mew daemon starting, model={}",
-            model_id_display
-        );
+        info!("mew daemon starting, model={}", model_id_display);
         Arc::new(move |params: mew_daemon::AgentBuildParams| {
             let cfg = (*cfg).clone();
             let cat = (*cat).clone();
@@ -1826,6 +1825,7 @@ async fn run_daemon_iroh(
         server.session_manager,
         server.groups_store,
         server.thinking_setter,
+        server.auto_summary_enabled,
         allowlist_path,
         secret_key,
     )
@@ -1857,7 +1857,11 @@ async fn pair_cmd() -> Result<()> {
     info!("connecting to iroh relay servers...");
     tokio::time::timeout(std::time::Duration::from_secs(15), endpoint.online())
         .await
-        .map_err(|_| anyhow::anyhow!("iroh endpoint failed to come online within 15s — check network connectivity"))?;
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "iroh endpoint failed to come online within 15s — check network connectivity"
+            )
+        })?;
 
     let node_id = endpoint.id();
     let node_id_str = node_id.to_string();
@@ -1877,8 +1881,7 @@ async fn pair_cmd() -> Result<()> {
     // `computer.mew.mew://<node_id>`
     // parse_dial_info in mew-mobile-core accepts this format.
     let payload = format!("computer.mew.mew://{node_id_str}");
-    let qr = qrcode::QrCode::new(payload)
-        .context("generate QR code")?;
+    let qr = qrcode::QrCode::new(payload).context("generate QR code")?;
     let qr_string = qr
         .render::<qrcode::render::unicode::Dense1x2>()
         .light_color(qrcode::render::unicode::Dense1x2::Light)
@@ -2676,7 +2679,8 @@ async fn run_tui(
         _mcp_clients = mcp_cls;
     }
 
-    let permission_engine = build_permission_engine(cfg, mode, std::env::current_dir().unwrap_or_default());
+    let permission_engine =
+        build_permission_engine(cfg, mode, std::env::current_dir().unwrap_or_default());
 
     // Load project context files.
     let ctx_loader = mew_context::Loader::new(std::env::current_dir().unwrap_or_default());
@@ -4133,7 +4137,8 @@ async fn build_and_run(
         _mcp_clients = mcp_cls;
     }
 
-    let permission_engine = build_permission_engine(cfg, mode, std::env::current_dir().unwrap_or_default());
+    let permission_engine =
+        build_permission_engine(cfg, mode, std::env::current_dir().unwrap_or_default());
 
     let mut agent = Agent::new(
         provider,

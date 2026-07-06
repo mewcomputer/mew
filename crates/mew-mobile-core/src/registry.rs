@@ -58,7 +58,9 @@ impl DaemonRegistry {
     pub fn add(&mut self, node_id: String, name: String) -> DaemonId {
         // Check if already exists by node_id.
         if let Some(existing) = self.entries.iter().find(|e| e.node_id == node_id) {
-            return DaemonId { node_id: existing.node_id.clone() };
+            return DaemonId {
+                node_id: existing.node_id.clone(),
+            };
         }
 
         let entry = DaemonEntry {
@@ -164,8 +166,20 @@ mod tests {
 
         let reg = DaemonRegistry::load(path).unwrap();
         assert_eq!(reg.list().len(), 2);
-        assert!(reg.get(&DaemonId { node_id: "node1".into() }).is_some());
-        assert!(reg.get(&DaemonId { node_id: "node2".into() }).is_some());
-        assert!(reg.get(&DaemonId { node_id: "node3".into() }).is_none());
+        assert!(reg
+            .get(&DaemonId {
+                node_id: "node1".into()
+            })
+            .is_some());
+        assert!(reg
+            .get(&DaemonId {
+                node_id: "node2".into()
+            })
+            .is_some());
+        assert!(reg
+            .get(&DaemonId {
+                node_id: "node3".into()
+            })
+            .is_none());
     }
 }

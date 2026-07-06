@@ -40,6 +40,7 @@ export type MessagePart =
       state: ToolDisplayState;
       output?: string;
       time?: { start: number; end: number | null };
+      sensitivity?: string;
     }
   | { type: "error"; message: string };
 
@@ -88,6 +89,7 @@ function wirePartToMessagePart(part: Part): MessagePart | null {
         state,
         output,
         time: part.state.time,
+        sensitivity: part.sensitivity,
       };
     }
     case "tool_result":
@@ -454,6 +456,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                     callId: tc.call_id,
                     input: tc.state.input,
                     state: "pending",
+                    sensitivity: tc.sensitivity,
                   },
                 ],
               };
@@ -468,6 +471,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                   callId: tc.call_id,
                   input: tc.state.input,
                   state: "pending",
+                  sensitivity: tc.sensitivity,
                 }],
                 timestamp: Date.now(),
               });

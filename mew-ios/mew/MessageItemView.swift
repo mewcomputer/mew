@@ -15,6 +15,7 @@ import SwiftStreamingMarkdown
 /// - `.error`: red text with a warning icon
 struct MessageItemView: View {
     let message: ChatMessage
+    var fontChoice: MewFontChoice = .miSans
 
     private var isUser: Bool { message.role == "user" }
 
@@ -40,7 +41,7 @@ struct MessageItemView: View {
             ForEach(message.parts, id: \.id) { part in
                 if part.kind == .text, let text = part.text, !text.isEmpty {
                     Text(markdown(text))
-                        .font(.body)
+                        .font(fontChoice.swiftUIFont(UIFont.systemFontSize))
                         .foregroundStyle(.primary)
                         .textSelection(.enabled)
                 } else if part.kind == .error, let text = part.text {
@@ -60,7 +61,7 @@ struct MessageItemView: View {
 
     @ViewBuilder
     private var assistantContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
             ForEach(partGroups) { group in
                 if group.parts.count > 1 {
                     ToolGroupRow(parts: group.parts)
@@ -76,29 +77,45 @@ struct MessageItemView: View {
         // shows through and user bubbles provide the only visual separation.
     }
 
-    /// Parts to render, with runs of consecutive tool calls to the *same* tool
-    /// collapsed into a single group so a burst of e.g. Read calls shows as one
-    /// batched row instead of many.
+    /// Parts to render, with runs of consecutive tool calls at the same
+    /// sensitivity tier collapsed into a single group:
+    /// - `.readOnly` calls (read, grep, glob, …) batch together
+    /// - `.modifiable` calls (write, edit, …) batch together
+    /// - `.dangerous` calls (bash, …) are always shown individually
+    /// A batch may contain mixed tool names (e.g. "2× read · 1× grep").
     private var partGroups: [PartGroup] {
         var groups: [PartGroup] = []
         var run: [MessagePart] = []
+        var runTier: ToolSensitivity?
+
+        func canGroup(_ part: MessagePart) -> Bool {
+            guard part.kind == .toolCall else { return false }
+            return toolSensitivity(for: part) != .dangerous
+        }
+
         func flushRun() {
             if !run.isEmpty {
                 groups.append(PartGroup(id: run[0].id, parts: run))
                 run = []
+                runTier = nil
             }
         }
+
         for part in message.parts {
-            if part.kind == .toolCall,
-               let name = part.toolName,
-               name == run.last?.toolName {
-                run.append(part)
+            if canGroup(part) {
+                let tier = toolSensitivity(for: part)
+                if runTier == tier || run.isEmpty {
+                    run.append(part)
+                    runTier = tier
+                } else {
+                    // Different tier — flush the previous run and start fresh.
+                    flushRun()
+                    run = [part]
+                    runTier = tier
+                }
             } else {
                 flushRun()
-                run = part.kind == .toolCall ? [part] : []
-                if run.isEmpty {
-                    groups.append(PartGroup(id: part.id, parts: [part]))
-                }
+                groups.append(PartGroup(id: part.id, parts: [part]))
             }
         }
         flushRun()
@@ -110,7 +127,7 @@ struct MessageItemView: View {
         switch part.kind {
         case .text:
             if let text = part.text, !text.isEmpty {
-                MarkdownView(text: text, config: .mewStatic)
+                MarkdownView(text: text, config: .mewStatic(fontChoice: fontChoice))
             }
         case .reasoning:
             reasoningView(part)
@@ -131,7 +148,7 @@ struct MessageItemView: View {
         let text = part.text ?? ""
         DisclosureGroup {
             if !text.isEmpty {
-                MarkdownView(text: text, config: .mewReasoning)
+                MarkdownView(text: text, config: .mewReasoning(fontChoice: fontChoice))
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         } label: {
@@ -162,35 +179,73 @@ struct MessageItemView: View {
 // MARK: - Part grouping
 
 /// A run of message parts rendered as a unit. A single-element group renders as
-/// its part; a multi-element group is a batch of same-tool calls.
+/// its part; a multi-element group is a batch of same-sensitivity-tier tool calls.
 private struct PartGroup: Identifiable {
     let id: String
     let parts: [MessagePart]
 }
 
+// MARK: - Tool sensitivity
+
+/// Sensitivity tier for grouping tool calls in the UI.
+/// ReadOnly calls are batched together; Modifiable calls are batched together;
+/// Dangerous calls are always shown individually.
+private enum ToolSensitivity {
+    case readOnly
+    case modifiable
+    case dangerous
+}
+
+/// Reads the sensitivity tier from the wire field stamped by the agent.
+/// Falls back to `.dangerous` (never grouped) if the field is absent — this
+/// happens for old sessions that predate the field or if the agent didn't
+/// stamp it (e.g. unknown MCP tools).
+private func toolSensitivity(for part: MessagePart) -> ToolSensitivity {
+    switch part.toolSensitivity?.lowercased() {
+    case "readonly":  return .readOnly
+    case "mutating":  return .modifiable
+    default:          return .dangerous
+    }
+}
+
 // MARK: - Tool group row
 
-/// A collapsed batch of consecutive calls to the same tool, e.g. `Read ×4`.
-/// Expands to the individual `ToolCallRow`s.
+/// A collapsed batch of consecutive tool calls at the same sensitivity tier.
+/// May contain mixed tool names (e.g. "2× read · 1× grep"). Expands to the
+/// individual `ToolCallRow`s.
 private struct ToolGroupRow: View {
     let parts: [MessagePart]
 
     @State private var expanded = false
 
-    private var toolName: String { parts.first?.toolName ?? "tool" }
     private var anyActive: Bool {
         parts.contains { $0.toolState == "running" || $0.toolState == "pending" }
     }
     private var anyError: Bool { parts.contains { $0.toolState == "error" } }
 
+    /// Builds a compact summary of the batch, grouping by tool name and
+    /// preserving first-seen order: "2× read · 1× grep".
+    private var summary: String {
+        var counts: [(name: String, count: Int)] = []
+        for part in parts {
+            let name = part.toolName ?? "tool"
+            if let idx = counts.firstIndex(where: { $0.name == name }) {
+                counts[idx].count += 1
+            } else {
+                counts.append((name, 1))
+            }
+        }
+        return counts.map { "\($0.count)× \($0.name)" }.joined(separator: " · ")
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Image(systemName: "wrench.and.screwdriver")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                Text("\(toolName) ×\(parts.count)")
+                Text(summary)
                     .font(.subheadline.weight(.medium))
                     .lineLimit(1)
 
@@ -206,7 +261,7 @@ private struct ToolGroupRow: View {
             .onTapGesture { withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() } }
 
             if expanded {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
                     ForEach(parts, id: \.id) { part in
                         ToolCallRow(part: part)
                     }
@@ -253,7 +308,7 @@ private struct ToolCallRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Image(systemName: "wrench.and.screwdriver")
                     .font(.subheadline)
@@ -410,6 +465,7 @@ final class LiveMarkdownSource: ObservableObject, StreamedMarkdownSource {
 /// blocks stay stable and newly appended text fades in as it arrives.
 struct StreamingBubble: View {
     let text: String
+    var fontChoice: MewFontChoice = .miSans
     @StateObject private var source = LiveMarkdownSource()
 
     var body: some View {
@@ -422,7 +478,7 @@ struct StreamingBubble: View {
                         TypingDot(delay: 0.4)
                     }
                 } else {
-                    StreamedMarkdownView(source: source, config: .mew)
+                    StreamedMarkdownView(source: source, config: .mew(fontChoice: fontChoice))
                 }
             }
             .padding(.horizontal, 14)

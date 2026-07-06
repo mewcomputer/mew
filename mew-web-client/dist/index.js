@@ -202,6 +202,17 @@ export class MewClient {
             this.send({ type: "list_sessions" });
         });
     }
+    /** List known projects (recent session cwds + workspace.roots). */
+    listProjects() {
+        return new Promise((resolve) => {
+            const onList = (data) => {
+                this.off("project-list", onList);
+                resolve(data.projects);
+            };
+            this.on("project-list", onList);
+            this.send({ type: "list_projects" });
+        });
+    }
     /** Delete a session from disk and remove it from the active list. */
     deleteSession(session_id) {
         this.send({ type: "delete_session", session_id });
@@ -353,6 +364,7 @@ export class MewClient {
                     session_id: msg.session_id,
                     model: msg.model,
                     provider: msg.provider,
+                    permission_mode: msg.permission_mode,
                 });
                 break;
             case "provider":
@@ -451,6 +463,9 @@ export class MewClient {
                     provider: msg.provider,
                     model: msg.model,
                 });
+                break;
+            case "project_list":
+                this.emit("project-list", { projects: msg.projects });
                 break;
             case "thinking_variant_changed":
                 this.emit("thinking-variant-changed", {

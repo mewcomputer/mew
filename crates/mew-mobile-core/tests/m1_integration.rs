@@ -27,7 +27,12 @@ struct TestListener {
 impl TestListener {
     fn new() -> (Self, Arc<StdMutex<Vec<CoreEvent>>>) {
         let events = Arc::new(StdMutex::new(Vec::new()));
-        (Self { events: events.clone() }, events)
+        (
+            Self {
+                events: events.clone(),
+            },
+            events,
+        )
     }
 }
 
@@ -133,10 +138,12 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
 
     // Create the mobile core.
     let phone_key = iroh::SecretKey::generate();
-    let core =
-        MobileCore::new(phone_key.to_bytes().to_vec(), core_data_dir.to_str().unwrap().into())
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let core = MobileCore::new(
+        phone_key.to_bytes().to_vec(),
+        core_data_dir.to_str().unwrap().into(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Pre-authorize the phone in the allowlist.
     allowlist.add(&core.node_id())?;
@@ -162,14 +169,18 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
     println!("✓ Received DaemonStatusChanged(Connected)");
 
     // Wait for DaemonVersion (from Ping/Pong).
-    wait_for_event(&events, 10, |e| matches!(e, CoreEvent::DaemonVersion { .. }));
+    wait_for_event(&events, 10, |e| {
+        matches!(e, CoreEvent::DaemonVersion { .. })
+    });
     println!("✓ Received DaemonVersion (Pong)");
 
     // Create a new session.
     core.new_session(daemon_id.clone(), None);
 
     // Wait for SessionReloaded.
-    wait_for_event(&events, 10, |e| matches!(e, CoreEvent::SessionReloaded { .. }));
+    wait_for_event(&events, 10, |e| {
+        matches!(e, CoreEvent::SessionReloaded { .. })
+    });
     println!("✓ Received SessionReloaded (SessionReady)");
 
     // Send a prompt.
@@ -181,23 +192,42 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
 
     // Verify we got TextDelta events (streaming text).
     let delta_count = count_events(&events, |e| matches!(e, CoreEvent::TextDelta { .. }));
-    assert!(delta_count > 0, "should have received at least one TextDelta");
+    assert!(
+        delta_count > 0,
+        "should have received at least one TextDelta"
+    );
     println!("✓ Received {delta_count} TextDelta event(s)");
 
     // Verify snapshot has the session.
-    let snapshot = core.snapshot(daemon_id.clone()).expect("snapshot should exist");
+    let snapshot = core
+        .snapshot(daemon_id.clone())
+        .expect("snapshot should exist");
     assert!(
-        snapshot.sessions.first().map(|s| !s.messages.is_empty()).unwrap_or(false),
+        snapshot
+            .sessions
+            .first()
+            .map(|s| !s.messages.is_empty())
+            .unwrap_or(false),
         "snapshot should have messages"
     );
     println!(
         "✓ Snapshot has {} message(s)",
-        snapshot.sessions.first().map(|s| s.messages.len()).unwrap_or(0)
+        snapshot
+            .sessions
+            .first()
+            .map(|s| s.messages.len())
+            .unwrap_or(0)
     );
 
     // Verify daemon version is in snapshot.
-    assert!(snapshot.daemon_version.is_some(), "snapshot should have daemon version");
-    println!("✓ Snapshot has daemon version: {:?}", snapshot.daemon_version);
+    assert!(
+        snapshot.daemon_version.is_some(),
+        "snapshot should have daemon version"
+    );
+    println!(
+        "✓ Snapshot has daemon version: {:?}",
+        snapshot.daemon_version
+    );
 
     // Verify the events vec has the right shape.
     let (total, has_connected, has_version, has_reloaded, has_turn_ended) = {
@@ -212,10 +242,20 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
                 }
             )
         });
-        let has_version = evs.iter().any(|e| matches!(e, CoreEvent::DaemonVersion { .. }));
-        let has_reloaded = evs.iter().any(|e| matches!(e, CoreEvent::SessionReloaded { .. }));
+        let has_version = evs
+            .iter()
+            .any(|e| matches!(e, CoreEvent::DaemonVersion { .. }));
+        let has_reloaded = evs
+            .iter()
+            .any(|e| matches!(e, CoreEvent::SessionReloaded { .. }));
         let has_turn_ended = evs.iter().any(|e| matches!(e, CoreEvent::TurnEnded { .. }));
-        (total, has_connected, has_version, has_reloaded, has_turn_ended)
+        (
+            total,
+            has_connected,
+            has_version,
+            has_reloaded,
+            has_turn_ended,
+        )
     };
     assert!(
         has_connected && has_version && has_reloaded && has_turn_ended,

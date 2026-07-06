@@ -49,7 +49,10 @@ pub mod session;
 pub mod iroh_transport;
 
 #[cfg(feature = "iroh")]
-pub use iroh_transport::{run_iroh, NodeIdAllowlist, MewIrohHandler, IrohStream, default_allowlist_path, default_secret_key_path, load_or_create_secret_key, MEW_ALPN};
+pub use iroh_transport::{
+    default_allowlist_path, default_secret_key_path, load_or_create_secret_key, run_iroh,
+    IrohStream, MewIrohHandler, NodeIdAllowlist, MEW_ALPN,
+};
 
 pub use client::DaemonClient;
 pub use session::{AttachError, PendingRequest, Session, SessionManager};
@@ -393,17 +396,13 @@ where
                     let cwd_path = PathBuf::from(cwd_str);
                     if !cwd_path.exists() {
                         reply(ServerMessage::Error {
-                            message: format!(
-                                "session cwd does not exist: {cwd_str}"
-                            ),
+                            message: format!("session cwd does not exist: {cwd_str}"),
                         });
                         continue;
                     }
                     if !cwd_path.is_dir() {
                         reply(ServerMessage::Error {
-                            message: format!(
-                                "session cwd is not a directory: {cwd_str}"
-                            ),
+                            message: format!("session cwd is not a directory: {cwd_str}"),
                         });
                         continue;
                     }
@@ -1403,26 +1402,28 @@ async fn list_projects(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| cwd_str.clone());
             let last_used = meta.last_message_at.or(Some(meta.created_at));
-            let entry = projects.entry(canonical).or_insert_with(|| {
-                mew_protocol::ProjectInfo {
+            let entry = projects
+                .entry(canonical)
+                .or_insert_with(|| mew_protocol::ProjectInfo {
                     path: cwd_str.clone(),
                     display_name: display_name.clone(),
                     session_count: 0,
                     last_used_at: None,
-                }
-            });
+                });
             entry.session_count += 1;
             if let Some(ts) = last_used {
-                entry.last_used_at = Some(
-                    entry.last_used_at.map(|e| e.max(ts)).unwrap_or(ts),
-                );
+                entry.last_used_at = Some(entry.last_used_at.map(|e| e.max(ts)).unwrap_or(ts));
             }
         }
     }
 
     // Sort by last_used_at descending (None sorts last).
     let mut result: Vec<_> = projects.into_values().collect();
-    result.sort_by(|a, b| b.last_used_at.unwrap_or(0).cmp(&a.last_used_at.unwrap_or(0)));
+    result.sort_by(|a, b| {
+        b.last_used_at
+            .unwrap_or(0)
+            .cmp(&a.last_used_at.unwrap_or(0))
+    });
     result
 }
 

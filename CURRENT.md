@@ -1,5 +1,205 @@
 # CURRENT.md — mew Fixes + Right Rail Redesign Progress
 
+## 2026-07-05: Fix provider retry stuck at "retrying (1/4)"
+
+The provider retry loop had three bugs causing it to get stuck or behave
+incorrectly when the provider failed:
+
+**Root causes & fixes:**
+
+1. **No HTTP timeout** (`mew-provider-openai`, `mew-provider-anthropic`):
+   Both providers used `reqwest::Client::new()` which has no timeout. If
+   the server hung (accepted TCP but never responded), `execute(req).await`
+   blocked forever — the RetryWait event was sent to the channel but the
+   retry loop never advanced to the next attempt. Added
+   `.timeout(300s).connect_timeout(30s)` to the client builder.
+
+2. **Network errors not retried** (`mew-provider-openai`,
+   `mew-provider-anthropic`): The `?` on `self.client.execute(req).await?`
+   propagated connection-level errors (DNS failure, connection refused,
+   TLS error, timeout) immediately, bypassing the retry loop entirely.
+   Wrapped the execute call in a `match` — `Err(e)` now goes through
+   `RetryPolicy::should_retry_network_error()` with the same exponential
+   backoff as 429s.
+
+3. **Stale retry status in TUI** (`mew-tui/src/app.rs`):
+   `AgentEvent::Error` and `ProviderEvent::PartStart` did not clear
+   `retry_status`, so the "retrying (1/4)" message persisted in the status
+   bar even after the error was shown or content started flowing. Added
+   `self.retry_status = None` to both handlers.
+
+4. **Hardcoded `max_attempts: 4`** (`mew-provider-openai`,
+   `mew-provider-anthropic`): The RetryWait event always reported
+   `max_attempts: 4` regardless of the actual retry policy. For 5xx errors
+   (which only allow 1 retry), this was misleading. Added
+   `RetryPolicy::max_attempts_for(status_code)` which returns the correct
+   max based on the status code.
+
+**New `RetryPolicy` methods** (`mew-provider/src/lib.rs`):
+- `should_retry_network_error(attempt)` — same exponential backoff as 429,
+  retryable up to `max_retries`.
+- `max_attempts_for(status_code)` — returns the correct max attempts for
+  display: `max_retries` for 429/network errors, 1 for 5xx.
+
+**Tests added** (`mew-provider/src/lib.rs`):
+- `test_retry_network_error_backoff` — verifies exponential backoff and
+  max_retries cutoff for network errors.
+- `test_max_attempts_for` — verifies correct max_attempts for 429, 5xx
+  with/without retry_5xx, and network errors.
+
+## 2026-07-05: Docs update — sync with recent iOS + daemon commits
+
+Audited the last ~40 commits (all iOS chat + daemon permission replay) against
+the docs and fixed drift across five files:
+
+**`docs/using-mew/ios-app.md`**:
+- Chat view: replaced stale "basic formatting" / "collapsed reasoning" with
+  SwiftStreamingMarkdown, full theme coverage, incremental streaming,
+  de-jittered autoscroll, consecutive same-tool batching.
+- Added file browser (+ button, folder navigation, file-to-composer), liquid
+  glass chatbar, working indicator.
+- Permission/ask sheets now noted as un-dismissable while pending.
+- Connection lifecycle: added permission/ask replay on attach.
+- Limitations: removed "No file browser" and "Basic markdown" (both shipped).
+  Replaced with the one real remaining gap (no syntax highlighting in code
+  blocks).
+
+**`docs/development/dev-protocol.md`**:
+- Client message table: was 12 entries, now covers all variants organized
+  into sections (session lifecycle, turn interaction, model & mode, groups,
+  projects & file service, other). Added DeleteSession, RenameSession,
+  SetAutoTitle, SetAutoSummary, SetPermissionMode, YieldControl, all group
+  ops, ListDir, ReadFilePreview, GitStatus, WatchWorkspace, OpenPath,
+  UnflagFile, Ping.
+- Server message table: similarly expanded. Added UserMessage, ErrorEvent,
+  WorkspacePermissionRequest, SubagentPermissionRequest, ClientAttached/
+  Detached, ControlYielded, PermissionModeChanged, GroupList, GroupsChanged,
+  DirListing, FilePreview, GitStatusResult, FsChanged, SessionSummaryChanged,
+  SessionMetaChanged, SessionAttentionChanged, SessionActivityChanged,
+  SessionStatsChanged, SessionUsageChanged, SessionAlert,
+  FlaggedFilesChanged, Pong.
+- Session struct: updated to match current code (PendingRequest, ClientKind
+  in clients tuple, title_generated, is_running, session_dir). Added
+  explanation of PendingRequest and ClientKind.
+- Connection lifecycle: added permission/ask replay + flagged-files replay
+  on attach, drain_pending on last-client disconnect.
+- AgentEvent translation: added WorkspacePermissionRequest and
+  SubagentPermissionRequest.
+- Added File service section with DirEntry struct.
+
+**`docs/development/dev-mobile.md`**:
+- Added File browser section (list_dir method, DirListing CoreEvent,
+  DirEntry record, iOS + button integration).
+- Added CI section documenting the ios-ci job (cargo check for both targets,
+  UniFFI bindings drift guard).
+
+**`docs/development/dev-architecture.md`**:
+- Crate map: added mew-mobile-core and mew-ios.
+- AgentEvent table: added WorkspacePermissionRequest, SubagentPermissionRequest.
+- Channel-bearing variants note: expanded to include all four permission
+  variants + PendingRequest explanation.
+- State ownership table: updated pending requests row (PendingRequest),
+  added iOS AppStore, is_running, ClientKind rows.
+- Lifecycle: added permission/ask + flagged-files replay on attach,
+  drain_pending on disconnect.
+- Multi-client section: mentions ClientKind, iOS app, permission replay.
+
+**`docs/development/dev-testing.md`**:
+- Protocol test count: 63 → 70.
+- Added CI jobs section documenting rust-ci, web-ci, and ios-ci jobs.
+
+## 2026-07-05: Thread tool sensitivity through wire protocol (iOS + web)
+
+Previously the iOS app used a client-side `toolSensitivity(for:)` map that
+hard-coded tool names → sensitivity tiers. The web UI had a similar
+`inferSensitivity(toolName)` heuristic. Both required manual updates when new
+tools were added, and MCP tools were never handled correctly.
+
+**Now**: `ToolCallPart` carries an `Option<String>` `sensitivity` field stamped
+by the agent from the tool registry at `PartStart` time. The field flows
+through `ProviderEventWire` → daemon → clients automatically. Both clients
+read the wire field and fall back to `.dangerous` (never grouped) when absent.
+
+### Rust changes
+- `crates/mew-message/src/lib.rs`: Added `sensitivity: Option<String>` to
+  `ToolCallPart` (serde `default` + `skip_serializing_if = "Option::is_none"`
+  for backward compat with old sessions). Added `#[allow(clippy::large_enum_variant)]`
+  on `Part`, `ProviderEventWire`, and `ProviderEvent`.
+- `crates/mew-agent/src/events.rs`: `handle_provider_event` PartStart handler
+  stamps `sensitivity` from `self.tools` registry using `sensitivity_label()`.
+- `crates/mew-agent/src/agent.rs`: Made `sensitivity_label()` `pub(crate)`.
+- `crates/mew-agent/src/tools.rs`: All 11 `PartUpdated` event constructions
+  propagate `tc.sensitivity.clone()`.
+- `crates/mew-provider-openai/src/lib.rs`, `crates/mew-provider-anthropic/src/lib.rs`,
+  `crates/mew-provider-fake/src/lib.rs`: All `ToolCallPart` construction sites
+  set `sensitivity: None` (stamped later by the agent).
+- `crates/mew-mobile-core/src/state.rs`: Added `tool_sensitivity: Option<String>`
+  to the UniFFI `MessagePart` record, populated from `tcp.sensitivity` in
+  `apply_provider_event`.
+- `crates/mew-mobile-core/src/lib.rs`: Session reload path carries
+  `tool_sensitivity` through.
+- UniFFI Swift bindings regenerated via `just ios-core`.
+
+### iOS changes (`mew-ios/mew/MessageItemView.swift`)
+- Replaced `toolSensitivity(for name: String?)` map with
+  `toolSensitivity(for part: MessagePart)` that reads `part.toolSensitivity`.
+- Grouping logic unchanged: readonly batched, modifiable batched, dangerous
+  always separate. Mixed-tool summary "2× read · 1× grep".
+- Spacing: 8→4pt between part groups, 6→4pt within tool rows (from the prior
+  change, still applies).
+
+### Web changes
+- `mew-web-client/src/index.ts`: Added `sensitivity?: string` to the
+  `tool_call` Part type.
+- `mew-web-ui/src/stores/session.ts`: Added `sensitivity?: string` to the
+  `MessagePart` tool-call variant. Threading through both
+  `wirePartToMessagePart` and the streaming `part_start` handler.
+- `mew-web-ui/src/components/tool-call-card.tsx`: Replaced
+  `inferSensitivity(toolName)` with `partSensitivity(part)` reading the wire field.
+- `mew-web-ui/src/components/message-item.tsx`: `groupParts` now groups by
+  sensitivity tier (readonly batched, modifiable batched, dangerous always
+  individual). Updated `ToolCallGroup` summary to show per-tool counts
+  "2× read · 1× grep".
+
+### Build status
+- Rust: `cargo clippy --all -- -D warnings` → zero warnings.
+- iOS: `xcodebuild -scheme mew -destination 'iPhone 17'` → BUILD SUCCEEDED.
+- Web client: `pnpm build` → clean.
+- Web UI: `pnpm build` → clean, 9 vitest tests pass (1 e2e test file fails,
+  expected — needs running daemon).
+
+## 2026-07-04: iOS tool call grouping by sensitivity tier + spacing fix
+
+Changed how tool calls are grouped in the iOS chat UI (`mew-ios/mew/MessageItemView.swift`):
+
+**Before:** consecutive calls to the *same* tool name were collapsed (`Read ×4`). Different tools in a row were separate rows with 8pt gaps.
+
+**After:** consecutive tool calls are grouped by sensitivity tier:
+- **ReadOnly** tools (read, grep, glob, echo, etc.) batch together → one row showing a mixed summary like `2× read · 1× grep`
+- **Modifiable** tools (write, edit_hashline, edit_str_replace, etc.) batch together
+- **Dangerous** tools (bash, shell_background, shell_monitor, unknown/MCP tools) are always shown individually
+
+The grouping uses a client-side `toolSensitivity(for:)` map derived from the Rust `Tool::sensitivity()` impls. Unknown tools default to `.dangerous` so MCP tools are never silently grouped.
+
+**Spacing:** reduced vertical gaps between part groups (8→4pt) and within tool rows (6→4pt) to eliminate the visible gap between consecutive tool calls.
+
+Build: `xcodebuild -scheme mew -destination 'iPhone 17'` → BUILD SUCCEEDED.
+
+## 2026-07-04: Iroh/WebSocket transport parity fix
+
+The iroh p2p transport (`run_iroh`) was missing two things the Unix-socket and TCP transports had:
+
+1. **`idle_summary_task` never spawned** — auto-summary of idle sessions silently didn't run over iroh. Added the spawn in `run_iroh`, matching `run()` and `run_tcp()`.
+2. **`auto_summary_enabled` was disconnected** — `run_iroh` created a fresh `Arc<AtomicBool>` inside the handler instead of using the server's shared flag. `SetAutoSummary` client messages updated the server's flag but the iroh handler read a different one. Now `run_iroh` accepts the server's `auto_summary_enabled` as a parameter.
+3. **iroh test didn't compile** — `auto_summary_enabled` field was added to `MewIrohHandler` but the test struct literals were never updated.
+
+Changes:
+- `crates/mew-daemon/src/iroh_transport.rs`: `run_iroh` gains `auto_summary_enabled` param, spawns `idle_summary_task`, passes the shared flag to the handler. Removed stale TODO comment.
+- `crates/mew/src/main.rs`: `run_daemon_iroh` passes `server.auto_summary_enabled`.
+- `crates/mew-daemon/tests/iroh.rs`: Both `MewIrohHandler` constructions updated with the field.
+
+All daemon tests pass (e2e: 12, tcp: 5, concurrency: 6, iroh: 2). Clippy clean with `-D warnings`.
+
 ## 2026-07-03: Daemon multi-workspace plan (Complete)
 
 Implemented the full plan from `notes/mew-daemon-multi-workspace-plan.md`:
@@ -365,3 +565,38 @@ Implemented the full plan from `notes/mew-clients-multi-workspace-plan.md`:
 - `docs/development/dev-protocol.md`: ListProjects/ProjectList tables + Project discovery section + cwd validation note
 
 70 protocol tests pass, all builds clean (Rust + web + iOS).
+
+## 2026-07-05 — frontend parity audit (TUI vs web vs iOS)
+
+Ran a three-way feature inventory (subagent fan-out) of mew-tui, mew-web-ui, and mew-ios against the mew-protocol surface. Headline findings:
+
+- **iOS furthest behind**: no permission-mode control (core method exists, no UI), todos dropped (core discards payload), slash results no-op'd, no subagent panel (core doesn't handle ToolStart/End/Progress or Subagent* events), attachments always empty vec, no personas/thinking controls, alerts collected but unrendered, no push notifications, only cost (no tokens/context) displayed, renameSession wired but no UI.
+- **Web mid**: attachment picker is a dead stub (chips never passed to prompt()), persona pill is a hardcoded local-only stub, no input history / paste-image handling, groups view-only (no create/manage UI), file-service client methods (listDir/readFilePreview/gitStatus/watchWorkspace/openPath) all unused, presence/yield tracked but unrendered, retry_wait and job-update events not surfaced, slash suggestions hardcoded to 3.
+- **TUI deepest on interaction but missing daemon-era session management**: no live daemon session rail (only /sessions from local disk), no archive/pin/groups/attention badges/cross-session alerts, /resume unavailable in daemon mode, no tool-call batching (web+iOS have it), no project picker for new-session cwd, no auto-title/summary display.
+- **Nobody surfaces**: group creation/management UI, client presence (ClientAttached/Detached/ControlYielded rendering), WatchWorkspace/FsChanged, OpenPath, message queueing. Persona switching has no ClientMessage at all (TUI does it in-process only).
+
+## 2026-07-05 — parity plans written (notes/)
+
+Three implementation plans from the parity audit, each verified against code by a planning agent:
+
+- `notes/tui-parity-plan.md` — key discovery: `DaemonClient::translate_server_message` drops ALL session-management ServerMessages and `event_tx` is prompt-scoped, so nearly every TUI gap is blocked on a new persistent notification channel (Item 0). No protocol changes needed. Also: `/resume` in daemon mode is wired but SessionHistory replay is dropped (fix is rendering, not adding the command); tool batching is unblocked today (sensitivity already on ToolCallPart).
+- `notes/web-parity-plan.md` — owns the persona protocol design (ListPersonas/SwitchPersona/PersonaList/PersonaSwitched). Key corrections: attachments are dropped at 3 layers incl. the daemon (Prompt handler ignores the field, run_turn passes vec![]); subagent-panel.tsx and settings-modal.tsx are dead code to delete. Waves: quick wins (retry toast, daemon version, jobs tab, input history) → web-only (presence, file tree, group mgmt) → protocol (personas, attachments w/ bridge upload endpoint option A, dynamic slash commands).
+- `notes/ios-parity-plan.md` — phases A–G batched around `just ios-core` UniFFI regens. Key discovery: slash commands are WORSE than audited — iOS has no slash_command method at all, so `/foo` goes to the model as prompt text. Phase C (attachments) depends on the web plan's daemon fix; Phase G (personas) blocked on the web plan's protocol addition.
+
+Cross-plan deps: daemon attachment fix (web item 1) gates iOS phase C; persona protocol (web item 2) gates iOS phase G; ListSlashCommands protocol addition (web item 10) shared by both.
+
+## 2026-07-05 — TUI scroll smoothness (render cache + visible-window)
+
+The TUI chat render was O(total transcript) per frame: `draw_chat` rebuilt the entire `Text` + `chat_rows` from scratch every frame, even on idle wheel-scroll. Benchmarked via `crates/mew-tui/examples/draw_bench.rs`: 3.5ms@10msg → 168ms@500msg per frame. On a 240Hz monitor (4.16ms budget) this caused the "very slightly hitchy" scroll the user reported, and would compound as transcripts grow.
+
+Root cause: markdown *parsing* was cached (`rendered_md_cache`), but line construction, indent-prepending, `chat_rows` string building, `wrapped_height`, and ratatui's `Paragraph` scroll-skip were all O(total) per frame. ratatui's `Paragraph::render` with `Wrap` walks `scroll.y` wrapped lines to skip to the visible window (O(scroll position), not O(visible)).
+
+**Fix** (two changes, both in `crates/mew-tui`):
+
+1. **Cache the built transcript** (`app.rs` + `ui/chat.rs`): new `RenderedChat` struct on `App` holds the built `Vec<Line<'static>>` + `chat_rows` + `max_scroll` + `dirty_gen`. `App::ensure_chat_rendered` rebuilds only when `chat_dirty` (a generation counter) bumps or width changes; idle scroll frames skip the rebuild entirely. `mark_chat_dirty()` is called from every chat-affecting mutator: `handle_agent_event` (PartStart/PartDelta/MessageEnd/ToolStart/ToolProgress/ToolEnd/PartUpdated), `push_synthetic_message`, `clear_messages`, `rewind_to`, `toggle_bash_expanded`, `toggle_reasoning_expanded`, `clear_selection`, and selection start/drag in `events.rs`. Scroll mutators deliberately do NOT bump it.
+
+2. **Visible-window render** (`ui/chat.rs::draw_chat`): user and reasoning text are now pre-wrapped to `md_width` at build time (via existing `wrap_text_to_width`, word-aware) so every cached line is ≤ chat width and each `Line` = exactly one visual row. Render slices `lines[scroll.y..scroll.y+height]` into a small `Text` with `scroll((0,0))` — O(visible) regardless of scroll position, killing ratatui's O(scroll.y) skip. `Wrap` kept on as a safety net for rare em-dash overflow during streaming (returns immediately per pre-wrapped line, still O(visible)). Removed dead `wrapped_height` (replaced by `lines.len()`).
+
+**Result** (`draw_bench.rs`): idle scroll frame time is now flat at ~0.32ms regardless of transcript size (was 3.5ms@10 → 168ms@500; now 0.34/0.32/0.31/0.32 across 10/50/200/500). 540× faster at 500 messages. Rebuild path (streaming/tool events) is unchanged at O(total) — acceptable since it only fires when content genuinely changes, and during streaming the screen redraws every frame anyway.
+
+**Tests**: 4 new unit tests in `app::tests` guard the cache invariant — scroll doesn't bump `chat_dirty`; message/selection/expansion mutations do; width change invalidates. All 128 mew-tui tests pass, clippy clean, fmt clean. `draw_bench.rs` kept as a regression benchmark; `paragraph_bench.rs` (diagnostic only) removed.
