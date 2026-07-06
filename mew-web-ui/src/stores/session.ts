@@ -40,7 +40,6 @@ export type MessagePart =
       state: ToolDisplayState;
       output?: string;
       time?: { start: number; end: number | null };
-      sensitivity?: string;
     }
   | { type: "error"; message: string };
 
@@ -89,7 +88,6 @@ function wirePartToMessagePart(part: Part): MessagePart | null {
         state,
         output,
         time: part.state.time,
-        sensitivity: part.sensitivity,
       };
     }
     case "tool_result":
@@ -132,12 +130,7 @@ export interface TodoItem {
   dependsOn: number[];
 }
 
-export type ConnectionState =
-  | "disconnected"
-  | "connecting"
-  | "connected"
-  // NOTE: "reconnecting" is reserved for future reconnection support; not yet set anywhere.
-  | "reconnecting";
+export type ConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting";
 
 // ---------------------------------------------------------------------------
 // Store
@@ -166,8 +159,6 @@ interface SessionState {
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCost: number;
-  // Input tokens from the last message_end — approximates current context fill
-  lastInputTokens: number;
 
   // Model management
   availableModels: ModelInfo[];
@@ -190,8 +181,6 @@ interface SessionState {
   // Session list
   availableSessions: SessionInfo[];
   sessionsLoading: boolean;
-  projects: import("@mew/web-client").ProjectInfo[];
-  projectsLoading: boolean;
 
   // Session titles (session_id → title)
   sessionTitles: Map<string, string>;
@@ -267,14 +256,12 @@ interface SessionState {
   clearAlertsForSession: (sessionId: string) => void;
   dismissAlert: (sessionId: string, timestamp: number) => void;
   onFlaggedFilesChanged: (files: { path: string; reason?: string }[]) => void;
-  onSessionMetaChanged: (sessionId: string, archived: boolean | null, pinned: boolean | null, groupId?: string) => void;
+  onSessionMetaChanged: (sessionId: string, archived: boolean, pinned: boolean, groupId?: string) => void;
   onSessionAttentionChanged: (sessionId: string, pendingPermissions: number, pendingQuestions: number) => void;
 
   // Shared-session actions
   setAvailableSessions: (sessions: SessionInfo[]) => void;
   setSessionsLoading: (loading: boolean) => void;
-  onProjectList: (projects: import("@mew/web-client").ProjectInfo[]) => void;
-  setProjectsLoading: (loading: boolean) => void;
   onSessionHistory: (messages: Message[]) => void;
   onSessionCleared: () => void;
 
@@ -307,7 +294,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   totalInputTokens: 0,
   totalOutputTokens: 0,
   totalCost: 0,
-  lastInputTokens: 0,
   availableModels: [],
   currentModel: null,
   currentProvider: null,
@@ -318,8 +304,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   yieldedByClient: null,
   availableSessions: [],
   sessionsLoading: false,
-  projects: [],
-  projectsLoading: false,
   sessionTitles: new Map(),
   sessionSummaries: new Map(),
   groups: [],
@@ -387,13 +371,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 (p) => p.type === "text" && p.streaming,
               );
               if (!hasStreaming) {
-                msgs[msgs.length - 1] = {
-                  ...last,
-                  parts: [
-                    ...last.parts,
-                    { type: "text" as const, text: "", streaming: true },
-                  ],
-                };
+                last.parts.push({
+                  type: "text" as const,
+                  text: "",
+                  streaming: true,
+                });
               }
             }
             return { messages: msgs };
@@ -416,13 +398,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               last.role === "assistant" &&
               last.parts.some((p) => (p.type === "text" || p.type === "reasoning") && p.streaming);
             if (isActiveAssistant) {
-              msgs[msgs.length - 1] = {
-                ...last,
-                parts: [
-                  ...last.parts,
-                  { type: "reasoning" as const, text: "", streaming: true },
-                ],
-              };
+              last.parts.push({
+                type: "reasoning" as const,
+                text: "",
+                streaming: true,
+              });
             } else {
               // New turn — create a fresh assistant message.
               msgs.push({
@@ -446,20 +426,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               last.role === "assistant" &&
               last.parts.some((p) => (p.type === "text" || p.type === "reasoning") && p.streaming);
             if (isActiveAssistant) {
-              msgs[msgs.length - 1] = {
-                ...last,
-                parts: [
-                  ...last.parts,
-                  {
-                    type: "tool-call",
-                    toolName: tc.tool_name,
-                    callId: tc.call_id,
-                    input: tc.state.input,
-                    state: "pending",
-                    sensitivity: tc.sensitivity,
-                  },
-                ],
-              };
+              last.parts.push({
+                type: "tool-call",
+                toolName: tc.tool_name,
+                callId: tc.call_id,
+                input: tc.state.input,
+                state: "pending",
+              });
             } else {
               // New turn — create a fresh assistant message.
               msgs.push({
@@ -471,7 +444,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                   callId: tc.call_id,
                   input: tc.state.input,
                   state: "pending",
-                  sensitivity: tc.sensitivity,
                 }],
                 timestamp: Date.now(),
               });
@@ -503,20 +475,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             const msgs = [...s.messages];
             const last = msgs[msgs.length - 1];
             if (last && last.role === "assistant") {
-              const textIdx = last.parts.findIndex(
+              const textPart = last.parts.find(
                 (p) => p.type === "text" && p.streaming,
               );
-              if (textIdx >= 0) {
-                const oldPart = last.parts[textIdx];
-                if (oldPart && oldPart.type === "text") {
-                  const newParts = [...last.parts];
-                  newParts[textIdx] = {
-                    ...oldPart,
-                    text: s.streamingText,
-                    streaming: false,
-                  };
-                  msgs[msgs.length - 1] = { ...last, parts: newParts };
-                }
+              if (textPart && textPart.type === "text") {
+                textPart.text = s.streamingText;
+                textPart.streaming = false;
               }
             }
             return {
@@ -531,20 +495,12 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             const msgs = [...s.messages];
             const last = msgs[msgs.length - 1];
             if (last && last.role === "assistant") {
-              const reasoningIdx = last.parts.findIndex(
+              const reasoningPart = last.parts.find(
                 (p) => p.type === "reasoning" && p.streaming,
               );
-              if (reasoningIdx >= 0) {
-                const oldPart = last.parts[reasoningIdx];
-                if (oldPart && oldPart.type === "reasoning") {
-                  const newParts = [...last.parts];
-                  newParts[reasoningIdx] = {
-                    ...oldPart,
-                    text: s.streamingReasoningText,
-                    streaming: false,
-                  };
-                  msgs[msgs.length - 1] = { ...last, parts: newParts };
-                }
+              if (reasoningPart && reasoningPart.type === "reasoning") {
+                reasoningPart.text = s.streamingReasoningText;
+                reasoningPart.streaming = false;
               }
             }
             return {
@@ -562,7 +518,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           totalInputTokens: s.totalInputTokens + ev.usage.input,
           totalOutputTokens: s.totalOutputTokens + ev.usage.output,
           totalCost: s.totalCost + ev.cost,
-          lastInputTokens: ev.usage.input,
         }));
         break;
       }
@@ -627,23 +582,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         for (let i = msgs.length - 1; i >= 0; i--) {
           const msg = msgs[i];
           if (!msg || msg.role !== "assistant") break;
-          const tcIdx = msg.parts.findIndex(
+          const tcPart = msg.parts.find(
             (p) => p.type === "tool-call" && p.callId === callId,
           );
-          if (tcIdx >= 0) {
-            const oldTc = msg.parts[tcIdx];
-            if (oldTc && oldTc.type === "tool-call") {
-              const newParts = [...msg.parts];
-              newParts[tcIdx] = {
-                ...oldTc,
-                state: newState,
-                input: part.state.input !== undefined ? part.state.input : oldTc.input,
-                time: part.state.time ?? oldTc.time,
-                output: output ?? oldTc.output,
-              };
-              msgs[i] = { ...msg, parts: newParts };
+          if (tcPart && tcPart.type === "tool-call") {
+            tcPart.state = newState;
+            // Update input from the part_updated event (the initial part_start
+            // may not have the full input if it arrived before parsing).
+            if (part.state.input !== undefined) {
+              tcPart.input = part.state.input;
             }
-            break;
+            if (part.state.time) {
+              tcPart.time = part.state.time;
+            }
+            if (output) tcPart.output = output;
           }
         }
         const ts = new Map(s.toolStates);
@@ -753,7 +705,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       ),
     })),
 
-  onSessionStatsChanged: (sessionId, added, removed, _filesChanged) =>
+  onSessionStatsChanged: (sessionId, added, removed, filesChanged) =>
     set((state) => ({
       availableSessions: state.availableSessions.map((s) =>
         s.session_id === sessionId
@@ -762,7 +714,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               change_stats: {
                 added,
                 removed,
-                files: [],
+                files: Array.from({ length: filesChanged }, (_, i) => `file_${i}`),
               },
             }
           : s,
@@ -828,12 +780,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((state) => ({
       availableSessions: state.availableSessions.map((s) =>
         s.session_id === sessionId
-          ? {
-              ...s,
-              archived: archived ?? s.archived,
-              pinned: pinned ?? s.pinned,
-              group_id: groupId ?? s.group_id,
-            }
+          ? { ...s, archived, pinned, group_id: groupId }
           : s,
       ),
     })),
@@ -850,14 +797,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setAvailableSessions: (sessions) => set({ availableSessions: sessions }),
 
   setSessionsLoading: (loading) => set({ sessionsLoading: loading }),
-
-  onProjectList: (projects) =>
-    set({
-      projects: projects as import("@mew/web-client").ProjectInfo[],
-      projectsLoading: false,
-    }),
-
-  setProjectsLoading: (loading) => set({ projectsLoading: loading }),
 
   onSessionHistory: (messages) =>
     set({
@@ -899,7 +838,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       totalInputTokens: 0,
       totalOutputTokens: 0,
       totalCost: 0,
-      lastInputTokens: 0,
     }),
 
   onSubagentStart: (data) =>
@@ -990,7 +928,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       totalInputTokens: 0,
       totalOutputTokens: 0,
       totalCost: 0,
-      lastInputTokens: 0,
       // Clear per-session state that shouldn't leak across sessions.
       flaggedFiles: [],
       dirListing: null,
@@ -1040,14 +977,6 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("tool-start", (data) => store.getState().onToolStart(data.call_id));
   client.on("tool-end", (data) => store.getState().onToolEnd(data.call_id, data.success));
   client.on("tool-progress", (data) => store.getState().onToolProgress(data.call_id, data.chunk));
-
-  // Background job updates — not yet surfaced in the UI, but logged so they're
-  // not silently dropped. Will be wired into a store field when job UI lands.
-  client.on("job-update", (data) => {
-    if (data.state === "failed" || data.state === "done") {
-      console.debug("[job]", data.job_id, data.state, data.command ?? "");
-    }
-  });
 
   client.on("part-updated", (data) => store.getState().onPartUpdated(data.part_id, data.part));
 
@@ -1191,9 +1120,6 @@ export function bridgeClientToStore(client: MewClient) {
     store.getState().setAvailableSessions(data.sessions);
     store.getState().setSessionsLoading(false);
   });
-  client.on("project-list", (data) => {
-    store.getState().onProjectList(data.projects);
-  });
   client.on("session-history", (data) => store.getState().onSessionHistory(data.messages));
   client.on("session-cleared", () => store.getState().onSessionCleared());
   client.on("request-resolved", (data) => {
@@ -1235,4 +1161,7 @@ function showNotification(
  * when the user clicks Allow/Deny. */
 export const permissionResponders = new Map<number, (decision: PermissionDecision) => void>();
 
-
+/** Side-channel map: request_id → respond callback for AskUserRequest.
+ * The new protocol sends responses via a separate AskUserResponse message,
+ * so the UI calls client.respondToAskUser(request_id, answers) directly. */
+export const askUserResponders = new Map<number, (answers: string[]) => void>();

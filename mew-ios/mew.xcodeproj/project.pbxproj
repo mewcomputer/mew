@@ -1,0 +1,479 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		02A0EBFC07ECB4A8B8E33F65 /* JunicodeVF-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 5710FFECFB944E351E490A12 /* JunicodeVF-Italic.ttf */; };
+		0BAEB661227D370ACEAB5007 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 545CECE3392D12E734D9A133 /* AppStore.swift */; };
+		0DD408C829CFAE400C464C3A /* SessionRailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB7E2A7290847C1C578F63BE /* SessionRailView.swift */; };
+		12C0132F6E3073C7F51E5F03 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFA34EA67DA0D120E7A78DE1 /* QRScannerView.swift */; };
+		16BC594BD342DCA17509E2CF /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85285983639DD6D24B4F80F5 /* RootView.swift */; };
+		1CDA1CE0CA9098BF1D1C0E1F /* MewMobileCore in Frameworks */ = {isa = PBXBuildFile; productRef = 9CC84733CE8778E2900946DD /* MewMobileCore */; };
+		2204447BBB5C4DE24837C742 /* SwiftStreamingMarkdown in Frameworks */ = {isa = PBXBuildFile; productRef = E21A7B5599C9DBB6EBFDB014 /* SwiftStreamingMarkdown */; };
+		25FE20CE2DBB5A85D0F1E250 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E97D7FB0A96CF8B8EC3BF945 /* Security.framework */; };
+		2B76B56664AE33DBC20E089A /* MewApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A1ADE8FFE4EDE33968D7384 /* MewApp.swift */; };
+		323BD99403811B825B87A700 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3655A4A573B1B7AC91FE0EFC /* Network.framework */; };
+		3ECB5C0A4A6549A019628638 /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD1D5DA20DD1C3DBF5CE8EFB /* KeychainHelper.swift */; };
+		4F205612DED4C630D54F90DB /* Banga-VF.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 060BFA4C32C363DFB0A5DC2A /* Banga-VF.ttf */; };
+		5ED5BEC718C0C0867E591172 /* MewFonts.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF9524DB093AB7A0BC6A9D6B /* MewFonts.swift */; };
+		605F2CA9067A1B53FD5FD6BD /* garamontio.ttf in Resources */ = {isa = PBXBuildFile; fileRef = BB081877C5E2930723CD11C3 /* garamontio.ttf */; };
+		632665EBBF51BAEDC04AF1FA /* MewMarkdownTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84E0E7829B606C9933390B40 /* MewMarkdownTheme.swift */; };
+		7011CE2081771E324DCC4842 /* IoskeleyMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = F45D29FEF81E04698380B32C /* IoskeleyMono-Regular.ttf */; };
+		719B31FEF1EEF27D41E99D9B /* JunicodeVF-Roman.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D9597B83C0928C3307E2A1AD /* JunicodeVF-Roman.ttf */; };
+		78F2165038F6E7A5F4B02918 /* IoskeleyMono-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 9D763AF8F21AA73C5478D393 /* IoskeleyMono-Medium.ttf */; };
+		7A81747C6C88584F8F89DA29 /* MewFontModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B73529E452736EB47B7E83 /* MewFontModifier.swift */; };
+		AEC055023E5D11E0B561E338 /* MessageItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CF93C654F76C6CC2E3B47D8 /* MessageItemView.swift */; };
+		B967FFC6CC20B82D58AAF3AA /* OFLGoudyStMTT-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = E2329F2821DA57FBDAD6ECEB /* OFLGoudyStMTT-Italic.ttf */; };
+		BA99902191A1CE43C8C4BA11 /* OFLGoudyStMTT.ttf in Resources */ = {isa = PBXBuildFile; fileRef = B9709224898AB1D8CB8163E4 /* OFLGoudyStMTT.ttf */; };
+		C88D34820C3694AA611C616D /* FormatHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDC069E4C5076818999AC23D /* FormatHelper.swift */; };
+		CBFBCB51A0168B395BBF1213 /* garamontio_it.ttf in Resources */ = {isa = PBXBuildFile; fileRef = F14316FC19A01B05976B5676 /* garamontio_it.ttf */; };
+		D3216BADB70A3EE813135568 /* DaemonListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 679C2551108B9BA54C017BBF /* DaemonListView.swift */; };
+		EF14AAB5D468BFCF4DF9B3A8 /* MiSansLatinVF.ttf in Resources */ = {isa = PBXBuildFile; fileRef = DCC1C2EB43A0A853DFF523E8 /* MiSansLatinVF.ttf */; };
+		F872BADD66AFD025999E2C17 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C1DAF87DF928ED741CDF5D0D /* SystemConfiguration.framework */; };
+		F92E765C3BD2C9CFF5239DDE /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7648D55347F186781EF8A218 /* Theme.swift */; };
+		F9D40665D15C1FD5BE9B29A6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F9000A5647A1E452404A0D2 /* SettingsView.swift */; };
+		FDEC179FCD1D0B1F5CA253E1 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		060BFA4C32C363DFB0A5DC2A /* Banga-VF.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Banga-VF.ttf"; sourceTree = "<group>"; };
+		0A1ADE8FFE4EDE33968D7384 /* MewApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewApp.swift; sourceTree = "<group>"; };
+		1F9000A5647A1E452404A0D2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		217C4CC15C885E0DACCF1987 /* mew.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = mew.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		3655A4A573B1B7AC91FE0EFC /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
+		545CECE3392D12E734D9A133 /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
+		5710FFECFB944E351E490A12 /* JunicodeVF-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "JunicodeVF-Italic.ttf"; sourceTree = "<group>"; };
+		57B73529E452736EB47B7E83 /* MewFontModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewFontModifier.swift; sourceTree = "<group>"; };
+		5CF93C654F76C6CC2E3B47D8 /* MessageItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageItemView.swift; sourceTree = "<group>"; };
+		679C2551108B9BA54C017BBF /* DaemonListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonListView.swift; sourceTree = "<group>"; };
+		761A142B716D6FADBAEDEE67 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		7648D55347F186781EF8A218 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		84E0E7829B606C9933390B40 /* MewMarkdownTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewMarkdownTheme.swift; sourceTree = "<group>"; };
+		85285983639DD6D24B4F80F5 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		9D763AF8F21AA73C5478D393 /* IoskeleyMono-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IoskeleyMono-Medium.ttf"; sourceTree = "<group>"; };
+		B674A9B93C0BAF747838F26B /* MewMobileCore */ = {isa = PBXFileReference; lastKnownFileType = folder; path = MewMobileCore; sourceTree = SOURCE_ROOT; };
+		B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		B9709224898AB1D8CB8163E4 /* OFLGoudyStMTT.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = OFLGoudyStMTT.ttf; sourceTree = "<group>"; };
+		BB081877C5E2930723CD11C3 /* garamontio.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = garamontio.ttf; sourceTree = "<group>"; };
+		BDC069E4C5076818999AC23D /* FormatHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormatHelper.swift; sourceTree = "<group>"; };
+		C1DAF87DF928ED741CDF5D0D /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
+		CD1D5DA20DD1C3DBF5CE8EFB /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
+		CFA34EA67DA0D120E7A78DE1 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
+		D9597B83C0928C3307E2A1AD /* JunicodeVF-Roman.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "JunicodeVF-Roman.ttf"; sourceTree = "<group>"; };
+		DB7E2A7290847C1C578F63BE /* SessionRailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRailView.swift; sourceTree = "<group>"; };
+		DCC1C2EB43A0A853DFF523E8 /* MiSansLatinVF.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = MiSansLatinVF.ttf; sourceTree = "<group>"; };
+		E2329F2821DA57FBDAD6ECEB /* OFLGoudyStMTT-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "OFLGoudyStMTT-Italic.ttf"; sourceTree = "<group>"; };
+		E97D7FB0A96CF8B8EC3BF945 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		EF9524DB093AB7A0BC6A9D6B /* MewFonts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewFonts.swift; sourceTree = "<group>"; };
+		F14316FC19A01B05976B5676 /* garamontio_it.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = garamontio_it.ttf; sourceTree = "<group>"; };
+		F45D29FEF81E04698380B32C /* IoskeleyMono-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IoskeleyMono-Regular.ttf"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		68B0C6DECA0A31802B84660B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1CDA1CE0CA9098BF1D1C0E1F /* MewMobileCore in Frameworks */,
+				2204447BBB5C4DE24837C742 /* SwiftStreamingMarkdown in Frameworks */,
+				F872BADD66AFD025999E2C17 /* SystemConfiguration.framework in Frameworks */,
+				25FE20CE2DBB5A85D0F1E250 /* Security.framework in Frameworks */,
+				323BD99403811B825B87A700 /* Network.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		386AEC32238D276083DE2577 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				217C4CC15C885E0DACCF1987 /* mew.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		690161DC6FFE3EF2B2275E54 = {
+			isa = PBXGroup;
+			children = (
+				F0A816B74114A1C519C033C9 /* mew */,
+				CB9796668F9E978EF8C596D7 /* Packages */,
+				820A65A6EBD3CAA199601F88 /* Frameworks */,
+				386AEC32238D276083DE2577 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		820A65A6EBD3CAA199601F88 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				3655A4A573B1B7AC91FE0EFC /* Network.framework */,
+				E97D7FB0A96CF8B8EC3BF945 /* Security.framework */,
+				C1DAF87DF928ED741CDF5D0D /* SystemConfiguration.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		CB9796668F9E978EF8C596D7 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				B674A9B93C0BAF747838F26B /* MewMobileCore */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		F0A816B74114A1C519C033C9 /* mew */ = {
+			isa = PBXGroup;
+			children = (
+				545CECE3392D12E734D9A133 /* AppStore.swift */,
+				B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */,
+				679C2551108B9BA54C017BBF /* DaemonListView.swift */,
+				BDC069E4C5076818999AC23D /* FormatHelper.swift */,
+				761A142B716D6FADBAEDEE67 /* Info.plist */,
+				CD1D5DA20DD1C3DBF5CE8EFB /* KeychainHelper.swift */,
+				5CF93C654F76C6CC2E3B47D8 /* MessageItemView.swift */,
+				0A1ADE8FFE4EDE33968D7384 /* MewApp.swift */,
+				57B73529E452736EB47B7E83 /* MewFontModifier.swift */,
+				EF9524DB093AB7A0BC6A9D6B /* MewFonts.swift */,
+				84E0E7829B606C9933390B40 /* MewMarkdownTheme.swift */,
+				CFA34EA67DA0D120E7A78DE1 /* QRScannerView.swift */,
+				85285983639DD6D24B4F80F5 /* RootView.swift */,
+				DB7E2A7290847C1C578F63BE /* SessionRailView.swift */,
+				1F9000A5647A1E452404A0D2 /* SettingsView.swift */,
+				7648D55347F186781EF8A218 /* Theme.swift */,
+				FB769C03A8D2DF7E375E9D64 /* Fonts */,
+			);
+			path = mew;
+			sourceTree = "<group>";
+		};
+		FB769C03A8D2DF7E375E9D64 /* Fonts */ = {
+			isa = PBXGroup;
+			children = (
+				060BFA4C32C363DFB0A5DC2A /* Banga-VF.ttf */,
+				F14316FC19A01B05976B5676 /* garamontio_it.ttf */,
+				BB081877C5E2930723CD11C3 /* garamontio.ttf */,
+				9D763AF8F21AA73C5478D393 /* IoskeleyMono-Medium.ttf */,
+				F45D29FEF81E04698380B32C /* IoskeleyMono-Regular.ttf */,
+				5710FFECFB944E351E490A12 /* JunicodeVF-Italic.ttf */,
+				D9597B83C0928C3307E2A1AD /* JunicodeVF-Roman.ttf */,
+				DCC1C2EB43A0A853DFF523E8 /* MiSansLatinVF.ttf */,
+				E2329F2821DA57FBDAD6ECEB /* OFLGoudyStMTT-Italic.ttf */,
+				B9709224898AB1D8CB8163E4 /* OFLGoudyStMTT.ttf */,
+			);
+			path = Fonts;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		D6005B4DBEE30C3AF9E91906 /* mew */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 93721ACA9CD8FEE43FCD17B0 /* Build configuration list for PBXNativeTarget "mew" */;
+			buildPhases = (
+				BE36F5DD36AA3E9E18B71899 /* Sources */,
+				8B914F22625EE84FBD3985E4 /* Resources */,
+				68B0C6DECA0A31802B84660B /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = mew;
+			packageProductDependencies = (
+				9CC84733CE8778E2900946DD /* MewMobileCore */,
+				E21A7B5599C9DBB6EBFDB014 /* SwiftStreamingMarkdown */,
+			);
+			productName = mew;
+			productReference = 217C4CC15C885E0DACCF1987 /* mew.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		5AF0B7DFE4AF7AEFA4420552 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+			};
+			buildConfigurationList = 5B75A1D6B438B57B9C9C0999 /* Build configuration list for PBXProject "mew" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 690161DC6FFE3EF2B2275E54;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				0CCAE6E10B00E144DF565422 /* XCRemoteSwiftPackageReference "SwiftStreamingMarkdown" */,
+				20C1E61692A8625EE0C7AB6B /* XCLocalSwiftPackageReference "MewMobileCore" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 386AEC32238D276083DE2577 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				D6005B4DBEE30C3AF9E91906 /* mew */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		8B914F22625EE84FBD3985E4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4F205612DED4C630D54F90DB /* Banga-VF.ttf in Resources */,
+				78F2165038F6E7A5F4B02918 /* IoskeleyMono-Medium.ttf in Resources */,
+				7011CE2081771E324DCC4842 /* IoskeleyMono-Regular.ttf in Resources */,
+				02A0EBFC07ECB4A8B8E33F65 /* JunicodeVF-Italic.ttf in Resources */,
+				719B31FEF1EEF27D41E99D9B /* JunicodeVF-Roman.ttf in Resources */,
+				EF14AAB5D468BFCF4DF9B3A8 /* MiSansLatinVF.ttf in Resources */,
+				B967FFC6CC20B82D58AAF3AA /* OFLGoudyStMTT-Italic.ttf in Resources */,
+				BA99902191A1CE43C8C4BA11 /* OFLGoudyStMTT.ttf in Resources */,
+				605F2CA9067A1B53FD5FD6BD /* garamontio.ttf in Resources */,
+				CBFBCB51A0168B395BBF1213 /* garamontio_it.ttf in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		BE36F5DD36AA3E9E18B71899 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				0BAEB661227D370ACEAB5007 /* AppStore.swift in Sources */,
+				FDEC179FCD1D0B1F5CA253E1 /* ChatView.swift in Sources */,
+				D3216BADB70A3EE813135568 /* DaemonListView.swift in Sources */,
+				C88D34820C3694AA611C616D /* FormatHelper.swift in Sources */,
+				3ECB5C0A4A6549A019628638 /* KeychainHelper.swift in Sources */,
+				AEC055023E5D11E0B561E338 /* MessageItemView.swift in Sources */,
+				2B76B56664AE33DBC20E089A /* MewApp.swift in Sources */,
+				7A81747C6C88584F8F89DA29 /* MewFontModifier.swift in Sources */,
+				5ED5BEC718C0C0867E591172 /* MewFonts.swift in Sources */,
+				632665EBBF51BAEDC04AF1FA /* MewMarkdownTheme.swift in Sources */,
+				12C0132F6E3073C7F51E5F03 /* QRScannerView.swift in Sources */,
+				16BC594BD342DCA17509E2CF /* RootView.swift in Sources */,
+				0DD408C829CFAE400C464C3A /* SessionRailView.swift in Sources */,
+				F9D40665D15C1FD5BE9B29A6 /* SettingsView.swift in Sources */,
+				F92E765C3BD2C9CFF5239DDE /* Theme.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		58F9AC68E9ED228B17EDD820 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				INFOPLIST_FILE = mew/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = computer.mew.mew;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		7166FC57685F0ED026E83C0E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_DEBUG_DYLIB = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Debug;
+		};
+		78D2EC97BE1D9BC32AB2B282 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_DEBUG_DYLIB = NO;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Release;
+		};
+		FC54FC0AF40CB26156ACF720 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = P2B3GABB6H;
+				INFOPLIST_FILE = mew/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = computer.mew.mew;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		5B75A1D6B438B57B9C9C0999 /* Build configuration list for PBXProject "mew" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7166FC57685F0ED026E83C0E /* Debug */,
+				78D2EC97BE1D9BC32AB2B282 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		93721ACA9CD8FEE43FCD17B0 /* Build configuration list for PBXNativeTarget "mew" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FC54FC0AF40CB26156ACF720 /* Debug */,
+				58F9AC68E9ED228B17EDD820 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		20C1E61692A8625EE0C7AB6B /* XCLocalSwiftPackageReference "MewMobileCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = MewMobileCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		0CCAE6E10B00E144DF565422 /* XCRemoteSwiftPackageReference "SwiftStreamingMarkdown" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/microsoft/SwiftStreamingMarkdown";
+			requirement = {
+				kind = revision;
+				revision = 947e958edf0d5b4352ac9383ec4de7a9bf8f13b9;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		9CC84733CE8778E2900946DD /* MewMobileCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MewMobileCore;
+		};
+		E21A7B5599C9DBB6EBFDB014 /* SwiftStreamingMarkdown */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 0CCAE6E10B00E144DF565422 /* XCRemoteSwiftPackageReference "SwiftStreamingMarkdown" */;
+			productName = SwiftStreamingMarkdown;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 5AF0B7DFE4AF7AEFA4420552 /* Project object */;
+}

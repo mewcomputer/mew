@@ -8,7 +8,7 @@ import { PanelLeft, PanelRight, Activity, Settings } from "lucide-react";
 
 /** Fake header — borderless, natural extension of the chat surface. */
 export function FakeHeader() {
-  const { toggleSidebar, open, isMobile } = useSidebar();
+  const { toggleSidebar, open } = useSidebar();
   const [rightSheetOpen, setRightSheetOpen] = useState(false);
   const sessionId = useSessionStore((s) => s.sessionId);
   const titles = useSessionStore((s) => s.sessionTitles);
@@ -41,17 +41,15 @@ export function FakeHeader() {
 
         <div className="flex-1" />
 
-        {isMobile && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7"
-            onClick={() => setRightSheetOpen(true)}
-            title="Activity"
-          >
-            <Activity className="h-3.5 w-3.5" />
-          </Button>
-        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={() => setRightSheetOpen(true)}
+          title="Activity"
+        >
+          <Activity className="h-3.5 w-3.5" />
+        </Button>
         <Button
           variant="ghost"
           size="icon"
@@ -62,10 +60,7 @@ export function FakeHeader() {
           <Settings className="h-3.5 w-3.5" />
         </Button>
       </div>
-      {/* Right rail: mobile sheet only — desktop renders the docked panel in the layout */}
-      {isMobile && (
-        <RightRail mobileOpen={rightSheetOpen} onMobileOpenChange={setRightSheetOpen} />
-      )}
+      <RightRail open={rightSheetOpen} onOpenChange={setRightSheetOpen} />
     </>
   );
 }

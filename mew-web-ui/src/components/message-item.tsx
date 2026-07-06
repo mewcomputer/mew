@@ -7,10 +7,8 @@ import { CopyButton } from "./copy-button";
 import { ReasoningBlock } from "./reasoning-block";
 import { cn } from "../lib/utils";
 
-/** Group consecutive tool-call parts by sensitivity tier.
- *  - readonly + mutating calls batch together within their tier
- *  - dangerous calls are always shown individually
- *  A batch may contain mixed tool names (e.g. "2× read · 1× grep"). */
+/** Group consecutive tool-call parts together so they can be collapsed
+ *  into a single card instead of showing N separate cards. */
 type PartGroup =
   | { kind: "single"; parts: [MessagePart] }
   | {
@@ -18,51 +16,32 @@ type PartGroup =
       parts: Extract<MessagePart, { type: "tool-call" }>[];
     };
 
-function partSensitivity(part: Extract<MessagePart, { type: "tool-call" }>): string {
-  return part.sensitivity?.toLowerCase() ?? "dangerous";
-}
-
 function groupParts(parts: MessagePart[]): PartGroup[] {
   const groups: PartGroup[] = [];
   let toolBuffer: Extract<MessagePart, { type: "tool-call" }>[] = [];
-  let bufferTier: string | null = null;
-
-  function flushBuffer() {
-    if (toolBuffer.length > 0) {
-      groups.push(
-        toolBuffer.length === 1
-          ? { kind: "single", parts: [toolBuffer[0] as MessagePart] }
-          : { kind: "tool-group", parts: toolBuffer },
-      );
-      toolBuffer = [];
-      bufferTier = null;
-    }
-  }
 
   for (const part of parts) {
     if (part.type === "tool-call") {
-      const tier = partSensitivity(part);
-      if (tier === "dangerous") {
-        // Dangerous tools are never grouped — flush existing buffer, then
-        // emit this call as a standalone single group.
-        flushBuffer();
-        groups.push({ kind: "single", parts: [part] });
-      } else if (bufferTier === null || bufferTier === tier) {
-        // Same tier (or first in buffer) — accumulate.
-        toolBuffer.push(part);
-        bufferTier = tier;
-      } else {
-        // Different tier — flush and start a new buffer.
-        flushBuffer();
-        toolBuffer = [part];
-        bufferTier = tier;
-      }
+      toolBuffer.push(part);
     } else {
-      flushBuffer();
+      if (toolBuffer.length > 0) {
+        groups.push(
+          toolBuffer.length === 1
+            ? { kind: "single", parts: [toolBuffer[0] as MessagePart] }
+            : { kind: "tool-group", parts: toolBuffer },
+        );
+        toolBuffer = [];
+      }
       groups.push({ kind: "single", parts: [part] });
     }
   }
-  flushBuffer();
+  if (toolBuffer.length > 0) {
+    groups.push(
+      toolBuffer.length === 1
+        ? { kind: "single", parts: [toolBuffer[0] as MessagePart] }
+        : { kind: "tool-group", parts: toolBuffer },
+    );
+  }
   return groups;
 }
 
@@ -76,15 +55,7 @@ function ToolCallGroup({
 }) {
   const [expanded, setExpanded] = useState(false);
   const toolNames = parts.map((p) => p.toolName);
-  // Build a count-per-tool summary preserving first-seen order,
-  // e.g. "2× read · 1× grep".
-  const counts: { name: string; count: number }[] = [];
-  for (const name of toolNames) {
-    const existing = counts.find((c) => c.name === name);
-    if (existing) existing.count++;
-    else counts.push({ name, count: 1 });
-  }
-  const summary = counts.map((c) => `${c.count}× ${c.name}`).join(" · ");
+  const uniqueNames = [...new Set(toolNames)];
 
   return (
     <div className="max-w-[85%]">
@@ -95,7 +66,7 @@ function ToolCallGroup({
         <Terminal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         <span className="text-sm font-medium">{parts.length} tool calls</span>
         <span className="truncate text-xs text-muted-foreground">
-          {summary}
+          {uniqueNames.join(", ")}
         </span>
         <ChevronRight
           className={cn(

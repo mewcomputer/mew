@@ -81,9 +81,7 @@ export type ClientMessage =
   | { type: "git_status"; session_id: string }
   | { type: "watch_workspace"; session_id: string; enabled: boolean }
   | { type: "open_path"; session_id: string; path: string }
-  | { type: "unflag_file"; session_id: string; path: string }
-  | { type: "list_projects" }
-  | { type: "ping" };
+  | { type: "unflag_file"; session_id: string; path: string };
 
 // Provider events — see mew_message::ProviderEventWire.
 export type ProviderEventWire =
@@ -114,7 +112,6 @@ export type Part =
       tool_name: string;
       call_id: string;
       state: ToolState;
-      sensitivity?: string;
     }
   | { type: "tool_result"; base: PartBase; call_id: string; output?: string }
   | {
@@ -210,8 +207,6 @@ export interface ModelInfo {
   description?: string;
   /** Available thinking/reasoning variants for this model. */
   thinking_variants?: ThinkingVariantInfo[];
-  /** Maximum context window in tokens, if known from the catalog. */
-  context_window?: number;
 }
 
 /** A named thinking/reasoning variant (e.g. "high", "max", "thinking"). */
@@ -267,14 +262,6 @@ export interface SessionInfo {
   usage?: SessionUsageWire;
   pending_permissions?: number;
   pending_questions?: number;
-}
-
-/** A known project directory, returned by `list_projects`. */
-export interface ProjectInfo {
-  path: string;
-  display_name: string;
-  session_count: number;
-  last_used_at?: number;
 }
 
 /** A session group. */
@@ -437,8 +424,8 @@ export type ServerMessage =
   | {
       type: "session_meta_changed";
       session_id: string;
-      archived: boolean | null;
-      pinned: boolean | null;
+      archived: boolean;
+      pinned: boolean;
       group_id?: string;
     }
   | {
@@ -446,9 +433,7 @@ export type ServerMessage =
       session_id: string;
       pending_permissions: number;
       pending_questions: number;
-    }
-  | { type: "pong"; version: string }
-  | { type: "project_list"; projects: ProjectInfo[] };
+    };
 
 // ---------------------------------------------------------------------------
 // Minimal WebSocket interface — lets Node users pass `ws` while browsers
@@ -555,7 +540,6 @@ export interface MewClientEvents {
   "session-history": (data: { messages: Message[] }) => void;
   "model-list": (data: { models: ModelInfo[] }) => void;
   "model-switched": (data: { provider: string; model: string }) => void;
-  "project-list": (data: { projects: ProjectInfo[] }) => void;
   "thinking-variant-changed": (data: { variant: string | null }) => void;
   "permission-mode-changed": (data: { mode: string }) => void;
   "client-attached": (data: { client_id: number; client_kind: string }) => void;
@@ -591,8 +575,8 @@ export interface MewClientEvents {
   "flagged-files-changed": (data: { session_id: string; files: FlaggedFileWire[] }) => void;
   "session-meta-changed": (data: {
     session_id: string;
-    archived: boolean | null;
-    pinned: boolean | null;
+    archived: boolean;
+    pinned: boolean;
     group_id?: string;
   }) => void;
   "session-attention-changed": (data: {
@@ -600,9 +584,6 @@ export interface MewClientEvents {
     pending_permissions: number;
     pending_questions: number;
   }) => void;
-
-  /** Response to `ping`. Carries the daemon version. */
-  pong: (data: { version: string }) => void;
 
   errorMessage: (data: { message: string }) => void;
   errorEvent: (data: { message: string }) => void;
@@ -729,18 +710,6 @@ export class MewClient {
     this.send({ type: "cancel" });
   }
 
-  /** Send `ping` to check daemon liveness and get its version. */
-  ping(): Promise<string> {
-    return new Promise<string>((resolve) => {
-      const onPong = (data: { version: string }) => {
-        this.off("pong", onPong);
-        resolve(data.version);
-      };
-      this.on("pong", onPong);
-      this.send({ type: "ping" });
-    });
-  }
-
   /**
    * Send a slash command (e.g. `/clear`, `/compact`). Returns the
    * `slash_result.text` if the daemon produces one.
@@ -806,18 +775,6 @@ export class MewClient {
       };
       this.on("session-list", onList);
       this.send({ type: "list_sessions" });
-    });
-  }
-
-  /** List known projects (recent session cwds + workspace.roots). */
-  listProjects(): Promise<ProjectInfo[]> {
-    return new Promise<ProjectInfo[]>((resolve) => {
-      const onList = (data: { projects: ProjectInfo[] }) => {
-        this.off("project-list", onList);
-        resolve(data.projects);
-      };
-      this.on("project-list", onList);
-      this.send({ type: "list_projects" });
     });
   }
 
@@ -997,7 +954,6 @@ export class MewClient {
           session_id: msg.session_id,
           model: msg.model,
           provider: msg.provider,
-          permission_mode: msg.permission_mode,
         });
         break;
       case "provider":
@@ -1105,9 +1061,6 @@ export class MewClient {
           model: msg.model,
         });
         break;
-      case "project_list":
-        this.emit("project-list", { projects: msg.projects });
-        break;
       case "thinking_variant_changed":
         this.emit("thinking-variant-changed", {
           variant: msg.variant ?? null,
@@ -1211,9 +1164,6 @@ export class MewClient {
           pending_permissions: msg.pending_permissions,
           pending_questions: msg.pending_questions,
         });
-        break;
-      case "pong":
-        this.emit("pong", { version: msg.version });
         break;
       case "error":
         this.emit("errorMessage", { message: msg.message });

@@ -128,17 +128,6 @@ export class MewClient {
     cancel() {
         this.send({ type: "cancel" });
     }
-    /** Send `ping` to check daemon liveness and get its version. */
-    ping() {
-        return new Promise((resolve) => {
-            const onPong = (data) => {
-                this.off("pong", onPong);
-                resolve(data.version);
-            };
-            this.on("pong", onPong);
-            this.send({ type: "ping" });
-        });
-    }
     /**
      * Send a slash command (e.g. `/clear`, `/compact`). Returns the
      * `slash_result.text` if the daemon produces one.
@@ -200,17 +189,6 @@ export class MewClient {
             };
             this.on("session-list", onList);
             this.send({ type: "list_sessions" });
-        });
-    }
-    /** List known projects (recent session cwds + workspace.roots). */
-    listProjects() {
-        return new Promise((resolve) => {
-            const onList = (data) => {
-                this.off("project-list", onList);
-                resolve(data.projects);
-            };
-            this.on("project-list", onList);
-            this.send({ type: "list_projects" });
         });
     }
     /** Delete a session from disk and remove it from the active list. */
@@ -364,7 +342,6 @@ export class MewClient {
                     session_id: msg.session_id,
                     model: msg.model,
                     provider: msg.provider,
-                    permission_mode: msg.permission_mode,
                 });
                 break;
             case "provider":
@@ -463,9 +440,6 @@ export class MewClient {
                     provider: msg.provider,
                     model: msg.model,
                 });
-                break;
-            case "project_list":
-                this.emit("project-list", { projects: msg.projects });
                 break;
             case "thinking_variant_changed":
                 this.emit("thinking-variant-changed", {
@@ -570,9 +544,6 @@ export class MewClient {
                     pending_permissions: msg.pending_permissions,
                     pending_questions: msg.pending_questions,
                 });
-                break;
-            case "pong":
-                this.emit("pong", { version: msg.version });
                 break;
             case "error":
                 this.emit("errorMessage", { message: msg.message });

@@ -45,11 +45,7 @@ function RootComponent() {
         if (!client) return;
         useSessionStore.getState().reset();
         client.newSession().then((newId) => {
-          try {
-            localStorage.setItem("mew.sessionId", newId);
-          } catch {
-            /* localStorage may be unavailable (e.g. private mode); ignore */
-          }
+          localStorage.setItem("mew.sessionId", newId);
           router.navigate({
             to: "/session/$sessionId",
             params: { sessionId: newId },

@@ -81,12 +81,13 @@ The one prerequisite. Give the TUI a persistent, always-on channel for session-m
 
 Independent of the daemon. Collapse consecutive `Part::ToolCall` entries with the same `sensitivity` into one summary row, matching web/iOS.
 
-**`crates/mew-tui/src/ui/chat.rs`** (the `Part::ToolCall(tc)` arm at ~line 324): before rendering, group runs of adjacent tool-call parts sharing `tc.sensitivity`. Render a single collapsed summary line (e.g. `▸ 4 readonly tool calls (Read, Grep, Glob…)`) with the existing state glyph logic from `tool_call_label_and_color` (chat.rs:804), and expand to individual blocks when the group has ≤1 call, any call is `Running`/`Error`, or the user toggles it.
-- Reuse the existing expand/collapse idiom already used for reasoning blocks (`reasoning_expanded: HashSet<PartId>`, `reasoning_header_rows`): add `tool_batch_expanded: HashSet<PartId>` keyed on the batch's first `PartId`, plus a `tool_batch_header_rows` for click-toggle in `events.rs` mouse handling.
+**Render-cache integration (landed 2026-07-05, commit `7ff470a6`).** `draw_chat` no longer builds the transcript inline — it calls `App::ensure_chat_rendered(md_width, chat_width, area_height)` and renders the cached `RenderedChat.lines` sliced to the visible window. The build loop was extracted to `pub(crate) fn build_chat_lines(app, md_width, chat_width) -> BuiltChat` in `ui/chat.rs`; that is now the single place that owns `chat_rows` construction and `max_scroll`. Consequences for batching:
+- The grouping logic goes inside `build_chat_lines`'s `Part::ToolCall(tc)` arm — it emits one collapsed summary `Line` per batch (or the individual blocks when expanded). `chat_rows` bookkeeping stays correct because it's all in one function.
+- Batch expand/collapse is a `tool_batch_expanded: HashSet<PartId>` toggle (reuse the reasoning-block idiom: `reasoning_expanded` + `reasoning_header_rows`). **Every toggle must call `app.mark_chat_dirty()`** so the cache rebuilds on the next frame; `ensure_chat_rendered` then recomputes `max_scroll` automatically. Do not touch `rendered_chat` directly.
+- `wrapped_height` is gone (removed in the same commit); scroll ceiling is `lines.len()` computed once at build time. Don't reintroduce a per-frame height walk.
+- Keep the active/streaming batch expanded by default. Streaming already bumps `chat_dirty` via `PartDelta`/`ToolStart`/`ToolProgress`/`PartUpdated`, so an expanded active batch rebuilds incrementally as expected; a collapsed one would too, just without per-call rows.
 
-**Local + daemon:** identical; both paths feed `Part::ToolCall` into the same `chat.rs`. No mode gating.
-
-**Watch:** `chat.rs` is 1000 lines and does streaming/selection row bookkeeping (`chat_rows`, selection offsets). The grouping must keep `chat_rows` line accounting correct. Keep the default expanded for the active/streaming batch so streaming still appears incrementally.
+**Local + daemon:** identical; both paths feed `Part::ToolCall` into the same `build_chat_lines`. No mode gating.
 
 ---
 
@@ -94,7 +95,7 @@ Independent of the daemon. Collapse consecutive `Part::ToolCall` entries with th
 
 `/resume <id>` already calls `attach_session`; only replay is missing.
 
-- In Item 0's reducer, handle `ServerMessage::SessionHistory { messages }`: `app.clear_messages()`, push each `mew_message::Message`, set `app.status.session_id`, `auto_scroll = true`, `scroll = max_scroll` — mirroring the local `ResumeSession` replay in `run_tui` (main.rs:3178-3200).
+- In Item 0's reducer, handle `ServerMessage::SessionHistory { messages }`: `app.clear_messages()`, push each `mew_message::Message`, set `app.status.session_id`, `auto_scroll = true`, then **`app.mark_chat_dirty()`** and let `ensure_chat_rendered` recompute `max_scroll` on the next frame (don't set `scroll = max_scroll` manually — `max_scroll` is only valid after a rebuild). This replaces the manual scroll-ceiling plumbing in the local `ResumeSession` path (main.rs:3178-3200), which predates the render cache.
 - `chat_with_daemon` already handles `/resume <id>` (main.rs:2195). Once Item 1 lands, resume also becomes selecting a row in the session picker.
 - Also translate the `AttachSession` path so the newly-attached session's `SessionReady`/title update `status`.
 
