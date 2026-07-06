@@ -21,7 +21,11 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let content_width = area.width.saturating_sub(2);
-    let visual_line_count = app.input_visual_line_count(content_width).max(1);
+    // The prefix ("> " or spinner + space) takes 2 columns, so the
+    // effective text width is content_width minus the prefix.
+    let prefix_width = 2usize;
+    let wrap_w = content_width.saturating_sub(prefix_width as u16).max(1) as usize;
+    let visual_line_count = app.input_visual_line_count(wrap_w as u16).max(1);
     let input_height = (visual_line_count as u16).min(12) + 2;
     let input_area = Rect::new(area.x, area.y, area.width, input_height.min(area.height));
 
@@ -57,14 +61,12 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     };
     let indent = Span::styled("  ", Style::default().bg(app.theme.tokens.status_bg));
 
-    let (cursor_visual_row, cursor_visual_col) = app.cursor_visual_row_col(content_width);
-    let prefix_width = 2usize;
-    let wrap_w = content_width.max(1) as usize;
+    let (cursor_visual_row, cursor_visual_col) = app.cursor_visual_row_col(wrap_w as u16);
 
     let mut visual_row = 0usize;
     for line in app.input.split('\n') {
         let dw = display_width(line);
-        let rows = if content_width == 0 {
+        let rows = if wrap_w == 0 {
             1
         } else {
             dw.div_ceil(wrap_w).max(1)
@@ -92,9 +94,7 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let cursor_x = content_area.x
-        + prefix_width as u16
-        + cursor_visual_col.min(content_area.width as usize) as u16;
+    let cursor_x = content_area.x + prefix_width as u16 + cursor_visual_col.min(wrap_w) as u16;
     let cursor_y = content_area.y + cursor_visual_row.min(content_area.height as usize) as u16;
     f.set_cursor_position((cursor_x, cursor_y));
 

@@ -120,10 +120,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     // Estimate the input's content width (the slot minus the 1-cell border
-    // on each side) so the layout reserves enough vertical space for wrapped
-    // lines. The exact width is computed again in `draw_input` once the slot
-    // is laid out.
-    let input_content_width = main_area.width.saturating_sub(2);
+    // on each side and the 2-char prefix) so the layout reserves enough
+    // vertical space for wrapped lines. The exact width is computed again
+    // in `draw_input` once the slot is laid out.
+    let input_content_width = main_area.width.saturating_sub(2).saturating_sub(2);
     let input_height = (app
         .input_visual_line_count(input_content_width)
         .clamp(1, 12)

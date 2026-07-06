@@ -105,11 +105,12 @@ pub(super) fn draw_landing(f: &mut Frame, app: &App, area: Rect, slash_height: u
 
     // Centered input width: ~60% of the area, clamped to a sane range and to
     // the available width. The content width (minus the 1-cell inset on each
-    // side that `draw_input` applies) drives wrapping/height.
+    // side and the 2-char prefix that `draw_input` applies) drives
+    // wrapping/height.
     let input_w = (area.width * 3 / 5)
         .clamp(30, 80)
         .min(area.width.saturating_sub(2));
-    let content_w = input_w.saturating_sub(2);
+    let content_w = input_w.saturating_sub(2).saturating_sub(2);
     let input_h = (app.input_visual_line_count(content_w).clamp(1, 12) + 2) as u16;
 
     // Vertical layout: hero, a 1-row gap, the slash list, then the input — all
