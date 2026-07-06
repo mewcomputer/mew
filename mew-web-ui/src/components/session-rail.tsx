@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
 import { useRouter } from "@tanstack/react-router";
-import type { MewClient, SessionInfo } from "@mew/web-client";
+import type { MewClient, SessionInfo, GroupInfo } from "@mew/web-client";
 import { useSessionStore } from "../stores/session";
 import { cn } from "../lib/utils";
 import {
@@ -16,7 +16,28 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
-import { Plus, RotateCcw, Settings, Folder, Archive, Pin } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuLabel,
+} from "@/components/ui/dropdown-menu";
+import {
+  Plus,
+  RotateCcw,
+  Settings,
+  Folder,
+  FolderPlus,
+  Archive,
+  Pin,
+  MoreHorizontal,
+  Trash2,
+  Check,
+  FolderInput,
+  ArrowUpDown,
+} from "lucide-react";
 
 interface SessionRailProps {
   client: MewClient | null;
@@ -98,7 +119,9 @@ export function SessionRail({ client }: SessionRailProps) {
     (s) => s.session_id !== currentSessionId && s.state === "idle" && s.model && !s.archived,
   );
 
-  const grouped = useMemo(() => {
+  type GroupedSection = { label: string; items: SessionInfo[]; groupId?: string };
+
+  const grouped = useMemo<GroupedSection[]>(() => {
     if (view === "workspace") {
       const map = new Map<string, SessionInfo[]>();
       for (const s of sorted) {
@@ -107,27 +130,36 @@ export function SessionRail({ client }: SessionRailProps) {
         list.push(s);
         map.set(key, list);
       }
-      return Array.from(map.entries());
+      return Array.from(map.entries()).map(([label, items]) => ({ label, items }));
     }
     if (view === "grouped") {
-      const map = new Map<string, SessionInfo[]>();
+      // Preserve group order from the store; ungrouped sessions land last.
+      const map = new Map<string, { items: SessionInfo[]; groupId: string }>();
       const ungrouped: SessionInfo[] = [];
       for (const s of sorted) {
         if (s.group_id) {
           const group = groups.find((g) => g.id === s.group_id);
-          const key = group?.name ?? "Unknown";
-          const list = map.get(key) ?? [];
-          list.push(s);
-          map.set(key, list);
+          const key = group?.id ?? s.group_id;
+          const entry = map.get(key);
+          if (entry) {
+            entry.items.push(s);
+          } else {
+            map.set(key, { items: [s], groupId: key });
+          }
         } else {
           ungrouped.push(s);
         }
       }
-      const result = Array.from(map.entries());
-      if (ungrouped.length > 0) result.push(["Ungrouped", ungrouped]);
+      const result: GroupedSection[] = Array.from(map.entries()).map(
+        ([, { items, groupId }]) => {
+          const g = groups.find((x) => x.id === groupId);
+          return { label: g?.name ?? "Unknown", items, groupId };
+        },
+      );
+      if (ungrouped.length > 0) result.push({ label: "Ungrouped", items: ungrouped });
       return result;
     }
-    return [["All Sessions", sorted] as [string, SessionInfo[]]];
+    return [{ label: "All Sessions", items: sorted }];
   }, [sorted, view, groups]);
 
   return (
@@ -164,13 +196,26 @@ export function SessionRail({ client }: SessionRailProps) {
             )}
           </div>
         </SidebarGroup>
-        {grouped.map(([label, items]) => (
-          <SidebarGroup key={label}>
+        {view === "grouped" && (
+          <SidebarGroup>
+            <div className="px-2 pb-1">
+              <NewGroupButton client={client} />
+            </div>
+          </SidebarGroup>
+        )}
+        {grouped.map((section) => (
+          <SidebarGroup key={section.groupId ?? section.label}>
             {view !== "timeline" && (
               <SidebarGroupLabel className="flex items-center gap-1">
                 {view === "workspace" && <Folder className="h-3 w-3" />}
-                {label}
-                <span className="text-muted-foreground">({items.length})</span>
+                {view === "grouped" && section.groupId && (
+                  <GroupColorSwatch groupId={section.groupId} groups={groups} />
+                )}
+                {section.label}
+                <span className="text-muted-foreground">({section.items.length})</span>
+                {view === "grouped" && section.groupId && (
+                  <GroupActions groupId={section.groupId} groups={groups} client={client} />
+                )}
               </SidebarGroupLabel>
             )}
             <SidebarGroupContent>
@@ -181,7 +226,7 @@ export function SessionRail({ client }: SessionRailProps) {
                 <div className="px-3 py-4 text-center text-xs text-muted-foreground">No sessions yet</div>
               )}
               <SidebarMenu className="gap-2">
-                {items.map((s) => (
+                {section.items.map((s) => (
                   <SidebarMenuItem key={s.session_id}>
                     <SessionRow
                       session={s}
@@ -190,6 +235,8 @@ export function SessionRail({ client }: SessionRailProps) {
                       onClick={() => handleAttach(s.session_id)}
                       onArchive={(archived) => handleArchive(s.session_id, archived)}
                       onPin={(pinned) => handlePin(s.session_id, pinned)}
+                      groups={groups}
+                      client={client}
                     />
                   </SidebarMenuItem>
                 ))}
@@ -202,9 +249,10 @@ export function SessionRail({ client }: SessionRailProps) {
   );
 }
 
-function SessionRow({ session: s, isActive, title, onClick, onArchive, onPin }: {
+function SessionRow({ session: s, isActive, title, onClick, onArchive, onPin, groups, client }: {
   session: SessionInfo; isActive: boolean; title: string;
   onClick: () => void; onArchive: (a: boolean) => void; onPin: (p: boolean) => void;
+  groups: GroupInfo[]; client: MewClient | null;
 }) {
   return (
     <div className="group relative">
@@ -247,8 +295,187 @@ function SessionRow({ session: s, isActive, title, onClick, onArchive, onPin }: 
         <Button variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => { e.stopPropagation(); onArchive(!s.archived); }} title={s.archived ? "Restore" : "Archive"}>
           <Archive className="h-3 w-3" />
         </Button>
+        <MoveToGroupDropdown sessionId={s.session_id} currentGroupId={s.group_id} groups={groups} client={client} />
       </div>
     </div>
+  );
+}
+
+/** "New group" affordance: prompts for a name, then calls createGroup. */
+function NewGroupButton({ client }: { client: MewClient | null }) {
+  const handleCreate = () => {
+    if (!client) return;
+    const name = window.prompt("New group name");
+    if (!name?.trim()) return;
+    client.createGroup(name.trim());
+    // The groups-changed broadcast will refresh the store.
+  };
+  return (
+    <Button onClick={handleCreate} disabled={!client} variant="outline" size="sm" className="w-full">
+      <FolderPlus className="h-3.5 w-3.5" />
+      New group
+    </Button>
+  );
+}
+
+/** A small color swatch that reflects the group color, used in the label. */
+function GroupColorSwatch({ groupId, groups }: { groupId: string; groups: GroupInfo[] }) {
+  const group = groups.find((g) => g.id === groupId);
+  const color = group?.color ?? "gray";
+  return (
+    <span
+      className={cn("h-2.5 w-2.5 shrink-0 rounded-full", swatchClass(color))}
+      title={group?.color ?? "default"}
+    />
+  );
+}
+
+/** Inline rename, color picker, reorder, and delete actions for a group. */
+function GroupActions({
+  groupId,
+  groups,
+  client,
+}: {
+  groupId: string;
+  groups: GroupInfo[];
+  client: MewClient | null;
+}) {
+  const group = groups.find((g) => g.id === groupId);
+  if (!group || !client) return null;
+
+  const handleRename = () => {
+    const name = window.prompt("Rename group", group.name);
+    if (name && name.trim() && name.trim() !== group.name) {
+      client.updateGroup(groupId, { name: name.trim() });
+    }
+  };
+
+  const handleColor = (color: string) => {
+    client.updateGroup(groupId, { color });
+  };
+
+  const handleClearColor = () => {
+    client.updateGroup(groupId, { color: null });
+  };
+
+  const handleDelete = () => {
+    if (!window.confirm(`Delete group "${group.name}"? Sessions will be ungrouped.`)) return;
+    client.deleteGroup(groupId);
+  };
+
+  const handleReorder = (delta: number) => {
+    client.updateGroup(groupId, { order: group.order + delta });
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          className="ml-1 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+          onClick={(e) => e.stopPropagation()}
+          title="Group actions"
+        >
+          <MoreHorizontal className="h-3 w-3" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-44" onClick={(e) => e.stopPropagation()}>
+        <DropdownMenuLabel className="text-[10px]">Group</DropdownMenuLabel>
+        <DropdownMenuItem onClick={handleRename}>
+          Rename…
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-[10px]">Color</DropdownMenuLabel>
+        <div className="grid grid-cols-6 gap-1 p-1">
+          {GROUP_COLORS.map((c) => (
+            <button
+              key={c}
+              className={cn(
+                "flex h-4 w-4 items-center justify-center rounded-full",
+                swatchClass(c),
+              )}
+              onClick={() => handleColor(c)}
+              title={c}
+            >
+              {group.color === c && <Check className="h-2.5 w-2.5 text-white" />}
+            </button>
+          ))}
+        </div>
+        <DropdownMenuItem onClick={handleClearColor}>
+          Clear color
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-[10px]">Reorder</DropdownMenuLabel>
+        <div className="flex gap-1 p-1">
+          <Button variant="outline" size="sm" className="h-6 flex-1" onClick={() => handleReorder(-1)}>
+            <ArrowUpDown className="h-3 w-3" /> Up
+          </Button>
+          <Button variant="outline" size="sm" className="h-6 flex-1" onClick={() => handleReorder(1)}>
+            <ArrowUpDown className="h-3 w-3 scale-y-[-1]" /> Down
+          </Button>
+        </div>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={handleDelete} className="text-destructive focus:text-destructive">
+          <Trash2 className="h-3 w-3" />
+          Delete group
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** Per-session "Move to group" dropdown, added to the hover actions. */
+function MoveToGroupDropdown({
+  sessionId,
+  currentGroupId,
+  groups,
+  client,
+}: {
+  sessionId: string;
+  currentGroupId?: string;
+  groups: GroupInfo[];
+  client: MewClient | null;
+}) {
+  if (!client) return null;
+  const sortedGroups = [...groups].sort((a, b) => a.order - b.order);
+
+  const handleAssign = (groupId: string | null) => {
+    client.assignSessionGroup(sessionId, groupId);
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-5 w-5"
+          onClick={(e) => e.stopPropagation()}
+          title="Move to group"
+        >
+          <FolderInput className="h-3 w-3" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-48" onClick={(e) => e.stopPropagation()}>
+        <DropdownMenuLabel className="text-[10px]">Move to group</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={() => handleAssign(null)}>
+          {!currentGroupId && <Check className="h-3 w-3" />}
+          Ungrouped
+        </DropdownMenuItem>
+        {sortedGroups.map((g) => (
+          <DropdownMenuItem key={g.id} onClick={() => handleAssign(g.id)}>
+            <span className={cn("h-2.5 w-2.5 rounded-full", swatchClass(g.color ?? "gray"))} />
+            <span className="truncate">{g.name}</span>
+            {currentGroupId === g.id && <Check className="ml-auto h-3 w-3" />}
+          </DropdownMenuItem>
+        ))}
+        {sortedGroups.length === 0 && (
+          <div className="px-2 py-1.5 text-[10px] text-muted-foreground">
+            No groups yet
+          </div>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -334,4 +561,35 @@ function formatRelativeAge(timestampMs: number): string {
 function formatCost(cost: number): string {
   if (cost < 0.01) return "<1¢";
   return `$${cost.toFixed(2)}`;
+}
+
+/** The palette offered in the group color picker. */
+const GROUP_COLORS = [
+  "red",
+  "orange",
+  "amber",
+  "green",
+  "teal",
+  "blue",
+  "indigo",
+  "purple",
+  "pink",
+  "gray",
+] as const;
+
+/** Map a color name to a tailwind background class for a swatch. */
+function swatchClass(color: string): string {
+  const map: Record<string, string> = {
+    red: "bg-red-500",
+    orange: "bg-orange-500",
+    amber: "bg-amber-500",
+    green: "bg-green-500",
+    teal: "bg-teal-500",
+    blue: "bg-blue-500",
+    indigo: "bg-indigo-500",
+    purple: "bg-purple-500",
+    pink: "bg-pink-500",
+    gray: "bg-muted-foreground",
+  };
+  return map[color] ?? "bg-muted-foreground";
 }

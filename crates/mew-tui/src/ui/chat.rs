@@ -222,8 +222,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
             if matches!(part, Part::ToolCall(_)) {
                 // Find the end of the consecutive ToolCall run.
                 let run_start = part_idx;
-                while part_idx < msg.parts.len()
-                    && matches!(msg.parts[part_idx], Part::ToolCall(_))
+                while part_idx < msg.parts.len() && matches!(msg.parts[part_idx], Part::ToolCall(_))
                 {
                     part_idx += 1;
                 }
@@ -313,8 +312,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                             app.tool_states.get(&tc.base.id)
                         {
                             if !output.is_empty() {
-                                let parsed =
-                                    output.as_str().into_text().unwrap_or_default();
+                                let parsed = output.as_str().into_text().unwrap_or_default();
                                 let is_bash = tc.tool_name == "bash";
                                 let lines = parsed.lines;
                                 let line_count = lines.len();
@@ -332,10 +330,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                             vec![
                                                 Span::styled("      ", tool_bg_style),
                                                 Span::styled(
-                                                    format!(
-                                                        "... ({} earlier lines)",
-                                                        skip
-                                                    ),
+                                                    format!("... ({} earlier lines)", skip),
                                                     Style::default()
                                                         .fg(Color::DarkGray)
                                                         .bg(app.theme.tokens.tool_bg),
@@ -392,9 +387,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                             .fg(Color::Green)
                                             .bg(app.theme.tokens.tool_bg)
                                     } else if line.starts_with('-') {
-                                        Style::default()
-                                            .fg(Color::Red)
-                                            .bg(app.theme.tokens.tool_bg)
+                                        Style::default().fg(Color::Red).bg(app.theme.tokens.tool_bg)
                                     } else {
                                         Style::default()
                                             .fg(Color::DarkGray)
@@ -430,12 +423,10 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                                 }
                             }
                         }
-                        if let Some(ToolDisplayState::Error(err)) =
-                            app.tool_states.get(&tc.base.id)
+                        if let Some(ToolDisplayState::Error(err)) = app.tool_states.get(&tc.base.id)
                         {
                             if !err.is_empty() {
-                                let parsed =
-                                    err.as_str().into_text().unwrap_or_default();
+                                let parsed = err.as_str().into_text().unwrap_or_default();
                                 for line in parsed.lines {
                                     for wrapped in wrap_tool_line(
                                         tool_width,
@@ -519,9 +510,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                         format!("{}, +{}", unique_names[0], unique_names.len() - 1)
                     };
 
-                    if let Some(line) =
-                        push_tool_edge(tool_width, true, app.theme.tokens.tool_bg)
-                    {
+                    if let Some(line) = push_tool_edge(tool_width, true, app.theme.tokens.tool_bg) {
                         sel_ctx.push_line(line);
                     }
                     sel_ctx.push_line(push_tool_line(
@@ -529,12 +518,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                         vec![
                             Span::styled("  ", tool_bg_style),
                             Span::styled(
-                                format!(
-                                    "{} {} tool calls: {}",
-                                    state_glyph,
-                                    run_len,
-                                    names_str
-                                ),
+                                format!("{} {} tool calls: {}", state_glyph, run_len, names_str),
                                 Style::default()
                                     .fg(state_color)
                                     .bg(app.theme.tokens.tool_bg)
@@ -549,8 +533,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
                         ],
                         tool_bg_style,
                     ));
-                    if let Some(line) =
-                        push_tool_edge(tool_width, false, app.theme.tokens.tool_bg)
+                    if let Some(line) = push_tool_edge(tool_width, false, app.theme.tokens.tool_bg)
                     {
                         sel_ctx.push_line(line);
                     }

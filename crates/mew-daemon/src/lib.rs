@@ -530,7 +530,7 @@ where
                 auto_summary_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!(auto_summary = enabled, "auto-summary setting changed");
             }
-            ClientMessage::Prompt { text, .. } => {
+            ClientMessage::Prompt { text, attachments } => {
                 let Some(session) = attached_session.clone() else {
                     reply(ServerMessage::Error {
                         message: "no session — send NewSession or AttachSession first".into(),
@@ -556,7 +556,8 @@ where
                     let agent = session.agent.lock().await.clone();
                     let prompt_text = text.clone();
                     let auto_title = auto_title_enabled;
-                    let had_error = run_turn(&session, &session_mgr, &agent, text).await;
+                    let had_error =
+                        run_turn(&session, &session_mgr, &agent, text, attachments).await;
 
                     // Generate a session title from the first user message
                     // if we haven't already. Uses a lightweight LLM call;
@@ -681,6 +682,7 @@ where
                                     &session_manager_clone,
                                     &wiki_agent,
                                     wiki_prompt.to_string(),
+                                    vec![],
                                 )
                                 .await;
                                 if had_error {
@@ -1021,6 +1023,84 @@ where
                     drop(active);
                 }
             }
+
+            // -- Personas --
+            ClientMessage::ListPersonas => {
+                let Some(session) = attached_session.clone() else {
+                    reply(ServerMessage::Error {
+                        message: "no session".into(),
+                    });
+                    continue;
+                };
+                let agent = session.agent.lock().await;
+                let current = &agent.persona_name;
+                let personas: Vec<mew_protocol::PersonaInfo> = agent
+                    .personas
+                    .iter()
+                    .map(|p| mew_protocol::PersonaInfo {
+                        name: p.name.clone(),
+                        description: p.description.clone(),
+                        color: None,
+                        active: current.as_deref() == Some(&p.name),
+                    })
+                    .collect();
+                reply(ServerMessage::PersonaList { personas });
+            }
+            ClientMessage::SwitchPersona { name } => {
+                let Some(session) = attached_session.clone() else {
+                    reply(ServerMessage::Error {
+                        message: "no session".into(),
+                    });
+                    continue;
+                };
+                let client_tx = client_tx.clone();
+                let switcher = session_manager.switcher.clone();
+                tokio::spawn(async move {
+                    let _guard = session.turn_lock.lock().await;
+                    let mut agent = session.agent.lock().await;
+                    let persona = agent.personas.iter().find(|p| p.name == name).cloned();
+                    match persona {
+                        Some(p) => {
+                            // apply_persona returns a pinned model if the
+                            // persona config specifies one.
+                            let pinned_model = agent.apply_persona(&p);
+                            let persona_name = p.name.clone();
+                            let _ = client_tx.send(ServerMessage::PersonaSwitched {
+                                name: persona_name.clone(),
+                            });
+                            // If the persona pinned a model, apply it via
+                            // the switcher (same path as SwitchModel).
+                            if let Some(model_str) = pinned_model {
+                                if let Some(switcher) = &switcher {
+                                    if let Some((provider, model)) = model_str.split_once('/') {
+                                        if let Ok((new_provider, new_model)) =
+                                            switcher(&mut agent, provider, model)
+                                        {
+                                            *session.provider.lock().await =
+                                                Some(new_provider.clone());
+                                            *session.model.lock().await = Some(new_model.clone());
+                                            session
+                                                .broadcast(ServerMessage::ModelSwitched {
+                                                    provider: new_provider,
+                                                    model: new_model,
+                                                })
+                                                .await;
+                                        }
+                                    }
+                                }
+                            }
+                            session
+                                .broadcast(ServerMessage::PersonaSwitched { name: persona_name })
+                                .await;
+                        }
+                        None => {
+                            let _ = client_tx.send(ServerMessage::Error {
+                                message: format!("unknown persona: {name}"),
+                            });
+                        }
+                    }
+                });
+            }
         }
     }
     if let (Some(session), Some(cid)) = (&attached_session, client_id) {
@@ -1074,6 +1154,7 @@ async fn run_turn(
     session_mgr: &Arc<SessionManager>,
     agent: &Agent,
     prompt_text: String,
+    attachments: Vec<mew_protocol::Attachment>,
 ) -> bool {
     let token = CancellationToken::new();
     *session.current_turn_cancel.lock().await = Some(token.clone());
@@ -1082,7 +1163,25 @@ async fn run_turn(
         .broadcast_activity(&session.id, SessionState::Running)
         .await;
 
-    let rx = agent.run_with_parts(prompt_text, vec![], Some(token));
+    // Convert wire attachments to message Parts.
+    let parts: Vec<mew_message::Part> = attachments
+        .iter()
+        .map(|a| {
+            let filename = a.path.rsplit('/').next().map(|s| s.to_string());
+            mew_message::Part::File(mew_message::FilePart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                mime: a.mime.clone().unwrap_or_default(),
+                filename,
+                url: a.path.clone(),
+            })
+        })
+        .collect();
+
+    let rx = agent.run_with_parts(prompt_text, parts, Some(token));
     let had_error = forward_events(rx, session.clone(), session_mgr.clone()).await;
 
     *session.current_turn_cancel.lock().await = None;

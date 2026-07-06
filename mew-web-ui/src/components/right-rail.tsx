@@ -1,9 +1,10 @@
-import { useState, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { CheckCircle2, HelpCircle, Loader2, PlayCircle, XCircle, AlertCircle, Pin, X, Terminal } from "lucide-react";
 import { useSessionStore, type TodoItem, type SubagentInfo, type PendingAskUser, type JobInfo } from "../stores/session";
 import { cn } from "../lib/utils";
 import { AskUserForm } from "./ask-user-card";
 import { getClient } from "../lib/client-ref";
+import { FileTreePanel, ChangesPanel } from "./file-tree";
 import {
   Sheet,
   SheetContent,
@@ -12,7 +13,7 @@ import {
   SheetDescription,
 } from "@/components/ui/sheet";
 
-type TabKey = "todos" | "subagents" | "questions" | "jobs";
+type TabKey = "todos" | "subagents" | "questions" | "jobs" | "files" | "changes";
 
 interface RightRailProps {
   open: boolean;
@@ -26,6 +27,24 @@ export function RightRail({ open, onOpenChange }: RightRailProps) {
   const questions = useSessionStore((s) => s.pendingAskUser);
   const flaggedFiles = useSessionStore((s) => s.flaggedFiles);
   const jobs = useSessionStore((s) => s.jobs);
+  const gitStatus = useSessionStore((s) => s.gitStatus);
+  const sessionId = useSessionStore((s) => s.sessionId);
+
+  // When the Files or Changes tab is opened, enable workspace watching so
+  // fs_changed events keep the listings/git status live. Stop watching
+  // when those tabs are closed to avoid unnecessary traffic.
+  useEffect(() => {
+    if (!open || !sessionId) return;
+    if (activeTab !== "files" && activeTab !== "changes") return;
+    const client = getClient();
+    if (!client) return;
+    client.watchWorkspace(sessionId, true);
+    // Also seed the git status when the Changes tab opens.
+    if (activeTab === "changes") client.gitStatus(sessionId);
+    return () => {
+      client.watchWorkspace(sessionId, false);
+    };
+  }, [open, activeTab, sessionId]);
 
   const activeCounts = {
     todos: todos.filter((t) => t.status === "in_progress" || t.status === "pending").length,
@@ -34,6 +53,8 @@ export function RightRail({ open, onOpenChange }: RightRailProps) {
     jobs: [...jobs.values()].filter(
       (j) => j.state !== "done" && j.state !== "failed" && j.state !== "cancelled",
     ).length,
+    files: 0,
+    changes: gitStatus.length,
   };
   const totalActive = activeCounts.todos + activeCounts.subagents + activeCounts.questions + activeCounts.jobs;
 
@@ -115,6 +136,18 @@ export function RightRail({ open, onOpenChange }: RightRailProps) {
             active={activeTab === "jobs"}
             onClick={() => setActiveTab("jobs")}
           />
+          <TabButton
+            label="Files"
+            count={activeCounts.files}
+            active={activeTab === "files"}
+            onClick={() => setActiveTab("files")}
+          />
+          <TabButton
+            label="Changes"
+            count={activeCounts.changes}
+            active={activeTab === "changes"}
+            onClick={() => setActiveTab("changes")}
+          />
         </div>
 
         {/* Content */}
@@ -128,6 +161,8 @@ export function RightRail({ open, onOpenChange }: RightRailProps) {
             />
           )}
           {activeTab === "jobs" && <JobsRailPanel jobs={jobs} />}
+          {activeTab === "files" && <FileTreePanel />}
+          {activeTab === "changes" && <ChangesPanel gitStatus={gitStatus} />}
         </div>
       </SheetContent>
     </Sheet>

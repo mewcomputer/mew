@@ -947,6 +947,8 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     } else {
                         Some(Action::InsertAtMention(format!("@{}", id)))
                     }
+                } else if kind == "session" {
+                    Some(Action::AttachSession(id))
                 } else {
                     None
                 }
@@ -1035,4 +1037,7 @@ pub enum Action {
     /// Set or clear the thinking variant. Fires from `/thinking <variant>`,
     /// the thinking variant picker, or Ctrl+P cycling.
     SetThinkingVariant(String),
+    /// Attach to a different daemon session (switch chat). Only meaningful
+    /// in daemon mode; local `run_tui` handles it as a no-op with an alert.
+    AttachSession(String),
 }

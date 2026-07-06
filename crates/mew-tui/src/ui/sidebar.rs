@@ -276,6 +276,11 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         Style::default().fg(app.theme.tokens.divider),
     )));
 
+    // Sessions (daemon mode only)
+    if app.daemon_mode {
+        draw_sessions_section(&mut text, &mut visual_row, app, area.width);
+    }
+
     // Subagents
     if !app.subagents.is_empty() {
         text.push_line(Line::from(vec![Span::styled(
@@ -469,4 +474,111 @@ fn draw_companion_section(text: &mut Text, visual_row: &mut u16, app: &mut App, 
         }
         *visual_row += info.lines().count().min(12) as u16;
     }
+}
+
+/// Render the daemon "Sessions" sidebar section. Shows each non-archived
+/// session from `daemon_sessions` with: state glyph, title (or summary
+/// or short id), attention badge, cost. The active session is marked.
+fn draw_sessions_section(text: &mut Text, visual_row: &mut u16, app: &mut App, width: u16) {
+    let collapsed = app
+        .sidebar_collapsed
+        .get("sessions")
+        .copied()
+        .unwrap_or(false);
+    let arrow = if collapsed { "▶" } else { "▼" };
+    app.sidebar_header_rows
+        .push((*visual_row, "sessions".into()));
+    *visual_row += 1;
+
+    let count = app.daemon_sessions.iter().filter(|s| !s.archived).count();
+    text.push_line(Line::from(vec![
+        Span::styled(arrow, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" Sessions ({})", count),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    if collapsed {
+        return;
+    }
+
+    if app.daemon_sessions.is_empty() {
+        text.push_line(Line::from(Span::styled(
+            "  no sessions",
+            Style::default().fg(Color::DarkGray),
+        )));
+        *visual_row += 1;
+    } else {
+        let active_id = app.status.session_id.clone();
+        let sessions = app.daemon_sessions.clone();
+        let titles = app.session_titles.clone();
+        let attention = app.session_attention.clone();
+        let max_title = width.saturating_sub(14) as usize;
+
+        for s in sessions.iter().filter(|s| !s.archived) {
+            let title = titles
+                .get(&s.session_id)
+                .cloned()
+                .or_else(|| s.summary.clone())
+                .unwrap_or_else(|| s.session_id.chars().take(8).collect::<String>());
+            let title_display: String = title.chars().take(max_title).collect();
+            let title_str = if title.chars().count() > max_title {
+                format!("{}…", title_display)
+            } else {
+                title_display
+            };
+
+            let (glyph, glyph_color) = match s.state {
+                mew_protocol::SessionState::Running => ("▶", Color::Yellow),
+                mew_protocol::SessionState::Active => ("●", Color::Green),
+                mew_protocol::SessionState::Idle => ("○", Color::DarkGray),
+            };
+
+            let cost = s
+                .usage
+                .as_ref()
+                .map(|u| format!("${:.2}", u.cost))
+                .unwrap_or_default();
+
+            // Attention badge: [!] for pending perms, [?] for pending questions.
+            let badge = attention.get(&s.session_id);
+            let (perm_n, quest_n) = badge.unwrap_or(&(0, 0));
+            let badge_str = if *perm_n > 0 && *quest_n > 0 {
+                format!(" [{}!{}?]", perm_n, quest_n)
+            } else if *perm_n > 0 {
+                format!(" [{}!]", perm_n)
+            } else if *quest_n > 0 {
+                format!(" [{}?]", quest_n)
+            } else {
+                String::new()
+            };
+            let badge_color = if *perm_n > 0 {
+                Color::Yellow
+            } else {
+                Color::Cyan
+            };
+
+            let is_active = s.session_id == active_id;
+            let marker = if is_active { "▸" } else { " " };
+            let title_color = if is_active { Color::White } else { Color::Gray };
+
+            text.push_line(Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Green)),
+                Span::styled(format!(" {} ", glyph), Style::default().fg(glyph_color)),
+                Span::styled(title_str, Style::default().fg(title_color)),
+                Span::styled(format!("  {}", cost), Style::default().fg(Color::DarkGray)),
+                Span::styled(badge_str, Style::default().fg(badge_color)),
+            ]));
+            *visual_row += 1;
+        }
+    }
+
+    text.push_line(Line::from(Span::styled(
+        "─".repeat(width.saturating_sub(2) as usize),
+        Style::default().fg(app.theme.tokens.divider),
+    )));
+    *visual_row += 1;
 }

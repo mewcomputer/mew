@@ -592,11 +592,9 @@ impl App {
             ServerMessage::SessionList { sessions } => {
                 self.daemon_sessions = sessions.clone();
             }
-            ServerMessage::SessionTitleChanged {
-                session_id,
-                title,
-            } => {
-                self.session_titles.insert(session_id.clone(), title.clone());
+            ServerMessage::SessionTitleChanged { session_id, title } => {
+                self.session_titles
+                    .insert(session_id.clone(), title.clone());
             }
             ServerMessage::SessionSummaryChanged {
                 session_id,
@@ -628,9 +626,7 @@ impl App {
                         .session_titles
                         .get(session_id)
                         .cloned()
-                        .unwrap_or_else(|| {
-                            session_id.chars().take(8).collect::<String>()
-                        });
+                        .unwrap_or_else(|| session_id.chars().take(8).collect::<String>());
                     format!("[{}] ", name)
                 } else {
                     String::new()
@@ -661,7 +657,9 @@ impl App {
                 self.auto_scroll = true;
                 self.pending_md_rerender = self.messages.last().map(|m| m.id);
             }
-            ServerMessage::ModelSwitched { provider, model, .. } => {
+            ServerMessage::ModelSwitched {
+                provider, model, ..
+            } => {
                 self.status.provider = provider.clone();
                 self.status.model = model.clone();
             }
@@ -742,6 +740,67 @@ impl App {
         self.mode = Mode::CommandPalette;
         self.picker = Some(PickerState {
             kind: "model".into(),
+            items,
+            filter: String::new(),
+            selected: 0,
+            cursor: 0,
+            scroll: 0,
+            visible_items: PICKER_VISIBLE_ITEMS,
+        });
+    }
+
+    /// Open the session switcher picker (daemon mode only). Builds
+    /// `PickerItem`s from `daemon_sessions`: id, label (state glyph +
+    /// title + cost), description (cwd + last-active). The active
+    /// session gets an "● active" suffix.
+    pub fn open_session_picker(&mut self) {
+        let active_id = &self.status.session_id;
+        let items: Vec<PickerItem> = self
+            .daemon_sessions
+            .iter()
+            .filter(|s| !s.archived)
+            .map(|s| {
+                let title = self
+                    .session_titles
+                    .get(&s.session_id)
+                    .cloned()
+                    .or_else(|| s.summary.clone())
+                    .unwrap_or_else(|| s.session_id.chars().take(8).collect());
+                let glyph = match s.state {
+                    mew_protocol::SessionState::Running => "▶",
+                    mew_protocol::SessionState::Active => "●",
+                    mew_protocol::SessionState::Idle => "○",
+                };
+                let cost = s
+                    .usage
+                    .as_ref()
+                    .map(|u| format!("${:.2}", u.cost))
+                    .unwrap_or_default();
+                let is_active = &s.session_id == active_id;
+                let marker = if is_active { " ● active" } else { "" };
+                let label = format!("{} {} {}{}", glyph, title, cost, marker);
+
+                let cwd_str = s.cwd.as_deref().unwrap_or("—");
+                let last = s
+                    .last_message_at
+                    .map(|ts| {
+                        chrono::DateTime::from_timestamp(ts, 0)
+                            .map(|dt| dt.format("%m-%d %H:%M").to_string())
+                            .unwrap_or_else(|| "—".to_string())
+                    })
+                    .unwrap_or_else(|| "—".to_string());
+                let desc = format!("cwd: {}  ·  last: {}", cwd_str, last);
+
+                PickerItem {
+                    id: s.session_id.clone(),
+                    label,
+                    description: desc,
+                }
+            })
+            .collect();
+        self.mode = Mode::CommandPalette;
+        self.picker = Some(PickerState {
+            kind: "session".into(),
             items,
             filter: String::new(),
             selected: 0,
@@ -1910,6 +1969,14 @@ impl App {
                 name: "/yield".into(),
                 description: "yield control to other clients".into(),
             },
+            SlashCommand {
+                name: "/autotitle".into(),
+                description: "toggle auto session titling (daemon mode)".into(),
+            },
+            SlashCommand {
+                name: "/autosummary".into(),
+                description: "toggle auto session summaries (daemon mode)".into(),
+            },
         ]
     }
 
@@ -2023,6 +2090,9 @@ impl App {
                 }
             }
             "/sessions" => SlashResult::Message(self.build_sessions_list()),
+            "/autotitle" | "/autosummary" => {
+                SlashResult::Message("this command is only available in daemon mode".into())
+            }
             "/mouse" | "/m" => SlashResult::ToggleMouseCapture,
             "/resume" => {
                 if let Some(id) = arg {

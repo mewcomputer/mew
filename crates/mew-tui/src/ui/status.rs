@@ -130,6 +130,39 @@ fn build_pills(app: &App) -> Vec<Pill> {
         });
     }
 
+    // Cross-session attention (daemon mode): show "N need you" in amber
+    // when any non-active session has pending permissions or questions.
+    if app.daemon_mode {
+        let total_attention: u32 = app
+            .session_attention
+            .iter()
+            .filter(|(id, _)| *id != &app.status.session_id)
+            .map(|(_, (p, q))| p + q)
+            .sum();
+        if total_attention > 0 {
+            pills.push(Pill {
+                text: format!("{} need you", total_attention),
+                fg: Color::Rgb(60, 35, 5),
+                bg: Color::Rgb(245, 200, 80),
+            });
+        }
+    }
+
+    // Session title (daemon mode): show the active session's title
+    // next to the model/provider pills so the user can identify which
+    // conversation they're in.
+    if app.daemon_mode {
+        if let Some(title) = app.session_titles.get(&app.status.session_id) {
+            if !title.is_empty() {
+                pills.push(Pill {
+                    text: title.clone(),
+                    fg: Color::Rgb(200, 200, 220),
+                    bg: Color::Rgb(40, 40, 60),
+                });
+            }
+        }
+    }
+
     // Future pills slot in here: persona, perms, plugin-contributed, etc.
     pills
 }

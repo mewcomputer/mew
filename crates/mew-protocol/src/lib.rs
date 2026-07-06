@@ -186,6 +186,16 @@ pub enum ClientMessage {
         session_id: String,
         path: String,
     },
+
+    // -- Personas --
+    /// List available personas for the active session.
+    ListPersonas,
+
+    /// Switch the active session to a different persona.
+    SwitchPersona {
+        /// Persona name (must match one returned by `ListPersonas`).
+        name: String,
+    },
 }
 
 /// What kind of client is connected to a session.
@@ -672,6 +682,20 @@ pub enum ServerMessage {
         pending_permissions: u32,
         pending_questions: u32,
     },
+
+    // -- Personas --
+    /// Response to `ListPersonas`: the full set of personas available
+    /// to the active session.
+    PersonaList {
+        personas: Vec<PersonaInfo>,
+    },
+
+    /// Confirmation that a persona switch succeeded. Distinct from
+    /// `PersonaSwitchRequested` (which is emitted when a tool queues
+    /// a persona switch during a turn).
+    PersonaSwitched {
+        name: String,
+    },
 }
 
 /// Wire-format info about a flagged file.
@@ -680,6 +704,20 @@ pub struct FlaggedFileWire {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Wire-format info about a persona, returned by `ListPersonas`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonaInfo {
+    /// Persona name (unique identifier).
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// Optional color token for UI display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Whether this persona is currently active.
+    pub active: bool,
 }
 
 /// Alert kind for cross-session notifications.
@@ -1446,6 +1484,56 @@ mod tests {
         };
         match round_trip(&m) {
             ServerMessage::PersonaSwitchRequested { name } => assert_eq!(name, "explorer"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn client_message_list_personas_roundtrip() {
+        let m = ClientMessage::ListPersonas;
+        assert!(matches!(round_trip(&m), ClientMessage::ListPersonas));
+    }
+
+    #[test]
+    fn client_message_switch_persona_roundtrip() {
+        let m = ClientMessage::SwitchPersona {
+            name: "code-reviewer".into(),
+        };
+        match round_trip(&m) {
+            ClientMessage::SwitchPersona { name } => assert_eq!(name, "code-reviewer"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn server_message_persona_list_roundtrip() {
+        let m = ServerMessage::PersonaList {
+            personas: vec![PersonaInfo {
+                name: "default".into(),
+                description: "Default persona".into(),
+                color: Some("blue".into()),
+                active: true,
+            }],
+        };
+        match round_trip(&m) {
+            ServerMessage::PersonaList { personas } => {
+                assert_eq!(personas.len(), 1);
+                assert_eq!(personas[0].name, "default");
+                assert!(personas[0].active);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn server_message_persona_switched_roundtrip() {
+        let m = ServerMessage::PersonaSwitched {
+            name: "code-reviewer".into(),
+        };
+        match round_trip(&m) {
+            ServerMessage::PersonaSwitched { name } => {
+                assert_eq!(name, "code-reviewer")
+            }
             _ => panic!(),
         }
     }

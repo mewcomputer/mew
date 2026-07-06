@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { toast } from "sonner";
 import { navigateToSession } from "../lib/router-ref";
+import { getClient } from "../lib/client-ref";
 import type {
   MewClient,
   ProviderEventWire,
@@ -764,7 +765,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   onGitStatus: (entries) => set({ gitStatus: entries }),
 
-  onFsChanged: () => {},
+  // When the filesystem changes (watchWorkspace), re-fetch the current dir
+  // listing and git status so the Files/Changes tabs stay live. The client
+  // is reached through the module-level ref set in App.tsx.
+  onFsChanged: () => {
+    const client = getClient();
+    const sid = get().sessionId;
+    if (!client || !sid) return;
+    client.listDir(sid, get().dirListingPath ?? undefined);
+    client.gitStatus(sid);
+  },
 
   onSessionUsageChanged: (sessionId, usage) =>
     set((state) => {

@@ -606,7 +606,9 @@ async fn translate_server_message(
         | ServerMessage::SessionTitleChanged { .. }
         | ServerMessage::SessionSummaryChanged { .. }
         | ServerMessage::SessionAlert { .. }
-        | ServerMessage::FlaggedFilesChanged { .. } => {
+        | ServerMessage::FlaggedFilesChanged { .. }
+        | ServerMessage::PersonaList { .. }
+        | ServerMessage::PersonaSwitched { .. } => {
             let _ = state.notify_tx.send(msg.clone()).await;
             Vec::new()
         }

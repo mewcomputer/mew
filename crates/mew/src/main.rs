@@ -1988,6 +1988,10 @@ async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()>
                                         let sid = arg.to_string();
                                         tokio::spawn(async move {
                                             let _ = client.attach_session(&sid).await;
+                                            // Request a fresh session list so
+                                            // the rail updates with the new
+                                            // active session.
+                                            client.list_sessions().await;
                                         });
                                         app.set_alert(format!("attaching to {arg}…"));
                                     } else {
@@ -2004,6 +2008,38 @@ async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()>
                                     });
                                     app.set_alert("control yielded");
                                 }
+                                "/sessions" => {
+                                    // Request a fresh session list from the
+                                    // daemon, then open the session picker.
+                                    client.list_sessions().await;
+                                    app.open_session_picker();
+                                }
+                                "/autotitle" => {
+                                    app.auto_title = !app.auto_title;
+                                    let enabled = app.auto_title;
+                                    let client = client.clone();
+                                    tokio::spawn(async move {
+                                        client.set_auto_title(enabled).await;
+                                    });
+                                    app.set_alert(if enabled {
+                                        "auto-title enabled"
+                                    } else {
+                                        "auto-title disabled"
+                                    });
+                                }
+                                "/autosummary" => {
+                                    app.auto_summary = !app.auto_summary;
+                                    let enabled = app.auto_summary;
+                                    let client = client.clone();
+                                    tokio::spawn(async move {
+                                        client.set_auto_summary(enabled).await;
+                                    });
+                                    app.set_alert(if enabled {
+                                        "auto-summary enabled"
+                                    } else {
+                                        "auto-summary disabled"
+                                    });
+                                }
                                 _ => {
                                     // Let the TUI handle it locally.
                                     let result = app.handle_slash(&text);
@@ -2016,6 +2052,17 @@ async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()>
                             tokio::spawn(async move {
                                 client.slash_command("/clear".into()).await;
                             });
+                        }
+                        mew_tui::events::Action::AttachSession(id) => {
+                            let client = client.clone();
+                            let sid = id.clone();
+                            tokio::spawn(async move {
+                                let _ = client.attach_session(&sid).await;
+                                // Request a fresh session list so the rail
+                                // updates with the new active session.
+                                client.list_sessions().await;
+                            });
+                            app.set_alert(format!("attaching to {}…", &id[..8.min(id.len())]));
                         }
                         _ => {}
                     }
@@ -3243,6 +3290,9 @@ async fn run_tui(
                                 }
                             }
                         }
+                        mew_tui::events::Action::AttachSession(_) => {
+                            app.set_alert("session switching is only available in daemon mode");
+                        }
                     }
                 }
             }
@@ -3499,6 +3549,9 @@ async fn run_tui(
                                 // effectively unreachable in the drain path.
                             }
                             mew_tui::events::Action::SetThinkingVariant(_) => {
+                                // Deferred to main loop; ignored during drain.
+                            }
+                            mew_tui::events::Action::AttachSession(_) => {
                                 // Deferred to main loop; ignored during drain.
                             }
                             mew_tui::events::Action::SaveSettings
