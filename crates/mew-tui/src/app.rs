@@ -185,6 +185,20 @@ pub struct App {
     pub last_md_width: u16,
     /// Max scroll offset from the most recent render, used to re-attach auto-scroll.
     pub max_scroll: u16,
+    /// Cached rendered chat (the built `Text` + `chat_rows` + layout
+    /// metadata). Rebuilding this is O(total transcript), so we keep it
+    /// across frames and only rebuild when the rendered output actually
+    /// changes. `chat_dirty` is bumped by every mutator that affects the
+    /// build; scroll does not bump it. See `RenderedChat` and
+    /// `App::ensure_chat_rendered`.
+    pub rendered_chat: Option<RenderedChat>,
+    /// Generation counter for `rendered_chat`. Bumped whenever the chat
+    /// render output may have changed. `None` means "force rebuild on next
+    /// draw" (initial state, or after a width change invalidated the cache).
+    pub chat_dirty: Option<u64>,
+    /// Width the cached chat was built at. Width changes invalidate the
+    /// cache (line wrapping depends on it).
+    pub rendered_chat_width: u16,
     /// Set on the first Esc press while streaming; second Esc within the window cancels.
     pub esc_cancel_pending: Option<Instant>,
     /// Set on the first Ctrl-c press while streaming; second Ctrl-c within 1s exits.
@@ -274,6 +288,39 @@ pub struct App {
     /// Tool-call batch expansion state. Keys are the first tool call's
     /// `PartId` in a batch; presence means the batch is expanded.
     pub tool_batch_expanded: std::collections::HashSet<mew_message::PartId>,
+}
+
+/// Cached result of building the chat `Text` for one transcript state.
+///
+/// `lines` holds every rendered line (already indented, em-dash-fixed,
+/// selection applied, and pre-wrapped to ≤ chat width so each entry is
+/// exactly one visual row — letting us slice the visible window without
+/// ratatui's O(scroll.y) skip). `chat_rows` is the plain-text mirror used
+/// by mouse selection. `max_scroll` is cached so `scroll_up`/`scroll_down`
+/// can clamp without rebuilding. `dirty_gen` is the `chat_dirty` generation
+/// this cache was built from, so a stale cache is detected in O(1).
+#[derive(Clone)]
+pub struct RenderedChat {
+    /// Plain lines (already indented, em-dash-fixed, selection applied,
+    /// pre-wrapped to ≤ chat width).
+    pub lines: Vec<ratatui::text::Line<'static>>,
+    /// One plain-text string per visual row, for mouse-selection mapping.
+    pub chat_rows: Vec<String>,
+    /// Total line count (`lines.len()`). Cached because it's needed for
+    /// `max_scroll` and scrollbar geometry on every render.
+    pub total_wrapped: u16,
+    /// `max_scroll = total_wrapped.saturating_sub(area_height)`; cached at
+    /// build time so scroll mutators don't need to rebuild.
+    pub max_scroll: u16,
+    /// The `chat_dirty` generation this cache was built from.
+    pub dirty_gen: u64,
+}
+
+/// Return type of `build_chat_lines` — the built lines + plain-text mirror,
+/// before being wrapped in a `RenderedChat` with geometry metadata.
+pub struct BuiltChat {
+    pub lines: Vec<ratatui::text::Line<'static>>,
+    pub chat_rows: Vec<String>,
 }
 
 /// A running or completed subagent task shown in the sidebar.
@@ -542,6 +589,9 @@ impl App {
             rendered_md_cache: HashMap::new(),
             last_md_width: 0,
             max_scroll: 0,
+            rendered_chat: None,
+            chat_dirty: None,
+            rendered_chat_width: 0,
             esc_cancel_pending: None,
             ctrl_c_quit_pending: None,
             retry_status: None,
@@ -656,6 +706,7 @@ impl App {
                 }
                 self.auto_scroll = true;
                 self.pending_md_rerender = self.messages.last().map(|m| m.id);
+                self.mark_chat_dirty();
             }
             ServerMessage::ModelSwitched {
                 provider, model, ..
@@ -1214,6 +1265,7 @@ impl App {
         self.sel_anchor_col = None;
         self.sel_end_row = None;
         self.sel_end_col = None;
+        self.mark_chat_dirty();
     }
 
     /// Toggle a sidebar section's collapsed state by name ("context", "tools", "mcp").
@@ -1766,6 +1818,64 @@ impl App {
         }
     }
 
+    /// Mark the cached chat render as stale so the next draw rebuilds it.
+    /// Call from every mutator that changes what `draw_chat` would produce.
+    /// Scroll mutators must NOT call this — they re-render from cache.
+    pub fn mark_chat_dirty(&mut self) {
+        self.chat_dirty = Some(self.chat_dirty.unwrap_or(0).wrapping_add(1));
+    }
+
+    /// Ensure `rendered_chat` is up to date for the current `chat_dirty`
+    /// generation and width. Rebuilds only when stale — idle scroll frames
+    /// (which don't bump `chat_dirty`) skip the rebuild and stay O(visible).
+    /// `area_height` is needed to compute `max_scroll` so scroll mutators
+    /// can clamp without rebuilding.
+    pub fn ensure_chat_rendered(&mut self, md_width: u16, chat_width: u16, area_height: u16) {
+        if md_width == 0 || chat_width == 0 {
+            return;
+        }
+        let dirty = self.chat_dirty;
+        let width_ok = self.rendered_chat_width == chat_width;
+        let cache_ok = matches!(
+            (&self.rendered_chat, &dirty, width_ok),
+            (Some(_), Some(_), true)
+        ) && self.rendered_chat.as_ref().map(|c| c.dirty_gen) == dirty;
+        if !cache_ok {
+            let built = crate::ui::chat::build_chat_lines(self, md_width, chat_width);
+            let total_lines = built.lines.len() as u16;
+            let max_scroll = total_lines.saturating_sub(area_height);
+            self.max_scroll = max_scroll;
+            // Publish the plain-text mirror for mouse selection + the
+            // companion overlay. Only on rebuild — idle scroll frames skip
+            // this clone, keeping them O(visible).
+            self.chat_rows = built.chat_rows.clone();
+            self.rendered_chat = Some(RenderedChat {
+                lines: built.lines,
+                chat_rows: built.chat_rows,
+                total_wrapped: total_lines,
+                max_scroll,
+                dirty_gen: dirty.unwrap_or(0),
+            });
+            self.rendered_chat_width = chat_width;
+            // Re-attach auto-scroll to the new bottom. While streaming we
+            // always pin to the bottom; otherwise only if already anchored.
+            if self.auto_scroll {
+                self.scroll = max_scroll;
+            }
+        } else if let Some(ref mut rc) = self.rendered_chat {
+            // Width and content are unchanged, but area_height may have
+            // changed (resize). Recompute max_scroll cheaply.
+            let max_scroll = rc.total_wrapped.saturating_sub(area_height);
+            if rc.max_scroll != max_scroll {
+                rc.max_scroll = max_scroll;
+                self.max_scroll = max_scroll;
+                if self.auto_scroll {
+                    self.scroll = max_scroll;
+                }
+            }
+        }
+    }
+
     pub fn push_synthetic_message(&mut self, text: String) {
         let msg_id = ulid::Ulid::new();
         self.messages.push(Message {
@@ -1795,6 +1905,7 @@ impl App {
         self.tool_states.clear();
         self.rendered_md_cache.clear();
         self.pending_md_rerender = None;
+        self.mark_chat_dirty();
     }
 
     /// Rewind the display to keep only the first `n` messages. Cleans up
@@ -1807,11 +1918,13 @@ impl App {
         self.rendered_md_cache
             .retain(|id, _| self.messages.iter().any(|m| m.id == *id));
         self.pending_md_rerender = None;
+        self.mark_chat_dirty();
     }
 
     /// Toggle bash output expansion.
     pub fn toggle_bash_expanded(&mut self) {
         self.bash_expanded = !self.bash_expanded;
+        self.mark_chat_dirty();
     }
 
     /// Toggle reasoning/thinking block expansion.
@@ -1824,6 +1937,7 @@ impl App {
             } else {
                 self.reasoning_expanded.insert(id);
             }
+            self.mark_chat_dirty();
         }
     }
 
@@ -2344,6 +2458,7 @@ impl App {
                 // Start incremental markdown stream for this message.
                 self.md_stream = Some(mdstream::MdStream::new(mdstream::Options::default()));
                 self.md_state = mdstream::DocumentState::new();
+                self.mark_chat_dirty();
             }
             AgentEvent::Provider(ProviderEvent::PartDelta { part_id, delta, .. }) => {
                 let mut is_text_delta = false;
@@ -2369,8 +2484,11 @@ impl App {
                         self.md_state.apply(update);
                     }
                 }
+                self.mark_chat_dirty();
             }
-            AgentEvent::Provider(ProviderEvent::PartEnd { .. }) => {}
+            AgentEvent::Provider(ProviderEvent::PartEnd { .. }) => {
+                self.mark_chat_dirty();
+            }
             AgentEvent::Provider(ProviderEvent::MessageEnd {
                 finish,
                 usage,
@@ -2400,6 +2518,7 @@ impl App {
                 if let Some(msg) = self.messages.last_mut() {
                     msg.time.completed = Some(chrono::Utc::now().timestamp_millis());
                 }
+                self.mark_chat_dirty();
             }
             AgentEvent::Provider(ProviderEvent::RetryWait {
                 attempt,
@@ -2471,6 +2590,7 @@ impl App {
                         }
                     }
                 }
+                self.mark_chat_dirty();
             }
             AgentEvent::ToolProgress { call_id, chunk } => {
                 // Append chunk to the running tool call's output.
@@ -2489,6 +2609,7 @@ impl App {
                         }
                     }
                 }
+                self.mark_chat_dirty();
             }
             AgentEvent::ToolEnd { call_id, success } => {
                 for msg in self.messages.iter_mut().rev() {
@@ -2515,6 +2636,7 @@ impl App {
                         }
                     }
                 }
+                self.mark_chat_dirty();
             }
             AgentEvent::PartUpdated { part_id, part } => {
                 if let Part::ToolCall(tc) = &part {
@@ -2538,6 +2660,7 @@ impl App {
                         }
                     }
                 }
+                self.mark_chat_dirty();
             }
             AgentEvent::Error(msg) => {
                 self.streaming = false;

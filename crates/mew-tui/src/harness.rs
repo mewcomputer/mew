@@ -168,7 +168,6 @@ impl Harness {
                     end: None,
                 },
             }),
-            sensitivity: Some("readonly".into()),
             raw_input: String::new(),
         });
         self.agent(AgentEvent::Provider(ProviderEvent::PartStart {
@@ -195,7 +194,6 @@ impl Harness {
                     end: Some(0),
                 },
             }),
-            sensitivity: Some("readonly".into()),
             raw_input: String::new(),
         });
         self.agent(AgentEvent::PartUpdated {
