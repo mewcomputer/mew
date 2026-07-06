@@ -294,8 +294,7 @@ pub(crate) fn build_chat_lines(
             if matches!(part, Part::ToolCall(_)) {
                 // Find the end of the consecutive ToolCall run.
                 let run_start = part_idx;
-                while part_idx < msg.parts.len()
-                    && matches!(msg.parts[part_idx], Part::ToolCall(_))
+                while part_idx < msg.parts.len() && matches!(msg.parts[part_idx], Part::ToolCall(_))
                 {
                     part_idx += 1;
                 }
@@ -322,13 +321,7 @@ pub(crate) fn build_chat_lines(
                         } else {
                             unreachable!()
                         };
-                        render_single_tool_call(
-                            &mut sel_ctx,
-                            app,
-                            tc,
-                            tool_width,
-                            tool_bg_style,
-                        );
+                        render_single_tool_call(&mut sel_ctx, app, tc, tool_width, tool_bg_style);
                     }
                 } else {
                     // Collapsed batch summary row.
@@ -394,9 +387,7 @@ pub(crate) fn build_chat_lines(
                         format!("{}, +{}", unique_names[0], unique_names.len() - 1)
                     };
 
-                    if let Some(line) =
-                        push_tool_edge(tool_width, true, app.theme.tokens.tool_bg)
-                    {
+                    if let Some(line) = push_tool_edge(tool_width, true, app.theme.tokens.tool_bg) {
                         sel_ctx.push_line(line);
                     }
                     sel_ctx.push_line(push_tool_line(
@@ -404,10 +395,7 @@ pub(crate) fn build_chat_lines(
                         vec![
                             Span::styled("  ", tool_bg_style),
                             Span::styled(
-                                format!(
-                                    "{} {} tool calls: {}",
-                                    state_glyph, run_len, names_str
-                                ),
+                                format!("{} {} tool calls: {}", state_glyph, run_len, names_str),
                                 Style::default()
                                     .fg(state_color)
                                     .bg(app.theme.tokens.tool_bg)
@@ -422,8 +410,7 @@ pub(crate) fn build_chat_lines(
                         ],
                         tool_bg_style,
                     ));
-                    if let Some(line) =
-                        push_tool_edge(tool_width, false, app.theme.tokens.tool_bg)
+                    if let Some(line) = push_tool_edge(tool_width, false, app.theme.tokens.tool_bg)
                     {
                         sel_ctx.push_line(line);
                     }

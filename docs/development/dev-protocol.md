@@ -35,6 +35,8 @@ Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
 | `ListModels` | | Request the available model list |
 | `SwitchModel` | `provider: String`, `model: String` | Switch to a different model |
 | `SetThinkingVariant` | `variant: String` | Set or clear thinking variant ("off" or "none" disables) |
+| `Ping` | | Liveness check; daemon replies with `Pong` |
+| `ListProjects` | | List known project directories (for project picker UI) |
 
 ## Server → Client messages
 
@@ -87,6 +89,8 @@ Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
 | `SlashResult` | `text` | Slash command produced text output |
 | `Error` | `message` | Error before or outside a turn |
 | `ErrorEvent` | `message` | Terminal error during a turn |
+| `Pong` | `version: String` | Response to `Ping`; carries daemon version |
+| `ProjectList` | `projects: Vec<ProjectInfo>` | Response to `ListProjects`; deduped project directories with session counts |
 
 ## Session model
 

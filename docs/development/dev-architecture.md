@@ -40,6 +40,12 @@ Browser ──ws/http──▶ mew-web-bridge (127.0.0.1:9847)
                          └── unix ws ──▶ mew-daemon
 ```
 
+For mobile/remote access, the daemon can also listen over iroh (P2P
+QUIC with holepunching and relays) using `mew daemon --iroh`. The
+`mew pair` command generates a QR code that the iOS app scans to
+connect. See [iOS App](/docs/using-mew/ios-app/) and [Mobile Core
+Development](/docs/development/dev-mobile/) for details.
+
 ## Crate map
 
 | Crate | Purpose | Key Types |
@@ -52,6 +58,7 @@ Browser ──ws/http──▶ mew-web-bridge (127.0.0.1:9847)
 | `mew-hashline` | Line-anchored edits with hash staleness detection | `Patcher`, `SnapshotStore`, `Patch` |
 | `mew-protocol` | Wire message types | `ClientMessage`, `ServerMessage` |
 | `mew-daemon` | WebSocket server, session ownership | `DaemonServer`, `Session`, `SessionManager` |
+| `mew-mobile-core` | Rust core for iOS/Android (UniFFI) | `MobileCore`, `CoreEvent`, `SessionState` |
 | `mew-web-bridge` | TCP+WS bridge + static UI server | `handle_connection`, `proxy` |
 | `mew-web-client` | TypeScript client for the wire protocol | `MewClient`, `MewClientEvents` |
 | `mew-web-ui` | React chat UI | `App.tsx`, `SessionState`, `ChatSurface` |

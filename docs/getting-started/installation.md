@@ -125,7 +125,8 @@ interface.
 | `mew` | Start an interactive TUI session (default) |
 | `mew run "prompt"` | Run a single prompt non-interactively |
 | `mew chat` | Same as the default, but accepts `--connect` to attach to a remote daemon |
-| `mew daemon` | Start the WebSocket daemon (for web UI or remote clients) |
+| `mew daemon` | Start the WebSocket daemon (for web UI or remote clients). Add `--iroh` for P2P transport. |
+| `mew pair` | Generate a QR code for pairing mobile/remote clients over iroh. |
 | `mew config show` | Print current configuration |
 | `mew config edit` | Open the config file in your editor |
 | `mew debug` | Debug tools (permission simulator, VFS inspector) |

@@ -41,7 +41,9 @@ interaction:
 - **Model picker**: shows available models with thinking variant
   selection. Click to switch models.
 - **Title strip**: shows the session title and connection status.
-- **Session rail**: lists previous sessions. Click to resume.
+- **Session rail**: lists previous sessions. Click to resume. The folder
+  button opens a project picker — pick a recent project directory or
+  type a path to start a new session in that directory.
 - **Input area**: type your prompt. `Cmd/Ctrl+Enter` to send.
 - **Status footer**: shows token count, model, and connection state.
 - **Todo panel**: renders the agent's todo list when active.
