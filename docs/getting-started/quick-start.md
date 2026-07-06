@@ -42,8 +42,7 @@ This opens the TUI. The layout has three areas:
 - **Status bar** (top): shows the current model, provider, and context
   window usage.
 - **Sidebar** (left): toggle sections with `Ctrl+1` (context), `Ctrl+2`
-  (tools), `Ctrl+3` (MCP servers). The sidebar shows whenever the terminal
-  is wide enough.
+  (tools), `Ctrl+3` (MCP servers). Collapse entirely with `Ctrl+1` again.
 - **Chat** (center): messages stream in as the model responds. Tool calls
   appear as cards with their input and output.
 - **Input bar** (bottom): type your prompt and press `Enter`.

@@ -11,8 +11,8 @@ with domain-specific capabilities without writing Rust code.
 ## Configuration
 
 MCP servers are configured in `mcp.json` in your working directory. The
-code also checks `.mcp.json`, `.mew/mcp.json`, and `.mew/.mcp.json`.
-All present files are loaded and their servers merged.
+code also checks `.mcp.json`, `.mew/mcp.json`, and `.mew/.mcp.json`
+(in that order, first match wins).
 
 ### Stdio transport
 
@@ -124,12 +124,3 @@ consider whether it's the right tool for the task.
 MCP servers communicate over JSON-RPC, so any language that can read
 stdin and write stdout can implement one. The protocol spec is at
 [modelcontextprotocol.io](https://modelcontextprotocol.io).
-
-## MCP servers vs plugins
-
-MCP servers and [plugins](/docs/using-mew/plugins/) both spawn an external
-program and both can add tools, so they get confused. MCP servers only
-expose tools over a standard protocol; plugins can also hook the agent
-lifecycle, mutate requests, and hold state. See
-[Comparing Features](/docs/using-mew/comparisons/) for the full
-breakdown.

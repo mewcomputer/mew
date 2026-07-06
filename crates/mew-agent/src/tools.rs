@@ -3,8 +3,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use mew_hooks::{PermissionDecision, ToolCall as HookToolCall, ToolOutput};
 use mew_message::{
-    Message, MessageId, Part, PartBase, PartId, ToolCallPart, ToolResultPart, ToolState,
-    ToolStateCompleted, ToolStateError, ToolStateRunning, ToolTime,
+    Message, Part, PartBase, PartId, ToolCallPart, ToolResultPart, ToolState, ToolStateCompleted,
+    ToolStateError, ToolStateRunning, ToolTime,
 };
 use mew_tools::{Sensitivity, ToolCtx, ToolProgress};
 
@@ -160,134 +160,6 @@ impl Agent {
         (decision, deny_reason)
     }
 
-    /// Finalize a tool call with an error state. Handles the full
-    /// error-completion protocol: update assistant message, emit
-    /// PartUpdated, emit ToolEnd, push ToolResultPart, and call
-    /// on_tool_error hook.
-    #[allow(clippy::too_many_arguments)]
-    async fn finalize_tool_error(
-        &self,
-        tc: &ToolCallPart,
-        part_id: PartId,
-        assistant_id: MessageId,
-        assistant_msg: &mut Option<Message>,
-        ev_tx: &mpsc::Sender<AgentEvent>,
-        result_parts: &mut Vec<Part>,
-        input: &serde_json::Value,
-        error: String,
-    ) {
-        let now = Utc::now().timestamp_millis();
-        let error_state = ToolState::Error(ToolStateError {
-            input: input.clone(),
-            error: error.clone(),
-            time: ToolTime {
-                start: now,
-                end: Some(now),
-            },
-        });
-        if let Some(ref mut msg) = assistant_msg {
-            self.update_tool_call(msg, part_id, error_state.clone());
-        }
-        let _ = ev_tx
-            .send(AgentEvent::PartUpdated {
-                part_id,
-                part: Part::ToolCall(ToolCallPart {
-                    base: tc.base.clone(),
-                    tool_name: tc.tool_name.clone(),
-                    call_id: tc.call_id.clone(),
-                    state: error_state,
-                    sensitivity: tc.sensitivity.clone(),
-                    raw_input: tc.raw_input.clone(),
-                }),
-            })
-            .await;
-        let _ = ev_tx
-            .send(AgentEvent::ToolEnd {
-                call_id: tc.call_id.clone(),
-                success: false,
-            })
-            .await;
-        self.dispatcher
-            .on_tool_error(
-                &mew_hooks::ToolCall {
-                    tool_name: tc.tool_name.clone(),
-                    call_id: tc.call_id.clone(),
-                    input: input.clone(),
-                },
-                &error,
-            )
-            .await;
-        result_parts.push(Part::ToolResult(ToolResultPart {
-            base: PartBase {
-                id: ulid::Ulid::new(),
-                message_id: assistant_id,
-                session_id: self.session_id,
-            },
-            call_id: tc.call_id.clone(),
-        }));
-    }
-
-    /// Finalize a tool call with a success state. Handles the full
-    /// success-completion protocol: update assistant message, emit
-    /// PartUpdated, emit ToolEnd, push ToolResultPart. Does NOT call
-    /// on_tool_error (use finalize_tool_error for failures).
-    #[allow(clippy::too_many_arguments)]
-    async fn finalize_tool_success(
-        &self,
-        tc: &ToolCallPart,
-        part_id: PartId,
-        assistant_id: MessageId,
-        assistant_msg: &mut Option<Message>,
-        ev_tx: &mpsc::Sender<AgentEvent>,
-        result_parts: &mut Vec<Part>,
-        input: &serde_json::Value,
-        output: &str,
-        metadata: &Option<serde_json::Value>,
-        diff: &Option<String>,
-    ) {
-        let now = Utc::now().timestamp_millis();
-        let completed_state = ToolState::Completed(ToolStateCompleted {
-            input: input.clone(),
-            output: output.to_string(),
-            metadata: metadata.clone(),
-            diff: diff.clone(),
-            time: ToolTime {
-                start: now,
-                end: Some(now),
-            },
-        });
-        if let Some(ref mut msg) = assistant_msg {
-            self.update_tool_call(msg, part_id, completed_state.clone());
-        }
-        let _ = ev_tx
-            .send(AgentEvent::PartUpdated {
-                part_id,
-                part: Part::ToolCall(ToolCallPart {
-                    base: tc.base.clone(),
-                    tool_name: tc.tool_name.clone(),
-                    call_id: tc.call_id.clone(),
-                    state: completed_state,
-                    sensitivity: tc.sensitivity.clone(),
-                    raw_input: tc.raw_input.clone(),
-                }),
-            })
-            .await;
-        let _ = ev_tx
-            .send(AgentEvent::ToolEnd {
-                call_id: tc.call_id.clone(),
-                success: true,
-            })
-            .await;
-        result_parts.push(Part::ToolResult(ToolResultPart {
-            base: PartBase {
-                id: ulid::Ulid::new(),
-                message_id: assistant_id,
-                session_id: self.session_id,
-            },
-            call_id: tc.call_id.clone(),
-        }));
-    }
-
     pub(crate) async fn execute_pending_tool_calls(
         &self,
         pending: &[ToolCallPart],
@@ -336,7 +208,7 @@ impl Agent {
 
             if matches!(
                 tc.tool_name.as_str(),
-                "shell_background" | "shell_monitor" | "job_status" | "job_block" | "job_cancel"
+                "shell_background" | "job_status" | "job_block" | "job_cancel"
             ) {
                 self.execute_job_tool(tc, assistant_msg, ev_tx, &mut result_parts)
                     .await;
@@ -373,7 +245,6 @@ impl Agent {
                         tool_name: tc.tool_name.clone(),
                         call_id: tc.call_id.clone(),
                         state: running_state,
-                        sensitivity: tc.sensitivity.clone(),
                         raw_input: tc.raw_input.clone(),
                     }),
                 })
@@ -392,15 +263,17 @@ impl Agent {
 
             // Permission check. The escape tier inside the engine reads
             // the cwd to resolve relative path args. The agent layer's
-            // `ToolCtx` is constructed a few lines below with `self.cwd`
-            // as its cwd — we mirror that here so the engine sees the same
-            // working directory the tool itself will see.
+            // `ToolCtx` is constructed a few lines below with
+            // `std::env::current_dir()` as its cwd — we mirror that here
+            // so the engine sees the same working directory the tool
+            // itself will see.
             let sensitivity = self
                 .tools
                 .get(&tc.tool_name)
                 .map(|t| t.sensitivity())
                 .unwrap_or(Sensitivity::Dangerous);
-            let engine_cwd = self.cwd.clone();
+            let engine_cwd =
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let (decision, deny_reason) = self
                 .resolve_permission_decision(
                     &tc.tool_name,
@@ -422,34 +295,89 @@ impl Agent {
                     Some(reason) => format!("permission denied: {reason}"),
                     None => "permission denied".to_string(),
                 };
-                self.finalize_tool_error(
-                    tc,
-                    part_id,
-                    assistant_id,
-                    assistant_msg,
-                    ev_tx,
-                    &mut result_parts,
-                    &hook_call.input,
-                    perm_error,
-                )
-                .await;
+                let error_state = ToolState::Error(ToolStateError {
+                    input: hook_call.input.clone(),
+                    error: perm_error,
+                    time: ToolTime {
+                        start: Utc::now().timestamp_millis(),
+                        end: Some(Utc::now().timestamp_millis()),
+                    },
+                });
+                if let Some(ref mut msg) = assistant_msg {
+                    self.update_tool_call(msg, part_id, error_state.clone());
+                }
+                let _ = ev_tx
+                    .send(AgentEvent::PartUpdated {
+                        part_id,
+                        part: Part::ToolCall(ToolCallPart {
+                            base: tc.base.clone(),
+                            tool_name: tc.tool_name.clone(),
+                            call_id: tc.call_id.clone(),
+                            state: error_state,
+                            raw_input: tc.raw_input.clone(),
+                        }),
+                    })
+                    .await;
+                let _ = ev_tx
+                    .send(AgentEvent::ToolEnd {
+                        call_id: call_id.clone(),
+                        success: false,
+                    })
+                    .await;
+                result_parts.push(Part::ToolResult(ToolResultPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: assistant_id,
+                        session_id: self.session_id,
+                    },
+                    call_id: tc.call_id.clone(),
+                }));
                 continue;
             }
 
             let tool = match self.tools.get(&tc.tool_name) {
                 Some(t) => t,
                 None => {
-                    self.finalize_tool_error(
-                        tc,
-                        part_id,
-                        assistant_id,
-                        assistant_msg,
-                        ev_tx,
-                        &mut result_parts,
-                        &hook_call.input,
-                        format!("unknown tool {:?}", tc.tool_name),
-                    )
-                    .await;
+                    let error_state = ToolState::Error(ToolStateError {
+                        input: hook_call.input.clone(),
+                        error: format!("unknown tool {:?}", tc.tool_name),
+                        time: ToolTime {
+                            start: Utc::now().timestamp_millis(),
+                            end: Some(Utc::now().timestamp_millis()),
+                        },
+                    });
+                    if let Some(ref mut msg) = assistant_msg {
+                        self.update_tool_call(msg, part_id, error_state.clone());
+                    }
+                    let _ = ev_tx
+                        .send(AgentEvent::PartUpdated {
+                            part_id,
+                            part: Part::ToolCall(ToolCallPart {
+                                base: tc.base.clone(),
+                                tool_name: tc.tool_name.clone(),
+                                call_id: tc.call_id.clone(),
+                                state: error_state,
+                                raw_input: tc.raw_input.clone(),
+                            }),
+                        })
+                        .await;
+                    let _ = ev_tx
+                        .send(AgentEvent::ToolEnd {
+                            call_id: call_id.clone(),
+                            success: false,
+                        })
+                        .await;
+                    self.dispatcher
+                        .on_tool_error(&hook_call, "unknown tool")
+                        .await;
+                    result_parts.push(Part::ToolResult(ToolResultPart {
+                        base: PartBase {
+                            id: ulid::Ulid::new(),
+                            message_id: assistant_id,
+                            session_id: self.session_id,
+                        },
+                        call_id: tc.call_id.clone(),
+                    }));
                     continue;
                 }
             };
@@ -475,17 +403,43 @@ impl Agent {
                         reason = %reason,
                         "tool-execute-before hook blocked the call"
                     );
-                    self.finalize_tool_error(
-                        tc,
-                        part_id,
-                        assistant_id,
-                        assistant_msg,
-                        ev_tx,
-                        &mut result_parts,
-                        &hook_call.input,
-                        format!("blocked by hook: {reason}"),
-                    )
-                    .await;
+                    let error_state = ToolState::Error(ToolStateError {
+                        input: hook_call.input.clone(),
+                        error: format!("blocked by hook: {reason}"),
+                        time: ToolTime {
+                            start: Utc::now().timestamp_millis(),
+                            end: Some(Utc::now().timestamp_millis()),
+                        },
+                    });
+                    if let Some(ref mut msg) = assistant_msg {
+                        self.update_tool_call(msg, part_id, error_state.clone());
+                    }
+                    let _ = ev_tx
+                        .send(AgentEvent::PartUpdated {
+                            part_id,
+                            part: Part::ToolCall(ToolCallPart {
+                                base: tc.base.clone(),
+                                tool_name: tc.tool_name.clone(),
+                                call_id: tc.call_id.clone(),
+                                state: error_state,
+                                raw_input: tc.raw_input.clone(),
+                            }),
+                        })
+                        .await;
+                    let _ = ev_tx
+                        .send(AgentEvent::ToolEnd {
+                            call_id: call_id.clone(),
+                            success: false,
+                        })
+                        .await;
+                    result_parts.push(Part::ToolResult(ToolResultPart {
+                        base: PartBase {
+                            id: ulid::Ulid::new(),
+                            message_id: assistant_id,
+                            session_id: self.session_id,
+                        },
+                        call_id: tc.call_id.clone(),
+                    }));
                     continue;
                 }
                 mew_hooks::HookOutcome::Suppress => {
@@ -496,17 +450,43 @@ impl Agent {
                     // Suppress behaves like Block but at debug level — the
                     // model still needs to see a result, so produce an error
                     // state with a generic message.
-                    self.finalize_tool_error(
-                        tc,
-                        part_id,
-                        assistant_id,
-                        assistant_msg,
-                        ev_tx,
-                        &mut result_parts,
-                        &hook_call.input,
-                        "tool call suppressed".into(),
-                    )
-                    .await;
+                    let error_state = ToolState::Error(ToolStateError {
+                        input: hook_call.input.clone(),
+                        error: "tool call suppressed".into(),
+                        time: ToolTime {
+                            start: Utc::now().timestamp_millis(),
+                            end: Some(Utc::now().timestamp_millis()),
+                        },
+                    });
+                    if let Some(ref mut msg) = assistant_msg {
+                        self.update_tool_call(msg, part_id, error_state.clone());
+                    }
+                    let _ = ev_tx
+                        .send(AgentEvent::PartUpdated {
+                            part_id,
+                            part: Part::ToolCall(ToolCallPart {
+                                base: tc.base.clone(),
+                                tool_name: tc.tool_name.clone(),
+                                call_id: tc.call_id.clone(),
+                                state: error_state,
+                                raw_input: tc.raw_input.clone(),
+                            }),
+                        })
+                        .await;
+                    let _ = ev_tx
+                        .send(AgentEvent::ToolEnd {
+                            call_id: call_id.clone(),
+                            success: false,
+                        })
+                        .await;
+                    result_parts.push(Part::ToolResult(ToolResultPart {
+                        base: PartBase {
+                            id: ulid::Ulid::new(),
+                            message_id: assistant_id,
+                            session_id: self.session_id,
+                        },
+                        call_id: tc.call_id.clone(),
+                    }));
                     continue;
                 }
             };
@@ -559,7 +539,7 @@ impl Agent {
             let ctx = ToolCtx::new(
                 std::sync::Arc::new(mew_tools::ToolCtxShared {
                     session_id: self.session_id,
-                    cwd: self.cwd.clone(),
+                    cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
                     dispatcher: Some(self.dispatcher.clone()),
                     secrets: self.secrets.clone(),
                     shell_session: self.shell_session.clone(),
@@ -575,17 +555,45 @@ impl Agent {
             if let Some(arg_path) = self.workspace_path_for_tool(&tc.tool_name, &input) {
                 let resolved = tool_cwd.join(&arg_path);
                 if let Err(msg) = self.ensure_workspace_path(&resolved, ev_tx).await {
-                    self.finalize_tool_error(
-                        tc,
-                        part_id,
-                        assistant_id,
-                        assistant_msg,
-                        ev_tx,
-                        &mut result_parts,
-                        &input,
-                        msg,
-                    )
-                    .await;
+                    let error_msg = msg.clone();
+                    let error_state = ToolState::Error(ToolStateError {
+                        input: input.clone(),
+                        error: msg,
+                        time: ToolTime {
+                            start: Utc::now().timestamp_millis(),
+                            end: Some(Utc::now().timestamp_millis()),
+                        },
+                    });
+                    if let Some(ref mut msg) = assistant_msg {
+                        self.update_tool_call(msg, part_id, error_state.clone());
+                    }
+                    let _ = ev_tx
+                        .send(AgentEvent::PartUpdated {
+                            part_id,
+                            part: Part::ToolCall(ToolCallPart {
+                                base: tc.base.clone(),
+                                tool_name: tc.tool_name.clone(),
+                                call_id: tc.call_id.clone(),
+                                state: error_state,
+                                raw_input: tc.raw_input.clone(),
+                            }),
+                        })
+                        .await;
+                    let _ = ev_tx
+                        .send(AgentEvent::ToolEnd {
+                            call_id: call_id.clone(),
+                            success: false,
+                        })
+                        .await;
+                    self.dispatcher.on_tool_error(&hook_call, &error_msg).await;
+                    result_parts.push(Part::ToolResult(ToolResultPart {
+                        base: PartBase {
+                            id: ulid::Ulid::new(),
+                            message_id: assistant_id,
+                            session_id: self.session_id,
+                        },
+                        call_id: tc.call_id.clone(),
+                    }));
                     continue;
                 }
             }
@@ -622,64 +630,90 @@ impl Agent {
                 .await;
 
             tracing::info!(tool = %tc.tool_name, call_id = %call_id, success = %output.error.is_empty(), "tool finished");
-
-            if !output.error.is_empty() {
-                // Tool returned an error in its output.
-                self.finalize_tool_error(
-                    tc,
-                    part_id,
-                    assistant_id,
-                    assistant_msg,
-                    ev_tx,
-                    &mut result_parts,
-                    &input,
-                    output.error.clone(),
+            let (success, final_state) = if !output.error.is_empty() {
+                (
+                    false,
+                    ToolState::Error(ToolStateError {
+                        input: input.clone(),
+                        error: output.error.clone(),
+                        time: ToolTime {
+                            start: Utc::now().timestamp_millis(),
+                            end: Some(Utc::now().timestamp_millis()),
+                        },
+                    }),
                 )
-                .await;
             } else {
-                // Tool succeeded.
-                // If the tool produced a file delta, emit it so the daemon can
-                // accumulate per-session change stats.
-                if let Some(delta) = &output.file_delta {
-                    let _ = ev_tx
-                        .send(AgentEvent::FileDelta {
-                            path: delta.path.clone(),
-                            added: delta.added,
-                            removed: delta.removed,
-                        })
-                        .await;
-                }
-                // If the flag_important tool ran, emit the current flagged-files set.
-                if tc.tool_name == "flag_important" {
-                    let files: Vec<crate::FlaggedFileInfo> = self
-                        .flagged_files
-                        .lock()
-                        .await
-                        .iter()
-                        .map(|f| crate::FlaggedFileInfo {
-                            path: f.path.display().to_string(),
-                            reason: Some(
-                                mew_tools::tools::flag_important::flag_mode_label(f.mode)
-                                    .to_string(),
-                            ),
-                        })
-                        .collect();
-                    let _ = ev_tx.send(AgentEvent::FlaggedFilesChanged { files }).await;
-                }
-                self.finalize_tool_success(
-                    tc,
-                    part_id,
-                    assistant_id,
-                    assistant_msg,
-                    ev_tx,
-                    &mut result_parts,
-                    &input,
-                    &output.output,
-                    &output.metadata,
-                    &output.diff,
+                (
+                    true,
+                    ToolState::Completed(ToolStateCompleted {
+                        input: input.clone(),
+                        output: output.output.clone(),
+                        metadata: output.metadata.clone(),
+                        diff: output.diff.clone(),
+                        time: ToolTime {
+                            start: Utc::now().timestamp_millis(),
+                            end: Some(Utc::now().timestamp_millis()),
+                        },
+                    }),
                 )
-                .await;
+            };
+
+            if let Some(ref mut msg) = assistant_msg {
+                self.update_tool_call(msg, part_id, final_state.clone());
             }
+            let _ = ev_tx
+                .send(AgentEvent::PartUpdated {
+                    part_id,
+                    part: Part::ToolCall(ToolCallPart {
+                        base: tc.base.clone(),
+                        tool_name: tc.tool_name.clone(),
+                        call_id: tc.call_id.clone(),
+                        state: final_state,
+                        raw_input: tc.raw_input.clone(),
+                    }),
+                })
+                .await;
+            let _ = ev_tx
+                .send(AgentEvent::ToolEnd {
+                    call_id: call_id.clone(),
+                    success,
+                })
+                .await;
+            // If the tool produced a file delta, emit it so the daemon can
+            // accumulate per-session change stats.
+            if let Some(delta) = &output.file_delta {
+                let _ = ev_tx
+                    .send(AgentEvent::FileDelta {
+                        path: delta.path.clone(),
+                        added: delta.added,
+                        removed: delta.removed,
+                    })
+                    .await;
+            }
+            // If the flag_important tool ran, emit the current flagged-files set.
+            if tc.tool_name == "flag_important" {
+                let files: Vec<crate::FlaggedFileInfo> = self
+                    .flagged_files
+                    .lock()
+                    .await
+                    .iter()
+                    .map(|f| crate::FlaggedFileInfo {
+                        path: f.path.display().to_string(),
+                        reason: Some(
+                            mew_tools::tools::flag_important::flag_mode_label(f.mode).to_string(),
+                        ),
+                    })
+                    .collect();
+                let _ = ev_tx.send(AgentEvent::FlaggedFilesChanged { files }).await;
+            }
+            result_parts.push(Part::ToolResult(ToolResultPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: assistant_id,
+                    session_id: self.session_id,
+                },
+                call_id: tc.call_id.clone(),
+            }));
         }
         result_parts
     }
@@ -729,7 +763,6 @@ impl Agent {
                             tool_name: tc.tool_name.clone(),
                             call_id: tc.call_id.clone(),
                             state: error_state,
-                            sensitivity: tc.sensitivity.clone(),
                             raw_input: tc.raw_input.clone(),
                         }),
                     })
@@ -771,7 +804,6 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: running_state,
-                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -1002,11 +1034,6 @@ impl Agent {
         };
 
         let success = is_subagent_success(&result);
-        let error_text = if success {
-            String::new()
-        } else {
-            result.clone()
-        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
@@ -1040,7 +1067,6 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: final_state,
-                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -1060,18 +1086,6 @@ impl Agent {
             },
             call_id: tc.call_id.clone(),
         }));
-        if !success {
-            self.dispatcher
-                .on_tool_error(
-                    &mew_hooks::ToolCall {
-                        tool_name: tc.tool_name.clone(),
-                        call_id: tc.call_id.clone(),
-                        input: input.clone(),
-                    },
-                    &error_text,
-                )
-                .await;
-        }
     }
 
     async fn execute_subagent_start(
@@ -1153,11 +1167,6 @@ impl Agent {
             Err(e) => (format!("error: {}", e), false),
         };
 
-        let error_text = if success {
-            String::new()
-        } else {
-            output.clone()
-        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
@@ -1191,7 +1200,6 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: final_state,
-                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -1211,18 +1219,6 @@ impl Agent {
             },
             call_id: tc.call_id.clone(),
         }));
-        if !success {
-            self.dispatcher
-                .on_tool_error(
-                    &mew_hooks::ToolCall {
-                        tool_name: tc.tool_name.clone(),
-                        call_id: tc.call_id.clone(),
-                        input: input.clone(),
-                    },
-                    &error_text,
-                )
-                .await;
-        }
     }
 
     async fn execute_ask_user(
@@ -1316,11 +1312,6 @@ impl Agent {
             }
         };
 
-        let error_text = if success {
-            String::new()
-        } else {
-            output.clone()
-        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
@@ -1354,7 +1345,6 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: final_state,
-                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -1374,18 +1364,6 @@ impl Agent {
             },
             call_id: tc.call_id.clone(),
         }));
-        if !success {
-            self.dispatcher
-                .on_tool_error(
-                    &mew_hooks::ToolCall {
-                        tool_name: tc.tool_name.clone(),
-                        call_id: tc.call_id.clone(),
-                        input: input.clone(),
-                    },
-                    &error_text,
-                )
-                .await;
-        }
     }
 
     async fn execute_job_tool(
@@ -1413,7 +1391,7 @@ impl Agent {
                     let cwd_str = input.get("cwd").and_then(|v| v.as_str());
                     let cwd = cwd_str
                         .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| self.cwd.clone());
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
                     let hook_call = mew_hooks::ToolCall {
                         tool_name: tc.tool_name.clone(),
                         call_id: tc.call_id.clone(),
@@ -1515,7 +1493,7 @@ impl Agent {
                     let cwd_str = input.get("cwd").and_then(|v| v.as_str());
                     let cwd = cwd_str
                         .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| self.cwd.clone());
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
                     let hook_call = mew_hooks::ToolCall {
                         tool_name: tc.tool_name.clone(),
                         call_id: tc.call_id.clone(),
@@ -1622,7 +1600,6 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: final_state,
-                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -1633,18 +1610,16 @@ impl Agent {
                 success,
             })
             .await;
-        if !success {
-            self.dispatcher
-                .on_tool_error(
-                    &mew_hooks::ToolCall {
-                        tool_name: tc.tool_name.clone(),
-                        call_id: tc.call_id.clone(),
-                        input: input.clone(),
-                    },
-                    &error_for_hook,
-                )
-                .await;
-        }
+        self.dispatcher
+            .on_tool_error(
+                &mew_hooks::ToolCall {
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    input: input.clone(),
+                },
+                if success { "" } else { &error_for_hook },
+            )
+            .await;
         result_parts.push(Part::ToolResult(ToolResultPart {
             base: PartBase {
                 id: ulid::Ulid::new(),
@@ -1706,11 +1681,6 @@ impl Agent {
                 .await;
         }
 
-        let error_text = if success {
-            String::new()
-        } else {
-            output.clone()
-        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input,
@@ -1744,7 +1714,6 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: final_state,
-                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -1759,18 +1728,6 @@ impl Agent {
             },
             call_id: tc.call_id.clone(),
         }));
-        if !success {
-            self.dispatcher
-                .on_tool_error(
-                    &mew_hooks::ToolCall {
-                        tool_name: tc.tool_name.clone(),
-                        call_id: tc.call_id.clone(),
-                        input: tc.input().clone(),
-                    },
-                    &error_text,
-                )
-                .await;
-        }
     }
 
     async fn execute_subagent_wait(
@@ -1835,11 +1792,6 @@ impl Agent {
             Err(e) => (format!("error: {}", e), false),
         };
 
-        let error_text = if success {
-            String::new()
-        } else {
-            output.clone()
-        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
@@ -1873,7 +1825,6 @@ impl Agent {
                     tool_name: tc.tool_name.clone(),
                     call_id: tc.call_id.clone(),
                     state: final_state,
-                    sensitivity: tc.sensitivity.clone(),
                     raw_input: tc.raw_input.clone(),
                 }),
             })
@@ -1893,18 +1844,6 @@ impl Agent {
             },
             call_id: tc.call_id.clone(),
         }));
-        if !success {
-            self.dispatcher
-                .on_tool_error(
-                    &mew_hooks::ToolCall {
-                        tool_name: tc.tool_name.clone(),
-                        call_id: tc.call_id.clone(),
-                        input: input.clone(),
-                    },
-                    &error_text,
-                )
-                .await;
-        }
     }
 }
 

@@ -7,7 +7,7 @@ use ratatui::{
 
 use crate::app::{App, Mode, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH};
 
-pub(crate) mod chat;
+mod chat;
 mod companion;
 mod input;
 mod overlays;

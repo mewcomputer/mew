@@ -71,6 +71,40 @@ impl Provider for Router {
     }
 }
 
+/// Wraps a Router with a display model name for the TUI status line.
+pub struct Routed {
+    inner: Router,
+    /// The model ID to show in the status line (typically the deci model).
+    pub display_model: String,
+    /// The provider ID to show in the status line.
+    pub display_provider: String,
+}
+
+impl Routed {
+    pub fn new(router: Router, display_provider: String, display_model: String) -> Self {
+        Self {
+            inner: router,
+            display_model,
+            display_provider,
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for Routed {
+    fn name(&self) -> &str {
+        "router"
+    }
+
+    async fn stream(&self, req: Request) -> Result<EventStream, ProviderError> {
+        self.inner.stream(req).await
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        self.inner.list_models().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,39 +244,5 @@ mod tests {
         let req = empty_request(messages);
         let provider = router.select(&req);
         assert_eq!(provider.name(), "micro");
-    }
-}
-
-/// Wraps a Router with a display model name for the TUI status line.
-pub struct Routed {
-    inner: Router,
-    /// The model ID to show in the status line (typically the deci model).
-    pub display_model: String,
-    /// The provider ID to show in the status line.
-    pub display_provider: String,
-}
-
-impl Routed {
-    pub fn new(router: Router, display_provider: String, display_model: String) -> Self {
-        Self {
-            inner: router,
-            display_model,
-            display_provider,
-        }
-    }
-}
-
-#[async_trait]
-impl Provider for Routed {
-    fn name(&self) -> &str {
-        "router"
-    }
-
-    async fn stream(&self, req: Request) -> Result<EventStream, ProviderError> {
-        self.inner.stream(req).await
-    }
-
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        self.inner.list_models().await
     }
 }

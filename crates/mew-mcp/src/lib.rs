@@ -832,7 +832,7 @@ mod tests {
             .to_string();
         eprintln!("stdio test dir: {allowed}");
 
-        let mut client = McpClient::connect_stdio(
+        let client = McpClient::connect_stdio(
             "filesystem",
             "npx",
             &[

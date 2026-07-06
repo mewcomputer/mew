@@ -245,9 +245,9 @@ mod tests {
     /// lifetime; when the guard is dropped, HOME is restored.
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn with_test_home() -> impl Drop {
-        use std::sync::{Mutex, MutexGuard};
+        use std::sync::MutexGuard;
         struct Guard {
-            lock: MutexGuard<'static, ()>,
+            _lock: MutexGuard<'static, ()>,
             _dir: tempfile::TempDir,
             prev: Option<std::ffi::OsString>,
         }
@@ -270,7 +270,7 @@ mod tests {
             std::env::set_var("HOME", dir.path());
         }
         Guard {
-            lock,
+            _lock: lock,
             _dir: dir,
             prev,
         }
@@ -280,7 +280,7 @@ mod tests {
     fn user_skills(skills: Vec<Skill>) -> Vec<Skill> {
         skills
             .into_iter()
-            .filter(|s| s.path != PathBuf::from("(built-in)"))
+            .filter(|s| s.path != Path::new("(built-in)"))
             .collect()
     }
 

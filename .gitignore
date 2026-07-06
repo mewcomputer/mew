@@ -7,9 +7,6 @@ bin/
 *.pem
 *.key
 
-# Session logs (requests.log, etc.)
-*.log
-
 # Rust
 target/
 Cargo.lock
@@ -26,11 +23,16 @@ Thumbs.db
 
 node_modules/
 
-# iOS — build artifacts
-mew-ios/MewMobileCore/XCFramework/
+# Xcode
 mew-ios/DerivedData/
-mew-ios/mew.xcodeproj
-mew-ios/mew.xcodeproj/project.xcworkspace/
+mew-ios/MewMobileCore/.swiftpm/
+mew-ios/MewMobileCore/XCFramework/
 mew-ios/mew.xcodeproj/xcuserdata/
-mew-ios/**/.swiftpm/xcode/xcuserdata/
+mew-ios/mew.xcodeproj/project.xcworkspace/xcuserdata/
 *.xcuserstate
+
+# TypeScript build info
+mew-web-ui/tsconfig.tsbuildinfo
+
+# Session logs (requests.log, etc.)
+*.log

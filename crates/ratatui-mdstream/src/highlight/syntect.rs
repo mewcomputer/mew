@@ -154,7 +154,7 @@ mod tests {
         assert!(!runs.is_empty(), "should produce runs for wgsl");
 
         let has_styled = runs.iter().any(|(_, style)| {
-            style.fg != None || style.add_modifier != ratatui::style::Modifier::empty()
+            style.fg.is_some() || style.add_modifier != ratatui::style::Modifier::empty()
         });
         assert!(has_styled, "wgsl @vertex should be syntax-highlighted");
     }

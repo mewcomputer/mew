@@ -277,12 +277,10 @@ impl Executor {
                 return Ok(());
             }
             if trimmed.starts_with('-') {
-                // `-old` rows are a common diff-style contamination. The
-                // SWAP/DEL range already specifies what's being deleted, so
-                // skip them with a warning instead of erroring.
-                self.warnings
-                    .push("ignored `-old` row (the range handles deletion)".to_string());
-                return Ok(());
+                return Err(crate::HashlineError::parse(
+                    line,
+                    "`-old` rows are not valid; the range does the deleting",
+                ));
             }
             // Bare body row: treat as literal content. Auto-strip line-number
             // prefixes (e.g. "12:content") that models paste from read output.
@@ -389,15 +387,9 @@ mod tests {
     }
 
     #[test]
-    fn ignores_minus_row_with_warning() {
-        let (edits, _, warnings) = parse_body("SWAP 1.=1:\n-old\n+new").unwrap();
-        // SWAP 1.=1 with 1 payload → 1 insert + 1 delete = 2 edits.
-        assert_eq!(edits.len(), 2);
-        assert!(matches!(
-            &edits[0],
-            Edit::Insert { text, .. } if text == "new"
-        ));
-        assert!(warnings.iter().any(|w| w.contains("ignored `-old` row")));
+    fn rejects_minus_row() {
+        let err = parse_body("SWAP 1.=1:\n-old\n+new").unwrap_err();
+        assert!(err.to_string().contains("`-old` rows are not valid"));
     }
 
     #[test]

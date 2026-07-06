@@ -156,12 +156,6 @@ pub enum ClientMessage {
         pinned: bool,
     },
 
-    // -- Projects --
-    /// List known projects (recent session cwds + configured workspace.roots).
-    /// Does NOT require a session — used before creating one to populate a
-    /// project picker. The daemon responds with `ServerMessage::ProjectList`.
-    ListProjects,
-
     // -- Phase 3: File service --
     ListDir {
         session_id: String,
@@ -192,10 +186,6 @@ pub enum ClientMessage {
         session_id: String,
         path: String,
     },
-
-    /// Ping the daemon for liveness check and version negotiation.
-    /// The daemon responds with `ServerMessage::Pong { version }`.
-    Ping,
 }
 
 /// What kind of client is connected to a session.
@@ -208,8 +198,6 @@ pub enum ClientKind {
     Web,
     /// Headless CLI script.
     Cli,
-    /// Mobile app (iOS / Android).
-    Mobile,
     /// Unknown / unspecified.
     #[default]
     Unknown,
@@ -231,9 +219,6 @@ pub struct ModelInfo {
     /// model doesn't support configurable thinking.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub thinking_variants: Vec<ThinkingVariantInfo>,
-    /// Maximum context window in tokens, if known from the catalog.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_window: Option<i64>,
 }
 
 /// A named thinking/reasoning variant (e.g. "high", "max", "thinking").
@@ -623,14 +608,6 @@ pub enum ServerMessage {
         groups: Vec<GroupInfo>,
     },
 
-    // -- Projects --
-    /// Response to `ListProjects`. Contains deduped project directories
-    /// derived from session metas + configured workspace.roots, sorted by
-    /// recency (most recent first).
-    ProjectList {
-        projects: Vec<ProjectInfo>,
-    },
-
     // -- Phase 3: File service responses --
     DirListing {
         path: String,
@@ -680,10 +657,10 @@ pub enum ServerMessage {
     /// so all clients can update their session rail.
     SessionMetaChanged {
         session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        archived: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pinned: Option<bool>,
+        #[serde(default)]
+        archived: bool,
+        #[serde(default)]
+        pinned: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         group_id: Option<String>,
     },
@@ -694,13 +671,6 @@ pub enum ServerMessage {
         session_id: String,
         pending_permissions: u32,
         pending_questions: u32,
-    },
-
-    /// Response to `ClientMessage::Ping`. Carries the daemon's version
-    /// so clients can detect version skew.
-    Pong {
-        /// Daemon version string (e.g. "0.2.0").
-        version: String,
     },
 }
 
@@ -763,20 +733,6 @@ pub struct GroupInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
     pub order: u32,
-}
-
-/// A known project directory, returned by `ListProjects`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProjectInfo {
-    /// Absolute path to the project directory.
-    pub path: String,
-    /// Human-friendly display name (last path component).
-    pub display_name: String,
-    /// Number of sessions in this project.
-    pub session_count: u32,
-    /// Timestamp of the last activity in this project (epoch millis).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_used_at: Option<i64>,
 }
 
 /// One entry in a directory listing.
@@ -958,33 +914,6 @@ mod tests {
         let msg = ClientMessage::Cancel;
         let json = encode_json(&msg).unwrap();
         assert!(json.contains(r#""type":"cancel""#));
-    }
-
-    #[test]
-    fn test_list_projects_roundtrip() {
-        let msg = ClientMessage::ListProjects;
-        let decoded = round_trip(&msg);
-        assert!(matches!(decoded, ClientMessage::ListProjects));
-
-        let msg = ServerMessage::ProjectList {
-            projects: vec![ProjectInfo {
-                path: "/home/user/myproject".to_string(),
-                display_name: "myproject".to_string(),
-                session_count: 3,
-                last_used_at: Some(1700000000),
-            }],
-        };
-        let decoded = round_trip(&msg);
-        match decoded {
-            ServerMessage::ProjectList { projects } => {
-                assert_eq!(projects.len(), 1);
-                assert_eq!(projects[0].path, "/home/user/myproject");
-                assert_eq!(projects[0].display_name, "myproject");
-                assert_eq!(projects[0].session_count, 3);
-                assert_eq!(projects[0].last_used_at, Some(1700000000));
-            }
-            _ => panic!("expected ProjectList"),
-        }
     }
 
     // -- ClientMessage: exhaustive variant coverage --------------------------
@@ -1169,18 +1098,18 @@ mod tests {
             },
         };
         match round_trip(&m) {
-            ServerMessage::Provider { event } => match event {
-                mew_message::ProviderEventWire::PartDelta {
-                    part_id,
-                    field,
-                    delta,
-                } => {
-                    assert_eq!(part_id, pid);
-                    assert_eq!(field, "text");
-                    assert_eq!(delta, "abc");
-                }
-                _ => panic!(),
-            },
+            ServerMessage::Provider {
+                event:
+                    mew_message::ProviderEventWire::PartDelta {
+                        part_id,
+                        field,
+                        delta,
+                    },
+            } => {
+                assert_eq!(part_id, pid);
+                assert_eq!(field, "text");
+                assert_eq!(delta, "abc");
+            }
             _ => panic!(),
         }
     }
@@ -1195,12 +1124,11 @@ mod tests {
             },
         };
         match round_trip(&m) {
-            ServerMessage::Provider { event } => match event {
-                mew_message::ProviderEventWire::MessageEnd { finish, .. } => {
-                    assert_eq!(finish, mew_message::Finish::ToolUse);
-                }
-                _ => panic!(),
-            },
+            ServerMessage::Provider {
+                event: mew_message::ProviderEventWire::MessageEnd { finish, .. },
+            } => {
+                assert_eq!(finish, mew_message::Finish::ToolUse);
+            }
             _ => panic!(),
         }
     }
@@ -1216,20 +1144,20 @@ mod tests {
             },
         };
         match round_trip(&m) {
-            ServerMessage::Provider { event } => match event {
-                mew_message::ProviderEventWire::RetryWait {
-                    attempt,
-                    max_attempts,
-                    delay_secs,
-                    reason,
-                } => {
-                    assert_eq!(attempt, 2);
-                    assert_eq!(max_attempts, 5);
-                    assert_eq!(delay_secs, 1);
-                    assert_eq!(reason, "429");
-                }
-                _ => panic!(),
-            },
+            ServerMessage::Provider {
+                event:
+                    mew_message::ProviderEventWire::RetryWait {
+                        attempt,
+                        max_attempts,
+                        delay_secs,
+                        reason,
+                    },
+            } => {
+                assert_eq!(attempt, 2);
+                assert_eq!(max_attempts, 5);
+                assert_eq!(delay_secs, 1);
+                assert_eq!(reason, "429");
+            }
             _ => panic!(),
         }
     }
@@ -1244,13 +1172,12 @@ mod tests {
             event: mew_message::ProviderEventWire::Error(err.clone()),
         };
         match round_trip(&m) {
-            ServerMessage::Provider { event } => match event {
-                mew_message::ProviderEventWire::Error(e) => {
-                    assert_eq!(e.message, "rate limit");
-                    assert_eq!(e.kind, mew_message::ErrorKind::Network);
-                }
-                _ => panic!(),
-            },
+            ServerMessage::Provider {
+                event: mew_message::ProviderEventWire::Error(e),
+            } => {
+                assert_eq!(e.message, "rate limit");
+                assert_eq!(e.kind, mew_message::ErrorKind::Network);
+            }
             _ => panic!(),
         }
     }
@@ -1447,10 +1374,10 @@ mod tests {
             },
         };
         match round_trip(&m) {
-            ServerMessage::SubagentEnd { outcome, .. } => match outcome {
-                SubagentOutcome::Failed { reason } => assert_eq!(reason, "timed out"),
-                _ => panic!(),
-            },
+            ServerMessage::SubagentEnd {
+                outcome: SubagentOutcome::Failed { reason },
+                ..
+            } => assert_eq!(reason, "timed out"),
             _ => panic!(),
         }
     }
@@ -1607,10 +1534,6 @@ mod tests {
 
     #[test]
     fn every_client_variant_has_distinct_type_tag() {
-        // Exhaustive: every variant of `ClientMessage` must serialize with the
-        // snake_case `type` tag derived from its Rust name, and every tag must
-        // be distinct. Catches typos in `#[serde(rename)]`, camelCase leaks,
-        // and accidental tag collisions.
         let samples: Vec<(&'static str, ClientMessage)> = vec![
             (
                 "new_session",
@@ -1618,35 +1541,6 @@ mod tests {
                     cwd: None,
                     client_kind: ClientKind::Unknown,
                 },
-            ),
-            (
-                "attach_session",
-                ClientMessage::AttachSession {
-                    session_id: "s".into(),
-                    client_kind: ClientKind::Unknown,
-                },
-            ),
-            ("list_sessions", ClientMessage::ListSessions),
-            (
-                "delete_session",
-                ClientMessage::DeleteSession {
-                    session_id: "s".into(),
-                },
-            ),
-            (
-                "rename_session",
-                ClientMessage::RenameSession {
-                    session_id: "s".into(),
-                    title: "t".into(),
-                },
-            ),
-            (
-                "set_auto_title",
-                ClientMessage::SetAutoTitle { enabled: true },
-            ),
-            (
-                "set_auto_summary",
-                ClientMessage::SetAutoSummary { enabled: true },
             ),
             (
                 "prompt",
@@ -1676,460 +1570,16 @@ mod tests {
                     command: "/help".into(),
                 },
             ),
-            ("list_models", ClientMessage::ListModels),
-            (
-                "switch_model",
-                ClientMessage::SwitchModel {
-                    provider: "p".into(),
-                    model: "m".into(),
-                },
-            ),
-            (
-                "set_thinking_variant",
-                ClientMessage::SetThinkingVariant {
-                    variant: "high".into(),
-                },
-            ),
-            (
-                "set_permission_mode",
-                ClientMessage::SetPermissionMode {
-                    mode: "standard".into(),
-                },
-            ),
-            ("yield_control", ClientMessage::YieldControl {}),
-            (
-                "create_group",
-                ClientMessage::CreateGroup {
-                    name: "g".into(),
-                    color: None,
-                },
-            ),
-            (
-                "update_group",
-                ClientMessage::UpdateGroup {
-                    group_id: "g".into(),
-                    name: None,
-                    color: None,
-                    order: None,
-                },
-            ),
-            (
-                "delete_group",
-                ClientMessage::DeleteGroup {
-                    group_id: "g".into(),
-                },
-            ),
-            (
-                "assign_session_group",
-                ClientMessage::AssignSessionGroup {
-                    session_id: "s".into(),
-                    group_id: None,
-                    position: None,
-                },
-            ),
-            (
-                "archive_session",
-                ClientMessage::ArchiveSession {
-                    session_id: "s".into(),
-                    archived: true,
-                },
-            ),
-            (
-                "pin_session",
-                ClientMessage::PinSession {
-                    session_id: "s".into(),
-                    pinned: true,
-                },
-            ),
-            (
-                "list_dir",
-                ClientMessage::ListDir {
-                    session_id: "s".into(),
-                    path: None,
-                },
-            ),
-            (
-                "read_file_preview",
-                ClientMessage::ReadFilePreview {
-                    session_id: "s".into(),
-                    path: "/x".into(),
-                    max_bytes: None,
-                },
-            ),
-            (
-                "git_status",
-                ClientMessage::GitStatus {
-                    session_id: "s".into(),
-                },
-            ),
-            (
-                "watch_workspace",
-                ClientMessage::WatchWorkspace {
-                    session_id: "s".into(),
-                    enabled: true,
-                },
-            ),
-            (
-                "open_path",
-                ClientMessage::OpenPath {
-                    session_id: "s".into(),
-                    path: "/x".into(),
-                },
-            ),
-            (
-                "unflag_file",
-                ClientMessage::UnflagFile {
-                    session_id: "s".into(),
-                    path: "/x".into(),
-                },
-            ),
-            ("ping", ClientMessage::Ping),
-            ("list_projects", ClientMessage::ListProjects),
         ];
-
-        let mut seen: Vec<&'static str> = Vec::with_capacity(samples.len());
-        for (expected, msg) in &samples {
-            let json = encode_json(msg).unwrap();
+        for (expected, msg) in samples {
+            let json = encode_json(&msg).unwrap();
             assert!(
                 json.contains(&format!(r#""type":"{}""#, expected)),
-                "tag mismatch for {}: expected {:?}, got {}",
-                expected,
+                "tag mismatch for {}: {}",
                 expected,
                 json
             );
-            assert!(
-                !seen.contains(expected),
-                "duplicate expected tag {:?} in client samples",
-                expected
-            );
-            seen.push(*expected);
         }
-        assert_eq!(
-            seen.len(),
-            samples.len(),
-            "client tag list should have no duplicates"
-        );
-    }
-
-    #[test]
-    fn every_server_variant_has_distinct_type_tag() {
-        // Exhaustive: every variant of `ServerMessage` must serialize with the
-        // snake_case `type` tag derived from its Rust name, and every tag must
-        // be distinct. Catches typos in `#[serde(rename)]`, camelCase leaks,
-        // and accidental tag collisions.
-        let part = sample_text_part();
-        let samples: Vec<(&'static str, ServerMessage)> = vec![
-            (
-                "session_ready",
-                ServerMessage::SessionReady {
-                    session_id: "s".into(),
-                    model: None,
-                    provider: None,
-                    permission_mode: None,
-                },
-            ),
-            (
-                "error",
-                ServerMessage::Error {
-                    message: "boom".into(),
-                },
-            ),
-            (
-                "provider",
-                ServerMessage::Provider {
-                    event: mew_message::ProviderEventWire::PartStart { part: part.clone() },
-                },
-            ),
-            (
-                "user_message",
-                ServerMessage::UserMessage { text: "hi".into() },
-            ),
-            (
-                "tool_start",
-                ServerMessage::ToolStart {
-                    call_id: "c".into(),
-                },
-            ),
-            (
-                "tool_end",
-                ServerMessage::ToolEnd {
-                    call_id: "c".into(),
-                    success: true,
-                },
-            ),
-            (
-                "part_updated",
-                ServerMessage::PartUpdated {
-                    part_id: mew_message::PartId::new(),
-                    part: part.clone(),
-                },
-            ),
-            (
-                "tool_progress",
-                ServerMessage::ToolProgress {
-                    call_id: "c".into(),
-                    chunk: "x".into(),
-                },
-            ),
-            (
-                "error_event",
-                ServerMessage::ErrorEvent {
-                    message: "boom".into(),
-                },
-            ),
-            (
-                "permission_request",
-                ServerMessage::PermissionRequest {
-                    request_id: 0,
-                    tool_name: "bash".into(),
-                    input: serde_json::Value::Null,
-                },
-            ),
-            (
-                "workspace_permission_request",
-                ServerMessage::WorkspacePermissionRequest {
-                    request_id: 0,
-                    path: "/x".into(),
-                },
-            ),
-            (
-                "ask_user_request",
-                ServerMessage::AskUserRequest {
-                    request_id: 0,
-                    call_id: "c".into(),
-                    questions: vec![],
-                },
-            ),
-            (
-                "subagent_start",
-                ServerMessage::SubagentStart {
-                    parent_call_id: "p".into(),
-                    name: "researcher".into(),
-                    child_session_id: "c".into(),
-                    display_name: None,
-                },
-            ),
-            (
-                "subagent_status",
-                ServerMessage::SubagentStatus {
-                    parent_call_id: "p".into(),
-                    tool_name: "bash".into(),
-                    message: "scanning".into(),
-                },
-            ),
-            (
-                "subagent_end",
-                ServerMessage::SubagentEnd {
-                    parent_call_id: "p".into(),
-                    child_session_id: "c".into(),
-                    outcome: SubagentOutcome::Completed,
-                },
-            ),
-            (
-                "subagent_permission_request",
-                ServerMessage::SubagentPermissionRequest {
-                    request_id: 0,
-                    parent_call_id: "p".into(),
-                    tool_name: "bash".into(),
-                    input: serde_json::Value::Null,
-                },
-            ),
-            (
-                "todos_updated",
-                ServerMessage::TodosUpdated { todos: vec![] },
-            ),
-            (
-                "persona_switch_requested",
-                ServerMessage::PersonaSwitchRequested { name: "n".into() },
-            ),
-            (
-                "job_update",
-                ServerMessage::JobUpdate {
-                    job_id: "j".into(),
-                    command: "ls".into(),
-                    state: "running".into(),
-                },
-            ),
-            (
-                "slash_result",
-                ServerMessage::SlashResult { text: "ok".into() },
-            ),
-            (
-                "request_resolved",
-                ServerMessage::RequestResolved { request_id: 0 },
-            ),
-            ("session_cleared", ServerMessage::SessionCleared),
-            (
-                "session_list",
-                ServerMessage::SessionList { sessions: vec![] },
-            ),
-            (
-                "session_history",
-                ServerMessage::SessionHistory { messages: vec![] },
-            ),
-            ("model_list", ServerMessage::ModelList { models: vec![] }),
-            (
-                "model_switched",
-                ServerMessage::ModelSwitched {
-                    provider: "p".into(),
-                    model: "m".into(),
-                },
-            ),
-            (
-                "thinking_variant_changed",
-                ServerMessage::ThinkingVariantChanged { variant: None },
-            ),
-            (
-                "permission_mode_changed",
-                ServerMessage::PermissionModeChanged {
-                    mode: "standard".into(),
-                },
-            ),
-            (
-                "client_attached",
-                ServerMessage::ClientAttached {
-                    client_id: 0,
-                    client_kind: ClientKind::Unknown,
-                },
-            ),
-            (
-                "client_detached",
-                ServerMessage::ClientDetached { client_id: 0 },
-            ),
-            (
-                "control_yielded",
-                ServerMessage::ControlYielded { client_id: 0 },
-            ),
-            (
-                "session_title_changed",
-                ServerMessage::SessionTitleChanged {
-                    session_id: "s".into(),
-                    title: "t".into(),
-                },
-            ),
-            (
-                "session_summary_changed",
-                ServerMessage::SessionSummaryChanged {
-                    session_id: "s".into(),
-                    summary: "sm".into(),
-                },
-            ),
-            (
-                "session_activity_changed",
-                ServerMessage::SessionActivityChanged {
-                    session_id: "s".into(),
-                    activity: SessionState::Active,
-                },
-            ),
-            (
-                "session_stats_changed",
-                ServerMessage::SessionStatsChanged {
-                    session_id: "s".into(),
-                    added: 0,
-                    removed: 0,
-                    files_changed: 0,
-                },
-            ),
-            ("group_list", ServerMessage::GroupList { groups: vec![] }),
-            (
-                "groups_changed",
-                ServerMessage::GroupsChanged { groups: vec![] },
-            ),
-            (
-                "dir_listing",
-                ServerMessage::DirListing {
-                    path: "/".into(),
-                    entries: vec![],
-                },
-            ),
-            (
-                "file_preview",
-                ServerMessage::FilePreview {
-                    path: "/x".into(),
-                    content: "c".into(),
-                    truncated: false,
-                    language: None,
-                },
-            ),
-            (
-                "git_status_result",
-                ServerMessage::GitStatusResult { entries: vec![] },
-            ),
-            ("fs_changed", ServerMessage::FsChanged { paths: vec![] }),
-            (
-                "session_usage_changed",
-                ServerMessage::SessionUsageChanged {
-                    session_id: "s".into(),
-                    usage: SessionUsageWire::from(&mew_session::SessionUsage::default()),
-                },
-            ),
-            (
-                "session_alert",
-                ServerMessage::SessionAlert {
-                    session_id: "s".into(),
-                    title: "t".into(),
-                    kind: AlertKind::TurnComplete,
-                    detail: None,
-                },
-            ),
-            (
-                "flagged_files_changed",
-                ServerMessage::FlaggedFilesChanged {
-                    session_id: "s".into(),
-                    files: vec![],
-                },
-            ),
-            (
-                "session_meta_changed",
-                ServerMessage::SessionMetaChanged {
-                    session_id: "s".into(),
-                    archived: None,
-                    pinned: None,
-                    group_id: None,
-                },
-            ),
-            (
-                "session_attention_changed",
-                ServerMessage::SessionAttentionChanged {
-                    session_id: "s".into(),
-                    pending_permissions: 0,
-                    pending_questions: 0,
-                },
-            ),
-            (
-                "pong",
-                ServerMessage::Pong {
-                    version: "0.0.0".into(),
-                },
-            ),
-            (
-                "project_list",
-                ServerMessage::ProjectList { projects: vec![] },
-            ),
-        ];
-
-        let mut seen: Vec<&'static str> = Vec::with_capacity(samples.len());
-        for (expected, msg) in &samples {
-            let json = encode_json(msg).unwrap();
-            assert!(
-                json.contains(&format!(r#""type":"{}""#, expected)),
-                "tag mismatch for {}: expected {:?}, got {}",
-                expected,
-                expected,
-                json
-            );
-            assert!(
-                !seen.contains(expected),
-                "duplicate expected tag {:?} in server samples",
-                expected
-            );
-            seen.push(*expected);
-        }
-        assert_eq!(
-            seen.len(),
-            samples.len(),
-            "server tag list should have no duplicates"
-        );
     }
 
     // -- Converters ----------------------------------------------------------
@@ -2525,7 +1975,6 @@ mod tests {
                 },
                 ThinkingVariantInfo { name: "max".into() },
             ],
-            context_window: Some(128_000),
         };
         let j = encode_json(&m).unwrap();
         assert!(j.contains(r#""thinking_variants""#));
@@ -2542,7 +1991,6 @@ mod tests {
             model: "model".into(),
             description: None,
             thinking_variants: vec![],
-            context_window: None,
         };
         let j = encode_json(&m).unwrap();
         // Empty vec should be skipped in serialization.
@@ -2610,26 +2058,5 @@ mod tests {
         let j = encode_json(&m).unwrap();
         // permission_mode should be skipped from serialization when None.
         assert!(!j.contains(r#""permission_mode""#));
-    }
-
-    #[test]
-    fn test_roundtrip_ping_pong() {
-        let ping = ClientMessage::Ping;
-        let j = encode_json(&ping).unwrap();
-        assert!(j.contains(r#""type":"ping""#));
-        let decoded: ClientMessage = decode_json(&j).unwrap();
-        assert!(matches!(decoded, ClientMessage::Ping));
-
-        let pong = ServerMessage::Pong {
-            version: "0.2.0".into(),
-        };
-        let j = encode_json(&pong).unwrap();
-        assert!(j.contains(r#""type":"pong""#));
-        assert!(j.contains(r#""version":"0.2.0""#));
-        let decoded: ServerMessage = decode_json(&j).unwrap();
-        match decoded {
-            ServerMessage::Pong { version } => assert_eq!(version, "0.2.0"),
-            _ => panic!("expected Pong"),
-        }
     }
 }

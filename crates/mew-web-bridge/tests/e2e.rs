@@ -26,7 +26,7 @@ type Ws = WebSocketStream<TcpStream>;
 
 struct TestStack {
     _dir: TempDir,
-    socket: String,
+    _socket: String,
     tcp_addr: SocketAddr,
 }
 
@@ -79,7 +79,7 @@ async fn spawn_stack() -> TestStack {
 
     TestStack {
         _dir: dir,
-        socket: socket_str,
+        _socket: socket_str,
         tcp_addr,
     }
 }

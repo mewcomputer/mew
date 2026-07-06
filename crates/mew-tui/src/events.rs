@@ -368,7 +368,6 @@ fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Ac
                     } else {
                         app.reasoning_expanded.insert(id);
                     }
-                    app.mark_chat_dirty();
                     return None;
                 }
 
@@ -377,7 +376,6 @@ fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Ac
                 app.sel_anchor_col = Some(rel_col);
                 app.sel_end_row = Some(visual_row);
                 app.sel_end_col = Some(rel_col);
-                app.mark_chat_dirty();
                 return None;
             }
             None
@@ -394,7 +392,6 @@ fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Ac
                 let rel_col = col.saturating_sub(app.chat_area.x) as usize;
                 app.sel_end_row = Some(visual_row);
                 app.sel_end_col = Some(rel_col);
-                app.mark_chat_dirty();
                 return None;
             }
             None

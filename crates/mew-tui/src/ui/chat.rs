@@ -18,8 +18,8 @@ use crate::app::{byte_at_display_offset, App, ToolDisplayState};
 use mew_message::{Part, Role, ToolState};
 
 /// State for tracking visual rows during chat rendering for drag-to-select.
-struct ChatLineCtx<'t> {
-    lines: &'t mut Vec<Line<'static>>,
+struct ChatLineCtx<'a, 't> {
+    text: &'t mut Text<'a>,
     chat_rows: &'t mut Vec<String>,
     visual_row: usize,
     has_sel: bool,
@@ -29,8 +29,8 @@ struct ChatLineCtx<'t> {
     end_col: usize,
 }
 
-impl<'t> ChatLineCtx<'t> {
-    fn push_line(&mut self, line: Line<'static>) {
+impl<'a, 't> ChatLineCtx<'a, 't> {
+    fn push_line(&mut self, line: Line<'a>) {
         let line = if self.has_sel {
             self.apply_selection(line)
         } else {
@@ -38,7 +38,7 @@ impl<'t> ChatLineCtx<'t> {
         };
         let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         self.chat_rows.push(plain);
-        self.lines.push(line);
+        self.text.push_line(line);
         self.visual_row += 1;
     }
 
@@ -74,7 +74,7 @@ impl<'t> ChatLineCtx<'t> {
         }
     }
 
-    fn apply_selection(&self, mut line: Line<'static>) -> Line<'static> {
+    fn apply_selection(&self, mut line: Line<'a>) -> Line<'a> {
         let (start_disp, end_disp) = match self.sel_range() {
             Some(r) => r,
             None => return line,
@@ -95,7 +95,7 @@ impl<'t> ChatLineCtx<'t> {
             }
             return line;
         }
-        let mut new_spans: Vec<Span<'static>> = Vec::new();
+        let mut new_spans: Vec<Span<'a>> = Vec::new();
         let mut offset = 0usize;
         let sel_style = Style::default().fg(Color::Black).bg(Color::White);
         for s in line.spans {
@@ -133,6 +133,9 @@ impl<'t> ChatLineCtx<'t> {
 }
 
 pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
+    let mut text = Text::default();
+    let tool_bg_style = Style::default().bg(app.theme.tokens.tool_bg);
+    let msg_count = app.messages.len();
     // Reserve the rightmost 1 column for the scrollbar so tool blocks (which
     // paint app.theme.tokens.tool_bg across the full paragraph width) can't cover it. The
     // down-indicator then overlays the last column of the chat (like the
@@ -150,105 +153,25 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         height: area.height,
     };
     // The chat indents every text part by 2 spaces ("  ") for a left
-    // margin. The markdown renderer produces lines that, after prepending
-    // that indent, are exactly `chat_inner.width` wide. User/reasoning text
-    // is pre-wrapped to `md_width` so every line is ≤ chat_inner.width and
-    // `Wrap` is a no-op — letting us slice the visible window directly.
+    // margin. The markdown renderer should produce lines that, after
+    // prepending that indent, are exactly `chat_inner.width` wide —
+    // otherwise the paragraph's `.wrap(Wrap { trim: false })` wraps the
+    // line a second time at render and the continuation row spills past
+    // the right edge (or, with the old off-by-one, got cut off entirely).
     let md_width = chat_inner.width.saturating_sub(2);
+    // Tool lines pad to this width so the bg fill matches the paragraph
+    // render area. Using `area.width` here would make each line 1 col wider
+    // than the render area, and `wrapped_height` (which uses
+    // `chat_inner.width`) would count every tool line as 2 visual rows —
+    // doubling the tool block's height and leaving a row of bg-only "empty
+    // space" under every line.
+    let tool_width = chat_inner.width;
 
-    if app.last_md_width != md_width {
-        app.rendered_md_cache.clear();
-        app.last_md_width = md_width;
-    }
-
-    // Rebuild only when the rendered output changed (chat_dirty bumped or
-    // width changed). Idle scroll frames skip the rebuild entirely.
-    app.ensure_chat_rendered(md_width, chat_inner.width, chat_inner.height);
-
-    let rc = match app.rendered_chat.as_ref() {
-        Some(rc) => rc,
-        None => return,
-    };
-
-    let max_scroll = rc.max_scroll;
-    let total_lines = rc.total_wrapped;
-    if app.auto_scroll {
-        app.scroll = max_scroll;
-    }
-    let scroll_offset = app.scroll.min(max_scroll) as usize;
-
-    // Visible window: each cached line is already ≤ chat_inner.width wide
-    // (pre-wrapped), so without `Wrap` each line is exactly one visual row.
-    // Slice [scroll_offset, scroll_offset + height) — O(visible) regardless
-    // of scroll position or transcript size, killing ratatui's O(scroll.y)
-    // skip walk.
-    let visible_end = (scroll_offset + chat_inner.height as usize).min(rc.lines.len());
-    let visible: Vec<ratatui::text::Line<'static>> = rc
-        .lines
-        .iter()
-        .skip(scroll_offset)
-        .take(visible_end.saturating_sub(scroll_offset))
-        .cloned()
-        .collect();
-    // `Wrap` is kept on as a safety net for the rare line that exceeds
-    // chat width after em-dash expansion during streaming. Since lines are
-    // pre-wrapped at build time, `WordWrapper` returns immediately per line
-    // (1 iteration), so this stays O(visible). The visible-window slice
-    // already eliminated ratatui's O(scroll.y) skip — `scroll` is 0 here.
-    let paragraph = Paragraph::new(Text::from(visible))
-        .wrap(Wrap { trim: false })
-        .scroll((0, 0));
-
-    f.render_widget(paragraph, chat_inner);
-
-    if total_lines > chat_inner.height {
-        let mut scrollbar_state = ScrollbarState::new(total_lines as usize)
-            .viewport_content_length(chat_inner.height as usize)
-            .position(scroll_offset);
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(None)
-            .end_symbol(None)
-            .track_symbol(Some("│"))
-            .thumb_symbol("█");
-        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
-    }
-
-    if app.scroll > 0 {
-        let indicator = Span::styled("↑", Style::default().fg(Color::Yellow));
-        let indicator_area = Rect::new(area.x, area.y, 2, 1);
-        f.render_widget(Paragraph::new(Line::from(indicator)), indicator_area);
-    }
-    if app.scroll < max_scroll {
-        let indicator = Span::styled("↓", Style::default().fg(Color::Yellow));
-        let indicator_area = Rect::new(
-            chat_inner.x + chat_inner.width - 1,
-            area.y + area.height - 1,
-            1,
-            1,
-        );
-        f.render_widget(Paragraph::new(Line::from(indicator)), indicator_area);
-    }
-}
-
-/// Build the full transcript as a flat `Vec<Line>` (one entry per visual
-/// row, pre-wrapped to ≤ `chat_width`) plus the plain-text mirror used by
-/// mouse selection. Called by `App::ensure_chat_rendered` only when the
-/// cache is stale. Mutates `app.reasoning_header_rows`,
-/// `app.rendered_md_cache`, and `app.pending_md_rerender` as side effects
-/// (same as the old inline build loop).
-pub(crate) fn build_chat_lines(
-    app: &mut App,
-    md_width: u16,
-    chat_width: u16,
-) -> crate::app::BuiltChat {
-    let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
-    let mut chat_rows: Vec<String> = Vec::new();
-    let tool_bg_style = Style::default().bg(app.theme.tokens.tool_bg);
-    let msg_count = app.messages.len();
-    let tool_width = chat_width;
+    let mut chat_rows = std::mem::take(&mut app.chat_rows);
+    chat_rows.clear();
     app.reasoning_header_rows.clear();
     let mut sel_ctx = ChatLineCtx {
-        lines: &mut lines,
+        text: &mut text,
         chat_rows: &mut chat_rows,
         visual_row: 0,
         has_sel: app.sel_anchor_row.is_some() && app.sel_end_row.is_some(),
@@ -257,6 +180,11 @@ pub(crate) fn build_chat_lines(
         end_row: app.sel_end_row.unwrap_or(0),
         end_col: app.sel_end_col.unwrap_or(0),
     };
+
+    if app.last_md_width != md_width {
+        app.rendered_md_cache.clear();
+        app.last_md_width = md_width;
+    }
 
     for (msg_idx, msg) in app.messages.iter().enumerate() {
         let is_last = msg_idx + 1 == msg_count;
@@ -272,7 +200,7 @@ pub(crate) fn build_chat_lines(
             if let Some(ref meta) = msg.assistant {
                 if !meta.provider_id.is_empty() && !meta.model_id.is_empty() {
                     let header = format!("{} / {}", meta.provider_id, meta.model_id);
-                    let header_w = chat_width.saturating_sub(2);
+                    let header_w = chat_inner.width.saturating_sub(2);
                     for chunk in wrap_text_to_width(&header, header_w) {
                         sel_ctx.push_line(Line::from(vec![
                             Span::raw("  "),
@@ -343,26 +271,16 @@ pub(crate) fn build_chat_lines(
                             sel_ctx.push_line(new_line);
                         }
                     } else {
-                        // Pre-wrap user text to `md_width` so every line is
-                        // ≤ chat_inner.width and `Wrap` is a no-op (lets us
-                        // slice the visible window without ratatui re-wrapping).
-                        // `prefix` is "> " (2 cols), so wrap content to
-                        // `md_width.saturating_sub(prefix_width)`.
-                        let prefix_str = format!("{} ", prefix);
-                        let prefix_w = display_width(&prefix_str) as u16;
-                        let content_w = md_width.saturating_sub(prefix_w);
-                        for src_line in tp.text.lines() {
-                            let expanded = src_line.replace('\u{2014}', "— ");
-                            for chunk in wrap_text_to_width(&expanded, content_w) {
-                                let spans = vec![
-                                    Span::styled(
-                                        prefix_str.clone(),
-                                        Style::default().fg(prefix_color),
-                                    ),
-                                    Span::styled(chunk, content_style),
-                                ];
-                                sel_ctx.push_line(Line::from(spans));
-                            }
+                        for line in tp.text.lines() {
+                            let display_line = line.replace('\u{2014}', "— ");
+                            let spans = vec![
+                                Span::styled(
+                                    format!("{} ", prefix),
+                                    Style::default().fg(prefix_color),
+                                ),
+                                Span::styled(display_line, content_style),
+                            ];
+                            sel_ctx.push_line(Line::from(spans));
                         }
                     }
                     message_had_content = true;
@@ -394,15 +312,11 @@ pub(crate) fn build_chat_lines(
                         Span::styled(header, Style::default().fg(Color::DarkGray)),
                     ]));
                     if is_expanded {
-                        // Pre-wrap reasoning text to `md_width` so each line
-                        // is one visual row (same rationale as user text).
-                        for src_line in rp.text.lines() {
-                            for chunk in wrap_text_to_width(src_line, md_width) {
-                                sel_ctx.push_line(Line::from(vec![
-                                    Span::raw("  "),
-                                    Span::styled(chunk, Style::default().fg(Color::DarkGray)),
-                                ]));
-                            }
+                        for line in rp.text.lines() {
+                            sel_ctx.push_line(Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled(line, Style::default().fg(Color::DarkGray)),
+                            ]));
                         }
                     }
                     message_had_content = true;
@@ -553,7 +467,7 @@ pub(crate) fn build_chat_lines(
                                     tool_width,
                                     vec![
                                         Span::styled("      ", tool_bg_style),
-                                        Span::styled(line.to_string(), style),
+                                        Span::styled(line, style),
                                     ],
                                     tool_bg_style,
                                 ));
@@ -624,10 +538,53 @@ pub(crate) fn build_chat_lines(
     }
     #[allow(clippy::drop_non_drop)]
     drop(sel_ctx);
-    crate::app::BuiltChat { lines, chat_rows }
+    app.chat_rows = chat_rows;
+
+    let total_lines = wrapped_height(&text, chat_inner.width);
+    let max_scroll = total_lines.saturating_sub(chat_inner.height);
+    app.max_scroll = max_scroll;
+
+    if app.auto_scroll {
+        app.scroll = max_scroll;
+    }
+    let scroll_offset = app.scroll.min(max_scroll);
+
+    let paragraph = Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll_offset, 0));
+
+    f.render_widget(paragraph, chat_inner);
+
+    if total_lines > chat_inner.height {
+        let mut scrollbar_state = ScrollbarState::new(total_lines as usize)
+            .viewport_content_length(chat_inner.height as usize)
+            .position(scroll_offset as usize);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
+
+    if app.scroll > 0 {
+        let indicator = Span::styled("↑", Style::default().fg(Color::Yellow));
+        let indicator_area = Rect::new(area.x, area.y, 2, 1);
+        f.render_widget(Paragraph::new(Line::from(indicator)), indicator_area);
+    }
+    if app.scroll < max_scroll {
+        let indicator = Span::styled("↓", Style::default().fg(Color::Yellow));
+        let indicator_area = Rect::new(
+            chat_inner.x + chat_inner.width - 1,
+            area.y + area.height - 1,
+            1,
+            1,
+        );
+        f.render_widget(Paragraph::new(Line::from(indicator)), indicator_area);
+    }
 }
 
-fn push_tool_line(width: u16, mut spans: Vec<Span<'static>>, pad_style: Style) -> Line<'static> {
+fn push_tool_line<'a>(width: u16, mut spans: Vec<Span<'a>>, pad_style: Style) -> Line<'a> {
     // Force pad_style's bg on every span so wrapped continuation rows
     // inherit the tool fill (see `push_ansi_line` for the full rationale).
     let tool_bg = pad_style.bg;
@@ -643,6 +600,25 @@ fn push_tool_line(width: u16, mut spans: Vec<Span<'static>>, pad_style: Style) -
             .push(Span::styled(" ".repeat((width - used) as usize), pad_style));
     }
     line
+}
+
+/// Count the visual rows `text` occupies when wrapped to `width` columns.
+/// `Paragraph::scroll` advances by wrapped rows, not raw `Line` entries, so
+/// the scroll ceiling must be derived from the wrapped height — otherwise any
+/// line that wraps makes the bottom unreachable (the classic "can't scroll to
+/// the last line" bug).
+fn wrapped_height(text: &ratatui::text::Text, width: u16) -> u16 {
+    if width == 0 {
+        return text.lines.len() as u16;
+    }
+    let w = width as usize;
+    text.lines
+        .iter()
+        .map(|line| {
+            let line_width = line.width();
+            (line_width.div_ceil(w)).max(1) as u16
+        })
+        .sum()
 }
 
 fn fix_em_dashes(lines: Vec<ratatui::text::Line<'static>>) -> Vec<ratatui::text::Line<'static>> {
@@ -695,12 +671,7 @@ fn push_tool_edge(width: u16, is_top: bool, tool_bg: Color) -> Option<Line<'stat
 /// width. Returns one `Line` per visual row, each padded to exactly
 /// `width` so the paragraph never wraps a tool line (which would leak
 /// the chat bg on the continuation row's trailing cells).
-fn wrap_tool_line(
-    width: u16,
-    line: Line<'static>,
-    indent: &str,
-    tool_bg: Color,
-) -> Vec<Line<'static>> {
+fn wrap_tool_line<'a>(width: u16, line: Line<'a>, indent: &str, tool_bg: Color) -> Vec<Line<'a>> {
     let indent_w = display_width(indent) as u16;
     let content_w = width.saturating_sub(indent_w);
     if content_w == 0 {
@@ -883,6 +854,48 @@ fn tool_call_args_summary(tc: &mew_message::ToolCallPart) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_wrapped_height_no_wrap_when_lines_fit() {
+        let text = Text::from(vec![Line::from("short"), Line::from("also short")]);
+        assert_eq!(wrapped_height(&text, 80), 2);
+    }
+
+    #[test]
+    fn test_wrapped_height_wraps_long_line() {
+        // 25 chars at width 10 -> ceil(25/10) = 3 rows
+        let text = Text::from(vec![Line::from("a".repeat(25))]);
+        assert_eq!(wrapped_height(&text, 10), 3);
+    }
+
+    #[test]
+    fn test_wrapped_height_empty_line_counts_as_one() {
+        let text = Text::from(vec![
+            Line::from("short"),        // 1 row
+            Line::from("b".repeat(25)), // 3 rows at width 10
+            Line::from(""),             // 1 row
+        ]);
+        assert_eq!(wrapped_height(&text, 10), 5);
+    }
+
+    #[test]
+    fn test_wrapped_height_zero_width_falls_back_to_line_count() {
+        let text = Text::from(vec![Line::from("x"), Line::from("y")]);
+        assert_eq!(wrapped_height(&text, 0), 2);
+    }
+
+    #[test]
+    fn test_wrapped_height_exact_width_line_is_one_row() {
+        // A line exactly `width` cols wide must count as 1 row. A line
+        // `width + 1` cols wide must count as 2 rows. Tool blocks pad
+        // their lines to the render area width — if they pad to a width
+        // that's 1 col wider than the render area, every tool line
+        // becomes 2 rows and the tool block's height doubles.
+        let text_exact = Text::from(vec![Line::from("a".repeat(10))]);
+        assert_eq!(wrapped_height(&text_exact, 10), 1);
+        let text_over = Text::from(vec![Line::from("a".repeat(11))]);
+        assert_eq!(wrapped_height(&text_over, 10), 2);
+    }
 
     #[test]
     fn test_wrap_tool_line_short_returns_one_row() {

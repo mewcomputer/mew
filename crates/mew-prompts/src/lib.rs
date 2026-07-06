@@ -7,8 +7,8 @@
 //! - [`persona`] — persona body rendered through minijinja (when
 //!   `template: true` is set in the persona frontmatter).
 //! - [`skills`] — `<available_skills>` XML block.
-//! - [`subagent`] — built-in subagent system prompts (researcher, reviewer,
-//!   coder, etc.).
+//! - [`subagent`] — built-in subagent system prompts (researcher,
+//!   plan-reviewer, coder, etc.).
 //! - [`classifier`] — permission-decision prompt for the future Auto mode
 //!   (classifier-driven approval).
 //!

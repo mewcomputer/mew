@@ -53,11 +53,3 @@ See [Permissions](/docs/using-mew/permissions/) for mode details, rules, and san
 | `/todo` | Show the session todo list |
 | `/mouse` `/m` | Toggle mouse capture for text selection |
 | `/quit` `/q` | Exit mew |
-
-## Slash commands vs tools
-
-Slash commands are shortcuts you type to steer mew. Tools are called by
-the model during a turn. If you want to trigger something yourself, it is
-a slash command; if the model should do it autonomously, it is a tool.
-See [Comparing Features](/docs/using-mew/comparisons/) for the full
-breakdown.

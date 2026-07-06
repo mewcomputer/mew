@@ -28,11 +28,7 @@ impl Adapter {
             base_url: base_url.trim_end_matches('/').to_string(),
             model,
             api_key,
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
-                .connect_timeout(std::time::Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            client: reqwest::Client::new(),
             dump: false,
         }
     }
@@ -80,62 +76,33 @@ impl Provider for Adapter {
             let req = request.try_clone().ok_or_else(|| {
                 ProviderError::Message("request cannot be cloned for retry".to_string())
             })?;
-            match self.client.execute(req).await {
-                Ok(r) => {
-                    if r.status().is_success() {
-                        resp = Some(r);
-                        break;
-                    }
-                    let status = r.status().as_u16();
-                    let data = r.text().await.unwrap_or_default();
-                    let (backoff, retry) = policy.should_retry(status, attempt);
-                    if !retry {
-                        let (kind, msg) = classify_error(status, &data);
-                        let _ = retry_tx
-                            .send(ProviderEvent::Error(mew_message::MessageError {
-                                kind,
-                                message: msg.clone(),
-                            }))
-                            .await;
-                        return Err(ProviderError::Classified { kind, message: msg });
-                    }
-                    let _ = retry_tx
-                        .send(ProviderEvent::RetryWait {
-                            attempt: attempt as u32 + 1,
-                            max_attempts: policy.max_attempts_for(status),
-                            delay_secs: backoff.as_secs(),
-                            reason: classify_reason(status),
-                        })
-                        .await;
-                    tokio::time::sleep(backoff).await;
-                }
-                Err(e) => {
-                    // Network-level error (connection refused, DNS failure,
-                    // TLS error, timeout, etc.).  Retry with the same
-                    // exponential backoff as 429s instead of propagating
-                    // immediately.
-                    let (backoff, retry) = policy.should_retry_network_error(attempt);
-                    if !retry {
-                        let msg = e.to_string();
-                        let _ = retry_tx
-                            .send(ProviderEvent::Error(mew_message::MessageError {
-                                kind: ErrorKind::Unknown,
-                                message: msg.clone(),
-                            }))
-                            .await;
-                        return Err(ProviderError::Http(e));
-                    }
-                    let _ = retry_tx
-                        .send(ProviderEvent::RetryWait {
-                            attempt: attempt as u32 + 1,
-                            max_attempts: policy.max_retries as u32,
-                            delay_secs: backoff.as_secs(),
-                            reason: "connection error".into(),
-                        })
-                        .await;
-                    tokio::time::sleep(backoff).await;
-                }
+            let r = self.client.execute(req).await?;
+            if r.status().is_success() {
+                resp = Some(r);
+                break;
             }
+            let status = r.status().as_u16();
+            let data = r.text().await.unwrap_or_default();
+            let (backoff, retry) = policy.should_retry(status, attempt);
+            if !retry {
+                let (kind, msg) = classify_error(status, &data);
+                let _ = retry_tx
+                    .send(ProviderEvent::Error(mew_message::MessageError {
+                        kind,
+                        message: msg.clone(),
+                    }))
+                    .await;
+                return Err(ProviderError::Classified { kind, message: msg });
+            }
+            let _ = retry_tx
+                .send(ProviderEvent::RetryWait {
+                    attempt: attempt as u32 + 1,
+                    max_attempts: 4,
+                    delay_secs: backoff.as_secs(),
+                    reason: classify_reason(status),
+                })
+                .await;
+            tokio::time::sleep(backoff).await;
         }
 
         drop(retry_tx);
@@ -194,7 +161,7 @@ impl Adapter {
             for p in &m.parts {
                 if let Part::ToolCall(tc) = p {
                     if tc.call_id == call_id {
-                        return tc.state.result_content().unwrap_or("").to_string();
+                        return tc.state.output().unwrap_or("").to_string();
                     }
                 }
             }
@@ -736,7 +703,6 @@ fn new_tool_call_part() -> ToolCallPart {
                 end: None,
             },
         }),
-        sensitivity: None,
         raw_input: String::new(),
     }
 }
@@ -745,7 +711,6 @@ fn new_tool_call_part() -> ToolCallPart {
 mod tests {
     use super::*;
     use mew_message::AssistantMeta;
-    use mew_message::ToolResultPart;
 
     fn make_minimal_png() -> Vec<u8> {
         vec![
@@ -828,7 +793,6 @@ mod tests {
                         },
                     }),
                     raw_input: String::new(),
-                    sensitivity: None,
                 }),
             ],
             time: mew_message::Time {
@@ -850,79 +814,6 @@ mod tests {
         assert!(wire[0]["tool_calls"].is_array());
         assert_eq!(wire[0]["tool_calls"][0]["id"], "call_123");
         assert_eq!(wire[0]["tool_calls"][0]["function"]["name"], "echo");
-    }
-
-    #[tokio::test]
-    async fn test_build_wire_message_tool_result_error() {
-        let adapter = Adapter::new(
-            "test".to_string(),
-            "https://example.com".to_string(),
-            "model".to_string(),
-            "key".to_string(),
-        );
-        // Assistant message with a tool call in Error state
-        let assistant_msg = Message {
-            id: ulid::Ulid::new(),
-            session_id: ulid::Ulid::new(),
-            role: Role::Assistant,
-            parts: vec![Part::ToolCall(ToolCallPart {
-                base: PartBase {
-                    id: ulid::Ulid::new(),
-                    message_id: ulid::Ulid::new(),
-                    session_id: ulid::Ulid::new(),
-                },
-                tool_name: "write".to_string(),
-                call_id: "call_err".to_string(),
-                state: ToolState::Error(mew_message::ToolStateError {
-                    input: serde_json::json!({}),
-                    error: "invalid input: missing path".to_string(),
-                    time: ToolTime {
-                        start: 0,
-                        end: Some(1),
-                    },
-                }),
-                raw_input: String::new(),
-                sensitivity: None,
-            })],
-            time: mew_message::Time {
-                created: 0,
-                completed: None,
-            },
-            assistant: Some(AssistantMeta {
-                provider_id: String::new(),
-                model_id: String::new(),
-                cost: 0.0,
-                tokens: Tokens::default(),
-                finish: None,
-                error: None,
-            }),
-        };
-        let user_msg = Message {
-            id: ulid::Ulid::new(),
-            session_id: ulid::Ulid::new(),
-            role: Role::User,
-            parts: vec![Part::ToolResult(ToolResultPart {
-                base: PartBase {
-                    id: ulid::Ulid::new(),
-                    message_id: ulid::Ulid::new(),
-                    session_id: ulid::Ulid::new(),
-                },
-                call_id: "call_err".to_string(),
-            })],
-            time: mew_message::Time {
-                created: 0,
-                completed: None,
-            },
-            assistant: None,
-        };
-        let all = vec![assistant_msg, user_msg.clone()];
-        let wire = adapter.build_wire_message(&all, &user_msg).await;
-        // OpenAI shape: one tool result message
-        assert_eq!(wire.len(), 1);
-        assert_eq!(wire[0]["role"], "tool");
-        assert_eq!(wire[0]["tool_call_id"], "call_err");
-        // Error message is the content — not empty
-        assert_eq!(wire[0]["content"], "invalid input: missing path");
     }
 
     #[tokio::test]

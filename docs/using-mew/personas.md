@@ -231,14 +231,5 @@ full toolset. This bypasses the confirm modal.
 /persona
 ```
 
-Lists all available personas with their descriptions. The active persona
-is marked with `*`.
-
-## Personas vs skills vs subagents
-
-Personas, skills, and subagents all customize behavior and it is easy to
-mix them up. The short version: a persona changes how the main agent
-behaves for the whole session; a skill is loaded on demand for one
-procedure; a subagent is a separate child agent that returns a summary.
-See [Comparing Features](/docs/using-mew/comparisons/) for the full
-breakdown.
+Lists all available personas with their descriptions and whether they're
+built-in or user-defined.

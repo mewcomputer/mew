@@ -1,8 +1,8 @@
 //! Built-in subagent system prompts.
 //!
 //! These are the system-prompt bodies for the three subagents mew ships
-//! built-in: `researcher`, `reviewer`, and `coder`. User-defined subagents
-//! load their bodies from `.mew/agents/*.md` files (handled by
+//! built-in: `researcher`, `plan-reviewer`, and `coder`. User-defined
+//! subagents load their bodies from `.mew/agents/*.md` files (handled by
 //! `mew-subagents`); only the built-in bodies live here.
 //!
 //! Centralizing them here means there's one place to look when you want to
@@ -19,8 +19,8 @@ pub fn builtin_bodies() -> Vec<(&'static str, &'static str)> {
             crate::vfs::read_builtin("subagents/researcher").unwrap_or(""),
         ),
         (
-            "reviewer",
-            crate::vfs::read_builtin("subagents/reviewer").unwrap_or(""),
+            "plan-reviewer",
+            crate::vfs::read_builtin("subagents/plan-reviewer").unwrap_or(""),
         ),
         (
             "coder",
@@ -46,13 +46,13 @@ mod tests {
     }
 
     #[test]
-    fn test_reviewer_body_mentions_severity_rating() {
+    fn test_plan_reviewer_body_mentions_severity_rating() {
         let bodies = builtin_bodies();
         let body = bodies
             .iter()
-            .find(|(n, _)| *n == "reviewer")
+            .find(|(n, _)| *n == "plan-reviewer")
             .map(|(_, b)| *b)
-            .expect("reviewer body present");
+            .expect("plan-reviewer body present");
         assert!(body.contains("critical"));
         assert!(body.contains("high"));
     }
@@ -72,6 +72,6 @@ mod tests {
     fn test_builtin_bodies_lists_all_three() {
         let bodies = builtin_bodies();
         let names: Vec<&str> = bodies.iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, vec!["researcher", "reviewer", "coder"]);
+        assert_eq!(names, vec!["researcher", "plan-reviewer", "coder"]);
     }
 }

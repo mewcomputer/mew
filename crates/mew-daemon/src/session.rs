@@ -69,9 +69,9 @@ pub struct Session {
         )>,
     >,
     /// Pending permission / workspace-permission / subagent-permission requests.
-    pub pending_permissions: Mutex<HashMap<u64, PendingRequest<PermissionDecision>>>,
+    pub pending_permissions: Mutex<HashMap<u64, oneshot::Sender<PermissionDecision>>>,
     /// Pending ask-user requests.
-    pub pending_ask_user: Mutex<HashMap<u64, PendingRequest<Vec<String>>>>,
+    pub pending_ask_user: Mutex<HashMap<u64, oneshot::Sender<Vec<String>>>>,
     /// Monotonically increasing IDs for both clients and permission requests.
     pub next_id: AtomicU64,
     /// Token for the turn currently in progress, if any.
@@ -85,14 +85,6 @@ pub struct Session {
     pub is_running: Mutex<bool>,
     /// Sessions root directory (for meta persistence).
     pub session_dir: PathBuf,
-}
-
-/// A request awaiting a client response. Keeps the wire payload so it can be
-/// replayed to a client that attaches while the request is still outstanding,
-/// alongside the channel that delivers the response back to the agent.
-pub struct PendingRequest<T> {
-    pub payload: mew_protocol::ServerMessage,
-    pub responder: oneshot::Sender<T>,
 }
 
 impl Session {
@@ -221,11 +213,7 @@ impl SessionManager {
     /// Create a brand-new session.
     pub async fn create(&self, cwd: Option<PathBuf>) -> Result<Arc<Session>> {
         let session_id = format!("sess_{}", ulid::Ulid::new());
-        let mut meta = mew_session::Meta::new(&session_id);
-        if let Some(ref c) = cwd {
-            meta.cwd = Some(c.display().to_string());
-        }
-        let writer = mew_session::Writer::open_at_with_meta(&self.session_dir, &session_id, meta)
+        let writer = mew_session::Writer::open_at(&self.session_dir, &session_id)
             .await
             .context("open session writer")?;
         let (agent, model, provider) = (self.builder)(AgentBuildParams {
@@ -280,10 +268,6 @@ impl SessionManager {
             return Err(AttachError::NotTopLevel);
         }
 
-        // Preserve cwd across resume — the session's cwd must survive
-        // daemon restarts and eviction (plan: "Attach/resume passes meta.cwd").
-        let session_cwd = meta.cwd.as_deref().map(std::path::PathBuf::from);
-
         let writer = mew_session::Writer::open_at_with_meta(&self.session_dir, session_id, meta)
             .await
             .context("open session writer for resume")
@@ -292,7 +276,7 @@ impl SessionManager {
         let (agent, model, provider) = (self.builder)(AgentBuildParams {
             session_id: session_id.to_string(),
             writer,
-            cwd: session_cwd,
+            cwd: None,
         })
         .context("build agent for resume")
         .map_err(AttachError::BuildAgent)?;

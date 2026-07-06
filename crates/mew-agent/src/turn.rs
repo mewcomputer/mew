@@ -6,7 +6,6 @@ use ulid::Ulid;
 use mew_hooks::ChatParams;
 use mew_message::{
     AssistantMeta, ErrorKind, Message, MessageError, Part, PartBase, Role, TextPart, Time, Tokens,
-    ToolState,
 };
 use mew_provider::{ProviderEvent, Request, ToolDef};
 use mew_tools::tools::flag_important::FlagMode;
@@ -298,73 +297,6 @@ impl Agent {
             };
 
             let req_for_fallback = req.clone();
-
-            // Log a compact request summary to <session_dir>/requests.log
-            // for debugging "weird state" issues. We log only counts and
-            // message IDs — not full content — to avoid O(N²) growth and
-            // to keep tool outputs and system prompts off disk.
-            if let Some(ref session) = self.session {
-                let dir = {
-                    let s = session.lock().await;
-                    s.dir().to_path_buf()
-                };
-                let log_path = dir.join("requests.log");
-                let entry = serde_json::json!({
-                    "ts": Utc::now().to_rfc3339(),
-                    "turn": turn_count,
-                    "provider": self.provider.name(),
-                    "message_count": req.messages.len(),
-                    "tool_count": req.tools.len(),
-                    "system_len": req.system.len(),
-                    "messages": req.messages.iter().map(|m| {
-                        serde_json::json!({
-                            "role": match m.role {
-                                Role::User => "user",
-                                Role::Assistant => "assistant",
-                            },
-                            "parts": m.parts.iter().map(|p| match p {
-                                Part::Text(t) => serde_json::json!({"type": "text", "len": t.text.len()}),
-                                Part::Reasoning(r) => serde_json::json!({"type": "reasoning", "len": r.text.len()}),
-                                Part::ToolCall(tc) => serde_json::json!({
-                                    "type": "tool_call",
-                                    "tool": tc.tool_name,
-                                    "call_id": tc.call_id,
-                                    "state": match &tc.state {
-                                        ToolState::Pending(_) => "pending",
-                                        ToolState::Running(_) => "running",
-                                        ToolState::Completed(_) => "completed",
-                                        ToolState::Error(_) => "error",
-                                    },
-                                }),
-                                Part::ToolResult(tr) => serde_json::json!({
-                                    "type": "tool_result",
-                                    "call_id": tr.call_id,
-                                }),
-                                Part::Compaction(_) => serde_json::json!({"type": "compaction"}),
-                                _ => serde_json::json!({"type": "other"}),
-                            }).collect::<Vec<_>>(),
-                        })
-                    }).collect::<Vec<_>>(),
-                });
-                let line = format!("{}\n", entry);
-                match tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log_path)
-                    .await
-                {
-                    Ok(mut f) => {
-                        use tokio::io::AsyncWriteExt;
-                        if let Err(e) = f.write_all(line.as_bytes()).await {
-                            tracing::warn!(error = %e, path = %log_path.display(), "failed to write requests.log");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, path = %log_path.display(), "failed to open requests.log");
-                    }
-                }
-            }
-
             let mut stream = match self.provider.stream(req).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -698,7 +630,6 @@ mod tests {
                 },
             }),
             raw_input: "{}".to_string(),
-            sensitivity: None,
         })
     }
 

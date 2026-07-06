@@ -69,10 +69,9 @@ Loads the full message history from disk, replaces the current conversation,
 and restores the session's todo list. The session ID is the folder name
 shown by `/sessions`.
 
-Resume reconstructs the entire conversation from the JSONL log, clear
-markers included as ordinary messages. `/clear` only resets the in-memory
-context for the running session; the log is append-only and resume
-replays it in full.
+Resume reconstructs the conversation from the JSONL log. If the session
+was cleared with `/clear` at some point, resume replays forward from the
+clear marker, so you get the post-clear context.
 
 ## Rewinding
 
@@ -104,9 +103,8 @@ You cannot rewind while streaming.
 /clear
 ```
 
-Clears the visible conversation and resets the agent's in-memory message
-history. A synthetic clear marker is appended to the session log as an
-audit record; the log itself is append-only and resume loads it in full.
+Clears the visible conversation. A clear marker is appended to the
+session log so resume knows where the fresh context starts.
 
 Permission caches survive `/clear`. If you approved a tool for the
 session with "Allow session", that approval persists. This is

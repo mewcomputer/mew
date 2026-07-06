@@ -276,13 +276,13 @@ impl Loader {
                 template: false,
             },
             SubagentDef {
-                name: "reviewer".into(),
-                description: "Reviews code changes for issues, style, and correctness.".into(),
+                name: "plan-reviewer".into(),
+                description: "Reviews a handoff plan before execution.".into(),
                 model: None,
                 tools: Some(vec!["read".into(), "glob".into(), "grep".into()]),
                 max_turns: Some(DEFAULT_MAX_TURNS),
                 max_duration_secs: Some(DEFAULT_MAX_DURATION_SECS),
-                body: mew_prompts::vfs::read_builtin("subagents/reviewer")
+                body: mew_prompts::vfs::read_builtin("subagents/plan-reviewer")
                     .unwrap_or("")
                     .to_string(),
                 path: PathBuf::from("(built-in)"),
@@ -426,6 +426,7 @@ mod tests {
         std::fs::write(agents_dir.join(format!("{name}.md")), content).unwrap();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_agent_full(
         dir: &Path,
         name: &str,
@@ -470,7 +471,7 @@ mod tests {
         let defs = loader.load().unwrap();
         let user_defs: Vec<_> = defs
             .iter()
-            .filter(|d| d.path != PathBuf::from("(built-in)"))
+            .filter(|d| d.path != Path::new("(built-in)"))
             .collect();
         assert_eq!(user_defs.len(), 1);
         assert_eq!(user_defs[0].name, "code-reviewer");
@@ -499,7 +500,7 @@ mod tests {
         let defs = loader.load().unwrap();
         let user_defs: Vec<_> = defs
             .iter()
-            .filter(|d| d.path != PathBuf::from("(built-in)"))
+            .filter(|d| d.path != Path::new("(built-in)"))
             .collect();
         assert_eq!(user_defs.len(), 1);
         let def = &user_defs[0];
@@ -528,7 +529,7 @@ mod tests {
         let defs = loader.load().unwrap();
         let user_defs: Vec<_> = defs
             .iter()
-            .filter(|d| d.path != PathBuf::from("(built-in)"))
+            .filter(|d| d.path != Path::new("(built-in)"))
             .collect();
         assert_eq!(user_defs.len(), 1);
         assert_eq!(user_defs[0].description, "First");
@@ -567,7 +568,7 @@ mod tests {
         let defs = loader.load().unwrap();
         let user_defs: Vec<_> = defs
             .iter()
-            .filter(|d| d.path != PathBuf::from("(built-in)"))
+            .filter(|d| d.path != Path::new("(built-in)"))
             .collect();
         assert!(user_defs.is_empty());
     }
@@ -593,7 +594,7 @@ mod tests {
         let defs = loader.load().unwrap();
         let user_defs: Vec<_> = defs
             .iter()
-            .filter(|d| d.path != PathBuf::from("(built-in)"))
+            .filter(|d| d.path != Path::new("(built-in)"))
             .collect();
         assert_eq!(user_defs.len(), 1);
         assert_eq!(user_defs[0].name, "no-fm");
@@ -617,7 +618,6 @@ mod tests {
                 model: Some("opencode-zen/deepseek-v4-flash".to_string()),
                 max_turns: Some(10),
                 max_duration_secs: Some(45),
-                ..Default::default()
             },
         );
         apply_config_overrides(&mut defs, &overrides);

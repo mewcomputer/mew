@@ -78,7 +78,7 @@ SWAP 2.=3:
 ```
 
 Replaces lines 2 through 3 with the payload. `SWAP 2.=2:` replaces a single
-line. Range separators can be `.=`, `..`, `-`, `…`, or `:` (e.g. `SWAP 2:5:`).
+line. Range separators can be `.=`, `..`, `-`, or `…`.
 
 ### DEL - delete a range
 
@@ -87,8 +87,7 @@ DEL 5
 DEL 2.=4
 ```
 
-Deletes lines 5, or lines 2 through 4. No payload body. Range separators
-can be `.=`, `..`, `-`, `…`, or `:` (e.g. `DEL 2:4`).
+Deletes lines 5, or lines 2 through 4. No payload body.
 
 ### INS - insert lines
 
@@ -160,10 +159,6 @@ the payload if they appear after the first `+` line. Raw lines that don't
 start with `+` are also accepted as payload content, which makes pasting from
 read output easier, but `+` is the canonical form.
 
-`-old` rows (unified-diff style deletion markers) are ignored with a warning,
-since the SWAP/DEL range already specifies what's being deleted. Don't rely
-on this, but it won't break your patch.
-
 If a raw payload line accidentally includes a read-output line-number prefix
 like `12:content`, mew strips it and adds a warning.
 
@@ -218,6 +213,5 @@ then the original style is restored before writing.
 | `hash mismatch for path: expected X, found Y` | The file changed since `read`. `read` it again. |
 | `line N does not exist` | The anchor line is past the end of the file. |
 | `invalid range: N.M ends before it starts` | The end line is smaller than the start line. |
-| `unexpected trailing text: ...` | The operation has extra text after the range. Use `SWAP 2.=5:` for a range or `SWAP 2:` for a single line. |
 | `block resolver unavailable` | `SWAP.BLK` or `DEL.BLK` could not resolve the syntax block. |
 | `line N was not shown in the read that minted the tag` | The anchor is outside the `offset`/`limit` window the model saw. |

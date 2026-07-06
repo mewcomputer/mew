@@ -99,7 +99,6 @@ pub enum ErrorKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[allow(clippy::large_enum_variant)] // already 288+ bytes; sensitivity field is negligible
 pub enum Part {
     Text(TextPart),
     Reasoning(ReasoningPart),
@@ -164,13 +163,6 @@ pub struct ToolCallPart {
     pub tool_name: String,
     pub call_id: String,
     pub state: ToolState,
-    /// Sensitivity tier of the tool ("readonly", "mutating", "dangerous").
-    /// Stamped by the agent from the tool registry on PartStart so clients can
-    /// group/label tool calls without their own name→tier map. `None` for
-    /// parts created before the agent stamps them (provider adapters) or for
-    /// historical sessions that predate the field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sensitivity: Option<String>,
     #[serde(skip)]
     pub raw_input: String,
 }
@@ -230,29 +222,6 @@ impl ToolState {
             _ => None,
         }
     }
-
-    /// Returns the error message if the tool is in an error state.
-    pub fn error(&self) -> Option<&str> {
-        match self {
-            ToolState::Error(s) => Some(&s.error),
-            _ => None,
-        }
-    }
-
-    /// Returns the text a provider should send back to the model as the
-    /// tool result content: the output on success, the error message on
-    /// failure. Never empty when the tool has reached a terminal state.
-    pub fn result_content(&self) -> Option<&str> {
-        match self {
-            ToolState::Completed(s) => Some(&s.output),
-            ToolState::Error(s) => Some(&s.error),
-            _ => None,
-        }
-    }
-
-    pub fn is_error(&self) -> bool {
-        matches!(self, ToolState::Error(_))
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -309,7 +278,6 @@ fn is_default<T: Default + PartialEq>(t: &T) -> bool {
 /// serializes cleanly for the daemon protocol.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[allow(clippy::large_enum_variant)] // Part is already large; boxing would ripple everywhere
 pub enum ProviderEventWire {
     PartStart {
         part: Part,
@@ -383,21 +351,6 @@ mod tests {
             id: Ulid::new(),
             message_id: mid,
             session_id: sid,
-        }
-    }
-
-    fn msg(role: Role, sid: SessionId, parts: Vec<Part>) -> Message {
-        let id = Ulid::new();
-        Message {
-            id,
-            session_id: sid,
-            role,
-            parts,
-            time: Time {
-                created: 1700000000000,
-                completed: None,
-            },
-            assistant: None,
         }
     }
 
@@ -494,7 +447,6 @@ mod tests {
                 },
             }),
             raw_input: String::new(),
-            sensitivity: None,
         });
         roundtrip("tool call pending", &p);
     }
@@ -516,7 +468,6 @@ mod tests {
                 },
             }),
             raw_input: String::new(),
-            sensitivity: None,
         });
         roundtrip("tool call running", &p);
     }
@@ -540,7 +491,6 @@ mod tests {
                 },
             }),
             raw_input: String::new(),
-            sensitivity: None,
         });
         roundtrip("tool call completed", &p);
     }
@@ -562,7 +512,6 @@ mod tests {
                 },
             }),
             raw_input: String::new(),
-            sensitivity: None,
         });
         roundtrip("tool call error", &p);
     }
@@ -651,7 +600,6 @@ mod tests {
                         },
                     }),
                     raw_input: String::new(),
-                    sensitivity: None,
                 }),
             ],
             time: Time {

@@ -121,7 +121,7 @@ mod tests {
             .map(|p| p.id)
             .collect();
         assert!(names.contains(&"subagent:researcher"));
-        assert!(names.contains(&"subagent:reviewer"));
+        assert!(names.contains(&"subagent:plan-reviewer"));
         assert!(names.contains(&"subagent:coder"));
     }
 

@@ -27,10 +27,10 @@ syntax-colored `+`/`-` highlighting.
 |------|-------------|-------------|
 | `read` | ReadOnly | Read file contents. Returns a `[path#hash]` header and numbered lines for hashline edits. Supports offset and limit for pagination. Detects binary files and refuses to read them. |
 | `write` | Mutating | Write content to a file. Creates the file if it doesn't exist, overwrites if it does. |
-| `edit_str_replace` | Mutating | Replace a unique string in a file. Fails if the old string appears more than once. Includes first/last line snippets in error messages to help recovery. |
+| `edit` | Mutating | Replace a unique string in a file. Fails if the old string appears more than once. Includes first/last line snippets in error messages to help recovery. |
 | `edit_hashline` | Mutating | Edit files using line-anchored hashline patches with file-hash staleness detection. Supports block-aware ops and stale-tag recovery. |
-| `glob` | ReadOnly | Find files matching a glob pattern. Sorted alphabetically. Honors `.gitignore` by default. |
-| `grep` | ReadOnly | Search file contents for a regex pattern via the in-tree search engine. Supports `include`/`glob` file filters. |
+| `glob` | ReadOnly | Find files matching a glob pattern. Sorted by modification time. Honors `.gitignore` by default. |
+| `grep` | ReadOnly | Search file contents for a regex pattern. Prefers ripgrep if available. Supports include filters and context lines. |
 
 See [Hashline Edits](/docs/using-mew/hashline/) for the patch format and examples.
 
@@ -42,8 +42,8 @@ See [Hashline Edits](/docs/using-mew/hashline/) for the patch format and example
 | `shell_background` | Dangerous | Launch a shell command in the background and return a job ID immediately. |
 | `shell_monitor` | Dangerous | Run a command and wait for it to exit successfully, retrying until a timeout. For readiness probes. |
 | `job_status` | ReadOnly | Check the status of a background job (shell or subagent). |
-| `job_block` | ReadOnly | Wait for a background job to reach a terminal state. |
-| `job_cancel` | Mutating | Cancel a running background job by killing its process. |
+| `job_block` | Mutating | Wait for a background job to reach a terminal state. |
+| `job_cancel` | Dangerous | Cancel a running background job by killing its process. |
 
 ### Session and agent
 
@@ -101,13 +101,12 @@ These tools only register when their prerequisites are met:
 
 ## Secret redaction
 
-Tools that return file content or command output redact known secrets
-before returning. Two layers:
+All tools that return file content or command output run the result
+through `SecretSet::redact()` before returning. This catches:
 
-- Word-based secrets (literal values listed in `secrets.words` are
-  replaced with `[REDACTED]`)
-- File-based secrets (paths matching `secrets.files` globs are dropped
-  from `glob` and `grep` results)
+- Pattern-based secrets (API keys, tokens, passwords matching common formats)
+- File-based secrets (contents of files listed in `secrets.files`)
+- Word-based secrets (specific values listed in `secrets.words`)
 
 See [Permissions](/docs/using-mew/permissions/) for how to configure secret
 redaction.
@@ -116,11 +115,3 @@ redaction.
 
 See [Adding a Tool](/docs/development/dev-tools/) for the developer guide on
 implementing and registering new tools.
-
-## Tools vs slash commands
-
-Tools and [slash commands](/docs/using-mew/slash-commands/) both extend
-mew, but they are triggered by different actors. The model calls a tool
-during a turn; you type a slash command into the input box. Tools are
-model-facing and permission-gated, slash commands are user shortcuts. See
-[Comparing Features](/docs/using-mew/comparisons/) for the full breakdown.

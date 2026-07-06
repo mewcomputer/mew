@@ -45,17 +45,8 @@ pub mod files;
 pub mod groups;
 pub mod session;
 
-#[cfg(feature = "iroh")]
-pub mod iroh_transport;
-
-#[cfg(feature = "iroh")]
-pub use iroh_transport::{
-    default_allowlist_path, default_secret_key_path, load_or_create_secret_key, run_iroh,
-    IrohStream, MewIrohHandler, NodeIdAllowlist, MEW_ALPN,
-};
-
 pub use client::DaemonClient;
-pub use session::{AttachError, PendingRequest, Session, SessionManager};
+pub use session::{AttachError, Session, SessionManager};
 
 /// Parameters passed to the agent-builder closure.
 pub struct AgentBuildParams {
@@ -101,9 +92,6 @@ pub struct DaemonServer {
     pub session_manager: Arc<SessionManager>,
     /// Session groups sidecar store (groups.json).
     pub groups_store: Arc<groups::GroupsStore>,
-    /// Daemon-wide flag for auto-summary. Shared across all connections
-    /// so the idle-summary task is spawned once, not per-connection.
-    pub auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DaemonServer {
@@ -147,7 +135,6 @@ impl DaemonServer {
             thinking_setter: None,
             session_manager,
             groups_store,
-            auto_summary_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 
@@ -173,26 +160,12 @@ impl DaemonServer {
         self
     }
 
-    /// Adopt the shared session state (`session_manager`, `groups_store`,
-    /// and `auto_summary_enabled`) from `other`.
-    ///
-    /// Because these fields are all `Arc`s, copying them shares the same
-    /// underlying state instead of creating fresh copies. This is what the
-    /// dual-listener (Unix + TCP) setup uses so that both listeners see the
-    /// same sessions and only one `idle_summary_task` scans them all.
-    pub fn share_session_state(mut self, other: &DaemonServer) -> Self {
-        self.session_manager = Arc::clone(&other.session_manager);
-        self.groups_store = Arc::clone(&other.groups_store);
-        self.auto_summary_enabled = Arc::clone(&other.auto_summary_enabled);
-        self
-    }
-
     /// Run the daemon, listening on the given Unix socket path.
     /// Blocks until the listener is closed, a signal (SIGINT/SIGTERM) is
     /// received, or an unrecoverable error occurs.
     pub async fn run(self, socket_path: &str) -> Result<()> {
-        // Check if the socket is already live; bail if so, remove if stale.
-        check_socket_liveness(socket_path)?;
+        // Remove stale socket.
+        let _ = std::fs::remove_file(socket_path);
 
         let listener = UnixListener::bind(socket_path)
             .with_context(|| format!("bind socket {}", socket_path))?;
@@ -201,17 +174,6 @@ impl DaemonServer {
         let session_manager = self.session_manager.clone();
         let groups_store = self.groups_store.clone();
         let thinking_setter = self.thinking_setter.clone();
-        let auto_summary_enabled = self.auto_summary_enabled.clone();
-
-        // Spawn the idle-summary task once (daemon-wide, not per-connection).
-        {
-            let sm = session_manager.clone();
-            let flag = auto_summary_enabled.clone();
-            tokio::spawn(async move {
-                idle_summary_task(sm, flag).await;
-            });
-        }
-
         let mut id_counter = 0u64;
 
         let mut sig_term =
@@ -232,10 +194,9 @@ impl DaemonServer {
                             let session_manager = session_manager.clone();
                             let groups_store = groups_store.clone();
                             let thinking_setter = thinking_setter.clone();
-                            let auto_summary_enabled = auto_summary_enabled.clone();
                             tokio::spawn(async move {
                                 info!(conn_id, "connection accepted");
-                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter, auto_summary_enabled).await {
+                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter).await {
                                     if !e.to_string().contains("connection reset") {
                                         warn!(conn_id, error = %e, "connection ended with error");
                                     }
@@ -266,17 +227,6 @@ impl DaemonServer {
         let session_manager = self.session_manager.clone();
         let groups_store = self.groups_store.clone();
         let thinking_setter = self.thinking_setter.clone();
-        let auto_summary_enabled = self.auto_summary_enabled.clone();
-
-        // Spawn the idle-summary task once (daemon-wide, not per-connection).
-        {
-            let sm = session_manager.clone();
-            let flag = auto_summary_enabled.clone();
-            tokio::spawn(async move {
-                idle_summary_task(sm, flag).await;
-            });
-        }
-
         let mut id_counter = 0u64;
 
         let mut sig_term =
@@ -297,10 +247,9 @@ impl DaemonServer {
                             let session_manager = session_manager.clone();
                             let groups_store = groups_store.clone();
                             let thinking_setter = thinking_setter.clone();
-                            let auto_summary_enabled = auto_summary_enabled.clone();
                             tokio::spawn(async move {
                                 info!(conn_id, %peer, "connection accepted (tcp)");
-                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter, auto_summary_enabled).await {
+                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter).await {
                                     if !e.to_string().contains("connection reset") {
                                         warn!(conn_id, error = %e, "connection ended with error");
                                     }
@@ -329,7 +278,6 @@ async fn handle_connection<S>(
     session_manager: Arc<SessionManager>,
     groups_store: Arc<groups::GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
-    auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -345,8 +293,19 @@ where
     let mut client_id: Option<u64> = None;
     let mut auto_title_enabled = true;
 
-    // auto_summary_enabled is passed in from the daemon (daemon-wide task
-    // is spawned once in run()/run_tcp(), not per-connection).
+    // Shared flag for the idle-summary background task.
+    let auto_summary_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+    // Spawn the idle-summary background task. It periodically checks active
+    // sessions and generates a summary for sessions that have been idle
+    // for a while.
+    {
+        let auto_summary_enabled = auto_summary_enabled.clone();
+        let session_manager = session_manager.clone();
+        tokio::spawn(async move {
+            idle_summary_task(session_manager, auto_summary_enabled).await;
+        });
+    }
 
     // Spawn a writer task that owns the WebSocket sink.
     let mut ws_tx = ws_tx;
@@ -391,22 +350,6 @@ where
 
         match client_msg {
             ClientMessage::NewSession { cwd, client_kind } => {
-                // Validate cwd if provided: must exist and be a directory.
-                if let Some(ref cwd_str) = cwd {
-                    let cwd_path = PathBuf::from(cwd_str);
-                    if !cwd_path.exists() {
-                        reply(ServerMessage::Error {
-                            message: format!("session cwd does not exist: {cwd_str}"),
-                        });
-                        continue;
-                    }
-                    if !cwd_path.is_dir() {
-                        reply(ServerMessage::Error {
-                            message: format!("session cwd is not a directory: {cwd_str}"),
-                        });
-                        continue;
-                    }
-                }
                 match session_manager.create(cwd.clone().map(PathBuf::from)).await {
                     Ok(session) => {
                         let (cid, was_first) =
@@ -422,8 +365,14 @@ where
                                 Some(agent.permission_mode().id().to_string()),
                             )
                         };
-                        // cwd is already persisted in meta at create time;
-                        // no need to set it again here.
+                        // Persist cwd on the session meta.
+                        if let Some(cwd_str) = &cwd {
+                            let dir = session_manager.session_dir.clone();
+                            let agent = session.agent.lock().await;
+                            if let Some(mut meta) = agent.session_meta().await {
+                                let _ = meta.set_cwd(&dir, cwd_str.clone()).await;
+                            }
+                        }
                         reply(ServerMessage::SessionReady {
                             session_id,
                             model,
@@ -482,22 +431,6 @@ where
                             msgs
                         };
                         reply(ServerMessage::SessionHistory { messages });
-
-                        // Replay any outstanding permission / ask-user requests
-                        // so a client attaching while the agent is blocked can
-                        // answer them (the payloads aren't in the history).
-                        {
-                            let perms = session.pending_permissions.lock().await;
-                            for pending in perms.values() {
-                                reply(pending.payload.clone());
-                            }
-                        }
-                        {
-                            let asks = session.pending_ask_user.lock().await;
-                            for pending in asks.values() {
-                                reply(pending.payload.clone());
-                            }
-                        }
 
                         // Replay current flagged-files set so the UI has it
                         // immediately after attach.
@@ -651,23 +584,14 @@ where
                     session.cancel_turn().await;
                 }
             }
-            ClientMessage::Ping => {
-                reply(ServerMessage::Pong {
-                    version: env!("CARGO_PKG_VERSION").to_string(),
-                });
-            }
-            ClientMessage::ListProjects => {
-                let projects = list_projects(&session_manager).await;
-                reply(ServerMessage::ProjectList { projects });
-            }
             ClientMessage::PermissionResponse {
                 request_id,
                 decision,
             } => {
                 if let Some(session) = &attached_session {
-                    let pending = session.pending_permissions.lock().await.remove(&request_id);
-                    if let Some(pending) = pending {
-                        let _ = pending.responder.send(decision.into());
+                    let tx = session.pending_permissions.lock().await.remove(&request_id);
+                    if let Some(tx) = tx {
+                        let _ = tx.send(decision.into());
                     }
                     session
                         .broadcast(ServerMessage::RequestResolved { request_id })
@@ -689,9 +613,9 @@ where
                 answers,
             } => {
                 if let Some(session) = &attached_session {
-                    let pending = session.pending_ask_user.lock().await.remove(&request_id);
-                    if let Some(pending) = pending {
-                        let _ = pending.responder.send(answers);
+                    let tx = session.pending_ask_user.lock().await.remove(&request_id);
+                    if let Some(tx) = tx {
+                        let _ = tx.send(answers);
                     }
                     session
                         .broadcast(ServerMessage::RequestResolved { request_id })
@@ -973,8 +897,8 @@ where
                         session_manager
                             .broadcast_all(ServerMessage::SessionMetaChanged {
                                 session_id: session_id.clone(),
-                                archived: None,
-                                pinned: None,
+                                archived: false,
+                                pinned: false,
                                 group_id: meta_group_id,
                             })
                             .await;
@@ -997,8 +921,8 @@ where
                 session_manager
                     .broadcast_all(ServerMessage::SessionMetaChanged {
                         session_id: session_id.clone(),
-                        archived: Some(archived),
-                        pinned: None,
+                        archived,
+                        pinned: false,
                         group_id: None,
                     })
                     .await;
@@ -1011,8 +935,8 @@ where
                 session_manager
                     .broadcast_all(ServerMessage::SessionMetaChanged {
                         session_id: session_id.clone(),
-                        archived: None,
-                        pinned: Some(pinned),
+                        archived: false,
+                        pinned,
                         group_id: None,
                     })
                     .await;
@@ -1332,29 +1256,6 @@ async fn generate_session_title(agent: &Agent, prompt_text: &str) -> String {
     }
 }
 
-/// Check if a Unix socket path has a live daemon listening.
-///
-/// If a connection succeeds, a daemon is already running — bail with an error.
-/// If the connection is refused (or the path doesn't exist), the socket is stale
-/// (or absent) — remove it and return Ok so the caller can bind.
-///
-/// This should be called before `daemonize()` in `main()` so the error reaches
-/// the terminal, and again inside `run()` as a safety net.
-pub fn check_socket_liveness(socket_path: &str) -> Result<()> {
-    use std::os::unix::net::UnixStream;
-    match UnixStream::connect(socket_path) {
-        Ok(_) => anyhow::bail!(
-            "a mew daemon is already running at {socket_path}. \
-             Stop it first (`mew daemon --stop`) or use a different --socket path."
-        ),
-        Err(_) => {
-            // Connection refused or path doesn't exist — stale or absent.
-            let _ = std::fs::remove_file(socket_path);
-            Ok(())
-        }
-    }
-}
-
 /// Fallback: derive a short session title from the first user message.
 /// Truncates to 60 chars, collapses whitespace, strips newlines.
 fn derive_session_title(text: &str) -> String {
@@ -1372,59 +1273,6 @@ fn derive_session_title(text: &str) -> String {
     } else {
         cleaned
     }
-}
-
-/// Collect known projects from session metas.
-/// Deduped by canonicalized path, sorted by recency (most recent first).
-async fn list_projects(
-    session_manager: &std::sync::Arc<crate::session::SessionManager>,
-) -> Vec<mew_protocol::ProjectInfo> {
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-
-    let dir = session_manager.session_dir.clone();
-    let mut projects: HashMap<PathBuf, mew_protocol::ProjectInfo> = HashMap::new();
-
-    // Walk session dirs and read meta.json for each.
-    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            let Ok(Some(meta)) = mew_session::Meta::read(&dir, &file_name).await else {
-                continue;
-            };
-            let Some(cwd_str) = &meta.cwd else {
-                continue;
-            };
-            let path = PathBuf::from(cwd_str);
-            let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
-            let display_name = canonical
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| cwd_str.clone());
-            let last_used = meta.last_message_at.or(Some(meta.created_at));
-            let entry = projects
-                .entry(canonical)
-                .or_insert_with(|| mew_protocol::ProjectInfo {
-                    path: cwd_str.clone(),
-                    display_name: display_name.clone(),
-                    session_count: 0,
-                    last_used_at: None,
-                });
-            entry.session_count += 1;
-            if let Some(ts) = last_used {
-                entry.last_used_at = Some(entry.last_used_at.map(|e| e.max(ts)).unwrap_or(ts));
-            }
-        }
-    }
-
-    // Sort by last_used_at descending (None sorts last).
-    let mut result: Vec<_> = projects.into_values().collect();
-    result.sort_by(|a, b| {
-        b.last_used_at
-            .unwrap_or(0)
-            .cmp(&a.last_used_at.unwrap_or(0))
-    });
-    result
 }
 
 /// Background task that generates AI summaries for sessions that have
@@ -1645,26 +1493,20 @@ async fn translate_event(
         }
         AgentEvent::PermissionRequest { call, tx } => {
             let id = session.next_request_id();
-            let request = ServerMessage::PermissionRequest {
-                request_id: id,
-                tool_name: call.tool_name.clone(),
-                input: call.input,
-            };
-            session.pending_permissions.lock().await.insert(
-                id,
-                PendingRequest {
-                    payload: request.clone(),
-                    responder: tx,
-                },
-            );
+            session.pending_permissions.lock().await.insert(id, tx);
+            let title = session.display_title().await;
             let alert = ServerMessage::SessionAlert {
                 session_id: session.id.clone(),
-                title: session.display_title().await,
+                title,
                 kind: mew_protocol::AlertKind::PermissionNeeded,
-                detail: Some(call.tool_name),
+                detail: Some(call.tool_name.clone()),
             };
             vec![
-                request,
+                ServerMessage::PermissionRequest {
+                    request_id: id,
+                    tool_name: call.tool_name,
+                    input: call.input,
+                },
                 alert,
                 ServerMessage::SessionAttentionChanged {
                     session_id: session.id.clone(),
@@ -1675,18 +1517,11 @@ async fn translate_event(
         }
         AgentEvent::WorkspacePermissionRequest { path, tx } => {
             let id = session.next_request_id();
-            let request = ServerMessage::WorkspacePermissionRequest {
+            session.pending_permissions.lock().await.insert(id, tx);
+            vec![ServerMessage::WorkspacePermissionRequest {
                 request_id: id,
                 path: path.display().to_string(),
-            };
-            session.pending_permissions.lock().await.insert(
-                id,
-                PendingRequest {
-                    payload: request.clone(),
-                    responder: tx,
-                },
-            );
-            vec![request]
+            }]
         }
         AgentEvent::AskUser {
             call_id,
@@ -1694,33 +1529,26 @@ async fn translate_event(
             tx,
         } => {
             let id = session.next_request_id();
-            let request = ServerMessage::AskUserRequest {
-                request_id: id,
-                call_id,
-                questions: questions
-                    .into_iter()
-                    .map(|q| Question {
-                        prompt: q.prompt,
-                        options: q
-                            .options
-                            .into_iter()
-                            .map(|o| QuestionOption {
-                                label: o.label,
-                                description: o.description,
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-            };
-            session.pending_ask_user.lock().await.insert(
-                id,
-                PendingRequest {
-                    payload: request.clone(),
-                    responder: tx,
-                },
-            );
+            session.pending_ask_user.lock().await.insert(id, tx);
             vec![
-                request,
+                ServerMessage::AskUserRequest {
+                    request_id: id,
+                    call_id,
+                    questions: questions
+                        .into_iter()
+                        .map(|q| Question {
+                            prompt: q.prompt,
+                            options: q
+                                .options
+                                .into_iter()
+                                .map(|o| QuestionOption {
+                                    label: o.label,
+                                    description: o.description,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                },
                 ServerMessage::SessionAlert {
                     session_id: session.id.clone(),
                     title: session.display_title().await,
@@ -1775,20 +1603,13 @@ async fn translate_event(
             tx,
         } => {
             let id = session.next_request_id();
-            let request = ServerMessage::SubagentPermissionRequest {
+            session.pending_permissions.lock().await.insert(id, tx);
+            vec![ServerMessage::SubagentPermissionRequest {
                 request_id: id,
                 parent_call_id,
                 tool_name: call.tool_name,
                 input: call.input,
-            };
-            session.pending_permissions.lock().await.insert(
-                id,
-                PendingRequest {
-                    payload: request.clone(),
-                    responder: tx,
-                },
-            );
-            vec![request]
+            }]
         }
         AgentEvent::SubagentProgress { .. } => {
             // Recurse into the child event. The boxed child event is
@@ -1879,48 +1700,4 @@ async fn send_msg<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let json = mew_protocol::encode_json(&msg)?;
     ws_tx.send(Message::Text(json)).await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_socket_liveness_guard_rejects_live_socket() {
-        use std::os::unix::net::UnixListener;
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("test.sock");
-
-        // Bind a listener to simulate a running daemon.
-        let _listener = UnixListener::bind(&socket_path).unwrap();
-
-        // check_socket_liveness should fail — a daemon is already listening.
-        let result = check_socket_liveness(socket_path.to_str().unwrap());
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("already running"), "unexpected error: {msg}");
-    }
-
-    #[test]
-    fn test_socket_liveness_guard_removes_stale_socket() {
-        // Create a file at the socket path that isn't a listening socket.
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("stale.sock");
-        std::fs::write(&socket_path, b"stale").unwrap();
-
-        // check_socket_liveness should succeed — connection will be refused,
-        // stale file removed.
-        let result = check_socket_liveness(socket_path.to_str().unwrap());
-        assert!(result.is_ok(), "stale socket should be removed: {result:?}");
-        assert!(!socket_path.exists(), "stale socket file should be removed");
-    }
-
-    #[test]
-    fn test_socket_liveness_guard_ok_when_no_socket() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("nonexistent.sock");
-
-        let result = check_socket_liveness(socket_path.to_str().unwrap());
-        assert!(result.is_ok(), "missing socket should be fine: {result:?}");
-    }
 }

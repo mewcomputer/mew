@@ -42,10 +42,6 @@ interaction:
   selection. Click to switch models.
 - **Title strip**: shows the session title and connection status.
 - **Session rail**: lists previous sessions. Click to resume.
-- **Project picker**: when creating a new session, opens a modal with recent
-  projects (derived from previous session cwds and `workspace.roots`)
-  plus a free-text path input. The daemon validates the chosen cwd before
-  creating the session.
 - **Input area**: type your prompt. `Cmd/Ctrl+Enter` to send.
 - **Status footer**: shows token count, model, and connection state.
 - **Todo panel**: renders the agent's todo list when active.

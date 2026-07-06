@@ -28,12 +28,15 @@ pub struct SimpleRunner {
     default_provider: Arc<dyn Provider>,
     tools: HashMap<String, Arc<dyn Tool>>,
     dispatcher: Arc<dyn Dispatcher>,
+    /// Optional resolver for per-subagent model overrides. When a subagent def
+    /// has `model: "provider/model"`, the runner asks the resolver for a
+    /// provider for that model. If no resolver is configured, the override is
+    /// ignored and the default provider is used.
     model_resolver: Option<Arc<dyn ModelResolver>>,
+    /// Optional override for where subagent session files are written.
+    /// `None` means use the global `mew_session::session_dir()`. Set this
+    /// from tests to isolate the runner from the user's real sessions.
     session_root: Option<PathBuf>,
-    /// Cwd for child agents. If None, falls back to process cwd (Agent::new default).
-    cwd: Option<PathBuf>,
-    /// Workspace roots for child agents. If empty, child gets empty roots.
-    workspace_roots: Vec<PathBuf>,
 }
 
 impl SimpleRunner {
@@ -52,17 +55,7 @@ impl SimpleRunner {
             dispatcher,
             model_resolver: None,
             session_root: None,
-            cwd: None,
-            workspace_roots: Vec::new(),
         }
-    }
-
-    /// Builder method to set the cwd for child agents. Child agents inherit
-    /// the parent session's cwd so file tools resolve relative paths correctly.
-    pub fn with_cwd(mut self, cwd: PathBuf, workspace_roots: Vec<PathBuf>) -> Self {
-        self.cwd = Some(cwd);
-        self.workspace_roots = workspace_roots;
-        self
     }
 
     /// Builder method to attach a model resolver for per-subagent overrides.
@@ -177,14 +170,6 @@ impl SubagentRunner for SimpleRunner {
             Some(session_id),
         );
 
-        // Inherit parent's cwd and workspace roots.
-        if let Some(ref cwd) = self.cwd {
-            agent.cwd = cwd.clone();
-        }
-        if !self.workspace_roots.is_empty() {
-            agent.workspace_roots = self.workspace_roots.clone();
-        }
-
         // Set the subagent's body as the system prompt. If the def has
         // `template: true`, render it through minijinja with the subagent's
         // context (subagent_name, tools, model, etc).
@@ -196,7 +181,9 @@ impl SubagentRunner for SimpleRunner {
                     model_id: agent.model_id.clone(),
                     provider_id: agent.provider_id.clone(),
                     session_id: session_id.to_string(),
-                    cwd: agent.cwd.to_string_lossy().to_string(),
+                    cwd: std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default(),
                     current_date: mew_prompts::template::TemplateContext::today(),
                     tools: tool_names,
                     ..Default::default()
@@ -556,7 +543,6 @@ mod tests {
                         },
                     }),
                     raw_input: String::new(),
-                    sensitivity: None,
                 }),
             },
             mew_provider::ProviderEvent::PartEnd { part_id },
@@ -737,7 +723,7 @@ mod tests {
                 def: &def,
                 prompt: "prompt".into(),
                 parent_call_id: "call_0".into(),
-                parent_session_id: parent_session_id,
+                parent_session_id,
                 event_tx: tx,
                 cancel,
                 model: None,
@@ -813,7 +799,7 @@ mod tests {
                 def: &def,
                 prompt: "prompt".into(),
                 parent_call_id: "call_0".into(),
-                parent_session_id: parent_session_id,
+                parent_session_id,
                 event_tx: tx,
                 cancel,
                 model: None,
@@ -919,7 +905,6 @@ mod tests {
                             },
                         }),
                         raw_input: String::new(),
-                        sensitivity: None,
                     }),
                 },
                 mew_provider::ProviderEvent::PartEnd {
@@ -1023,7 +1008,6 @@ mod tests {
                             },
                         }),
                         raw_input: String::new(),
-                        sensitivity: None,
                     }),
                 },
                 mew_provider::ProviderEvent::PartEnd {

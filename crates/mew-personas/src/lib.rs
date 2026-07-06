@@ -287,6 +287,72 @@ fn validate_name(name: &str) -> Result<(), PersonaError> {
     Ok(())
 }
 
+/// Built-in personas shipped with mew. User-defined personas (loaded from
+/// `.mew/personas/<name>/PERSONA.md` etc.) override these by name.
+///
+/// - **planner** — read-only investigation + plan writing. Writes a plan to
+///   `PLAN.md` (or the configured `plan_path`), flag_important's it, then
+///   hands off to the builder. No bash or dangerous tools.
+/// - **builder** — the default persona. All tools available. Reads the plan
+///   from `PLAN.md` at the start of work and executes it step by step.
+pub fn builtin_defaults() -> Vec<Persona> {
+    vec![
+        Persona {
+            name: "builder".into(),
+            description: "Executes plans step by step. The default persona — all tools available."
+                .into(),
+            body: BUILDER_BODY.into(),
+            path: PathBuf::from("(built-in)"),
+            config: PersonaConfig::default(),
+        },
+        Persona {
+            name: "planner".into(),
+            description:
+                "Investigates the codebase and writes a plan. Read-only tools plus plan writing."
+                    .into(),
+            body: PLANNER_BODY.into(),
+            path: PathBuf::from("(built-in)"),
+            config: PersonaConfig {
+                tools: Some(vec![
+                    "read".into(),
+                    "glob".into(),
+                    "grep".into(),
+                    "write".into(),
+                    "edit".into(),
+                    "ask_user_question".into(),
+                    "flag_important".into(),
+                    "todo_create".into(),
+                    "todo_update".into(),
+                    "todo_complete".into(),
+                    "todo_list".into(),
+                ]),
+                // Planner cannot switch to any other persona on its own —
+                // the user must explicitly switch via the slash command or
+                // the confirmation modal. This prevents the planner from
+                // self-escalating to a builder without user oversight.
+                transitions: Some(TransitionRules {
+                    allowed: Some(Vec::new()),
+                    confirm: false,
+                }),
+                // Steer the Auto/Auto+ classifier toward being strict about
+                // any mutating or dangerous tool calls, since the planner is
+                // meant to be read-only.
+                autonomous_hint: Some(
+                    "This persona is read-only. Be strict about shell commands, \
+                     file writes, and any tool that modifies state. Deny or \
+                     escalate unless the action is clearly part of writing \
+                     the plan file."
+                        .into(),
+                ),
+                ..Default::default()
+            },
+        },
+    ]
+}
+
+const BUILDER_BODY: &str = include_str!("../../mew-prompts/resources/personas/builder.md");
+const PLANNER_BODY: &str = include_str!("../../mew-prompts/resources/personas/planner.md");
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,69 +792,3 @@ mod tests {
         assert!(builder.config.transitions.is_none());
     }
 }
-
-/// Built-in personas shipped with mew. User-defined personas (loaded from
-/// `.mew/personas/<name>/PERSONA.md` etc.) override these by name.
-///
-/// - **planner** — read-only investigation + plan writing. Writes a plan to
-///   `PLAN.md` (or the configured `plan_path`), flag_important's it, then
-///   hands off to the builder. No bash or dangerous tools.
-/// - **builder** — the default persona. All tools available. Reads the plan
-///   from `PLAN.md` at the start of work and executes it step by step.
-pub fn builtin_defaults() -> Vec<Persona> {
-    vec![
-        Persona {
-            name: "builder".into(),
-            description: "Executes plans step by step. The default persona — all tools available."
-                .into(),
-            body: BUILDER_BODY.into(),
-            path: PathBuf::from("(built-in)"),
-            config: PersonaConfig::default(),
-        },
-        Persona {
-            name: "planner".into(),
-            description:
-                "Investigates the codebase and writes a plan. Read-only tools plus plan writing."
-                    .into(),
-            body: PLANNER_BODY.into(),
-            path: PathBuf::from("(built-in)"),
-            config: PersonaConfig {
-                tools: Some(vec![
-                    "read".into(),
-                    "glob".into(),
-                    "grep".into(),
-                    "write".into(),
-                    "edit".into(),
-                    "ask_user_question".into(),
-                    "flag_important".into(),
-                    "todo_create".into(),
-                    "todo_update".into(),
-                    "todo_complete".into(),
-                    "todo_list".into(),
-                ]),
-                // Planner cannot switch to any other persona on its own —
-                // the user must explicitly switch via the slash command or
-                // the confirmation modal. This prevents the planner from
-                // self-escalating to a builder without user oversight.
-                transitions: Some(TransitionRules {
-                    allowed: Some(Vec::new()),
-                    confirm: false,
-                }),
-                // Steer the Auto/Auto+ classifier toward being strict about
-                // any mutating or dangerous tool calls, since the planner is
-                // meant to be read-only.
-                autonomous_hint: Some(
-                    "This persona is read-only. Be strict about shell commands, \
-                     file writes, and any tool that modifies state. Deny or \
-                     escalate unless the action is clearly part of writing \
-                     the plan file."
-                        .into(),
-                ),
-                ..Default::default()
-            },
-        },
-    ]
-}
-
-const BUILDER_BODY: &str = include_str!("../../mew-prompts/resources/personas/builder.md");
-const PLANNER_BODY: &str = include_str!("../../mew-prompts/resources/personas/planner.md");

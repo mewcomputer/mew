@@ -97,8 +97,8 @@ mod tests {
             "resources/subagents/researcher.md must be embedded"
         );
         assert!(
-            read_builtin("subagents/reviewer").is_some(),
-            "resources/subagents/reviewer.md must be embedded"
+            read_builtin("subagents/plan-reviewer").is_some(),
+            "resources/subagents/plan-reviewer.md must be embedded"
         );
         assert!(
             read_builtin("subagents/coder").is_some(),

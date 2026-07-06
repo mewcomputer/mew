@@ -4,120 +4,6 @@ use std::sync::Mutex as StdMutex;
 use mew_hooks::NopDispatcher;
 use mew_hooks::ToolOutput;
 
-/// Forwards every `Dispatcher` method to the embedded `NopDispatcher` so
-/// tests can override just one or two methods without hand-writing 25
-/// stubs. The struct is expected to have a field named `inner` of type
-/// `NopDispatcher`.
-macro_rules! impl_default_dispatcher_methods {
-    ($ty:ty) => {
-        #[async_trait::async_trait]
-        impl mew_hooks::Dispatcher for $ty {
-            async fn init(&self, _: &mew_hooks::PluginHost) {}
-            async fn shutdown(&self) {}
-            async fn on_register_tools(&self) -> Vec<mew_hooks::ToolRegistration> {
-                self.inner.on_register_tools().await
-            }
-            async fn on_register_slash_commands(&self) -> Vec<mew_hooks::SlashCommandDef> {
-                self.inner.on_register_slash_commands().await
-            }
-            async fn execute_slash_command(&self, c: &str, a: &str) -> Option<String> {
-                self.inner.execute_slash_command(c, a).await
-            }
-            async fn on_provider_event(&self, ev: &mew_provider::ProviderEvent) {
-                self.inner.on_provider_event(ev).await
-            }
-            async fn on_tool_error(&self, call: &mew_hooks::ToolCall, error: &str) {
-                self.inner.on_tool_error(call, error).await
-            }
-            async fn on_subagent_start(
-                &self,
-                name: &str,
-                parent_call_id: &str,
-                display_name: Option<&str>,
-            ) {
-                self.inner
-                    .on_subagent_start(name, parent_call_id, display_name)
-                    .await
-            }
-            async fn on_subagent_end(&self, name: &str, parent_call_id: &str, outcome: &str) {
-                self.inner
-                    .on_subagent_end(name, parent_call_id, outcome)
-                    .await
-            }
-            async fn on_turn_end(&self, messages: &[mew_message::Message]) {
-                self.inner.on_turn_end(messages).await
-            }
-            async fn on_pre_model_turn(&self, messages: &[mew_message::Message], system: &str) {
-                self.inner.on_pre_model_turn(messages, system).await
-            }
-            async fn on_stop(&self) {
-                self.inner.on_stop().await
-            }
-            async fn on_pre_compaction(&self, messages: &[mew_message::Message]) {
-                self.inner.on_pre_compaction(messages).await
-            }
-            async fn on_post_compaction(&self, messages: &[mew_message::Message]) {
-                self.inner.on_post_compaction(messages).await
-            }
-            async fn on_chat_message(&self, msg: mew_message::Message) -> mew_message::Message {
-                self.inner.on_chat_message(msg).await
-            }
-            async fn on_chat_headers(&self, h: http::HeaderMap) -> http::HeaderMap {
-                self.inner.on_chat_headers(h).await
-            }
-            async fn on_system_prompt(&self, prompt: String) -> String {
-                self.inner.on_system_prompt(prompt).await
-            }
-            async fn on_tool_execute_before(
-                &self,
-                call: &mew_hooks::ToolCall,
-                input: serde_json::Value,
-            ) -> mew_hooks::HookOutcome<serde_json::Value> {
-                self.inner.on_tool_execute_before(call, input).await
-            }
-            async fn on_tool_execute_after(
-                &self,
-                call: &mew_hooks::ToolCall,
-                output: mew_hooks::ToolOutput,
-            ) -> mew_hooks::ToolOutput {
-                self.inner.on_tool_execute_after(call, output).await
-            }
-            async fn on_permission_ask(
-                &self,
-                call: &mew_hooks::ToolCall,
-                current: mew_hooks::PermissionDecision,
-            ) -> mew_hooks::HookOutcome<mew_hooks::PermissionDecision> {
-                self.inner.on_permission_ask(call, current).await
-            }
-            async fn on_shell_env(
-                &self,
-                env: std::collections::HashMap<String, String>,
-            ) -> std::collections::HashMap<String, String> {
-                self.inner.on_shell_env(env).await
-            }
-            async fn on_user_input(&self, prompt: String) -> String {
-                self.inner.on_user_input(prompt).await
-            }
-            async fn on_persona_change(&self, old_persona: Option<&str>, new_persona: &str) {
-                self.inner.on_persona_change(old_persona, new_persona).await
-            }
-            async fn on_session_save(&self) {
-                self.inner.on_session_save().await
-            }
-            async fn on_model_finish(
-                &self,
-                finish: &str,
-                input_tokens: u32,
-                output_tokens: u32,
-                cost: f64,
-            ) {
-                self.inner
-                    .on_model_finish(finish, input_tokens, output_tokens, cost)
-                    .await
-            }
-        }
-    };
-}
 use mew_message::{
     Finish, Message, Part, PartBase, Role, TextPart, Time, Tokens, ToolCallPart, ToolState,
     ToolStatePending, ToolTime,
@@ -585,7 +471,6 @@ fn test_pending_tool_calls() {
             },
         }),
         raw_input: String::new(),
-        sensitivity: None,
     };
     let completed_part = ToolCallPart {
         base: PartBase {
@@ -606,7 +491,6 @@ fn test_pending_tool_calls() {
             },
         }),
         raw_input: String::new(),
-        sensitivity: None,
     };
 
     let msg = Message {
@@ -665,7 +549,6 @@ fn test_update_tool_call() {
                 },
             }),
             raw_input: String::new(),
-            sensitivity: None,
         })],
         time: Time {
             created: now,
@@ -840,151 +723,6 @@ async fn test_tool_turn_denied() {
     assert!(got_tool_end);
 }
 
-/// Verify that when a tool call is denied, the error message reaches the
-/// provider in the next turn's request messages — not an empty string.
-#[tokio::test]
-async fn test_tool_error_message_reaches_provider() {
-    let script1 = FakeProvider::tool_call("echo", "c1", serde_json::json!({"input": "hi"}));
-    let script2 = FakeProvider::text_response("done");
-    let provider = std::sync::Arc::new(CapturingProvider::new(vec![script1, script2]));
-    let agent = Agent::new(
-        provider.clone(),
-        std::sync::Arc::new(NopDispatcher),
-        None,
-        vec![std::sync::Arc::new(EchoTool::mutating())],
-        None,
-    );
-
-    let mut rx = agent.run("call echo".into());
-
-    while let Some(ev) = rx.recv().await {
-        match ev {
-            AgentEvent::PermissionRequest { tx, .. } => {
-                let _ = tx.send(mew_hooks::PermissionDecision::Deny);
-            }
-            AgentEvent::Provider(ProviderEvent::MessageEnd {
-                finish: Finish::Stop,
-                ..
-            }) => break,
-            _ => {}
-        }
-    }
-
-    // The second captured request should contain the tool error message.
-    // The error state lives on the ToolCallPart in the assistant message;
-    // the user message only has a ToolResultPart with the call_id.
-    let captured = provider.captured.lock().unwrap();
-    assert_eq!(captured.len(), 2, "should have two provider calls");
-
-    let second_req = &captured[1];
-    let mut found_error = false;
-    for msg in &second_req.messages {
-        for part in &msg.parts {
-            if let Part::ToolCall(tc) = part {
-                if tc.call_id == "c1" {
-                    if let Some(err) = tc.state.error() {
-                        assert!(
-                            err.contains("permission denied"),
-                            "error should mention permission denied, got: {err}"
-                        );
-                        found_error = true;
-                    }
-                }
-            }
-        }
-    }
-    assert!(
-        found_error,
-        "tool error message should be in the second request's messages"
-    );
-}
-
-/// Verify that when a tool fails with an error, the error message reaches
-/// the provider — not an empty string.
-#[tokio::test]
-async fn test_tool_execution_error_reaches_provider() {
-    // A tool that always fails
-    struct FailingTool {
-        schema: serde_json::Value,
-    }
-    #[async_trait]
-    impl Tool for FailingTool {
-        fn name(&self) -> &str {
-            "fail"
-        }
-        fn description(&self) -> &str {
-            "always fails"
-        }
-        fn schema(&self) -> &serde_json::Value {
-            &self.schema
-        }
-        fn sensitivity(&self) -> Sensitivity {
-            Sensitivity::ReadOnly
-        }
-        async fn execute(
-            &self,
-            _ctx: ToolCtx,
-            _input: serde_json::Value,
-        ) -> Result<ToolOutput, mew_tools::ToolError> {
-            Err(mew_tools::ToolError::Execution(
-                "invalid input: missing path".to_string(),
-            ))
-        }
-    }
-
-    let script1 = FakeProvider::tool_call("fail", "c1", serde_json::json!({}));
-    let script2 = FakeProvider::text_response("done");
-    let provider = std::sync::Arc::new(CapturingProvider::new(vec![script1, script2]));
-    let agent = Agent::new(
-        provider.clone(),
-        std::sync::Arc::new(NopDispatcher),
-        None,
-        vec![std::sync::Arc::new(FailingTool {
-            schema: serde_json::json!({"type": "object", "properties": {}}),
-        }) as std::sync::Arc<dyn Tool>],
-        None,
-    );
-
-    let mut rx = agent.run("call fail".into());
-
-    while let Some(ev) = rx.recv().await {
-        if matches!(
-            ev,
-            AgentEvent::Provider(ProviderEvent::MessageEnd {
-                finish: Finish::Stop,
-                ..
-            })
-        ) {
-            break;
-        }
-    }
-
-    let captured = provider.captured.lock().unwrap();
-    assert_eq!(captured.len(), 2, "should have two provider calls");
-
-    let second_req = &captured[1];
-    let mut found_error = false;
-    for msg in &second_req.messages {
-        for part in &msg.parts {
-            if let Part::ToolCall(tc) = part {
-                if tc.call_id == "c1" {
-                    if let Some(err) = tc.state.error() {
-                        assert!(
-                            err.contains("invalid input: missing path"),
-                            "error message should reach provider, got: {err}"
-                        );
-                        found_error = true;
-                    }
-                }
-            }
-        }
-    }
-    assert!(
-        found_error,
-        "tool error message should be in the second request's messages"
-    );
-}
-
 #[tokio::test]
 async fn test_cancellation_during_stream() {
     let script = FakeProvider::text_response("a very long response that takes time");
@@ -1087,7 +825,6 @@ async fn test_multi_tool_call_turn() {
                     },
                 }),
                 raw_input: String::new(),
-                sensitivity: None,
             }),
         },
         mew_provider::ProviderEvent::PartEnd {
@@ -1110,7 +847,6 @@ async fn test_multi_tool_call_turn() {
                     },
                 }),
                 raw_input: String::new(),
-                sensitivity: None,
             }),
         },
         mew_provider::ProviderEvent::PartEnd {
@@ -1178,7 +914,6 @@ async fn test_permission_engine_session_allow() {
                     },
                 }),
                 raw_input: String::new(),
-                sensitivity: None,
             }),
         },
         mew_provider::ProviderEvent::PartEnd {
@@ -1201,7 +936,6 @@ async fn test_permission_engine_session_allow() {
                     },
                 }),
                 raw_input: String::new(),
-                sensitivity: None,
             }),
         },
         mew_provider::ProviderEvent::PartEnd {
@@ -1445,7 +1179,6 @@ fn test_reconcile_tool_call_input_parses_streamed_arguments() {
                 },
             }),
             raw_input: r#"{"name":"explore","prompt":"what is the repo vibe?"}"#.into(),
-            sensitivity: None,
         })],
         time: Time {
             created: now,
@@ -1511,7 +1244,6 @@ fn test_reconcile_tool_call_input_leaves_other_parts_alone() {
                     },
                 }),
                 raw_input: r#"{"input":"hi"}"#.into(),
-                sensitivity: None,
             }),
         ],
         time: Time {
@@ -1574,7 +1306,6 @@ fn test_reconcile_tool_call_input_no_op_on_empty_raw_input() {
                 },
             }),
             raw_input: String::new(),
-            sensitivity: None,
         })],
         time: Time {
             created: now,
@@ -1616,7 +1347,6 @@ async fn test_streaming_tool_call_appends_with_parsed_input() {
                     },
                 }),
                 raw_input: String::new(),
-                sensitivity: None,
             }),
         },
         mew_provider::ProviderEvent::PartDelta {
@@ -2182,7 +1912,6 @@ fn long_reasoning_then_tool_call_script(
                 },
             }),
             raw_input: String::new(),
-            sensitivity: None,
         }),
     });
     events.push(mew_provider::ProviderEvent::PartEnd { part_id: tc_id });
@@ -2237,26 +1966,28 @@ async fn test_long_reasoning_truncates_and_forges_ack() {
     // turn already (that's the point — it set tool_choice on the next
     // request). Verify via the captured requests: the second request
     // should have tool_choice = Some(Required).
-    let captured = provider.captured.lock().unwrap();
-    assert!(
-        captured.len() >= 2,
-        "agent should have made at least 2 model requests, got {}",
-        captured.len()
-    );
-    let second_req = &captured[1];
-    let tc = second_req
-        .params
-        .as_ref()
-        .and_then(|p| p.tool_choice)
-        .expect("second request must have tool_choice set (the truncator's force flag)");
-    assert!(
-        matches!(tc, mew_provider::ToolChoice::Required),
-        "second request tool_choice must be Required, got {:?}",
-        tc
-    );
-
-    // Drop the lock guard before re-borrowing agent.
-    drop(captured);
+    // Scope the sync lock so it's released before the async `agent.messages`
+    // lock below (clippy: await-holding-lock). The assert borrows `captured`
+    // only inside this block.
+    {
+        let captured = provider.captured.lock().unwrap();
+        assert!(
+            captured.len() >= 2,
+            "agent should have made at least 2 model requests, got {}",
+            captured.len()
+        );
+        let second_req = &captured[1];
+        let tc = second_req
+            .params
+            .as_ref()
+            .and_then(|p| p.tool_choice)
+            .expect("second request must have tool_choice set (the truncator's force flag)");
+        assert!(
+            matches!(tc, mew_provider::ToolChoice::Required),
+            "second request tool_choice must be Required, got {:?}",
+            tc
+        );
+    }
 
     let msgs = agent.messages.lock().await;
     let assistant = msgs

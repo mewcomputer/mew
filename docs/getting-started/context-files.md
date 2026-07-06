@@ -69,9 +69,8 @@ one at the root), they all get loaded and concatenated.
 
 Both filenames are checked. `AGENTS.md` is the standard name for
 agent-readable context files. `CLAUDE.md` is supported for compatibility
-with Claude Code projects. If both exist in the same directory, only
-`AGENTS.md` is loaded; `CLAUDE.md` is used as a fallback only when
-`AGENTS.md` is absent.
+with Claude Code projects. If both exist in the same directory, both are
+loaded.
 
 The content format is the same for both. Use whichever name your team
 prefers, or both if you work across different tools.
@@ -144,11 +143,3 @@ This means:
 If your context file is large, consider moving detailed procedures into
 [skills](/docs/using-mew/skills/) that the agent loads on demand instead of
 embedding everything in the system prompt.
-
-## Where do my instructions go?
-
-Context files, personas, and skills all take free-text instructions, so
-it is not always obvious which to use. The rule: always-on facts go in
-the context file; a switchable mode of working goes in a persona; a
-procedure you only sometimes need goes in a skill. See
-[Comparing Features](/docs/using-mew/comparisons/) for the full breakdown.

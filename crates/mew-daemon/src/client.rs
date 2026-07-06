@@ -139,11 +139,7 @@ impl DaemonClient {
     /// Create a new session on the daemon.
     pub async fn new_session(&self) -> Result<()> {
         let msg = ClientMessage::NewSession {
-            cwd: Some(
-                std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-            ),
+            cwd: None,
             client_kind: mew_protocol::ClientKind::Tui,
         };
         let json = mew_protocol::encode_json(&msg)?;
@@ -512,9 +508,7 @@ async fn translate_server_message(
         | ServerMessage::SessionAlert { .. }
         | ServerMessage::FlaggedFilesChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }
-        | ServerMessage::SessionAttentionChanged { .. }
-        | ServerMessage::ProjectList { .. }
-        | ServerMessage::Pong { .. } => {
+        | ServerMessage::SessionAttentionChanged { .. } => {
             // These are handled by the DaemonClient directly or are web-UI
             // specific; they don't map to AgentEvents for the TUI.
             Vec::new()
