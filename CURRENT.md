@@ -1,5 +1,58 @@
 # CURRENT.md — mew Fixes + Right Rail Redesign Progress
 
+## 2026-07-06: Restored Accidentally Removed Features
+
+A large batch commit (`7623b4d3` / `742f4bdc`) accidentally removed several features from the compiled surface while leaving dependent code (mew-mobile-core, iOS app, web client) still referencing them. All features have been restored from git history.
+
+### Protocol (`mew-protocol`)
+- `ClientMessage::Ping` and `ClientMessage::ListProjects` added back
+- `ServerMessage::Pong { version }` and `ServerMessage::ProjectList { projects }` added back
+- `ClientKind::Mobile` variant added back
+- `ModelInfo.context_window: Option<i64>` field added back (serde default + skip-if-none)
+- `ProjectInfo` struct added back (path, display_name, session_count, last_used_at)
+- Roundtrip tests for all new variants + updated exhaustive tag tests (74 tests pass)
+
+### Daemon (`mew-daemon`)
+- `pub mod iroh_transport;` declaration added (file was already on disk, fully implemented)
+- `check_socket_liveness()` restored (3 unit tests pass)
+- `list_projects()` async helper restored — walks session_dir, reads meta.json, dedupes by canonical path, sorts by recency
+- `ClientMessage::Ping` → `ServerMessage::Pong { version }` handler restored
+- `ClientMessage::ListProjects` → `ServerMessage::ProjectList` handler restored
+- `NewSession { cwd }` validation restored (must exist and be a directory)
+- `handle_connection` made `pub` with `auto_summary_enabled: Arc<AtomicBool>` 5th param
+- `DaemonServer.auto_summary_enabled` field added; idle_summary_task now spawned daemon-wide (not per-connection)
+- 3 new e2e tests: ping/pong, list_projects, bad cwd validation (15 e2e tests pass)
+
+### Iroh transport + `mew pair` (`mew` + `mew-daemon`)
+- `iroh = "1"` and `qrcode = "0.14"` added to workspace deps
+- `uniffi = "0.32"` added to workspace deps
+- `mew-daemon` `iroh` feature now enables `dep:iroh`
+- `mew` crate gets `iroh` feature (`dep:iroh` + `mew-daemon/iroh`) and `qrcode` dep
+- `mew pair` subcommand restored — prints NodeId + ASCII QR code, enters pairing mode
+- `--iroh` flag on `mew daemon` restored — runs daemon via iroh P2P transport
+- `run_daemon_iroh()` and `pair_cmd()` functions restored
+- `check_socket_liveness()` called before `daemonize()` (only when binding Unix socket)
+- `build_daemon_server()` extracted as shared helper used by both `run_daemon` and `run_daemon_iroh`
+- `mew-mobile-core` added to workspace members (was missing); `tool_sensitivity` field references fixed (set to `None` since the field was removed from `ToolCallPart`)
+
+### Web client project picker (`mew-web-client` + `mew-web-ui`)
+- `ProjectInfo` interface, `list_projects` ClientMessage, `project_list` ServerMessage, `project-list` event, `listProjects()` method added to web client
+- `context_window` field added to `ModelInfo` interface
+- Store: `projects`/`projectsLoading` state, `onProjectList` handler, bridge registration, `reset()` cleanup
+- `ProjectPickerModal` component added to session-rail (recent projects list + free-text path input)
+- 9 web UI unit tests pass
+
+### Justfile
+- `ios-core` recipe restored — builds both iOS targets, generates Swift bindings via uniffi-bindgen, creates XCFramework
+
+### Verification
+- `cargo clippy --all --features iroh -- -D warnings` — zero warnings
+- `cargo test -p mew-protocol` — 74 tests pass
+- `cargo test -p mew-daemon` (lib + e2e + tcp + concurrency) — all pass
+- `pnpm --filter @mew/web-client build` — clean
+- `pnpm --filter mew-web-ui test` — 9 unit tests pass (e2e requires running daemon)
+- `mew pair --help` — shows subcommand
+
 ## 2026-07-02: Web UI Fixes Plan (6 Phases Complete)
 
 ### Phase 1: Crashes and alert correctness

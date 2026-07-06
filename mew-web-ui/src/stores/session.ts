@@ -18,6 +18,7 @@ import type {
   GitEntry,
   SessionUsageWire,
   AlertKind,
+  ProjectInfo,
 } from "@mew/web-client";
 
 // ---------------------------------------------------------------------------
@@ -227,6 +228,10 @@ interface SessionState {
   // Daemon version (from pong reply; null until received)
   daemonVersion: string | null;
 
+  // Projects (recent session cwds from the daemon)
+  projects: ProjectInfo[];
+  projectsLoading: boolean;
+
   // Prompt history (most-recent-last)
   promptHistory: string[];
 
@@ -301,6 +306,10 @@ interface SessionState {
   // Daemon version
   setDaemonVersion: (version: string) => void;
 
+  // Projects
+  onProjectList: (projects: ProjectInfo[]) => void;
+  setProjectsLoading: (loading: boolean) => void;
+
   // Prompt history
   pushPromptHistory: (text: string) => void;
 
@@ -346,6 +355,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   todos: [],
   jobs: new Map(),
   daemonVersion: null,
+  projects: [],
+  projectsLoading: false,
   promptHistory: [],
 
   setConnectionState: (s) => set({ connectionState: s }),
@@ -977,6 +988,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setDaemonVersion: (version) => set({ daemonVersion: version }),
 
+  onProjectList: (projects) => set({ projects, projectsLoading: false }),
+  setProjectsLoading: (loading) => set({ projectsLoading: loading }),
+
   pushPromptHistory: (text) =>
     set((state) => {
       // Skip empty or exact-duplicates of the last entry.
@@ -1014,6 +1028,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // currentModel is intentionally preserved to avoid model picker/footer blanks.
       attachedClients: [],
       yieldedByClient: null,
+      projects: [],
+      projectsLoading: false,
     }),
 }));
 
@@ -1094,6 +1110,8 @@ export function bridgeClientToStore(client: MewClient) {
   );
 
   client.on("pong", (data) => store.getState().setDaemonVersion(data.version));
+
+  client.on("project-list", (data) => store.getState().onProjectList(data.projects));
 
   client.on("model-list", (data) => store.getState().setAvailableModels(data.models));
   client.on("model-switched", (data) =>

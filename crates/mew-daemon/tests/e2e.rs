@@ -770,3 +770,80 @@ fn _unused_type_anchors(
     _: PartId,
 ) {
 }
+
+#[tokio::test]
+async fn ping_returns_pong_with_version() {
+    let script = Arc::new(|| FakeProvider::text_response("ok"));
+    let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
+
+    let mut ws = connect(&socket).await;
+    send(&mut ws, ClientMessage::Ping).await;
+
+    let msg = recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::Pong { .. })).await;
+    match msg {
+        ServerMessage::Pong { version } => {
+            assert!(
+                !version.is_empty(),
+                "version should be non-empty, got {version:?}"
+            );
+        }
+        _ => unreachable!("expected Pong"),
+    }
+}
+
+#[tokio::test]
+async fn list_projects_returns_project_list() {
+    let script = Arc::new(|| FakeProvider::text_response("ok"));
+    let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
+
+    let mut ws = connect(&socket).await;
+    // Create a session with a known cwd so there's at least one project.
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: Some("/tmp".into()),
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
+    recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
+
+    // Now ask for the project list.
+    send(&mut ws, ClientMessage::ListProjects).await;
+    let msg = recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::ProjectList { .. })).await;
+    match msg {
+        ServerMessage::ProjectList { projects } => {
+            // /tmp should appear in the list (it was used as a session cwd).
+            let found = projects.iter().any(|p| p.path == "/tmp");
+            assert!(found, "expected /tmp in project list, got: {:?}", projects);
+        }
+        _ => unreachable!("expected ProjectList"),
+    }
+}
+
+#[tokio::test]
+async fn new_session_with_bad_cwd_returns_error() {
+    let script = Arc::new(|| FakeProvider::text_response("ok"));
+    let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
+
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: Some("/nonexistent/path/that/does/not/exist".into()),
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
+
+    let msg = recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::Error { .. })).await;
+    match msg {
+        ServerMessage::Error { message } => {
+            assert!(
+                message.contains("does not exist"),
+                "expected 'does not exist' in error, got: {message}"
+            );
+        }
+        _ => unreachable!("expected Error"),
+    }
+}

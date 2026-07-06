@@ -28,9 +28,11 @@ mew-tools = { workspace = true }
 
 tokio-util = { workspace = true }
 
+iroh = { workspace = true, optional = true }
+
 [features]
 default = []
-iroh = []
+iroh = ["dep:iroh"]
 
 [dev-dependencies]
 tempfile = "3"

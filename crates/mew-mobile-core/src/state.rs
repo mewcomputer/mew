@@ -187,7 +187,7 @@ impl SessionState {
                                 tool_call_id: Some(tcp.call_id.clone()),
                                 tool_time_start: time_start,
                                 tool_time_end: time_end,
-                                tool_sensitivity: tcp.sensitivity.clone(),
+                                tool_sensitivity: None,
                             },
                         )
                     }

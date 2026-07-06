@@ -27,6 +27,7 @@ members = [
     "crates/mew-hooks-runtime",
     "crates/mew-tui",
     "crates/ratatui-mdstream",
+    "crates/mew-mobile-core",
 ]
 resolver = "2"
 
@@ -148,3 +149,12 @@ ratatui-mdstream = { path = "crates/ratatui-mdstream" }
 
 # Random number generation (kept for the TUI spinner; no other consumers).
 rand = "0.8"
+
+# P2P transport (iroh) for mobile/remote daemon access.
+iroh = "1"
+
+# QR code generation for `mew pair` pairing flow.
+qrcode = "0.14"
+
+# UniFFI for generating Swift/Kotlin bindings from mew-mobile-core.
+uniffi = "0.32"

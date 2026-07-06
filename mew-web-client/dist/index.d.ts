@@ -109,6 +109,8 @@ export type ClientMessage = {
     path: string;
 } | {
     type: "ping";
+} | {
+    type: "list_projects";
 };
 export type ProviderEventWire = {
     type: "part_start";
@@ -248,6 +250,8 @@ export interface ModelInfo {
     description?: string;
     /** Available thinking/reasoning variants for this model. */
     thinking_variants?: ThinkingVariantInfo[];
+    /** Maximum context window in tokens, if known from the catalog. */
+    context_window?: number;
 }
 /** A named thinking/reasoning variant (e.g. "high", "max", "thinking"). */
 export interface ThinkingVariantInfo {
@@ -276,6 +280,17 @@ export type AlertKind = "turn_complete" | "turn_failed" | "permission_needed" | 
 export interface FlaggedFileWire {
     path: string;
     reason?: string;
+}
+/** A known project directory, returned by `list_projects`. */
+export interface ProjectInfo {
+    /** Absolute path to the project directory. */
+    path: string;
+    /** Human-friendly display name (last path component). */
+    display_name: string;
+    /** Number of sessions in this project. */
+    session_count: number;
+    /** Timestamp of the last activity (epoch seconds). */
+    last_used_at: number | null;
 }
 /** Metadata returned by `list_sessions` for one session. */
 export interface SessionInfo {
@@ -535,6 +550,9 @@ export type ServerMessage = {
 } | {
     type: "pong";
     version: string;
+} | {
+    type: "project_list";
+    projects: ProjectInfo[];
 };
 export interface MewWebSocket {
     send(data: string): void;
@@ -731,6 +749,9 @@ export interface MewClientEvents {
     pong: (data: {
         version: string;
     }) => void;
+    "project-list": (data: {
+        projects: ProjectInfo[];
+    }) => void;
 }
 export type MewEventName = keyof MewClientEvents;
 export interface MewClientOptions {
@@ -827,6 +848,8 @@ export declare class MewClient {
     unflagFile(sessionId: string, path: string): void;
     /** Ping the daemon; resolves with the daemon version once a pong arrives. */
     ping(): Promise<string>;
+    /** List known projects (recent session cwds). */
+    listProjects(): void;
     on<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     off<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     private emit;

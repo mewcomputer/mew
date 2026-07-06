@@ -196,6 +196,16 @@ pub enum ClientMessage {
         /// Persona name (must match one returned by `ListPersonas`).
         name: String,
     },
+
+    // -- Projects --
+    /// List known projects (recent session cwds + configured workspace.roots).
+    /// Does NOT require a session — used before creating one to populate a
+    /// project picker. The daemon responds with `ServerMessage::ProjectList`.
+    ListProjects,
+
+    /// Ping the daemon for liveness check and version negotiation.
+    /// The daemon responds with `ServerMessage::Pong { version }`.
+    Ping,
 }
 
 /// What kind of client is connected to a session.
@@ -208,6 +218,8 @@ pub enum ClientKind {
     Web,
     /// Headless CLI script.
     Cli,
+    /// Mobile app (iOS / Android).
+    Mobile,
     /// Unknown / unspecified.
     #[default]
     Unknown,
@@ -229,6 +241,9 @@ pub struct ModelInfo {
     /// model doesn't support configurable thinking.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub thinking_variants: Vec<ThinkingVariantInfo>,
+    /// Maximum context window in tokens, if known from the catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<i64>,
 }
 
 /// A named thinking/reasoning variant (e.g. "high", "max", "thinking").
@@ -696,6 +711,19 @@ pub enum ServerMessage {
     PersonaSwitched {
         name: String,
     },
+
+    /// Response to `ClientMessage::Ping`. Carries the daemon's version
+    /// so clients can detect version skew.
+    Pong {
+        /// Daemon version string (e.g. "0.2.0").
+        version: String,
+    },
+
+    /// Response to `ListProjects`. Contains deduped project directories
+    /// derived from session metadata.
+    ProjectList {
+        projects: Vec<ProjectInfo>,
+    },
 }
 
 /// Wire-format info about a flagged file.
@@ -704,6 +732,20 @@ pub struct FlaggedFileWire {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// A known project directory, returned by `ListProjects`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectInfo {
+    /// Absolute path to the project directory.
+    pub path: String,
+    /// Human-friendly display name (last path component).
+    pub display_name: String,
+    /// Number of sessions in this project.
+    pub session_count: u32,
+    /// Timestamp of the last activity in this project (epoch seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<i64>,
 }
 
 /// Wire-format info about a persona, returned by `ListPersonas`.
@@ -952,6 +994,68 @@ mod tests {
         let msg = ClientMessage::Cancel;
         let json = encode_json(&msg).unwrap();
         assert!(json.contains(r#""type":"cancel""#));
+    }
+
+    #[test]
+    fn test_list_projects_roundtrip() {
+        let msg = ClientMessage::ListProjects;
+        let decoded = round_trip(&msg);
+        assert!(matches!(decoded, ClientMessage::ListProjects));
+
+        let msg = ServerMessage::ProjectList {
+            projects: vec![ProjectInfo {
+                path: "/home/user/myproject".to_string(),
+                display_name: "myproject".to_string(),
+                session_count: 3,
+                last_used_at: Some(1700000000),
+            }],
+        };
+        let decoded = round_trip(&msg);
+        match decoded {
+            ServerMessage::ProjectList { projects } => {
+                assert_eq!(projects.len(), 1);
+                assert_eq!(projects[0].path, "/home/user/myproject");
+                assert_eq!(projects[0].display_name, "myproject");
+                assert_eq!(projects[0].session_count, 3);
+                assert_eq!(projects[0].last_used_at, Some(1700000000));
+            }
+            _ => panic!("expected ProjectList"),
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_ping_pong() {
+        let ping = ClientMessage::Ping;
+        let j = encode_json(&ping).unwrap();
+        assert!(j.contains(r#""type":"ping""#));
+        let decoded: ClientMessage = decode_json(&j).unwrap();
+        assert!(matches!(decoded, ClientMessage::Ping));
+
+        let pong = ServerMessage::Pong {
+            version: "0.2.0".into(),
+        };
+        let j = encode_json(&pong).unwrap();
+        assert!(j.contains(r#""type":"pong""#));
+        assert!(j.contains(r#""version":"0.2.0""#));
+        let decoded: ServerMessage = decode_json(&j).unwrap();
+        match decoded {
+            ServerMessage::Pong { version } => assert_eq!(version, "0.2.0"),
+            _ => panic!("expected Pong"),
+        }
+    }
+
+    #[test]
+    fn test_client_kind_mobile_roundtrip() {
+        let msg = ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Mobile,
+        };
+        match round_trip(&msg) {
+            ClientMessage::NewSession { client_kind, .. } => {
+                assert_eq!(client_kind, ClientKind::Mobile);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     // -- ClientMessage: exhaustive variant coverage --------------------------
@@ -1658,6 +1762,8 @@ mod tests {
                     command: "/help".into(),
                 },
             ),
+            ("ping", ClientMessage::Ping),
+            ("list_projects", ClientMessage::ListProjects),
         ];
         for (expected, msg) in samples {
             let json = encode_json(&msg).unwrap();
@@ -2063,12 +2169,14 @@ mod tests {
                 },
                 ThinkingVariantInfo { name: "max".into() },
             ],
+            context_window: Some(128_000),
         };
         let j = encode_json(&m).unwrap();
         assert!(j.contains(r#""thinking_variants""#));
         let parsed: ModelInfo = serde_json::from_str(&j).unwrap();
         assert_eq!(parsed.thinking_variants.len(), 2);
         assert_eq!(parsed.thinking_variants[0].name, "high");
+        assert_eq!(parsed.context_window, Some(128_000));
     }
 
     #[test]
@@ -2079,10 +2187,13 @@ mod tests {
             model: "model".into(),
             description: None,
             thinking_variants: vec![],
+            context_window: None,
         };
         let j = encode_json(&m).unwrap();
         // Empty vec should be skipped in serialization.
         assert!(!j.contains(r#""thinking_variants""#));
+        // context_window should be skipped when None.
+        assert!(!j.contains(r#""context_window""#));
     }
 
     #[test]

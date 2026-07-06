@@ -45,6 +45,9 @@ pub mod files;
 pub mod groups;
 pub mod session;
 
+#[cfg(feature = "iroh")]
+pub mod iroh_transport;
+
 pub use client::DaemonClient;
 pub use session::{AttachError, Session, SessionManager};
 
@@ -92,6 +95,9 @@ pub struct DaemonServer {
     pub session_manager: Arc<SessionManager>,
     /// Session groups sidecar store (groups.json).
     pub groups_store: Arc<groups::GroupsStore>,
+    /// Daemon-wide flag for auto-summary. Shared across all connections
+    /// so the idle-summary task is spawned once, not per-connection.
+    pub auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DaemonServer {
@@ -135,6 +141,7 @@ impl DaemonServer {
             thinking_setter: None,
             session_manager,
             groups_store,
+            auto_summary_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 
@@ -174,6 +181,17 @@ impl DaemonServer {
         let session_manager = self.session_manager.clone();
         let groups_store = self.groups_store.clone();
         let thinking_setter = self.thinking_setter.clone();
+        let auto_summary_enabled = self.auto_summary_enabled.clone();
+
+        // Spawn the idle-summary task once (daemon-wide, not per-connection).
+        {
+            let sm = session_manager.clone();
+            let flag = auto_summary_enabled.clone();
+            tokio::spawn(async move {
+                idle_summary_task(sm, flag).await;
+            });
+        }
+
         let mut id_counter = 0u64;
 
         let mut sig_term =
@@ -194,9 +212,10 @@ impl DaemonServer {
                             let session_manager = session_manager.clone();
                             let groups_store = groups_store.clone();
                             let thinking_setter = thinking_setter.clone();
+                            let auto_summary_enabled = auto_summary_enabled.clone();
                             tokio::spawn(async move {
                                 info!(conn_id, "connection accepted");
-                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter).await {
+                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter, auto_summary_enabled).await {
                                     if !e.to_string().contains("connection reset") {
                                         warn!(conn_id, error = %e, "connection ended with error");
                                     }
@@ -227,6 +246,17 @@ impl DaemonServer {
         let session_manager = self.session_manager.clone();
         let groups_store = self.groups_store.clone();
         let thinking_setter = self.thinking_setter.clone();
+        let auto_summary_enabled = self.auto_summary_enabled.clone();
+
+        // Spawn the idle-summary task once (daemon-wide, not per-connection).
+        {
+            let sm = session_manager.clone();
+            let flag = auto_summary_enabled.clone();
+            tokio::spawn(async move {
+                idle_summary_task(sm, flag).await;
+            });
+        }
+
         let mut id_counter = 0u64;
 
         let mut sig_term =
@@ -247,9 +277,10 @@ impl DaemonServer {
                             let session_manager = session_manager.clone();
                             let groups_store = groups_store.clone();
                             let thinking_setter = thinking_setter.clone();
+                            let auto_summary_enabled = auto_summary_enabled.clone();
                             tokio::spawn(async move {
                                 info!(conn_id, %peer, "connection accepted (tcp)");
-                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter).await {
+                                if let Err(e) = handle_connection(stream, session_manager, groups_store, thinking_setter, auto_summary_enabled).await {
                                     if !e.to_string().contains("connection reset") {
                                         warn!(conn_id, error = %e, "connection ended with error");
                                     }
@@ -273,11 +304,12 @@ impl DaemonServer {
 // Per-connection handler
 // ---------------------------------------------------------------------------
 
-async fn handle_connection<S>(
+pub async fn handle_connection<S>(
     stream: S,
     session_manager: Arc<SessionManager>,
     groups_store: Arc<groups::GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
+    auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -293,19 +325,8 @@ where
     let mut client_id: Option<u64> = None;
     let mut auto_title_enabled = true;
 
-    // Shared flag for the idle-summary background task.
-    let auto_summary_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-
-    // Spawn the idle-summary background task. It periodically checks active
-    // sessions and generates a summary for sessions that have been idle
-    // for a while.
-    {
-        let auto_summary_enabled = auto_summary_enabled.clone();
-        let session_manager = session_manager.clone();
-        tokio::spawn(async move {
-            idle_summary_task(session_manager, auto_summary_enabled).await;
-        });
-    }
+    // auto_summary_enabled is passed in from the daemon (daemon-wide task
+    // is spawned once in run()/run_tcp(), not per-connection).
 
     // Spawn a writer task that owns the WebSocket sink.
     let mut ws_tx = ws_tx;
@@ -350,6 +371,22 @@ where
 
         match client_msg {
             ClientMessage::NewSession { cwd, client_kind } => {
+                // Validate cwd if provided: must exist and be a directory.
+                if let Some(ref cwd_str) = cwd {
+                    let cwd_path = PathBuf::from(cwd_str);
+                    if !cwd_path.exists() {
+                        reply(ServerMessage::Error {
+                            message: format!("session cwd does not exist: {cwd_str}"),
+                        });
+                        continue;
+                    }
+                    if !cwd_path.is_dir() {
+                        reply(ServerMessage::Error {
+                            message: format!("session cwd is not a directory: {cwd_str}"),
+                        });
+                        continue;
+                    }
+                }
                 match session_manager.create(cwd.clone().map(PathBuf::from)).await {
                     Ok(session) => {
                         let (cid, was_first) =
@@ -584,6 +621,15 @@ where
                 if let Some(session) = &attached_session {
                     session.cancel_turn().await;
                 }
+            }
+            ClientMessage::Ping => {
+                reply(ServerMessage::Pong {
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                });
+            }
+            ClientMessage::ListProjects => {
+                let projects = list_projects(&session_manager).await;
+                reply(ServerMessage::ProjectList { projects });
             }
             ClientMessage::PermissionResponse {
                 request_id,
@@ -1355,6 +1401,79 @@ async fn generate_session_title(agent: &Agent, prompt_text: &str) -> String {
     }
 }
 
+/// Check whether a daemon is already listening at the given socket path.
+///
+/// - If a live daemon responds → bail (prevent double-binding).
+/// - If the socket file is stale (connection refused) → remove it and return Ok.
+/// - If no socket file exists → return Ok.
+pub fn check_socket_liveness(socket_path: &str) -> Result<()> {
+    use std::os::unix::net::UnixStream;
+    match UnixStream::connect(socket_path) {
+        Ok(_) => anyhow::bail!(
+            "a mew daemon is already running at {socket_path}. \
+             Stop it first (`mew daemon --stop`) or use a different --socket path."
+        ),
+        Err(_) => {
+            // Connection refused or path doesn't exist — stale or absent.
+            let _ = std::fs::remove_file(socket_path);
+            Ok(())
+        }
+    }
+}
+
+/// Collect known projects from session metas.
+/// Deduped by canonicalized path, sorted by recency (most recent first).
+async fn list_projects(
+    session_manager: &std::sync::Arc<crate::session::SessionManager>,
+) -> Vec<mew_protocol::ProjectInfo> {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let dir = session_manager.session_dir.clone();
+    let mut projects: HashMap<PathBuf, mew_protocol::ProjectInfo> = HashMap::new();
+
+    // Walk session dirs and read meta.json for each.
+    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            let Ok(Some(meta)) = mew_session::Meta::read(&dir, &file_name).await else {
+                continue;
+            };
+            let Some(cwd_str) = &meta.cwd else {
+                continue;
+            };
+            let path = PathBuf::from(cwd_str);
+            let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
+            let display_name = canonical
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| cwd_str.clone());
+            let last_used = meta.last_message_at.or(Some(meta.created_at));
+            let entry = projects
+                .entry(canonical)
+                .or_insert_with(|| mew_protocol::ProjectInfo {
+                    path: cwd_str.clone(),
+                    display_name: display_name.clone(),
+                    session_count: 0,
+                    last_used_at: None,
+                });
+            entry.session_count += 1;
+            if let Some(ts) = last_used {
+                entry.last_used_at = Some(entry.last_used_at.map(|e| e.max(ts)).unwrap_or(ts));
+            }
+        }
+    }
+
+    // Sort by last_used_at descending (None sorts last).
+    let mut result: Vec<_> = projects.into_values().collect();
+    result.sort_by(|a, b| {
+        b.last_used_at
+            .unwrap_or(0)
+            .cmp(&a.last_used_at.unwrap_or(0))
+    });
+    result
+}
+
 /// Fallback: derive a short session title from the first user message.
 /// Truncates to 60 chars, collapses whitespace, strips newlines.
 fn derive_session_title(text: &str) -> String {
@@ -1799,4 +1918,48 @@ async fn send_msg<S: AsyncRead + AsyncWrite + Unpin + Send>(
     let json = mew_protocol::encode_json(&msg)?;
     ws_tx.send(Message::Text(json)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_socket_liveness_guard_rejects_live_socket() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test.sock");
+
+        // Bind a listener to simulate a running daemon.
+        let _listener = UnixListener::bind(&socket_path).unwrap();
+
+        // check_socket_liveness should fail — a daemon is already listening.
+        let result = check_socket_liveness(socket_path.to_str().unwrap());
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("already running"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn test_socket_liveness_guard_removes_stale_socket() {
+        // Create a file at the socket path that isn't a listening socket.
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("stale.sock");
+        std::fs::write(&socket_path, b"stale").unwrap();
+
+        // check_socket_liveness should succeed — connection will be refused,
+        // stale file removed.
+        let result = check_socket_liveness(socket_path.to_str().unwrap());
+        assert!(result.is_ok(), "stale socket should be removed: {result:?}");
+        assert!(!socket_path.exists(), "stale socket file should be removed");
+    }
+
+    #[test]
+    fn test_socket_liveness_guard_ok_when_no_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("nonexistent.sock");
+
+        let result = check_socket_liveness(socket_path.to_str().unwrap());
+        assert!(result.is_ok(), "missing socket should be fine: {result:?}");
+    }
 }

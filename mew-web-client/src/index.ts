@@ -82,7 +82,8 @@ export type ClientMessage =
   | { type: "watch_workspace"; session_id: string; enabled: boolean }
   | { type: "open_path"; session_id: string; path: string }
   | { type: "unflag_file"; session_id: string; path: string }
-  | { type: "ping" };
+  | { type: "ping" }
+  | { type: "list_projects" };
 
 // Provider events — see mew_message::ProviderEventWire.
 export type ProviderEventWire =
@@ -208,6 +209,8 @@ export interface ModelInfo {
   description?: string;
   /** Available thinking/reasoning variants for this model. */
   thinking_variants?: ThinkingVariantInfo[];
+  /** Maximum context window in tokens, if known from the catalog. */
+  context_window?: number;
 }
 
 /** A named thinking/reasoning variant (e.g. "high", "max", "thinking"). */
@@ -242,6 +245,18 @@ export type AlertKind = "turn_complete" | "turn_failed" | "permission_needed" | 
 export interface FlaggedFileWire {
   path: string;
   reason?: string;
+}
+
+/** A known project directory, returned by `list_projects`. */
+export interface ProjectInfo {
+  /** Absolute path to the project directory. */
+  path: string;
+  /** Human-friendly display name (last path component). */
+  display_name: string;
+  /** Number of sessions in this project. */
+  session_count: number;
+  /** Timestamp of the last activity (epoch seconds). */
+  last_used_at: number | null;
 }
 
 /** Metadata returned by `list_sessions` for one session. */
@@ -435,7 +450,8 @@ export type ServerMessage =
       pending_permissions: number;
       pending_questions: number;
     }
-  | { type: "pong"; version: string };
+  | { type: "pong"; version: string }
+  | { type: "project_list"; projects: ProjectInfo[] };
 
 // ---------------------------------------------------------------------------
 // Minimal WebSocket interface — lets Node users pass `ws` while browsers
@@ -590,6 +606,7 @@ export interface MewClientEvents {
   errorMessage: (data: { message: string }) => void;
   errorEvent: (data: { message: string }) => void;
   pong: (data: { version: string }) => void;
+  "project-list": (data: { projects: ProjectInfo[] }) => void;
 }
 
 export type MewEventName = keyof MewClientEvents;
@@ -924,6 +941,11 @@ export class MewClient {
     });
   }
 
+  /** List known projects (recent session cwds). */
+  listProjects(): void {
+    this.send({ type: "list_projects" });
+  }
+
   // -------------------------------------------------------------------------
   // Event registration
   // -------------------------------------------------------------------------
@@ -1188,6 +1210,9 @@ export class MewClient {
         break;
       case "pong":
         this.emit("pong", { version: msg.version });
+        break;
+      case "project_list":
+        this.emit("project-list", { projects: msg.projects });
         break;
     }
   }

@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
 import { useRouter } from "@tanstack/react-router";
-import type { MewClient, SessionInfo, GroupInfo } from "@mew/web-client";
+import type { MewClient, SessionInfo, GroupInfo, ProjectInfo } from "@mew/web-client";
 import { useSessionStore } from "../stores/session";
 import { cn } from "../lib/utils";
 import {
@@ -16,6 +16,12 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -52,10 +58,12 @@ export function SessionRail({ client }: SessionRailProps) {
   const sessionTitles = useSessionStore((s) => s.sessionTitles);
   const connectionState = useSessionStore((s) => s.connectionState);
   const groups = useSessionStore((s) => s.groups);
+  const projects = useSessionStore((s) => s.projects);
   const { setOpenMobile } = useSidebar();
   const router = useRouter();
   const [view, setView] = useState<ViewMode>("timeline");
   const [showArchived, setShowArchived] = useState(false);
+  const [showProjectPicker, setShowProjectPicker] = useState(false);
 
   useEffect(() => {
     if (client && connectionState === "connected") {
@@ -73,6 +81,16 @@ export function SessionRail({ client }: SessionRailProps) {
     const newId = await client.newSession();
     localStorage.setItem("mew.sessionId", newId);
     router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
+    setOpenMobile(false);
+  };
+
+  const handleNewSessionFromCwd = async (cwd: string) => {
+    if (!client) return;
+    useSessionStore.getState().reset();
+    const newId = await client.newSession(cwd);
+    localStorage.setItem("mew.sessionId", newId);
+    router.navigate({ to: "/session/$sessionId", params: { sessionId: newId } });
+    setShowProjectPicker(false);
     setOpenMobile(false);
   };
 
@@ -184,10 +202,28 @@ export function SessionRail({ client }: SessionRailProps) {
       <SidebarContent>
         <SidebarGroup>
           <div className="space-y-1.5 p-2">
-            <Button onClick={handleNewSession} disabled={!client} variant="default" size="sm" className="w-full">
-              <Plus className="h-3.5 w-3.5" />
-              New session
-            </Button>
+            <div className="flex gap-1.5">
+              <Button onClick={handleNewSession} disabled={!client} variant="default" size="sm" className="flex-1">
+                <Plus className="h-3.5 w-3.5" />
+                New session
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="px-2"
+                disabled={!client}
+                title="New session from a project directory"
+                onClick={() => {
+                  if (client) {
+                    client.listProjects();
+                    useSessionStore.getState().setProjectsLoading(true);
+                  }
+                  setShowProjectPicker(true);
+                }}
+              >
+                <FolderPlus className="h-3.5 w-3.5" />
+              </Button>
+            </div>
             {continueTarget && (
               <Button onClick={() => handleAttach(continueTarget.session_id)} variant="outline" size="sm" className="w-full" title={`Resume ${deriveTitle(continueTarget)}`}>
                 <RotateCcw className="h-3.5 w-3.5" />
@@ -245,6 +281,12 @@ export function SessionRail({ client }: SessionRailProps) {
           </SidebarGroup>
         ))}
       </SidebarContent>
+      <ProjectPickerModal
+        open={showProjectPicker}
+        onOpenChange={setShowProjectPicker}
+        projects={projects}
+        onSelect={handleNewSessionFromCwd}
+      />
     </Sidebar>
   );
 }
@@ -592,4 +634,90 @@ function swatchClass(color: string): string {
     gray: "bg-muted-foreground",
   };
   return map[color] ?? "bg-muted-foreground";
+}
+
+function ProjectPickerModal({
+  open,
+  onOpenChange,
+  projects,
+  onSelect,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  projects: ProjectInfo[];
+  onSelect: (cwd: string) => void;
+}) {
+  const [manualPath, setManualPath] = useState("");
+
+  const sortedProjects = useMemo(
+    () =>
+      [...projects].sort(
+        (a, b) => (b.last_used_at ?? 0) - (a.last_used_at ?? 0),
+      ),
+    [projects],
+  );
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>New session from project</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          {sortedProjects.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-xs font-medium text-muted-foreground">Recent projects</p>
+              <div className="max-h-64 space-y-1 overflow-y-auto">
+                {sortedProjects.map((p) => (
+                  <button
+                    key={p.path}
+                    onClick={() => onSelect(p.path)}
+                    className="flex w-full items-center gap-2 rounded-md border border-border px-3 py-2 text-left text-sm hover:bg-muted/50 transition-colors"
+                  >
+                    <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-medium">{p.display_name}</div>
+                      <div className="truncate text-xs text-muted-foreground">{p.path}</div>
+                    </div>
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {p.session_count} session{p.session_count === 1 ? "" : "s"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {sortedProjects.length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              No recent projects found. Enter a path below to start a session in a specific directory.
+            </p>
+          )}
+          <div className="space-y-2 border-t border-border pt-3">
+            <p className="text-xs font-medium text-muted-foreground">Or enter a path:</p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={manualPath}
+                onChange={(e) => setManualPath(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && manualPath.trim()) {
+                    onSelect(manualPath.trim());
+                  }
+                }}
+                placeholder="/path/to/project"
+                className="flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none focus:ring-1 focus:ring-ring"
+              />
+              <Button
+                size="sm"
+                disabled={!manualPath.trim()}
+                onClick={() => onSelect(manualPath.trim())}
+              >
+                Open
+              </Button>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
 }

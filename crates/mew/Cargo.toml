@@ -47,3 +47,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 nix = { workspace = true }
+
+iroh = { workspace = true, optional = true }
+qrcode = { workspace = true }
+
+[features]
+default = []
+iroh = ["dep:iroh", "mew-daemon/iroh"]

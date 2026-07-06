@@ -314,6 +314,10 @@ export class MewClient {
             this.send({ type: "ping" });
         });
     }
+    /** List known projects (recent session cwds). */
+    listProjects() {
+        this.send({ type: "list_projects" });
+    }
     // -------------------------------------------------------------------------
     // Event registration
     // -------------------------------------------------------------------------
@@ -564,6 +568,9 @@ export class MewClient {
                 break;
             case "pong":
                 this.emit("pong", { version: msg.version });
+                break;
+            case "project_list":
+                this.emit("project-list", { projects: msg.projects });
                 break;
         }
     }
