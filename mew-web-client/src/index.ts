@@ -1223,6 +1223,12 @@ export class MewClient {
       case "project_list":
         this.emit("project-list", { projects: msg.projects });
         break;
+      default: {
+        // Exhaustiveness check: adding a new ServerMessage variant
+        // without handling it here becomes a TypeScript error.
+        const _exhaustive: never = msg;
+        throw new Error(`unhandled ServerMessage: ${(_exhaustive as { type: string }).type}`);
+      }
     }
   }
 

@@ -859,8 +859,7 @@ fn translate_message(
             provider,
             permission_mode,
         } => {
-            *conn_state.session_state.lock().unwrap() =
-                Some(SessionState::new(session_id.clone()));
+            *conn_state.session_state.lock().unwrap() = Some(SessionState::new(session_id.clone()));
             // Capture current model/provider/permission_mode from SessionReady.
             *conn_state.current_model.lock().unwrap() = model.clone();
             *conn_state.current_provider.lock().unwrap() = provider.clone();
@@ -1286,11 +1285,7 @@ fn translate_message(
                     model: m.model.clone(),
                     description: m.description.clone(),
                     context_window: m.context_window,
-                    thinking_variants: m
-                        .thinking_variants
-                        .iter()
-                        .map(|v| v.name.clone())
-                        .collect(),
+                    thinking_variants: m.thinking_variants.iter().map(|v| v.name.clone()).collect(),
                 })
                 .collect();
             // Store models in shared state for snapshot.
@@ -1301,11 +1296,7 @@ fn translate_message(
                     provider: m.provider.clone(),
                     model: m.model.clone(),
                     context_window: m.context_window,
-                    thinking_variants: m
-                        .thinking_variants
-                        .iter()
-                        .map(|v| v.name.clone())
-                        .collect(),
+                    thinking_variants: m.thinking_variants.iter().map(|v| v.name.clone()).collect(),
                 })
                 .collect();
             events.push(CoreEvent::ModelList {
@@ -1450,10 +1441,64 @@ fn translate_message(
             });
         }
 
-        // Catch-all: log and ignore messages we don't translate.
-        _ => {
-            warn!(daemon = %daemon_id, msg = ?msg, "unhandled ServerMessage");
+        // Explicit arms for unhandled variants — no silent catch-all.
+        // New ServerMessage variants will cause a compile error here,
+        // forcing a decision about how to handle them.
+        ServerMessage::Error { message } => {
+            events.push(CoreEvent::Alert {
+                daemon: d.clone(),
+                session_id: conn_state
+                    .attached_session
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_default(),
+                kind: "error".into(),
+                title: "Error".into(),
+                detail: Some(message.clone()),
+            });
         }
+        ServerMessage::ErrorEvent { message } => {
+            events.push(CoreEvent::Alert {
+                daemon: d.clone(),
+                session_id: conn_state
+                    .attached_session
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_default(),
+                kind: "error".into(),
+                title: "Error".into(),
+                detail: Some(message.clone()),
+            });
+        }
+        // These variants are not yet translated to CoreEvent — they are
+        // intentionally no-ops for now. Adding a new ServerMessage variant
+        // here forces a compile-time decision.
+        ServerMessage::ToolStart { .. }
+        | ServerMessage::ToolEnd { .. }
+        | ServerMessage::ToolProgress { .. }
+        | ServerMessage::SubagentStart { .. }
+        | ServerMessage::SubagentStatus { .. }
+        | ServerMessage::SubagentEnd { .. }
+        | ServerMessage::JobUpdate { .. }
+        | ServerMessage::ClientAttached { .. }
+        | ServerMessage::ClientDetached { .. }
+        | ServerMessage::ControlYielded { .. }
+        | ServerMessage::SessionSummaryChanged { .. }
+        | ServerMessage::SessionActivityChanged { .. }
+        | ServerMessage::SessionStatsChanged { .. }
+        | ServerMessage::SessionUsageChanged { .. }
+        | ServerMessage::GroupList { .. }
+        | ServerMessage::GroupsChanged { .. }
+        | ServerMessage::FilePreview { .. }
+        | ServerMessage::GitStatusResult { .. }
+        | ServerMessage::FsChanged { .. }
+        | ServerMessage::SessionMetaChanged { .. }
+        | ServerMessage::FlaggedFilesChanged { .. }
+        | ServerMessage::PersonaSwitchRequested { .. }
+        | ServerMessage::PersonaList { .. }
+        | ServerMessage::PersonaSwitched { .. } => {}
     }
 
     events

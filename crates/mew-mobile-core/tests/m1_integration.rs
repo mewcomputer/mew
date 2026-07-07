@@ -402,14 +402,17 @@ async fn b1_b6_feature_parity_tests() -> Result<()> {
     println!("✓ AC.2: Received PermissionModeChanged(standard) from set_permission_mode");
 
     // ── AC.1: SlashCommand /clear → SlashResult ──
-    h.core
-        .slash_command(h.daemon_id.clone(), "/clear".into());
-    wait_for_event(&h.events, 15, |e| {
-        matches!(e, CoreEvent::SlashResult { ref text, .. } if !text.is_empty())
-    });
+    h.core.slash_command(h.daemon_id.clone(), "/clear".into());
+    wait_for_event(
+        &h.events,
+        15,
+        |e| matches!(e, CoreEvent::SlashResult { ref text, .. } if !text.is_empty()),
+    );
     {
         let evs = h.events.lock().unwrap();
-        let slash = evs.iter().find(|e| matches!(e, CoreEvent::SlashResult { .. }));
+        let slash = evs
+            .iter()
+            .find(|e| matches!(e, CoreEvent::SlashResult { .. }));
         assert!(slash.is_some(), "should have a SlashResult event");
         if let Some(CoreEvent::SlashResult { text, .. }) = slash {
             assert!(!text.is_empty(), "SlashResult text should not be empty");
@@ -419,9 +422,7 @@ async fn b1_b6_feature_parity_tests() -> Result<()> {
 
     // ── AC.5: Usage fields in snapshot after a turn ──
     h.core.prompt(h.daemon_id.clone(), "hello".into());
-    wait_for_event(&h.events, 15, |e| {
-        matches!(e, CoreEvent::TurnEnded { .. })
-    });
+    wait_for_event(&h.events, 15, |e| matches!(e, CoreEvent::TurnEnded { .. }));
     println!("✓ AC.5: Received TurnEnded");
     {
         let snapshot = h

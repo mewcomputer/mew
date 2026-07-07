@@ -83,6 +83,8 @@ pub enum SlashResult {
     /// Open the session picker from disk (standalone mode, used by
     /// `/sessions` and `/resume` with no arg).
     OpenSessionPickerFromDisk,
+    /// Open the keyboard shortcuts overlay (same as pressing `?`).
+    OpenHelp,
 }
 
 /// The application's main state.
@@ -2277,7 +2279,8 @@ impl App {
             },
             SlashCommand {
                 name: "/permissions".into(),
-                description: "switch permission mode (Standard or Dangerous!)".into(),
+                description:
+                    "switch permission mode (standard/permissive/auto/auto_plus/dangerous)".into(),
             },
             SlashCommand {
                 name: "/quit".into(),
@@ -2346,7 +2349,7 @@ impl App {
             "/compact" => SlashResult::Compact,
             "/todo" => SlashResult::Todo,
             "/cost" => SlashResult::Message(self.build_cost_report()),
-            "/help" => SlashResult::OpenCommandPalette,
+            "/help" => SlashResult::OpenHelp,
             "/model" => {
                 if let Some(id) = arg {
                     SlashResult::SwitchModel(id.to_string())
@@ -2501,9 +2504,10 @@ impl App {
         if filtered.is_empty() {
             return;
         }
-        // Visible count matches the inner area in draw_slash_autocomplete:
-        // cap to 5 total, minus 2 padding = 3.
-        let visible: usize = 3;
+        // Visible count: min(half the chat area height, 12). Falls back to
+        // 3 when chat_area hasn't been populated yet (e.g. before first draw).
+        let visible: usize = self.chat_area.height.checked_div(2).unwrap_or(3).min(12) as usize;
+        let visible = visible.max(1);
         if self.slash_selected < self.slash_scroll {
             self.slash_scroll = self.slash_selected;
         } else if self.slash_selected >= self.slash_scroll + visible {
@@ -4358,10 +4362,10 @@ mod tests {
     }
 
     #[test]
-    fn test_help_opens_command_palette() {
+    fn test_help_opens_shortcuts_overlay() {
         let app = App::new();
         let result = app.handle_slash("/help");
-        assert!(matches!(result, SlashResult::OpenCommandPalette));
+        assert!(matches!(result, SlashResult::OpenHelp));
     }
 
     #[test]

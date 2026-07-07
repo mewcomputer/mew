@@ -2364,6 +2364,9 @@ fn handle_slash_result_local(app: &mut mew_tui::App, result: mew_tui::app::Slash
             // TodosUpdated events come from the daemon.
         }
         SlashResult::Clear | SlashResult::Compact | SlashResult::Continue | SlashResult::Quit => {}
+        SlashResult::OpenHelp => {
+            app.mode = mew_tui::app::Mode::Help;
+        }
         SlashResult::PluginCommand { .. } => {
             app.set_alert("plugin commands not available in daemon mode");
         }

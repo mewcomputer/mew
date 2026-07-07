@@ -293,6 +293,10 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
             cx.app.open_session_picker_from_disk();
             Flow::Continue
         }
+        SlashResult::OpenHelp => {
+            cx.app.mode = mew_tui::app::Mode::Help;
+            Flow::Continue
+        }
     }
 }
 
