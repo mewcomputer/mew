@@ -1005,7 +1005,7 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
 }
 
 /// High-level actions produced by input handling.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, strum::EnumIter)]
 pub enum Action {
     /// Submit a user message.
     Submit(String),

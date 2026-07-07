@@ -26,7 +26,7 @@ pub struct SlashCommand {
 }
 
 /// Result of handling a slash command.
-#[derive(Debug)]
+#[derive(Debug, strum::EnumIter)]
 pub enum SlashResult {
     /// Command unknown; fall through to the model.
     Continue,

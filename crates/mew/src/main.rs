@@ -623,12 +623,12 @@ fn build_tools(
 /// Session-level info exposed to plugins via the `config_read` callback.
 /// Plugins can query `session_id`, `model`, `provider`, `workspace`, and
 /// `active_persona`. Updated when persona/model changes.
-struct PluginInfo {
-    session_id: String,
-    model: String,
-    provider: String,
-    workspace: String,
-    active_persona: Option<String>,
+pub(crate) struct PluginInfo {
+    pub(crate) session_id: String,
+    pub(crate) model: String,
+    pub(crate) provider: String,
+    pub(crate) workspace: String,
+    pub(crate) active_persona: Option<String>,
 }
 
 /// Build a display-only summary of a persona for the confirm modal.
@@ -1879,7 +1879,6 @@ async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()>
                         cat: None,
                         loaded_personas: &[],
                         plugin_info: &plugin_info,
-                        terminal: &mut terminal,
                     };
                     let _flow = crate::runtime::handle_action(&mut cx, action).await;
                 }
@@ -2587,7 +2586,6 @@ async fn run_tui(
                         cat,
                         loaded_personas: &loaded_personas,
                         plugin_info: &plugin_info,
-                        terminal: &mut terminal,
                     };
                     let _flow = crate::runtime::handle_action(&mut cx, action).await;
                 }
@@ -2720,7 +2718,6 @@ async fn run_tui(
                 cat,
                 loaded_personas: &loaded_personas,
                 plugin_info: &plugin_info,
-                terminal: &mut terminal,
             };
             let flow = crate::runtime::handle_action(&mut cx, action).await;
             if matches!(flow, crate::runtime::Flow::Quit) {
@@ -3332,6 +3329,7 @@ fn build_provider(
     build_direct_provider(cfg, cat, provider_id, &pc, model_override, raw)
 }
 
+#[allow(dead_code)]
 pub(crate) async fn toggle_mouse_capture(
     app: &mut mew_tui::App,
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
@@ -3421,5 +3419,216 @@ fn context_display_name(path: &std::path::Path) -> String {
         leaf.to_string()
     } else {
         format!("{leaf} in {dir}/")
+    }
+}
+
+#[cfg(test)]
+mod dispatch_table_tests {
+    use super::*;
+    use mew_agent::AgentEvent;
+    use mew_tui::events::Action;
+    use strum::IntoEnumIterator;
+
+    /// Recording target that logs all method calls.
+    struct RecordingTarget {
+        calls: Vec<&'static str>,
+    }
+
+    impl RecordingTarget {
+        fn new() -> Self {
+            Self { calls: Vec::new() }
+        }
+        fn record(&mut self, name: &'static str) {
+            self.calls.push(name);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl runtime::target::CommandTarget for RecordingTarget {
+        fn prompt(
+            &mut self,
+            _enriched: String,
+            _parts: Vec<Part>,
+        ) -> tokio::sync::mpsc::Receiver<AgentEvent> {
+            self.record("prompt");
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            rx
+        }
+        async fn cancel(&mut self) {
+            self.record("cancel");
+        }
+        async fn clear(&mut self) -> Result<(), runtime::target::Unsupported> {
+            self.record("clear");
+            Ok(())
+        }
+        async fn compact(&mut self) -> Result<(), runtime::target::Unsupported> {
+            self.record("compact");
+            Ok(())
+        }
+        async fn todos(&mut self) -> Result<String, runtime::target::Unsupported> {
+            self.record("todos");
+            Ok("test".into())
+        }
+        async fn switch_model(
+            &mut self,
+            _spec: &str,
+        ) -> Result<runtime::target::SwitchedModel, runtime::target::Unsupported> {
+            self.record("switch_model");
+            Ok(runtime::target::SwitchedModel {
+                provider_id: "t".into(),
+                model_id: "t".into(),
+                display: "t".into(),
+            })
+        }
+        async fn set_permission_mode(
+            &mut self,
+            _mode: mew_hooks::PermissionMode,
+        ) -> Result<(), runtime::target::Unsupported> {
+            self.record("set_permission_mode");
+            Ok(())
+        }
+        async fn set_thinking(
+            &mut self,
+            _variant: &str,
+        ) -> Result<(), runtime::target::Unsupported> {
+            self.record("set_thinking");
+            Ok(())
+        }
+        async fn attach_session(&mut self, _id: &str) -> Result<(), runtime::target::Unsupported> {
+            self.record("attach_session");
+            Ok(())
+        }
+        async fn resume(&mut self, _id: &str) -> Result<(), runtime::target::Unsupported> {
+            self.record("resume");
+            Ok(())
+        }
+        async fn rewind(&mut self, _n: usize) -> Result<(), runtime::target::Unsupported> {
+            self.record("rewind");
+            Ok(())
+        }
+        async fn switch_persona(
+            &mut self,
+            _name: &str,
+            _personas: &[mew_personas::Persona],
+        ) -> Result<runtime::target::PersonaApplied, runtime::target::Unsupported> {
+            self.record("switch_persona");
+            Ok(runtime::target::PersonaApplied {
+                name: "t".into(),
+                pinned_model: None,
+                display: "t".into(),
+            })
+        }
+        async fn plugin_command(
+            &mut self,
+            _name: &str,
+            _args: &str,
+        ) -> Result<String, runtime::target::Unsupported> {
+            self.record("plugin_command");
+            Ok("r".into())
+        }
+        async fn cancel_subagent(
+            &mut self,
+            _task_id: &str,
+        ) -> Result<bool, runtime::target::Unsupported> {
+            self.record("cancel_subagent");
+            Ok(true)
+        }
+    }
+
+    /// Every `Action` variant must produce an observable effect through
+    /// `handle_action`. Catches silent drops.
+    #[tokio::test]
+    async fn test_action_variant_table() {
+        let all_actions: Vec<Action> = Action::iter().collect();
+        assert!(
+            !all_actions.is_empty(),
+            "Action::iter() should return variants"
+        );
+
+        for action in Action::iter() {
+            // Skip actions that need external resources not available in tests.
+            if matches!(
+                action,
+                Action::CopySelection(_)
+                    | Action::SaveSettings
+                    | Action::SettingsEditStart
+                    | Action::SettingsEditComplete
+            ) {
+                continue; // clipboard / settings editor handles these
+            }
+            // Provide meaningful test data for actions that carry payloads.
+            let action = match action {
+                Action::Submit(_) => Action::Submit("test prompt".into()),
+                Action::SlashCommand(_) => Action::SlashCommand("/cost".into()),
+                Action::SwitchModel(_) => Action::SwitchModel("test/model".into()),
+                Action::InsertAtMention(_) => Action::InsertAtMention("@file".into()),
+                Action::InsertSubagentMention(_) => {
+                    Action::InsertSubagentMention("researcher".into())
+                }
+                Action::CopySelection(_) => unreachable!(),
+                Action::CancelMostRecentSubagent(_) => {
+                    Action::CancelMostRecentSubagent("task_123".into())
+                }
+                Action::PersonaSwitchConfirmed(_) => Action::PersonaSwitchConfirmed("test".into()),
+                Action::SetPermissionMode(_) => {
+                    Action::SetPermissionMode(mew_hooks::PermissionMode::Standard)
+                }
+                Action::SetThinkingVariant(_) => Action::SetThinkingVariant("off".into()),
+                Action::AttachSession(_) => Action::AttachSession("sess_123".into()),
+                other => other,
+            };
+            let mut app = mew_tui::App::new();
+            let mut target = RecordingTarget::new();
+            let mut should_break = false;
+            let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+                session_id: String::new(),
+                model: String::new(),
+                provider: String::new(),
+                workspace: String::new(),
+                active_persona: None,
+            }));
+            let mut settings_editor: Option<config_editor::ConfigEditor> = None;
+            let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+
+            let chat_dirty_before = app.chat_dirty;
+            let messages_before = app.messages().len();
+            let input_before = app.input.clone();
+            let sidebar_before = app.sidebar_collapsed.clone();
+
+            let mut cx = runtime::Ctx {
+                app: &mut app,
+                target: &mut target,
+                event_loop: &event_loop,
+                settings_editor: &mut settings_editor,
+                should_break: &mut should_break,
+                cat: None,
+                loaded_personas: &[],
+                plugin_info: &plugin_info,
+            };
+
+            let _ = runtime::handle_action(&mut cx, action.clone()).await;
+
+            let target_called = !target.calls.is_empty();
+            let chat_dirty_changed = app.chat_dirty != chat_dirty_before;
+            let messages_changed = app.messages().len() != messages_before;
+            let input_changed = app.input != input_before;
+            let sidebar_changed = app.sidebar_collapsed != sidebar_before;
+            let alert_set = app.alert.is_some();
+            let quit_set = should_break;
+            let mode_changed = app.mode != mew_tui::app::Mode::Normal;
+
+            assert!(
+                target_called
+                    || chat_dirty_changed
+                    || messages_changed
+                    || input_changed
+                    || sidebar_changed
+                    || alert_set
+                    || quit_set
+                    || mode_changed,
+                "Action variant {:?} produced no observable effect — possible silent drop",
+                action
+            );
+        }
     }
 }

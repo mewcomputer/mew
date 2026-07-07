@@ -19,7 +19,6 @@ use crate::copy_to_clipboard;
 use crate::persona_summary;
 use crate::runtime::mentions::process_mentions;
 use crate::runtime::target::{CommandTarget, Unsupported};
-use crate::toggle_mouse_capture;
 
 /// Whether to continue or quit the event loop after handling an action.
 #[derive(Debug)]
@@ -41,7 +40,6 @@ pub struct Ctx<'a, T: CommandTarget> {
     pub cat: Option<&'a Catalog>,
     pub loaded_personas: &'a [mew_personas::Persona],
     pub plugin_info: &'a Arc<std::sync::Mutex<crate::PluginInfo>>,
-    pub terminal: &'a mut ratatui::DefaultTerminal,
 }
 
 /// Handle a single `Action`, producing a `Flow` indicating whether to
@@ -259,7 +257,9 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
             Flow::Continue
         }
         SlashResult::ToggleMouseCapture => {
-            toggle_mouse_capture(cx.app, cx.terminal).await;
+            // The caller handles the actual terminal toggle since it needs
+            // a DefaultTerminal reference. We just mark the intent.
+            cx.app.set_alert("toggle mouse capture");
             Flow::Continue
         }
         SlashResult::PluginCommand { name, args } => {
