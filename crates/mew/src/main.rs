@@ -3046,507 +3046,28 @@ async fn run_tui(
 
                 if let Some(action) = mew_tui::events::handle_input_event(&mut app, crossterm_event)
                 {
-                    match action {
-                        mew_tui::events::Action::Submit(text) => {
-                            let text = agent.dispatcher.on_user_input(text).await;
-                            let cwd = std::env::current_dir().unwrap_or_default();
-                            let (enriched, display, attachments) =
-                                process_mentions(&text, &cwd, &mut app.context_files).await;
-                            app.push_user(display, attachments.clone());
-                            app.streaming = true;
-                            let agent_rx = agent.run_with_parts(enriched, attachments, None);
-                            event_loop.forward_agent_events(agent_rx);
-                        }
-                        mew_tui::events::Action::SlashCommand(text) => {
-                            match app.handle_slash(&text) {
-                                mew_tui::SlashResult::Continue => {
-                                    continue;
-                                }
-                                mew_tui::SlashResult::Quit => should_break = true,
-                                mew_tui::SlashResult::Clear => {
-                                    agent.clear_context().await;
-                                    app.clear_messages();
-                                    app.push_synthetic_message("context cleared".into());
-                                }
-                                mew_tui::SlashResult::Message(msg) => {
-                                    app.push_synthetic_message(msg);
-                                }
-                                mew_tui::SlashResult::Compact => {
-                                    agent.force_compact().await;
-                                    app.push_synthetic_message(
-                                        "compaction will run on next turn".into(),
-                                    );
-                                }
-                                mew_tui::SlashResult::Todo => {
-                                    let list = agent.todos.lock().await;
-                                    app.push_synthetic_message(list.render());
-                                }
-                                mew_tui::SlashResult::SwitchModel(new_model) => {
-                                    let (new_provider_id, new_model_id) =
-                                        if let Some(idx) = new_model.find('/') {
-                                            (&new_model[..idx], &new_model[idx + 1..])
-                                        } else {
-                                            (provider_id.as_str(), new_model.as_str())
-                                        };
-                                    match build_provider(
-                                        cfg,
-                                        cat,
-                                        new_provider_id,
-                                        new_model_id,
-                                        raw,
-                                    ) {
-                                        Ok(new_provider) => {
-                                            agent.provider = new_provider;
-                                            agent.set_model_info(new_model_id, new_provider_id);
-                                            app.status.model = new_model_id.to_string();
-                                            app.status.provider = new_provider_id.to_string();
-                                            if let Some(c) = cat {
-                                                app.status.context_window =
-                                                    c.context_window(new_model_id) as u32;
-                                                if let Some(m) = c.lookup(new_model_id) {
-                                                    agent.input_price = m.pricing.input;
-                                                    agent.output_price = m.pricing.output;
-                                                    agent.cache_read_price = m.pricing.cache_read;
-                                                    agent.cache_write_price = m.pricing.cache_write;
-                                                    agent.reasoning_price = m.pricing.reasoning;
-                                                }
-                                            }
-                                            let mut state =
-                                                mew_config::load_state().unwrap_or_default();
-                                            state.last_model = new_model_id.to_string();
-                                            state.last_provider = new_provider_id.to_string();
-                                            if let Err(e) = mew_config::save_state(&state) {
-                                                tracing::warn!("failed to save state: {}", e);
-                                            }
-                                            app.push_synthetic_message(format!(
-                                                "switched to {}",
-                                                new_model
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            app.push_synthetic_message(format!(
-                                                "failed to switch: {}",
-                                                e
-                                            ));
-                                        }
-                                    }
-                                }
-                                mew_tui::SlashResult::SetThinkingVariant(ref variant) => {
-                                    let model_id = &app.status.model;
-                                    let variant_name = variant.as_str();
-                                    if variant_name.is_empty()
-                                        || variant_name == "off"
-                                        || variant_name == "none"
-                                    {
-                                        agent.set_reasoning(None);
-                                        app.push_synthetic_message("thinking disabled".into());
-                                    } else {
-                                        match resolve_reasoning(cat, model_id, Some(variant_name)) {
-                                            Some(config) => {
-                                                agent.set_reasoning(Some(config));
-                                                app.push_synthetic_message(format!(
-                                                    "thinking variant: {}",
-                                                    variant_name
-                                                ));
-                                            }
-                                            None => {
-                                                app.push_synthetic_message(format!(
-                                                    "unknown thinking variant '{variant_name}' for model '{model_id}'"
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                                mew_tui::SlashResult::SetTheme(ref name) => {
-                                    app.theme = mew_tui::theme::Theme::load(name);
-                                    // Persist to state.toml so it survives restart.
-                                    {
-                                        let mut save = mew_config::load_state().unwrap_or_default();
-                                        save.theme = app.theme.name.clone();
-                                        let _ = mew_config::save_state(&save);
-                                    }
-                                    app.push_synthetic_message(format!(
-                                        "theme: {}",
-                                        app.theme.name
-                                    ));
-                                }
-                                mew_tui::SlashResult::SwitchPersona(ref name) => {
-                                    if name == "default" || name == "none" {
-                                        let old = app.active_persona.clone();
-                                        agent.clear_persona();
-                                        app.active_persona = None;
-                                        plugin_info.lock().unwrap().active_persona = None;
-                                        app.push_synthetic_message(
-                                            "persona cleared (default)".into(),
-                                        );
-                                        agent
-                                            .dispatcher
-                                            .on_persona_change(old.as_deref(), "default")
-                                            .await;
-                                    } else if let Some(persona) =
-                                        loaded_personas.iter().find(|p| p.name == *name)
-                                    {
-                                        apply_persona_switch(
-                                            &mut agent,
-                                            &mut app,
-                                            cfg,
-                                            cat,
-                                            provider_id.as_str(),
-                                            raw,
-                                            persona,
-                                        );
-                                    } else {
-                                        app.push_synthetic_message(format!(
-                                            "unknown persona: {}. use /persona to list available.",
-                                            name
-                                        ));
-                                    }
-                                }
-                                mew_tui::SlashResult::PersonaSwitchConfirm(ref name) => {
-                                    if let Some(persona) =
-                                        loaded_personas.iter().find(|p| p.name == *name)
-                                    {
-                                        let target = persona_summary(persona);
-                                        let current = app
-                                            .active_persona
-                                            .as_ref()
-                                            .and_then(|cur_name| {
-                                                loaded_personas.iter().find(|p| &p.name == cur_name)
-                                            })
-                                            .map(persona_summary);
-                                        app.request_persona_switch_confirm(target, current);
-                                    } else {
-                                        app.push_synthetic_message(format!(
-                                            "unknown persona: {}. use /persona to list available.",
-                                            name
-                                        ));
-                                    }
-                                }
-                                mew_tui::SlashResult::Rewind(n) => {
-                                    if app.streaming {
-                                        app.push_synthetic_message(
-                                            "cannot rewind while streaming".into(),
-                                        );
-                                    } else if n > app.messages.len() {
-                                        app.push_synthetic_message(format!(
-                                            "only {} messages exist",
-                                            app.messages.len()
-                                        ));
-                                    } else {
-                                        let removed = app.messages.len() - n;
-                                        app.rewind_to(n);
-                                        {
-                                            let mut msgs = agent.messages.lock().await;
-                                            if n < msgs.len() {
-                                                msgs.truncate(n);
-                                            }
-                                        }
-                                        app.push_synthetic_message(format!(
-                                            "rewound to message {} (removed {})",
-                                            n, removed
-                                        ));
-                                    }
-                                }
-                                mew_tui::SlashResult::ResumeSession(ref id) => {
-                                    match mew_session::Reader::load(id).await {
-                                        Ok(msgs) => {
-                                            agent.load_messages(msgs.clone()).await;
-                                            // Carry forward the resumed session's todos.
-                                            let resumed_todos_path = mew_session::session_dir()
-                                                .join(id)
-                                                .join("todos.json");
-                                            if let Ok(list) =
-                                                mew_agent::TodoList::load(&resumed_todos_path).await
-                                            {
-                                                *agent.todos.lock().await = list;
-                                            }
-                                            app.todos = agent.todos.lock().await.items.clone();
-                                            app.clear_messages();
-                                            for msg in &msgs {
-                                                app.push_message(msg.clone());
-                                            }
-                                            app.status.session_id = id.clone();
-                                            app.auto_scroll = true;
-                                            app.scroll = app.max_scroll;
-                                            app.push_synthetic_message(format!(
-                                                "resumed session {}",
-                                                id
-                                            ));
-                                        }
-                                        Err(e) => {
-                                            app.push_synthetic_message(format!(
-                                                "failed to load session {}: {}",
-                                                id, e
-                                            ));
-                                        }
-                                    }
-                                }
-                                mew_tui::SlashResult::OpenModelPicker => {
-                                    app.open_command_palette();
-                                }
-                                mew_tui::SlashResult::PermissionModeMenu => {
-                                    app.open_permission_mode_picker();
-                                }
-                                mew_tui::SlashResult::SetPermissionMode(mode) => {
-                                    agent.set_permission_mode(mode);
-                                    app.permission_mode = mode;
-                                    let alert = match mode {
-                                        mew_hooks::PermissionMode::Standard => {
-                                            "Standard permission mode — prompts restored."
-                                                .to_string()
-                                        }
-                                        mew_hooks::PermissionMode::Permissive => {
-                                            "Permissive mode — Mutating tools auto-allow; \
-                                             bash still prompts and your rules still apply."
-                                                .to_string()
-                                        }
-                                        mew_hooks::PermissionMode::Auto => {
-                                            "Auto mode — small LLM classifier decides each \
-                                             tool call. Falls back to user on escalate."
-                                                .to_string()
-                                        }
-                                        mew_hooks::PermissionMode::AutoPlus => {
-                                            "Auto+ mode — classifier decides, but escalate or \
-                                             failure means Deny (fail closed). No human in \
-                                             the loop."
-                                                .to_string()
-                                        }
-                                        mew_hooks::PermissionMode::Dangerous => {
-                                            "⚠ Dangerous! mode — every tool auto-runs; \
-                                             overrides deny rules, ask rules, and the \
-                                             secret-file guard."
-                                                .to_string()
-                                        }
-                                    };
-                                    app.set_alert(alert);
-                                }
-                                mew_tui::SlashResult::ToggleMouseCapture => {
-                                    toggle_mouse_capture(&mut app, &mut terminal).await;
-                                }
-                                mew_tui::SlashResult::PluginCommand { name, args } => {
-                                    let disp = agent.dispatcher.clone();
-                                    match disp.execute_slash_command(&name, &args).await {
-                                        Some(result) => {
-                                            app.push_synthetic_message(result);
-                                        }
-                                        None => {
-                                            app.push_synthetic_message(format!(
-                                                "unknown command: {}",
-                                                name
-                                            ));
-                                        }
-                                    }
-                                }
-                                mew_tui::SlashResult::OpenThinkingVariantPicker => {
-                                    app.open_thinking_variant_picker();
-                                }
-                                mew_tui::SlashResult::OpenCommandPalette => {
-                                    app.open_command_palette();
-                                }
-                                mew_tui::SlashResult::OpenThemePicker => {
-                                    app.open_theme_picker();
-                                }
-                                mew_tui::SlashResult::OpenPersonaPicker => {
-                                    app.open_persona_picker();
-                                }
-                                mew_tui::SlashResult::OpenRewindPicker => {
-                                    app.open_rewind_picker();
-                                }
-                                mew_tui::SlashResult::OpenSessionPickerFromDisk => {
-                                    app.open_session_picker_from_disk();
-                                }
-                            }
-                        }
-                        mew_tui::events::Action::Clear => {
-                            agent.clear_context().await;
-                            app.clear_messages();
-                            app.push_synthetic_message("context cleared".into());
-                        }
-                        mew_tui::events::Action::SwitchModel(new_model) => {
-                            let (new_provider_id, new_model_id) =
-                                if let Some(idx) = new_model.find('/') {
-                                    (&new_model[..idx], &new_model[idx + 1..])
-                                } else {
-                                    (provider_id.as_str(), new_model.as_str())
-                                };
-                            match build_provider(cfg, cat, new_provider_id, new_model_id, raw) {
-                                Ok(new_provider) => {
-                                    agent.provider = new_provider;
-                                    agent.set_model_info(new_model_id, new_provider_id);
-                                    app.status.model = new_model_id.to_string();
-                                    app.status.provider = new_provider_id.to_string();
-                                    if let Some(c) = cat {
-                                        app.status.context_window =
-                                            c.context_window(new_model_id) as u32;
-                                        if let Some(m) = c.lookup(new_model_id) {
-                                            agent.input_price = m.pricing.input;
-                                            agent.output_price = m.pricing.output;
-                                            agent.cache_read_price = m.pricing.cache_read;
-                                            agent.cache_write_price = m.pricing.cache_write;
-                                            agent.reasoning_price = m.pricing.reasoning;
-                                        }
-                                    }
-                                    let mut state = mew_config::load_state().unwrap_or_default();
-                                    state.last_model = new_model_id.to_string();
-                                    state.last_provider = new_provider_id.to_string();
-                                    state.sidebar_collapsed = app.sidebar_collapsed.clone();
-                                    if let Err(e) = mew_config::save_state(&state) {
-                                        tracing::warn!("failed to save state: {}", e);
-                                    }
-                                    app.push_synthetic_message(format!(
-                                        "switched to {}",
-                                        new_model
-                                    ));
-                                }
-                                Err(e) => {
-                                    app.push_synthetic_message(format!(
-                                        "failed to switch model: {}",
-                                        e
-                                    ));
-                                }
-                            }
-                        }
-                        mew_tui::events::Action::Cancel => {
-                            agent.cancel_token.cancel();
-                            app.streaming = false;
-                        }
-                        mew_tui::events::Action::CancelMostRecentSubagent(task_id) => {
-                            if agent.cancel_subagent(&task_id).await {
-                                app.set_alert("subagent cancellation requested");
-                            } else {
-                                app.set_alert("subagent already finished");
-                            }
-                        }
-                        mew_tui::events::Action::PersonaSwitchConfirmed(name) => {
-                            if let Some(persona) = loaded_personas.iter().find(|p| p.name == name) {
-                                let old = app.active_persona.clone();
-                                apply_persona_switch(
-                                    &mut agent,
-                                    &mut app,
-                                    cfg,
-                                    cat,
-                                    provider_id.as_str(),
-                                    raw,
-                                    persona,
-                                );
-                                plugin_info.lock().unwrap().active_persona = Some(name.clone());
-                                agent
-                                    .dispatcher
-                                    .on_persona_change(old.as_deref(), &name)
-                                    .await;
-                            }
-                        }
-                        mew_tui::events::Action::SetPermissionMode(mode) => {
-                            agent.set_permission_mode(mode);
-                            app.permission_mode = mode;
-                            let alert = match mode {
-                                mew_hooks::PermissionMode::Standard => {
-                                    "Standard permission mode — prompts restored for \
-                                     Mutating/Dangerous tools."
-                                        .to_string()
-                                }
-                                mew_hooks::PermissionMode::Permissive => {
-                                    "Permissive mode — Mutating tools auto-allow; \
-                                     bash still prompts and your rules still apply."
-                                        .to_string()
-                                }
-                                mew_hooks::PermissionMode::Auto => {
-                                    "Auto mode — small LLM classifier decides each \
-                                     tool call. Falls back to user on escalate."
-                                        .to_string()
-                                }
-                                mew_hooks::PermissionMode::AutoPlus => {
-                                    "Auto+ mode — classifier decides, but escalate or \
-                                     failure means Deny (fail closed). No human in \
-                                     the loop."
-                                        .to_string()
-                                }
-                                mew_hooks::PermissionMode::Dangerous => {
-                                    "⚠ Dangerous! mode — every tool auto-runs; \
-                                     overrides deny rules, ask rules, and the \
-                                     secret-file guard."
-                                        .to_string()
-                                }
-                            };
-                            app.set_alert(alert);
-                        }
-                        mew_tui::events::Action::InsertAtMention(mention) => {
-                            app.insert_mention(&mention);
-                        }
-                        mew_tui::events::Action::InsertSubagentMention(name) => {
-                            app.insert_mention(&format!("@{} ", name));
-                        }
-                        mew_tui::events::Action::CopySelection(text) => {
-                            copy_to_clipboard(&text);
-                            app.set_alert(format!("copied {} chars", text.len()));
-                            app.clear_selection();
-                        }
-                        mew_tui::events::Action::ToggleSidebarContext => {
-                            app.toggle_sidebar_section("context");
-                        }
-                        mew_tui::events::Action::ToggleSidebarTools => {
-                            app.toggle_sidebar_section("tools");
-                        }
-                        mew_tui::events::Action::ToggleSidebarMcp => {
-                            app.toggle_sidebar_section("mcp");
-                        }
-                        mew_tui::events::Action::OpenSettings => {
-                            // Create ConfigEditor with discovered plugins
-                            let loader = mew_hooks_runtime::PluginLoader::new(
-                                mew_hooks_runtime::PluginLoader::default_dirs(),
-                            );
-                            let state = mew_config::load_state().unwrap_or_default();
-                            let plugins: Vec<config_editor::PluginEntry> = loader
-                                .discover_executables()
-                                .into_iter()
-                                .map(|path| {
-                                    let name = path
-                                        .file_stem()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .to_string();
-                                    let enabled = !state.disabled_plugins.contains(&name);
-                                    config_editor::PluginEntry {
-                                        name,
-                                        path: path.display().to_string(),
-                                        enabled,
-                                    }
-                                })
-                                .collect();
-                            let cfg = mew_config::load().unwrap_or_default();
-                            settings_editor = Some(config_editor::ConfigEditor::new(cfg, plugins));
-                            app.mode = mew_tui::app::Mode::Settings;
-                        }
-                        mew_tui::events::Action::SaveSettings
-                        | mew_tui::events::Action::SettingsEditStart
-                        | mew_tui::events::Action::SettingsEditComplete => {
-                            // Handled by ConfigEditor in settings mode — ignore here
-                        }
-                        mew_tui::events::Action::Quit => should_break = true,
-                        mew_tui::events::Action::SetThinkingVariant(variant) => {
-                            let model_id = &app.status.model;
-                            if variant == "off" || variant == "none" {
-                                agent.set_reasoning(None);
-                                app.set_alert("thinking disabled");
-                            } else {
-                                match resolve_reasoning(cat, model_id, Some(&variant)) {
-                                    Some(config) => {
-                                        agent.set_reasoning(Some(config));
-                                        app.set_alert(format!("thinking: {}", variant));
-                                    }
-                                    None => {
-                                        app.set_alert(format!(
-                                            "unknown thinking variant '{}' for model '{}'",
-                                            variant, model_id
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        mew_tui::events::Action::AttachSession(_) => {
-                            app.set_alert("session switching is only available in daemon mode");
-                        }
-                    }
+                    let mut target = crate::runtime::local::LocalTarget::new(
+                        &mut agent,
+                        cfg.clone(),
+                        cat.cloned(),
+                        provider_id.clone(),
+                        raw,
+                    );
+                    let mut cx = crate::runtime::Ctx {
+                        app: &mut app,
+                        target: &mut target,
+                        event_loop: &event_loop,
+                        settings_editor: &mut settings_editor,
+                        should_break: &mut should_break,
+                        cfg,
+                        cat,
+                        loaded_personas: &loaded_personas,
+                        provider_id: provider_id.as_str(),
+                        raw,
+                        plugin_info: &plugin_info,
+                        terminal: &mut terminal,
+                    };
+                    let _flow = crate::runtime::handle_action(&mut cx, action).await;
                 }
             }
 
@@ -3582,7 +3103,7 @@ async fn run_tui(
         // (which are async) can run after the drain finishes.
         let mut agent_drain_count = 0u32;
         const STREAMING_DRAIN_LIMIT: u32 = 4;
-        let mut pending_drain_submit: Option<String> = None;
+        let mut queued_actions: Vec<mew_tui::events::Action> = Vec::new();
         'drain: while let Ok(event) = event_rx.try_recv() {
             // Any non-tick event in the drain means we need a redraw.
             if !matches!(event, mew_tui::Event::Tick) {
@@ -3624,228 +3145,10 @@ async fn run_tui(
                     if let Some(action) =
                         mew_tui::events::handle_input_event(&mut app, crossterm_event)
                     {
-                        match action {
-                            mew_tui::events::Action::Quit => {
-                                should_break = true;
-                                break 'drain;
-                            }
-                            mew_tui::events::Action::Submit(text) => {
-                                pending_drain_submit = Some(text);
-                                break 'drain;
-                            }
-                            mew_tui::events::Action::Cancel => {
-                                agent.cancel_token.cancel();
-                                app.streaming = false;
-                            }
-                            mew_tui::events::Action::Clear => {
-                                agent.clear_context().await;
-                                app.clear_messages();
-                                app.push_synthetic_message("context cleared".into());
-                            }
-                            mew_tui::events::Action::ToggleSidebarContext => {
-                                app.toggle_sidebar_section("context");
-                            }
-                            mew_tui::events::Action::ToggleSidebarTools => {
-                                app.toggle_sidebar_section("tools");
-                            }
-                            mew_tui::events::Action::ToggleSidebarMcp => {
-                                app.toggle_sidebar_section("mcp");
-                            }
-                            mew_tui::events::Action::CancelMostRecentSubagent(task_id) => {
-                                if agent.cancel_subagent(&task_id).await {
-                                    app.set_alert("subagent cancellation requested");
-                                } else {
-                                    app.set_alert("subagent already finished");
-                                }
-                            }
-                            mew_tui::events::Action::PersonaSwitchConfirmed(name) => {
-                                if let Some(persona) =
-                                    loaded_personas.iter().find(|p| p.name == name)
-                                {
-                                    apply_persona_switch(
-                                        &mut agent,
-                                        &mut app,
-                                        cfg,
-                                        cat,
-                                        provider_id.as_str(),
-                                        raw,
-                                        persona,
-                                    );
-                                }
-                            }
-                            mew_tui::events::Action::SetPermissionMode(mode) => {
-                                agent.set_permission_mode(mode);
-                                app.permission_mode = mode;
-                                let alert = match mode {
-                                    mew_hooks::PermissionMode::Standard => {
-                                        "Standard permission mode — prompts restored.".to_string()
-                                    }
-                                    mew_hooks::PermissionMode::Permissive => {
-                                        "Permissive mode — Mutating tools auto-allow; \
-                                         bash still prompts and your rules still apply."
-                                            .to_string()
-                                    }
-                                    mew_hooks::PermissionMode::Auto => {
-                                        "Auto mode — small LLM classifier decides each \
-                                         tool call. Falls back to user on escalate."
-                                            .to_string()
-                                    }
-                                    mew_hooks::PermissionMode::AutoPlus => {
-                                        "Auto+ mode — classifier decides, but escalate or \
-                                         failure means Deny (fail closed). No human in \
-                                         the loop."
-                                            .to_string()
-                                    }
-                                    mew_hooks::PermissionMode::Dangerous => {
-                                        "⚠ Dangerous! mode — every tool auto-runs; \
-                                         overrides deny rules, ask rules, and the \
-                                         secret-file guard."
-                                            .to_string()
-                                    }
-                                };
-                                app.set_alert(alert);
-                            }
-                            mew_tui::events::Action::InsertAtMention(mention) => {
-                                app.insert_mention(&mention);
-                            }
-                            mew_tui::events::Action::InsertSubagentMention(name) => {
-                                app.insert_mention(&format!("@{} ", name));
-                            }
-                            mew_tui::events::Action::CopySelection(text) => {
-                                copy_to_clipboard(&text);
-                                app.set_alert(format!("copied {} chars", text.len()));
-                                app.clear_selection();
-                            }
-                            mew_tui::events::Action::SlashCommand(text) => {
-                                match app.handle_slash(&text) {
-                                    mew_tui::SlashResult::Continue => {}
-                                    mew_tui::SlashResult::Quit => {
-                                        should_break = true;
-                                        break 'drain;
-                                    }
-                                    mew_tui::SlashResult::Clear => {
-                                        agent.clear_context().await;
-                                        app.clear_messages();
-                                        app.push_synthetic_message("context cleared".into());
-                                    }
-                                    mew_tui::SlashResult::Message(msg) => {
-                                        app.push_synthetic_message(msg);
-                                    }
-                                    mew_tui::SlashResult::Compact => {
-                                        agent.force_compact().await;
-                                        app.push_synthetic_message(
-                                            "compaction will run on next turn".into(),
-                                        );
-                                    }
-                                    mew_tui::SlashResult::Todo => {
-                                        let list = agent.todos.lock().await;
-                                        app.push_synthetic_message(list.render());
-                                    }
-                                    mew_tui::SlashResult::SwitchModel(_) => {
-                                        // Model switches are deferred; handled in main loop.
-                                    }
-                                    mew_tui::SlashResult::SetThinkingVariant(_) => {
-                                        // Deferred; handled in main loop.
-                                    }
-                                    mew_tui::SlashResult::SetTheme(ref name) => {
-                                        app.theme = mew_tui::theme::Theme::load(name);
-                                        {
-                                            let mut save =
-                                                mew_config::load_state().unwrap_or_default();
-                                            save.theme = app.theme.name.clone();
-                                            let _ = mew_config::save_state(&save);
-                                        }
-                                        app.push_synthetic_message(format!(
-                                            "theme: {}",
-                                            app.theme.name
-                                        ));
-                                    }
-                                    mew_tui::SlashResult::SwitchPersona(_) => {
-                                        // Handled inline above (direct clear).
-                                    }
-                                    mew_tui::SlashResult::PersonaSwitchConfirm(_) => {
-                                        // Deferred; opens the confirm modal
-                                        // in the main loop.
-                                    }
-                                    mew_tui::SlashResult::ResumeSession(_) => {
-                                        // Deferred; handled in main loop when not streaming.
-                                    }
-                                    mew_tui::SlashResult::Rewind(_) => {
-                                        // Deferred; handled in main loop when not streaming.
-                                    }
-                                    mew_tui::SlashResult::OpenModelPicker => {
-                                        // Deferred to main loop; ignored during drain.
-                                    }
-                                    mew_tui::SlashResult::PermissionModeMenu => {
-                                        // Deferred to main loop; ignored during drain.
-                                    }
-                                    mew_tui::SlashResult::SetPermissionMode(mode) => {
-                                        // Deferred to main loop; ignored during drain.
-                                        let _ = mode;
-                                    }
-                                    mew_tui::SlashResult::ToggleMouseCapture => {
-                                        // Deferred to main loop; ignored during drain.
-                                    }
-                                    mew_tui::SlashResult::PluginCommand { name, args } => {
-                                        // Deferred to main loop; ignored during drain.
-                                        let _ = name;
-                                        let _ = args;
-                                    }
-                                    mew_tui::SlashResult::OpenThinkingVariantPicker
-                                    | mew_tui::SlashResult::OpenCommandPalette
-                                    | mew_tui::SlashResult::OpenThemePicker
-                                    | mew_tui::SlashResult::OpenPersonaPicker
-                                    | mew_tui::SlashResult::OpenRewindPicker
-                                    | mew_tui::SlashResult::OpenSessionPickerFromDisk => {
-                                        // Deferred to main loop; ignored during drain.
-                                    }
-                                }
-                            }
-                            mew_tui::events::Action::SwitchModel(_) => {
-                                // Model switches happen via the command palette, which
-                                // requires mode=CommandPalette. The palette is never
-                                // open during heavy streaming, so this branch is
-                                // effectively unreachable in the drain path.
-                            }
-                            mew_tui::events::Action::SetThinkingVariant(_) => {
-                                // Deferred to main loop; ignored during drain.
-                            }
-                            mew_tui::events::Action::AttachSession(_) => {
-                                // Deferred to main loop; ignored during drain.
-                            }
-                            mew_tui::events::Action::SaveSettings
-                            | mew_tui::events::Action::SettingsEditStart
-                            | mew_tui::events::Action::SettingsEditComplete => {
-                                // Handled by ConfigEditor in settings mode
-                            }
-                            mew_tui::events::Action::OpenSettings => {
-                                let loader = mew_hooks_runtime::PluginLoader::new(
-                                    mew_hooks_runtime::PluginLoader::default_dirs(),
-                                );
-                                let state = mew_config::load_state().unwrap_or_default();
-                                let plugins: Vec<config_editor::PluginEntry> = loader
-                                    .discover_executables()
-                                    .into_iter()
-                                    .map(|path| {
-                                        let name = path
-                                            .file_stem()
-                                            .unwrap_or_default()
-                                            .to_string_lossy()
-                                            .to_string();
-                                        let enabled = !state.disabled_plugins.contains(&name);
-                                        config_editor::PluginEntry {
-                                            name,
-                                            path: path.display().to_string(),
-                                            enabled,
-                                        }
-                                    })
-                                    .collect();
-                                let cfg = mew_config::load().unwrap_or_default();
-                                settings_editor =
-                                    Some(config_editor::ConfigEditor::new(cfg, plugins));
-                                app.mode = mew_tui::app::Mode::Settings;
-                            }
-                        }
+                        // Queue the action for replay after the drain exits.
+                        // The drain no longer interprets actions — it just coalesces
+                        // and queues. This prevents the drop/defer bug class.
+                        queued_actions.push(action);
                     }
                 }
                 mew_tui::Event::Agent(event) => {
@@ -3876,15 +3179,34 @@ async fn run_tui(
             }
         }
 
-        // Process a Submit action deferred from the drain (needs async @mention reads).
-        if let Some(text) = pending_drain_submit {
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let (enriched, display, attachments) =
-                process_mentions(&text, &cwd, &mut app.context_files).await;
-            app.push_user(display, attachments.clone());
-            app.streaming = true;
-            let agent_rx = agent.run_with_parts(enriched, attachments, None);
-            event_loop.forward_agent_events(agent_rx);
+        // Replay queued actions through handle_action (the single dispatch path).
+        // The drain no longer interprets actions — it just coalesces and queues.
+        for action in queued_actions {
+            let mut target = crate::runtime::local::LocalTarget::new(
+                &mut agent,
+                cfg.clone(),
+                cat.cloned(),
+                provider_id.clone(),
+                raw,
+            );
+            let mut cx = crate::runtime::Ctx {
+                app: &mut app,
+                target: &mut target,
+                event_loop: &event_loop,
+                settings_editor: &mut settings_editor,
+                should_break: &mut should_break,
+                cfg,
+                cat,
+                loaded_personas: &loaded_personas,
+                provider_id: provider_id.as_str(),
+                raw,
+                plugin_info: &plugin_info,
+                terminal: &mut terminal,
+            };
+            let flow = crate::runtime::handle_action(&mut cx, action).await;
+            if matches!(flow, crate::runtime::Flow::Quit) {
+                break;
+            }
         }
 
         if should_break {
@@ -4575,9 +3897,7 @@ pub(crate) async fn toggle_mouse_capture(
     app.mouse_capture = !app.mouse_capture;
     if app.mouse_capture {
         let _ = crossterm::execute!(terminal.backend_mut(), crossterm::event::EnableMouseCapture);
-        app.push_synthetic_message(
-            "mouse capture enabled (use /mouse to select text)".into(),
-        );
+        app.push_synthetic_message("mouse capture enabled (use /mouse to select text)".into());
     } else {
         let _ = crossterm::execute!(
             terminal.backend_mut(),

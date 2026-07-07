@@ -15,10 +15,12 @@ use tokio::sync::mpsc::Receiver;
 /// Returned by `CommandTarget` methods that are not meaningful for a given
 /// backend. Rendered as a visible alert — never silently dropped.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct Unsupported(pub &'static str);
 
 /// Result of applying a permission mode change.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SwitchedModel {
     pub provider_id: String,
     pub model_id: String,
@@ -27,6 +29,7 @@ pub struct SwitchedModel {
 
 /// Result of applying a persona switch.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PersonaApplied {
     pub name: String,
     pub pinned_model: Option<String>,
@@ -39,6 +42,7 @@ pub struct PersonaApplied {
 /// Methods that return `Result<_, Unsupported>` may not be meaningful for
 /// all backends. `Err(Unsupported(reason))` renders a visible alert.
 #[async_trait::async_trait]
+#[allow(dead_code)]
 pub trait CommandTarget: Send {
     /// Submit a prompt. Returns the event receiver for streaming.
     fn prompt(&mut self, enriched: String, parts: Vec<Part>) -> Receiver<AgentEvent>;

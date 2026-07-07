@@ -81,7 +81,8 @@ fn golden_test(name: &str, script: &str) {
     let actual_trimmed = rendered.trim_end();
 
     assert_eq!(
-        actual_trimmed, expected_trimmed,
+        actual_trimmed,
+        expected_trimmed,
         "golden frame mismatch for '{name}'\n\
          If this change is intentional, run:\n  \
          MEW_UPDATE_GOLDEN=1 cargo test -p mew-tui -- {name}\n\

@@ -20,9 +20,13 @@ use crate::{build_provider, resolve_reasoning};
 /// for model switching.
 pub struct LocalTarget<'a> {
     pub agent: &'a mut mew_agent::Agent,
+    #[allow(dead_code)]
     pub cfg: Config,
+    #[allow(dead_code)]
     pub cat: Option<Catalog>,
+    #[allow(dead_code)]
     pub provider_id: String,
+    #[allow(dead_code)]
     pub raw: bool,
 }
 
@@ -135,15 +139,16 @@ impl<'a> CommandTarget for LocalTarget<'a> {
     }
 
     async fn attach_session(&mut self, _id: &str) -> Result<(), Unsupported> {
-        Err(Unsupported("session switching is only available in daemon mode"))
+        Err(Unsupported(
+            "session switching is only available in daemon mode",
+        ))
     }
 
     async fn resume(&mut self, id: &str) -> Result<(), Unsupported> {
         match mew_session::Reader::load(id).await {
             Ok(msgs) => {
                 self.agent.load_messages(msgs).await;
-                let resumed_todos_path =
-                    mew_session::session_dir().join(id).join("todos.json");
+                let resumed_todos_path = mew_session::session_dir().join(id).join("todos.json");
                 if let Ok(list) = mew_agent::TodoList::load(&resumed_todos_path).await {
                     *self.agent.todos.lock().await = list;
                 }
@@ -182,7 +187,10 @@ impl<'a> CommandTarget for LocalTarget<'a> {
             // If persona pins a model, switch to it
             if let Some(ref model_str) = pinned_model {
                 let (new_provider_id, new_model_id) = if let Some(idx) = model_str.find('/') {
-                    (model_str[..idx].to_string(), model_str[idx + 1..].to_string())
+                    (
+                        model_str[..idx].to_string(),
+                        model_str[idx + 1..].to_string(),
+                    )
                 } else {
                     (self.provider_id.clone(), model_str.clone())
                 };

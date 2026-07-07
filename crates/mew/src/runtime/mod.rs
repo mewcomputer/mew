@@ -14,4 +14,5 @@ pub mod mentions;
 pub mod target;
 
 pub use dispatch::{handle_action, Ctx, Flow};
+#[allow(unused_imports)]
 pub use target::{CommandTarget, Unsupported};

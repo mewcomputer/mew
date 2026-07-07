@@ -16,11 +16,11 @@ use mew_tui::events::Action;
 use mew_tui::SlashResult;
 
 use crate::config_editor::{self, ConfigEditor};
+use crate::copy_to_clipboard;
+use crate::persona_summary;
 use crate::runtime::mentions::process_mentions;
 use crate::runtime::target::{CommandTarget, Unsupported};
 use crate::toggle_mouse_capture;
-use crate::persona_summary;
-use crate::copy_to_clipboard;
 
 /// Whether to continue or quit the event loop after handling an action.
 #[derive(Debug)]
@@ -39,10 +39,13 @@ pub struct Ctx<'a, T: CommandTarget> {
     pub event_loop: &'a mew_tui::EventLoop,
     pub settings_editor: &'a mut Option<ConfigEditor>,
     pub should_break: &'a mut bool,
+    #[allow(dead_code)]
     pub cfg: &'a Config,
     pub cat: Option<&'a Catalog>,
     pub loaded_personas: &'a [mew_personas::Persona],
+    #[allow(dead_code)]
     pub provider_id: &'a str,
+    #[allow(dead_code)]
     pub raw: bool,
     pub plugin_info: &'a Arc<std::sync::Mutex<crate::PluginInfo>>,
     pub terminal: &'a mut ratatui::DefaultTerminal,
@@ -188,7 +191,8 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
         SlashResult::Compact => {
             match cx.target.compact().await {
                 Ok(()) => {
-                    cx.app.push_synthetic_message("compaction will run on next turn".into());
+                    cx.app
+                        .push_synthetic_message("compaction will run on next turn".into());
                 }
                 Err(Unsupported(reason)) => cx.app.set_alert(reason),
             }
@@ -216,9 +220,7 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
                     .app
                     .active_persona
                     .as_ref()
-                    .and_then(|cur_name| {
-                        cx.loaded_personas.iter().find(|p| &p.name == cur_name)
-                    })
+                    .and_then(|cur_name| cx.loaded_personas.iter().find(|p| &p.name == cur_name))
                     .map(persona_summary);
                 cx.app.request_persona_switch_confirm(target, current);
             } else {
@@ -260,7 +262,8 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
                 save.theme = cx.app.theme.name.clone();
                 let _ = mew_config::save_state(&save);
             }
-            cx.app.push_synthetic_message(format!("theme: {}", cx.app.theme.name));
+            cx.app
+                .push_synthetic_message(format!("theme: {}", cx.app.theme.name));
             Flow::Continue
         }
         SlashResult::ToggleMouseCapture => {
@@ -320,20 +323,19 @@ async fn handle_switch_model<T: CommandTarget>(cx: &mut Ctx<'_, T>, spec: &str) 
             if let Err(e) = mew_config::save_state(&state) {
                 tracing::warn!("failed to save state: {}", e);
             }
-            cx.app.push_synthetic_message(format!("switched to {}", switched.display));
+            cx.app
+                .push_synthetic_message(format!("switched to {}", switched.display));
         }
         Err(Unsupported(reason)) => {
-            cx.app.push_synthetic_message(format!("failed to switch model: {}", reason));
+            cx.app
+                .push_synthetic_message(format!("failed to switch model: {}", reason));
         }
     }
 }
 
 /// Handle `SetPermissionMode` — shared by `Action::SetPermissionMode` and
 /// `SlashResult::SetPermissionMode`.
-async fn handle_set_permission_mode<T: CommandTarget>(
-    cx: &mut Ctx<'_, T>,
-    mode: PermissionMode,
-) {
+async fn handle_set_permission_mode<T: CommandTarget>(cx: &mut Ctx<'_, T>, mode: PermissionMode) {
     match cx.target.set_permission_mode(mode).await {
         Ok(()) => {
             cx.app.permission_mode = mode;
@@ -367,10 +369,7 @@ async fn handle_set_permission_mode<T: CommandTarget>(
 
 /// Handle `SetThinkingVariant` — shared by `Action::SetThinkingVariant` and
 /// `SlashResult::SetThinkingVariant`.
-async fn handle_set_thinking_variant<T: CommandTarget>(
-    cx: &mut Ctx<'_, T>,
-    variant: &str,
-) {
+async fn handle_set_thinking_variant<T: CommandTarget>(cx: &mut Ctx<'_, T>, variant: &str) {
     match cx.target.set_thinking(variant).await {
         Ok(()) => {
             if variant.is_empty() || variant == "off" || variant == "none" {
@@ -384,11 +383,8 @@ async fn handle_set_thinking_variant<T: CommandTarget>(
 }
 
 /// Handle persona switch confirmation.
-async fn handle_persona_switch_confirmed<T: CommandTarget>(
-    cx: &mut Ctx<'_, T>,
-    name: &str,
-) {
-    let old = cx.app.active_persona.clone();
+async fn handle_persona_switch_confirmed<T: CommandTarget>(cx: &mut Ctx<'_, T>, name: &str) {
+    let _old = cx.app.active_persona.clone();
     // Reuse the same path as SlashResult::SwitchPersona
     handle_switch_persona(cx, name).await;
 }
@@ -424,8 +420,11 @@ async fn handle_switch_persona<T: CommandTarget>(cx: &mut Ctx<'_, T>, name: &str
             }
             cx.app.push_synthetic_message(applied.display);
         }
-        Err(Unsupported(reason)) => {
-            cx.app.push_synthetic_message(format!("unknown persona: {}. use /persona to list available.", name));
+        Err(Unsupported(_reason)) => {
+            cx.app.push_synthetic_message(format!(
+                "unknown persona: {}. use /persona to list available.",
+                name
+            ));
         }
     }
     cx.target.on_persona_change(old.as_deref(), name).await;
@@ -455,10 +454,12 @@ async fn handle_resume_session<T: CommandTarget>(cx: &mut Ctx<'_, T>, id: &str) 
             cx.app.status.session_id = id.to_string();
             cx.app.auto_scroll = true;
             cx.app.scroll = cx.app.max_scroll;
-            cx.app.push_synthetic_message(format!("resumed session {}", id));
+            cx.app
+                .push_synthetic_message(format!("resumed session {}", id));
         }
         Err(e) => {
-            cx.app.push_synthetic_message(format!("failed to load session {}: {}", id, e));
+            cx.app
+                .push_synthetic_message(format!("failed to load session {}: {}", id, e));
         }
     }
 }
@@ -466,24 +467,21 @@ async fn handle_resume_session<T: CommandTarget>(cx: &mut Ctx<'_, T>, id: &str) 
 /// Handle `Rewind` — truncate to first N messages.
 async fn handle_rewind<T: CommandTarget>(cx: &mut Ctx<'_, T>, n: usize) {
     if cx.app.streaming {
-        cx.app.push_synthetic_message("cannot rewind while streaming".into());
+        cx.app
+            .push_synthetic_message("cannot rewind while streaming".into());
         return;
     }
     if n > cx.app.messages.len() {
-        cx.app.push_synthetic_message(format!(
-            "only {} messages exist",
-            cx.app.messages.len()
-        ));
+        cx.app
+            .push_synthetic_message(format!("only {} messages exist", cx.app.messages.len()));
         return;
     }
     let removed = cx.app.messages.len() - n;
     match cx.target.rewind(n).await {
         Ok(()) => {
             cx.app.rewind_to(n);
-            cx.app.push_synthetic_message(format!(
-                "rewound to message {} (removed {})",
-                n, removed
-            ));
+            cx.app
+                .push_synthetic_message(format!("rewound to message {} (removed {})", n, removed));
         }
         Err(Unsupported(reason)) => cx.app.set_alert(reason),
     }
@@ -502,9 +500,8 @@ async fn handle_attach_session<T: CommandTarget>(cx: &mut Ctx<'_, T>, id: &str) 
 
 /// Open the settings page with discovered plugins.
 fn open_settings<T: CommandTarget>(cx: &mut Ctx<'_, T>) {
-    let loader = mew_hooks_runtime::PluginLoader::new(
-        mew_hooks_runtime::PluginLoader::default_dirs(),
-    );
+    let loader =
+        mew_hooks_runtime::PluginLoader::new(mew_hooks_runtime::PluginLoader::default_dirs());
     let state = mew_config::load_state().unwrap_or_default();
     let plugins: Vec<config_editor::PluginEntry> = loader
         .discover_executables()

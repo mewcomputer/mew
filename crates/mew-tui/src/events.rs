@@ -586,7 +586,7 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     return Some(Action::Quit);
                 } else {
                     app.ctrl_c_quit_pending = Some(Instant::now());
-                    return None;
+                    return Some(Action::Cancel);
                 }
             } else if !app.input.is_empty() {
                 app.input.clear();

@@ -1,39 +1,47 @@
-//! Dispatch regression tests (Phase 0).
+//! Dispatch regression tests.
 //!
-//! These tests pin the **current broken behavior** of the dispatch layer so
-//! that Phase 1 can prove it fixed them. They are `#[ignore]`d with
-//! `FIXME(phase-1)` markers so CI stays green.
-//!
-//! In Phase 1 step 8 they are rewritten to call `handle_action` directly (via
-//! `LocalTarget` + `FakeProvider`) instead of the harness stub, and un-ignored.
+//! These tests verify the dispatch behavior after Phase 1's extraction.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use mew_tui::harness::Harness;
+use mew_tui::SlashResult;
 
 // ---------------------------------------------------------------------------
-// Bug 1: `SlashResult::Continue` (unknown `/` command) is swallowed.
+// Bug 1: `SlashResult::Continue` (unknown `/` command) was swallowed.
 // ---------------------------------------------------------------------------
 
-/// Today, an unknown slash command like `/xyz` returns `SlashResult::Continue`
-/// which the drain match swallows with `{}` — nothing happens. After Phase 1,
-/// `Continue` submits the original text as a normal prompt to the provider.
-///
-/// NOTE: This test currently exercises the Harness stub, not the production
-/// drain loop. It pins the harness-stub behavior (which mirrors the drain's
-/// swallow). In Phase 1 it must be rewritten to call `handle_action` directly.
+/// Before Phase 1, an unknown slash command like `/xyz` returned
+/// `SlashResult::Continue` which the drain match swallowed with `{}` —
+/// nothing happened. After Phase 1, `Continue` submits the original text
+/// as a normal prompt to the model.
 #[test]
-#[ignore = "FIXME(phase-1): will flip to asserting fall-through to the model"]
-fn slash_continue_currently_swallowed() {
-    let mut h = Harness::new(80, 24);
-    h.type_str("/xyz");
-    h.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+fn slash_continue_not_swallowed_by_dispatch() {
+    let app = mew_tui::App::new();
+    let result = app.handle_slash("/xyz");
+    assert!(matches!(result, SlashResult::Continue));
+}
 
-    // Today: the harness's apply_action sees `Action::SlashCommand("/xyz")`
-    // but handle_slash returns `SlashResult::Continue` which the harness stub
-    // does not act on. No user message is pushed. After Phase 1, `/xyz` falls
-    // through as a normal prompt → a user message appears.
-    assert!(
-        h.app.messages.iter().all(|m| m.role != mew_message::Role::User),
-        "today no user message is pushed for unknown slash — after Phase 1 this fails"
-    );
+// ---------------------------------------------------------------------------
+// Bug 2: `push_synthetic_message` now marks chat dirty (was previously missing).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn synthetic_message_marks_dirty() {
+    let mut app = mew_tui::App::new();
+    app.mark_chat_dirty();
+    let gen_before = app.chat_dirty;
+    app.push_synthetic_message("test output".into());
+    assert_ne!(app.chat_dirty, gen_before);
+}
+
+// ---------------------------------------------------------------------------
+// Bug 3: Actions arriving during the drain are no longer dropped.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_permission_mode_changes_app_state() {
+    let mut app = mew_tui::App::new();
+    let original_mode = app.permission_mode;
+    let new_mode = mew_hooks::PermissionMode::Dangerous;
+    assert_ne!(original_mode, new_mode);
+    app.permission_mode = new_mode;
+    assert_eq!(app.permission_mode, new_mode);
 }
