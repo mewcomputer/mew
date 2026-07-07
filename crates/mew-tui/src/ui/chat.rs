@@ -424,27 +424,51 @@ pub(crate) fn build_chat_lines(
                     if prefix.is_empty() {
                         let use_streaming = is_streaming && Some(part_idx) == last_text_part_idx;
                         let md_lines: Vec<ratatui::text::Line<'static>> = if use_streaming {
+                            // Use incremental RenderCache: cache committed blocks,
+                            // only render the pending block each frame.
                             let mut highlighter =
                                 ratatui_mdstream::highlight::SyntectHighlighter::new();
-                            fix_em_dashes(ratatui_mdstream::render_streaming(
-                                &app.md_state,
+                            app.md_render_cache.extend(
+                                app.md_state.committed(),
                                 md_width,
                                 &MdTheme::dark(),
                                 &mut highlighter,
-                            ))
+                            );
+                            let mut lines = app.md_render_cache.collect_lines();
+                            // Render only the pending block incrementally.
+                            if let Some(pending) = app.md_state.pending() {
+                                let pending_ref = mdstream::PendingBlockRef {
+                                    id: pending.id,
+                                    kind: pending.kind,
+                                    raw: &pending.raw,
+                                    display: pending.display.as_deref(),
+                                };
+                                let pending_lines = ratatui_mdstream::render::render_pending(
+                                    &pending_ref,
+                                    md_width,
+                                    &MdTheme::dark(),
+                                    &mut highlighter,
+                                    &ratatui_mdstream::pending::FullPending,
+                                );
+                                if !lines.is_empty() && !pending_lines.is_empty() {
+                                    lines.push(ratatui::text::Line::from(""));
+                                }
+                                lines.extend(pending_lines);
+                            }
+                            fix_em_dashes(lines)
                         } else {
                             if app.pending_md_rerender == Some(msg.id) {
-                                app.rendered_md_cache.remove(&msg.id);
+                                app.rendered_md_cache.remove(&tp.base.id);
                                 app.pending_md_rerender = None;
                             }
                             let cache = &mut app.rendered_md_cache;
                             if let Some((cached_width, cached_text, cached_lines)) =
-                                cache.get(&msg.id)
+                                cache.get(&tp.base.id)
                             {
                                 if cached_text == &tp.text && *cached_width == md_width {
                                     Rc::unwrap_or_clone(Rc::clone(cached_lines))
                                 } else {
-                                    cache.remove(&msg.id);
+                                    cache.remove(&tp.base.id);
                                     let lines = fix_em_dashes(ratatui_mdstream::render_markdown(
                                         &tp.text,
                                         md_width,
@@ -452,7 +476,7 @@ pub(crate) fn build_chat_lines(
                                     ));
                                     let rc = Rc::new(lines);
                                     cache.insert(
-                                        msg.id,
+                                        tp.base.id,
                                         (md_width, tp.text.clone(), Rc::clone(&rc)),
                                     );
                                     Rc::unwrap_or_clone(rc)
@@ -464,7 +488,10 @@ pub(crate) fn build_chat_lines(
                                     &MdTheme::dark(),
                                 ));
                                 let rc = Rc::new(lines);
-                                cache.insert(msg.id, (md_width, tp.text.clone(), Rc::clone(&rc)));
+                                cache.insert(
+                                    tp.base.id,
+                                    (md_width, tp.text.clone(), Rc::clone(&rc)),
+                                );
                                 Rc::unwrap_or_clone(rc)
                             }
                         };

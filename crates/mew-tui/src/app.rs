@@ -1,5 +1,5 @@
 use mew_agent::{AgentEvent, AskUserQuestion};
-use mew_message::{Message, MessageId, Part, PartId, Role, ToolState};
+use mew_message::{Message, Part, PartId, Role, ToolState};
 use mew_provider::ProviderEvent;
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet};
@@ -194,8 +194,12 @@ pub struct App {
     pub md_state: mdstream::DocumentState,
     /// Active markdown stream (set during streaming, taken on completion).
     pub md_stream: Option<mdstream::MdStream>,
+    /// Incremental render cache for streaming — caches committed blocks
+    /// so only the pending block is re-rendered each frame.
+    pub md_render_cache: ratatui_mdstream::cache::RenderCache,
     /// Cached rendered markdown lines by message ID.
-    pub rendered_md_cache: HashMap<MessageId, (u16, String, Rc<Vec<ratatui::text::Line<'static>>>)>,
+    pub rendered_md_cache:
+        HashMap<mew_message::PartId, (u16, String, Rc<Vec<ratatui::text::Line<'static>>>)>,
     /// Last render width for cache invalidation.
     pub last_md_width: u16,
     /// Max scroll offset from the most recent render, used to re-attach auto-scroll.
@@ -606,6 +610,7 @@ impl App {
             pending_md_rerender: None,
             md_state: mdstream::DocumentState::new(),
             md_stream: None,
+            md_render_cache: ratatui_mdstream::cache::RenderCache::new(),
             rendered_md_cache: HashMap::new(),
             last_md_width: 0,
             max_scroll: 0,
@@ -723,6 +728,7 @@ impl App {
                 self.messages.clear();
                 self.md_stream = None;
                 self.md_state = mdstream::DocumentState::new();
+                self.md_render_cache.invalidate();
                 for msg in messages {
                     self.messages.push(msg.clone());
                 }
@@ -2143,6 +2149,7 @@ impl App {
         self.messages.clear();
         self.tool_states.clear();
         self.rendered_md_cache.clear();
+        self.md_render_cache.invalidate();
         self.pending_md_rerender = None;
         self.mark_chat_dirty();
     }
@@ -2154,8 +2161,14 @@ impl App {
             return;
         }
         self.messages.truncate(n);
+        // Retain cache entries whose PartId belongs to a surviving message.
+        let surviving: std::collections::HashSet<mew_message::PartId> = self
+            .messages
+            .iter()
+            .flat_map(|m| m.parts.iter().map(|p| p.id()))
+            .collect();
         self.rendered_md_cache
-            .retain(|id, _| self.messages.iter().any(|m| m.id == *id));
+            .retain(|id, _| surviving.contains(id));
         self.pending_md_rerender = None;
         self.mark_chat_dirty();
     }
@@ -2562,8 +2575,10 @@ impl App {
                             self.md_stream =
                                 Some(mdstream::MdStream::new(mdstream::Options::default()));
                             self.md_state = mdstream::DocumentState::new();
+                            self.md_render_cache.invalidate();
                         }
                         msg.parts.push(part);
+                        self.mark_chat_dirty();
                         return;
                     }
                 }
@@ -2582,6 +2597,7 @@ impl App {
                 // Start incremental markdown stream for this message.
                 self.md_stream = Some(mdstream::MdStream::new(mdstream::Options::default()));
                 self.md_state = mdstream::DocumentState::new();
+                self.md_render_cache.invalidate();
                 self.mark_chat_dirty();
             }
             AgentEvent::Provider(ProviderEvent::PartDelta { part_id, delta, .. }) => {
@@ -4160,13 +4176,14 @@ mod tests {
         let mut app = App::new();
         for i in 0..5 {
             let id = ulid::Ulid::new();
+            let part_id = ulid::Ulid::new();
             let msg = mew_message::Message {
                 id,
                 session_id: ulid::Ulid::new(),
                 role: mew_message::Role::User,
                 parts: vec![mew_message::Part::Text(mew_message::TextPart {
                     base: mew_message::PartBase {
-                        id: ulid::Ulid::new(),
+                        id: part_id,
                         message_id: id,
                         session_id: ulid::Ulid::new(),
                     },
@@ -4180,8 +4197,10 @@ mod tests {
                 assistant: None,
             };
             app.messages.push(msg);
-            app.rendered_md_cache
-                .insert(id, (80, format!("msg {}", i), std::rc::Rc::new(vec![])));
+            app.rendered_md_cache.insert(
+                part_id,
+                (80, format!("msg {}", i), std::rc::Rc::new(vec![])),
+            );
         }
         assert_eq!(app.messages.len(), 5);
         assert_eq!(app.rendered_md_cache.len(), 5);
