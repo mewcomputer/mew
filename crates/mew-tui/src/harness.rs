@@ -144,8 +144,13 @@ impl Harness {
             session_id,
         };
         // Ensure an assistant message exists to hold the tool call part.
-        if !self.app.messages.iter().any(|m| m.role == Role::Assistant) {
-            self.app.messages.push(Message {
+        if !self
+            .app
+            .messages()
+            .iter()
+            .any(|m| m.role == Role::Assistant)
+        {
+            self.app.push_message(Message {
                 id: msg_id,
                 session_id,
                 role: Role::Assistant,
@@ -209,8 +214,13 @@ impl Harness {
         let part_id = PartId::new();
         let msg_id = MessageId::new();
         let session_id = SessionId::new();
-        if !self.app.messages.iter().any(|m| m.role == Role::Assistant) {
-            self.app.messages.push(Message {
+        if !self
+            .app
+            .messages()
+            .iter()
+            .any(|m| m.role == Role::Assistant)
+        {
+            self.app.push_message(Message {
                 id: msg_id,
                 session_id,
                 role: Role::Assistant,
@@ -252,7 +262,7 @@ impl Harness {
     fn push_user_message(&mut self, text: String) {
         let msg_id = MessageId::new();
         let session_id = SessionId::new();
-        self.app.messages.push(Message {
+        self.app.push_message(Message {
             id: msg_id,
             session_id,
             role: Role::User,

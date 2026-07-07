@@ -460,12 +460,12 @@ async fn handle_rewind<T: CommandTarget>(cx: &mut Ctx<'_, T>, n: usize) {
             .push_synthetic_message("cannot rewind while streaming".into());
         return;
     }
-    if n > cx.app.messages.len() {
+    if n > cx.app.messages().len() {
         cx.app
-            .push_synthetic_message(format!("only {} messages exist", cx.app.messages.len()));
+            .push_synthetic_message(format!("only {} messages exist", cx.app.messages().len()));
         return;
     }
-    let removed = cx.app.messages.len() - n;
+    let removed = cx.app.messages().len() - n;
     match cx.target.rewind(n).await {
         Ok(()) => {
             cx.app.rewind_to(n);

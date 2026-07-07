@@ -91,8 +91,8 @@ pub enum SlashResult {
 pub struct App {
     /// The active color theme.
     pub theme: crate::theme::Theme,
-    /// Conversation messages.
-    pub messages: Vec<Message>,
+    /// Conversation messages (private — use `messages()`, `push_message()`, etc).
+    pub(crate) messages: Vec<Message>,
     /// Input buffer.
     pub input: String,
     /// Cursor position in the input buffer (byte offset).
@@ -2071,6 +2071,11 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Conversation messages (read-only accessor).
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
     }
 
     /// Push a message onto the display store and mark the chat dirty so the
