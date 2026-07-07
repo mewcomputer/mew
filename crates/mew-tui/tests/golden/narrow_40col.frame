@@ -1,0 +1,26 @@
+--- snapshot narrow ---
+  This is a long line that should wrap
+  at 40 columns because the terminal
+  is very narrow indeed.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────
+
+ >
+
+  ~/code/mew/crates/mew-0 tok  ·  $0.00
+---

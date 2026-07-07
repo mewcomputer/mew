@@ -99,3 +99,60 @@ fn welcome() {
         "# Just open the app and snapshot the empty state\nsnapshot welcome",
     );
 }
+
+/// Type a prompt, submit, get a fake response.
+#[test]
+fn user_assistant_turn() {
+    golden_test(
+        "user_assistant_turn",
+        "# Type a prompt and get a response\ntype hello world\nsubmit\nsay Hi there! How can I help?\nsnapshot result",
+    );
+}
+
+/// Narrow terminal (40 cols) to test wrapping.
+#[test]
+fn narrow_40col() {
+    let rendered = normalize_frame(&run_script(
+        "# Narrow terminal test\nsay This is a long line that should wrap at 40 columns because the terminal is very narrow indeed.\nsnapshot narrow",
+        40, 24));
+    let dir = golden_dir();
+    fs::create_dir_all(&dir).expect("create golden dir");
+    let frame_path = dir.join("narrow_40col.frame");
+    let update = std::env::var("MEW_UPDATE_GOLDEN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        .unwrap_or(false);
+    if update {
+        fs::write(&frame_path, &rendered).expect("write golden frame");
+        eprintln!("updated: {}", frame_path.display());
+        return;
+    }
+    let expected = fs::read_to_string(&frame_path).unwrap_or_else(|_| {
+        panic!(
+            "golden frame not found: {}\nRun with MEW_UPDATE_GOLDEN=1 to generate it.",
+            frame_path.display()
+        )
+    });
+    assert_eq!(
+        rendered.trim_end(),
+        expected.trim_end(),
+        "golden frame mismatch for 'narrow_40col'\nRun with MEW_UPDATE_GOLDEN=1 to regenerate."
+    );
+}
+
+/// Tool call display (collapsed).
+#[test]
+fn tool_call_collapsed() {
+    golden_test(
+        "tool_call_collapsed",
+        "# Show a tool call\nsay_tool_call bash \"ls -la\" None\nsnapshot tool",
+    );
+}
+
+/// Reasoning block display.
+#[test]
+fn reasoning_block() {
+    golden_test(
+        "reasoning_block",
+        "# Show a reasoning block\nsay_reasoning I need to think about this carefully.\nsnapshot reasoning",
+    );
+}
