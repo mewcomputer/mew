@@ -100,7 +100,4 @@ pub trait CommandTarget: Send {
     /// Cancel the most recently started running subagent. Returns true if
     /// a cancellation was requested.
     async fn cancel_subagent(&mut self, task_id: &str) -> Result<bool, Unsupported>;
-
-    /// Yield control back to the model.
-    async fn yield_control(&mut self) -> Result<(), Unsupported>;
 }

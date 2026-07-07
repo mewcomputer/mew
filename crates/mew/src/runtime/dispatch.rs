@@ -9,7 +9,6 @@
 use std::sync::Arc;
 
 use mew_catalog::Catalog;
-use mew_config::Config;
 use mew_hooks::PermissionMode;
 use mew_tui::app::Mode as TuiMode;
 use mew_tui::events::Action;
@@ -39,14 +38,8 @@ pub struct Ctx<'a, T: CommandTarget> {
     pub event_loop: &'a mew_tui::EventLoop,
     pub settings_editor: &'a mut Option<ConfigEditor>,
     pub should_break: &'a mut bool,
-    #[allow(dead_code)]
-    pub cfg: &'a Config,
     pub cat: Option<&'a Catalog>,
     pub loaded_personas: &'a [mew_personas::Persona],
-    #[allow(dead_code)]
-    pub provider_id: &'a str,
-    #[allow(dead_code)]
-    pub raw: bool,
     pub plugin_info: &'a Arc<std::sync::Mutex<crate::PluginInfo>>,
     pub terminal: &'a mut ratatui::DefaultTerminal,
 }
@@ -58,7 +51,6 @@ pub struct Ctx<'a, T: CommandTarget> {
 /// Every message push goes through `app.push_message()` /
 /// `app.push_synthetic_message()` / `app.push_user()` so dirty state is
 /// always maintained.
-#[allow(clippy::wildcard_enum_match_arm)]
 pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action) -> Flow {
     match action {
         Action::Submit(text) => {
@@ -128,7 +120,7 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             Flow::Continue
         }
         Action::PersonaSwitchConfirmed(name) => {
-            handle_persona_switch_confirmed(cx, &name).await;
+            handle_switch_persona(cx, &name).await;
             Flow::Continue
         }
         Action::SetPermissionMode(mode) => {
@@ -380,13 +372,6 @@ async fn handle_set_thinking_variant<T: CommandTarget>(cx: &mut Ctx<'_, T>, vari
         }
         Err(Unsupported(reason)) => cx.app.set_alert(reason),
     }
-}
-
-/// Handle persona switch confirmation.
-async fn handle_persona_switch_confirmed<T: CommandTarget>(cx: &mut Ctx<'_, T>, name: &str) {
-    let _old = cx.app.active_persona.clone();
-    // Reuse the same path as SlashResult::SwitchPersona
-    handle_switch_persona(cx, name).await;
 }
 
 /// Handle `SwitchPersona` slash result.

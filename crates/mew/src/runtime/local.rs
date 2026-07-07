@@ -247,8 +247,4 @@ impl<'a> CommandTarget for LocalTarget<'a> {
     async fn cancel_subagent(&mut self, task_id: &str) -> Result<bool, Unsupported> {
         Ok(self.agent.cancel_subagent(task_id).await)
     }
-
-    async fn yield_control(&mut self) -> Result<(), Unsupported> {
-        Err(Unsupported("yield_control not implemented for local mode"))
-    }
 }

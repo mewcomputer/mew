@@ -3059,11 +3059,8 @@ async fn run_tui(
                         event_loop: &event_loop,
                         settings_editor: &mut settings_editor,
                         should_break: &mut should_break,
-                        cfg,
                         cat,
                         loaded_personas: &loaded_personas,
-                        provider_id: provider_id.as_str(),
-                        raw,
                         plugin_info: &plugin_info,
                         terminal: &mut terminal,
                     };
@@ -3195,11 +3192,8 @@ async fn run_tui(
                 event_loop: &event_loop,
                 settings_editor: &mut settings_editor,
                 should_break: &mut should_break,
-                cfg,
                 cat,
                 loaded_personas: &loaded_personas,
-                provider_id: provider_id.as_str(),
-                raw,
                 plugin_info: &plugin_info,
                 terminal: &mut terminal,
             };
