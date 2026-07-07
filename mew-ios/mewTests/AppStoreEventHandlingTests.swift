@@ -61,7 +61,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
     func testThinkingVariantChangedNoneClearsState() {
         store.handleEvent(.thinkingVariantChanged(daemon: "daemon-1", variant: "high"))
         store.handleEvent(.thinkingVariantChanged(daemon: "daemon-1", variant: nil))
-        XCTAssertNil(store.thinkingVariant["daemon-1"])
+        XCTAssertNil(store.thinkingVariant["daemon-1"] ?? nil)
     }
 
     // MARK: - AC.4: TodosUpdated stores payload

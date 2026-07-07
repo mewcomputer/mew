@@ -638,10 +638,9 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/espeon/SwiftStreamingMarkdown.git";
 			requirement = {
-				branch = fix/equatable-pin;
+				branch = fix/remove-equatable-macro;
 				kind = branch;
 			};
-		};
 		};
 /* End XCRemoteSwiftPackageReference section */
 

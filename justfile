@@ -298,3 +298,6 @@ ios-core:
     echo "✓ mew-mobile-core built for iOS"
     echo "  Bindings:  ${BINDINGS_DIR}/mew_mobile_core.swift"
     echo "  Framework: ${FRAMEWORK_DIR}/mew_mobile_core.xcframework"
+
+ios-test:
+    cd mew-ios && xcodebuild -project mew.xcodeproj -scheme mew -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 17' test

@@ -37,118 +37,106 @@ struct ChatView: View {
     @State private var fileBrowserPath: String?
 
     var body: some View {
-        Group {
-            if store.visibleMessages.isEmpty && !store.isStreaming && store.streamingText.isEmpty {
-                if isLoadingSession {
-                    ProgressView("Loading session…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    emptyState
-                }
-            } else {
-                messageList
-            }
-        }
-        // Float the composer over the content so messages scroll under the
-        // liquid-glass chatbar; the inset doubles as the bottom scroll padding.
-        .safeAreaInset(edge: .bottom) {
-            VStack(spacing: 0) {
-                if showsRetryBanner {
-                    retryBanner
-                }
-                composer
-            }
-        }
-        // Todo panel above the content when todos exist for this session.
-        .safeAreaInset(edge: .top) {
-            if let todos = store.todos[sessionId], !todos.isEmpty {
-                TodoPanelView(todos: todos)
-            }
-        }
-        .animation(.easeInOut(duration: 0.25), value: showsRetryBanner)
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar { toolbarContent }
-        .task {
-            store.selectSession(sessionId)
-            isLoadingSession = true
-            // Short fallback; history replay clears it sooner via onChange below.
-            try? await Task.sleep(for: .seconds(2))
-            isLoadingSession = false
-            store.listModels()
-        }
-        .onChange(of: store.visibleMessages.isEmpty) { _, isEmpty in
-            if !isEmpty { isLoadingSession = false }
-        }
-        // Permission sheet: driven directly by the pending queue (filtered to
-        // this session) so it re-appears on re-entry and can't be lost to an
-        // accidental swipe — the agent stays blocked until it's answered.
-        .sheet(item: Binding(
-            get: { store.pendingPermissions.first { $0.sessionId == sessionId }.map { PermissionSheetItem(permission: $0) } },
-            set: { _ in }
-        )) { item in
-            PermissionSheet(permission: item.permission) { decision in
-                store.respondPermission(requestId: item.permission.requestId, decision: decision)
-            }
-            .presentationDetents([.medium, .large])
-            .interactiveDismissDisabled()
-        }
-        // Ask-user sheet: same store-driven, non-dismissable treatment.
-        .sheet(item: Binding(
-            get: { store.pendingAskUser.first { $0.sessionId == sessionId }.map { AskUserSheetItem(ask: $0) } },
-            set: { _ in }
-        )) { item in
-            AskUserSheet(ask: item.ask) { answers in
-                store.respondAskUser(requestId: item.ask.requestId, answers: answers)
-            }
-            .presentationDetents([.medium, .large])
-            .interactiveDismissDisabled()
-        }
-        // File browser — opens from the + button. When non-nil, the sheet
-        // shows the listing for that path; tap a folder to navigate in
-        // (sets fileBrowserPath to the new path) or tap a file to insert
-        // its path into the composer.
-        .sheet(item: Binding(
-            get: { fileBrowserPath.map { FileBrowserItem(path: $0) } },
-            set: { newValue in fileBrowserPath = newValue?.path }
-        )) { item in
-            FileBrowserSheet(
-                sessionId: sessionId,
-                currentPath: item.path,
-                onNavigate: { newPath in fileBrowserPath = newPath },
-                onPick: { path in
-                    // Append the picked path to the composer text,
-                    // separated by a space if the user already has
-                    // something typed.
-                    if !inputText.isEmpty, !inputText.hasSuffix(" ") {
-                        inputText += " "
+        content
+            // Float the composer over the content so messages scroll under the
+            // liquid-glass chatbar; the inset doubles as the bottom scroll padding.
+            .safeAreaInset(edge: .bottom) {
+                VStack(spacing: 0) {
+                    if showsRetryBanner {
+                        retryBanner
                     }
-                    inputText += path
-                    fileBrowserPath = nil
-                },
-                onClose: { fileBrowserPath = nil }
-            )
-            .presentationDetents([.large])
-        }
-        // Mirror the first available model into the picker label.
-        .onChange(of: store.availableModels) { models in
-            if currentModel == nil { currentModel = models.first }
-        }
-        // Sync local model state when a cross-device model switch arrives.
-        .onChange(of: store.currentModel) { currentModels in
-            if let daemonId = store.selectedDaemonId?.nodeId,
-               let modelName = currentModels[daemonId] {
-                // Find the matching ModelSummary from available models.
-                if let m = store.availableModels.first(where: { $0.model == modelName }) {
-                    currentModel = m
+                    composer
                 }
             }
-        }
-        // Dismiss loading spinner as soon as messages arrive
-        .onChange(of: store.visibleMessages) { _ in
-            if !store.visibleMessages.isEmpty {
-                isLoadingSession = false
+            // Todo panel above the content when todos exist for this session.
+            .safeAreaInset(edge: .top) {
+                if let todos = store.todos[sessionId], !todos.isEmpty {
+                    TodoPanelView(todos: todos)
+                }
             }
+            .animation(.easeInOut(duration: 0.25), value: showsRetryBanner)
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { toolbarContent }
+            .task {
+                store.selectSession(sessionId)
+                isLoadingSession = true
+                // Short fallback; history replay clears it sooner via onChange below.
+                try? await Task.sleep(for: .seconds(2))
+                isLoadingSession = false
+                store.listModels()
+            }
+            .onChange(of: store.visibleMessages.isEmpty) { _, isEmpty in
+                if !isEmpty { isLoadingSession = false }
+            }
+            .sheet(item: Binding(
+                get: { store.pendingPermissions.first { $0.sessionId == sessionId }.map { PermissionSheetItem(permission: $0) } },
+                set: { _ in }
+            )) { item in
+                PermissionSheet(permission: item.permission) { decision in
+                    store.respondPermission(requestId: item.permission.requestId, decision: decision)
+                }
+                .presentationDetents([.medium, .large])
+                .interactiveDismissDisabled()
+            }
+            .sheet(item: Binding(
+                get: { store.pendingAskUser.first { $0.sessionId == sessionId }.map { AskUserSheetItem(ask: $0) } },
+                set: { _ in }
+            )) { item in
+                AskUserSheet(ask: item.ask) { answers in
+                    store.respondAskUser(requestId: item.ask.requestId, answers: answers)
+                }
+                .presentationDetents([.medium, .large])
+                .interactiveDismissDisabled()
+            }
+            .sheet(item: Binding(
+                get: { fileBrowserPath.map { FileBrowserItem(path: $0) } },
+                set: { newValue in fileBrowserPath = newValue?.path }
+            )) { item in
+                FileBrowserSheet(
+                    sessionId: sessionId,
+                    currentPath: item.path,
+                    onNavigate: { newPath in fileBrowserPath = newPath },
+                    onPick: { path in
+                        if !inputText.isEmpty, !inputText.hasSuffix(" ") {
+                            inputText += " "
+                        }
+                        inputText += path
+                        fileBrowserPath = nil
+                    },
+                    onClose: { fileBrowserPath = nil }
+                )
+                .presentationDetents([.large])
+            }
+            .onChange(of: store.availableModels) { models in
+                if currentModel == nil { currentModel = models.first }
+            }
+            .onChange(of: store.currentModel) { currentModels in
+                if let daemonId = store.selectedDaemonId?.nodeId,
+                   let modelName = currentModels[daemonId] {
+                    if let m = store.availableModels.first(where: { $0.model == modelName }) {
+                        currentModel = m
+                    }
+                }
+            }
+            .onChange(of: store.visibleMessages) { _ in
+                if !store.visibleMessages.isEmpty {
+                    isLoadingSession = false
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if store.visibleMessages.isEmpty && !store.isStreaming && store.streamingText.isEmpty {
+            if isLoadingSession {
+                ProgressView("Loading session…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                emptyState
+            }
+        } else {
+            messageList
         }
     }
 

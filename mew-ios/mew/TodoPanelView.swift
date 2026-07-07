@@ -77,7 +77,6 @@ struct TodoPanelView: View {
 
     @ViewBuilder
     private func statusIcon(_ status: String, isDimmed: Bool) -> some View {
-        let color: Color = isDimmed ? .tertiary : .secondary
         switch status {
         case "done":
             Image(systemName: "checkmark.circle.fill")
@@ -94,7 +93,7 @@ struct TodoPanelView: View {
         default: // pending
             Image(systemName: "circle")
                 .font(.system(size: 14))
-                .foregroundStyle(color)
+                .foregroundStyle(isDimmed ? .tertiary : .secondary)
         }
     }
 
