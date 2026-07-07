@@ -2060,9 +2060,46 @@ impl App {
         }
     }
 
+    /// Push a message onto the display store and mark the chat dirty so the
+    /// next render picks it up. All external message pushes should go through
+    /// this method (or `push_synthetic_message` / `push_user`) — never
+    /// `app.messages.push(...)` directly, which skips the dirty mark.
+    pub fn push_message(&mut self, msg: Message) {
+        self.messages.push(msg);
+        self.mark_chat_dirty();
+    }
+
+    /// Construct and push a user message from display text + attachments.
+    pub fn push_user(&mut self, display: String, attachments: Vec<Part>) {
+        let msg_id = ulid::Ulid::new();
+        let mut parts = vec![Part::Text(mew_message::TextPart {
+            base: mew_message::PartBase {
+                id: ulid::Ulid::new(),
+                message_id: msg_id,
+                session_id: ulid::Ulid::new(),
+            },
+            text: display,
+            synthetic: false,
+        })];
+        parts.extend(attachments);
+        self.push_message(Message {
+            id: msg_id,
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts,
+            time: mew_message::Time {
+                created: chrono::Utc::now().timestamp_millis(),
+                completed: None,
+            },
+            assistant: None,
+        });
+    }
+
+    /// Push a synthetic assistant message (e.g. `/cost` output, system
+    /// alerts). Marks the chat dirty so it renders on the next draw.
     pub fn push_synthetic_message(&mut self, text: String) {
         let msg_id = ulid::Ulid::new();
-        self.messages.push(Message {
+        self.push_message(Message {
             id: msg_id,
             session_id: ulid::Ulid::new(),
             role: Role::Assistant,

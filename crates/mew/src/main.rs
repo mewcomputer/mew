@@ -7,6 +7,7 @@ use tracing::{info, warn};
 use async_trait::async_trait;
 
 mod config_editor;
+mod runtime;
 
 use mew_agent::Agent;
 use mew_catalog::Catalog;
@@ -14,7 +15,7 @@ use mew_config::{Config, ProviderConfig};
 use mew_hooks::{Dispatcher, NopDispatcher, PluginHost};
 use mew_hooks_runtime::SubprocessDispatcher;
 use mew_mcp::McpClient;
-use mew_message::{Finish, Part, PartId, Role, SessionId};
+use mew_message::{Finish, Part, PartId, SessionId};
 use mew_provider::Provider;
 use mew_provider_anthropic::Adapter as AnthropicAdapter;
 use mew_provider_openai::Adapter as OpenAIAdapter;
@@ -916,7 +917,7 @@ struct PluginInfo {
 }
 
 /// Build a display-only summary of a persona for the confirm modal.
-fn persona_summary(p: &mew_personas::Persona) -> mew_tui::app::PersonaSummary {
+pub(crate) fn persona_summary(p: &mew_personas::Persona) -> mew_tui::app::PersonaSummary {
     mew_tui::app::PersonaSummary {
         name: p.name.clone(),
         description: p.description.clone(),
@@ -971,7 +972,7 @@ fn apply_persona_switch(
             }
         }
     }
-    app.messages.push(synthetic_message(format!(
+    app.push_synthetic_message(format!(
         "switched to persona: {}{}",
         persona.name,
         if let Some(ref m) = pinned_model {
@@ -979,7 +980,7 @@ fn apply_persona_switch(
         } else {
             String::new()
         }
-    )));
+    ));
 }
 
 /// If the agent's `switch_persona` tool queued a switch and the turn has
@@ -2153,7 +2154,7 @@ async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()>
                                 &mut app.context_files,
                             )
                             .await;
-                            app.messages.push(user_message(display, attachments));
+                            app.push_user(display, attachments);
                             app.streaming = true;
                             let client = client.clone();
                             let ev_loop = event_loop.clone();
@@ -2923,8 +2924,7 @@ async fn run_tui(
     // Populate MCP server status in sidebar
     for (name, ok, count) in &mcp_server_status {
         if !ok {
-            app.messages
-                .push(synthetic_message(format!("{name} connection failed")));
+            app.push_synthetic_message(format!("{name} connection failed"));
         }
         app.mcp_status.push((name.clone(), *ok, *count));
     }
@@ -3052,8 +3052,7 @@ async fn run_tui(
                             let cwd = std::env::current_dir().unwrap_or_default();
                             let (enriched, display, attachments) =
                                 process_mentions(&text, &cwd, &mut app.context_files).await;
-                            app.messages
-                                .push(user_message(display, attachments.clone()));
+                            app.push_user(display, attachments.clone());
                             app.streaming = true;
                             let agent_rx = agent.run_with_parts(enriched, attachments, None);
                             event_loop.forward_agent_events(agent_rx);
@@ -3067,21 +3066,20 @@ async fn run_tui(
                                 mew_tui::SlashResult::Clear => {
                                     agent.clear_context().await;
                                     app.clear_messages();
-                                    app.messages
-                                        .push(synthetic_message("context cleared".into()));
+                                    app.push_synthetic_message("context cleared".into());
                                 }
                                 mew_tui::SlashResult::Message(msg) => {
-                                    app.messages.push(synthetic_message(msg));
+                                    app.push_synthetic_message(msg);
                                 }
                                 mew_tui::SlashResult::Compact => {
                                     agent.force_compact().await;
-                                    app.messages.push(synthetic_message(
+                                    app.push_synthetic_message(
                                         "compaction will run on next turn".into(),
-                                    ));
+                                    );
                                 }
                                 mew_tui::SlashResult::Todo => {
                                     let list = agent.todos.lock().await;
-                                    app.messages.push(synthetic_message(list.render()));
+                                    app.push_synthetic_message(list.render());
                                 }
                                 mew_tui::SlashResult::SwitchModel(new_model) => {
                                     let (new_provider_id, new_model_id) =
@@ -3120,16 +3118,16 @@ async fn run_tui(
                                             if let Err(e) = mew_config::save_state(&state) {
                                                 tracing::warn!("failed to save state: {}", e);
                                             }
-                                            app.messages.push(synthetic_message(format!(
+                                            app.push_synthetic_message(format!(
                                                 "switched to {}",
                                                 new_model
-                                            )));
+                                            ));
                                         }
                                         Err(e) => {
-                                            app.messages.push(synthetic_message(format!(
+                                            app.push_synthetic_message(format!(
                                                 "failed to switch: {}",
                                                 e
-                                            )));
+                                            ));
                                         }
                                     }
                                 }
@@ -3141,21 +3139,20 @@ async fn run_tui(
                                         || variant_name == "none"
                                     {
                                         agent.set_reasoning(None);
-                                        app.messages
-                                            .push(synthetic_message("thinking disabled".into()));
+                                        app.push_synthetic_message("thinking disabled".into());
                                     } else {
                                         match resolve_reasoning(cat, model_id, Some(variant_name)) {
                                             Some(config) => {
                                                 agent.set_reasoning(Some(config));
-                                                app.messages.push(synthetic_message(format!(
+                                                app.push_synthetic_message(format!(
                                                     "thinking variant: {}",
                                                     variant_name
-                                                )));
+                                                ));
                                             }
                                             None => {
-                                                app.messages.push(synthetic_message(format!(
+                                                app.push_synthetic_message(format!(
                                                     "unknown thinking variant '{variant_name}' for model '{model_id}'"
-                                                )));
+                                                ));
                                             }
                                         }
                                     }
@@ -3168,10 +3165,10 @@ async fn run_tui(
                                         save.theme = app.theme.name.clone();
                                         let _ = mew_config::save_state(&save);
                                     }
-                                    app.messages.push(synthetic_message(format!(
+                                    app.push_synthetic_message(format!(
                                         "theme: {}",
                                         app.theme.name
-                                    )));
+                                    ));
                                 }
                                 mew_tui::SlashResult::SwitchPersona(ref name) => {
                                     if name == "default" || name == "none" {
@@ -3179,9 +3176,9 @@ async fn run_tui(
                                         agent.clear_persona();
                                         app.active_persona = None;
                                         plugin_info.lock().unwrap().active_persona = None;
-                                        app.messages.push(synthetic_message(
+                                        app.push_synthetic_message(
                                             "persona cleared (default)".into(),
-                                        ));
+                                        );
                                         agent
                                             .dispatcher
                                             .on_persona_change(old.as_deref(), "default")
@@ -3199,10 +3196,10 @@ async fn run_tui(
                                             persona,
                                         );
                                     } else {
-                                        app.messages.push(synthetic_message(format!(
+                                        app.push_synthetic_message(format!(
                                             "unknown persona: {}. use /persona to list available.",
                                             name
-                                        )));
+                                        ));
                                     }
                                 }
                                 mew_tui::SlashResult::PersonaSwitchConfirm(ref name) => {
@@ -3219,22 +3216,22 @@ async fn run_tui(
                                             .map(persona_summary);
                                         app.request_persona_switch_confirm(target, current);
                                     } else {
-                                        app.messages.push(synthetic_message(format!(
+                                        app.push_synthetic_message(format!(
                                             "unknown persona: {}. use /persona to list available.",
                                             name
-                                        )));
+                                        ));
                                     }
                                 }
                                 mew_tui::SlashResult::Rewind(n) => {
                                     if app.streaming {
-                                        app.messages.push(synthetic_message(
+                                        app.push_synthetic_message(
                                             "cannot rewind while streaming".into(),
-                                        ));
+                                        );
                                     } else if n > app.messages.len() {
-                                        app.messages.push(synthetic_message(format!(
+                                        app.push_synthetic_message(format!(
                                             "only {} messages exist",
                                             app.messages.len()
-                                        )));
+                                        ));
                                     } else {
                                         let removed = app.messages.len() - n;
                                         app.rewind_to(n);
@@ -3244,10 +3241,10 @@ async fn run_tui(
                                                 msgs.truncate(n);
                                             }
                                         }
-                                        app.messages.push(synthetic_message(format!(
+                                        app.push_synthetic_message(format!(
                                             "rewound to message {} (removed {})",
                                             n, removed
-                                        )));
+                                        ));
                                     }
                                 }
                                 mew_tui::SlashResult::ResumeSession(ref id) => {
@@ -3266,21 +3263,21 @@ async fn run_tui(
                                             app.todos = agent.todos.lock().await.items.clone();
                                             app.clear_messages();
                                             for msg in &msgs {
-                                                app.messages.push(msg.clone());
+                                                app.push_message(msg.clone());
                                             }
                                             app.status.session_id = id.clone();
                                             app.auto_scroll = true;
                                             app.scroll = app.max_scroll;
-                                            app.messages.push(synthetic_message(format!(
+                                            app.push_synthetic_message(format!(
                                                 "resumed session {}",
                                                 id
-                                            )));
+                                            ));
                                         }
                                         Err(e) => {
-                                            app.messages.push(synthetic_message(format!(
+                                            app.push_synthetic_message(format!(
                                                 "failed to load session {}: {}",
                                                 id, e
-                                            )));
+                                            ));
                                         }
                                     }
                                 }
@@ -3330,13 +3327,13 @@ async fn run_tui(
                                     let disp = agent.dispatcher.clone();
                                     match disp.execute_slash_command(&name, &args).await {
                                         Some(result) => {
-                                            app.messages.push(synthetic_message(result));
+                                            app.push_synthetic_message(result);
                                         }
                                         None => {
-                                            app.messages.push(synthetic_message(format!(
+                                            app.push_synthetic_message(format!(
                                                 "unknown command: {}",
                                                 name
-                                            )));
+                                            ));
                                         }
                                     }
                                 }
@@ -3363,8 +3360,7 @@ async fn run_tui(
                         mew_tui::events::Action::Clear => {
                             agent.clear_context().await;
                             app.clear_messages();
-                            app.messages
-                                .push(synthetic_message("context cleared".into()));
+                            app.push_synthetic_message("context cleared".into());
                         }
                         mew_tui::events::Action::SwitchModel(new_model) => {
                             let (new_provider_id, new_model_id) =
@@ -3397,16 +3393,16 @@ async fn run_tui(
                                     if let Err(e) = mew_config::save_state(&state) {
                                         tracing::warn!("failed to save state: {}", e);
                                     }
-                                    app.messages.push(synthetic_message(format!(
+                                    app.push_synthetic_message(format!(
                                         "switched to {}",
                                         new_model
-                                    )));
+                                    ));
                                 }
                                 Err(e) => {
-                                    app.messages.push(synthetic_message(format!(
+                                    app.push_synthetic_message(format!(
                                         "failed to switch model: {}",
                                         e
-                                    )));
+                                    ));
                                 }
                             }
                         }
@@ -3644,8 +3640,7 @@ async fn run_tui(
                             mew_tui::events::Action::Clear => {
                                 agent.clear_context().await;
                                 app.clear_messages();
-                                app.messages
-                                    .push(synthetic_message("context cleared".into()));
+                                app.push_synthetic_message("context cleared".into());
                             }
                             mew_tui::events::Action::ToggleSidebarContext => {
                                 app.toggle_sidebar_section("context");
@@ -3731,21 +3726,20 @@ async fn run_tui(
                                     mew_tui::SlashResult::Clear => {
                                         agent.clear_context().await;
                                         app.clear_messages();
-                                        app.messages
-                                            .push(synthetic_message("context cleared".into()));
+                                        app.push_synthetic_message("context cleared".into());
                                     }
                                     mew_tui::SlashResult::Message(msg) => {
-                                        app.messages.push(synthetic_message(msg));
+                                        app.push_synthetic_message(msg);
                                     }
                                     mew_tui::SlashResult::Compact => {
                                         agent.force_compact().await;
-                                        app.messages.push(synthetic_message(
+                                        app.push_synthetic_message(
                                             "compaction will run on next turn".into(),
-                                        ));
+                                        );
                                     }
                                     mew_tui::SlashResult::Todo => {
                                         let list = agent.todos.lock().await;
-                                        app.messages.push(synthetic_message(list.render()));
+                                        app.push_synthetic_message(list.render());
                                     }
                                     mew_tui::SlashResult::SwitchModel(_) => {
                                         // Model switches are deferred; handled in main loop.
@@ -3761,10 +3755,10 @@ async fn run_tui(
                                             save.theme = app.theme.name.clone();
                                             let _ = mew_config::save_state(&save);
                                         }
-                                        app.messages.push(synthetic_message(format!(
+                                        app.push_synthetic_message(format!(
                                             "theme: {}",
                                             app.theme.name
-                                        )));
+                                        ));
                                     }
                                     mew_tui::SlashResult::SwitchPersona(_) => {
                                         // Handled inline above (direct clear).
@@ -3887,8 +3881,7 @@ async fn run_tui(
             let cwd = std::env::current_dir().unwrap_or_default();
             let (enriched, display, attachments) =
                 process_mentions(&text, &cwd, &mut app.context_files).await;
-            app.messages
-                .push(user_message(display, attachments.clone()));
+            app.push_user(display, attachments.clone());
             app.streaming = true;
             let agent_rx = agent.run_with_parts(enriched, attachments, None);
             event_loop.forward_agent_events(agent_rx);
@@ -4016,54 +4009,6 @@ async fn process_mentions(
     }
 
     (enriched, display, attachments)
-}
-
-fn user_message(text: String, attachments: Vec<Part>) -> mew_message::Message {
-    let msg_id = ulid::Ulid::new();
-    let mut parts = vec![Part::Text(mew_message::TextPart {
-        base: mew_message::PartBase {
-            id: ulid::Ulid::new(),
-            message_id: msg_id,
-            session_id: ulid::Ulid::new(),
-        },
-        text: text.clone(),
-        synthetic: false,
-    })];
-    parts.extend(attachments);
-    mew_message::Message {
-        id: msg_id,
-        session_id: ulid::Ulid::new(),
-        role: Role::User,
-        parts,
-        time: mew_message::Time {
-            created: chrono::Utc::now().timestamp_millis(),
-            completed: None,
-        },
-        assistant: None,
-    }
-}
-
-fn synthetic_message(text: String) -> mew_message::Message {
-    let msg_id = ulid::Ulid::new();
-    mew_message::Message {
-        id: msg_id,
-        session_id: ulid::Ulid::new(),
-        role: Role::Assistant,
-        parts: vec![Part::Text(mew_message::TextPart {
-            base: mew_message::PartBase {
-                id: ulid::Ulid::new(),
-                message_id: msg_id,
-                session_id: ulid::Ulid::new(),
-            },
-            text,
-            synthetic: true,
-        })],
-        time: mew_message::Time {
-            created: chrono::Utc::now().timestamp_millis(),
-            completed: Some(chrono::Utc::now().timestamp_millis()),
-        },
-        assistant: None,
-    }
 }
 
 async fn discover_models(cfg: &Config, cat: Option<&Catalog>, raw: bool) -> Vec<(String, String)> {
@@ -4623,28 +4568,28 @@ fn build_provider(
     build_direct_provider(cfg, cat, provider_id, &pc, model_override, raw)
 }
 
-async fn toggle_mouse_capture(
+pub(crate) async fn toggle_mouse_capture(
     app: &mut mew_tui::App,
     terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
 ) {
     app.mouse_capture = !app.mouse_capture;
     if app.mouse_capture {
         let _ = crossterm::execute!(terminal.backend_mut(), crossterm::event::EnableMouseCapture);
-        app.messages.push(synthetic_message(
+        app.push_synthetic_message(
             "mouse capture enabled (use /mouse to select text)".into(),
-        ));
+        );
     } else {
         let _ = crossterm::execute!(
             terminal.backend_mut(),
             crossterm::event::DisableMouseCapture,
         );
-        app.messages.push(synthetic_message(
+        app.push_synthetic_message(
             "mouse capture disabled \u{2014} native text selection enabled".into(),
-        ));
+        );
     }
 }
 
-fn copy_to_clipboard(text: &str) {
+pub(crate) fn copy_to_clipboard(text: &str) {
     #[cfg(target_os = "macos")]
     {
         let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
