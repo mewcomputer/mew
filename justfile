@@ -178,10 +178,44 @@ clean-web:
 lint-all: clippy
     pnpm --filter @mew/web-client exec tsc --noEmit
 
+# Architecture guard: enforce dispatch invariants.
+# - No messages.push outside mew-tui/src/app.rs in crates/mew/src
+# - No Action/SlashResult match arms outside runtime/dispatch.rs
+# - No todo!()/unimplemented!() in crates/mew/src
+arch-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # No messages.push in crates/mew/src outside mew-tui's app.rs.
+    # Scoped to mew/src only — other crates have legitimate messages.push
+    # calls on their own message types.
+    if grep -rnF '.messages.push(' crates/mew/src --include='*.rs' \
+        | grep -v 'mew-tui/src/app.rs' ; then
+        echo "ERROR: messages.push outside app.rs in crates/mew/src" ; exit 1
+    fi
+    # No Action/SlashResult match-ARM lines outside runtime/dispatch.rs.
+    # Matches arm-style lines (e.g. `Action::Quit =>` or
+    # `mew_tui::events::Action::Submit(_) =>`) but NOT constructions
+    # or type annotations.
+    # NOTE: chat_with_daemon still has inline dispatch (Phase 2 will fix).
+    # The primary guard is deny(clippy::wildcard_enum_match_arm) in dispatch.rs.
+    if grep -rnE '^\s*(mew_tui::)?(events::)?(Action|SlashResult)::[^;]*=>' \
+        crates/mew/src/runtime --include='*.rs' \
+        | grep -v 'runtime/dispatch.rs' \
+        | grep -v '^\s*//' ; then
+        echo "ERROR: Action/SlashResult match arms outside runtime/dispatch.rs" ; exit 1
+    fi
+    # No todo!() / unimplemented!() in crates/mew/src
+    if grep -rn 'todo!()' crates/mew/src --include='*.rs' ; then
+        echo "ERROR: todo!() in crates/mew/src" ; exit 1
+    fi
+    if grep -rn 'unimplemented!()' crates/mew/src --include='*.rs' ; then
+        echo "ERROR: unimplemented!() in crates/mew/src" ; exit 1
+    fi
+
 # CI-ready check: format, clippy, unit/integration tests (Rust + JS),
 # and the subprocess e2e test. The e2e test needs the binaries built;
 # `build-web` depends on the right set.
-ci: fmt clippy test-all e2e
+ci: fmt clippy arch-check test-all e2e
 
 # End-to-end check: build binaries and run subprocess e2e tests.
 # The e2e test in mew-web-bridge spawns real `mew` and `mew-web`
