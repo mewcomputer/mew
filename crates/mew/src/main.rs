@@ -1861,148 +1861,27 @@ async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()>
             mew_tui::Event::Input(crossterm_event) => {
                 if let Some(action) = mew_tui::events::handle_input_event(&mut app, crossterm_event)
                 {
-                    match action {
-                        mew_tui::events::Action::Submit(text) => {
-                            let (enriched, display, attachments) = process_mentions(
-                                &text,
-                                &std::env::current_dir().unwrap_or_default(),
-                                &mut app.context_files,
-                            )
-                            .await;
-                            app.push_user(display, attachments);
-                            app.streaming = true;
-                            let client = client.clone();
-                            let ev_loop = event_loop.clone();
-                            tokio::spawn(async move {
-                                let rx = client.prompt(enriched).await;
-                                ev_loop.forward_agent_events(rx);
-                            });
-                        }
-                        mew_tui::events::Action::Quit => should_break = true,
-                        mew_tui::events::Action::SetThinkingVariant(_) => {
-                            app.set_alert(
-                                "thinking variant switching not available in daemon mode",
-                            );
-                        }
-                        mew_tui::events::Action::Cancel => {
-                            let client = client.clone();
-                            tokio::spawn(async move {
-                                client.cancel().await;
-                            });
-                        }
-                        mew_tui::events::Action::SlashCommand(text) => {
-                            // Forward slash commands that mutate agent state
-                            // to the daemon. Built-in display commands
-                            // (/help, /cost) are handled locally by the TUI.
-                            let (cmd, _arg) = match text.split_once(' ') {
-                                Some((c, a)) => (c, Some(a)),
-                                None => (text.as_str(), None),
-                            };
-                            match cmd {
-                                "/clear" | "/compact" => {
-                                    let client = client.clone();
-                                    tokio::spawn(async move {
-                                        client.slash_command(text.clone()).await;
-                                    });
-                                }
-                                "/web" => {
-                                    // Print the web URL for the current session.
-                                    let sid = &app.status.session_id;
-                                    if !sid.is_empty() {
-                                        let port = std::env::var("MEW_PORT")
-                                            .unwrap_or_else(|_| "9847".into());
-                                        let url = format!("http://localhost:{port}/session/{sid}");
-                                        app.set_alert(format!("Web URL: {url}"));
-                                    } else {
-                                        app.set_alert("no active session");
-                                    }
-                                }
-                                "/resume" => {
-                                    if let Some(arg) = _arg {
-                                        let client = client.clone();
-                                        let sid = arg.to_string();
-                                        tokio::spawn(async move {
-                                            let _ = client.attach_session(&sid).await;
-                                            // Request a fresh session list so
-                                            // the rail updates with the new
-                                            // active session.
-                                            client.list_sessions().await;
-                                        });
-                                        app.set_alert(format!("attaching to {arg}…"));
-                                    } else {
-                                        // No arg → open the session picker.
-                                        client.list_sessions().await;
-                                        app.open_session_picker();
-                                    }
-                                }
-                                "/yield" => {
-                                    let client = client.clone();
-                                    tokio::spawn(async move {
-                                        let msg = mew_protocol::ClientMessage::YieldControl {};
-                                        if let Ok(json) = mew_protocol::encode_json(&msg) {
-                                            let _ = client.send_raw(&json).await;
-                                        }
-                                    });
-                                    app.set_alert("control yielded");
-                                }
-                                "/sessions" => {
-                                    // Request a fresh session list from the
-                                    // daemon, then open the session picker.
-                                    client.list_sessions().await;
-                                    app.open_session_picker();
-                                }
-                                "/autotitle" => {
-                                    app.auto_title = !app.auto_title;
-                                    let enabled = app.auto_title;
-                                    let client = client.clone();
-                                    tokio::spawn(async move {
-                                        client.set_auto_title(enabled).await;
-                                    });
-                                    app.set_alert(if enabled {
-                                        "auto-title enabled"
-                                    } else {
-                                        "auto-title disabled"
-                                    });
-                                }
-                                "/autosummary" => {
-                                    app.auto_summary = !app.auto_summary;
-                                    let enabled = app.auto_summary;
-                                    let client = client.clone();
-                                    tokio::spawn(async move {
-                                        client.set_auto_summary(enabled).await;
-                                    });
-                                    app.set_alert(if enabled {
-                                        "auto-summary enabled"
-                                    } else {
-                                        "auto-summary disabled"
-                                    });
-                                }
-                                _ => {
-                                    // Let the TUI handle it locally.
-                                    let result = app.handle_slash(&text);
-                                    handle_slash_result_local(&mut app, result);
-                                }
-                            }
-                        }
-                        mew_tui::events::Action::Clear => {
-                            let client = client.clone();
-                            tokio::spawn(async move {
-                                client.slash_command("/clear".into()).await;
-                            });
-                        }
-                        mew_tui::events::Action::AttachSession(id) => {
-                            let client = client.clone();
-                            let sid = id.clone();
-                            tokio::spawn(async move {
-                                let _ = client.attach_session(&sid).await;
-                                // Request a fresh session list so the rail
-                                // updates with the new active session.
-                                client.list_sessions().await;
-                            });
-                            app.set_alert(format!("attaching to {}…", &id[..8.min(id.len())]));
-                        }
-                        _ => {}
-                    }
+                    let mut target = crate::runtime::daemon::DaemonTarget::new(client.clone());
+                    let plugin_info =
+                        std::sync::Arc::new(std::sync::Mutex::new(crate::PluginInfo {
+                            session_id: String::new(),
+                            model: String::new(),
+                            provider: String::new(),
+                            workspace: String::new(),
+                            active_persona: None,
+                        }));
+                    let mut cx = crate::runtime::Ctx {
+                        app: &mut app,
+                        target: &mut target,
+                        event_loop: &event_loop,
+                        settings_editor: &mut None,
+                        should_break: &mut should_break,
+                        cat: None,
+                        loaded_personas: &[],
+                        plugin_info: &plugin_info,
+                        terminal: &mut terminal,
+                    };
+                    let _flow = crate::runtime::handle_action(&mut cx, action).await;
                 }
             }
             mew_tui::Event::Agent(agent_event) => {
@@ -2034,78 +1913,6 @@ async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()>
 /// Handle slash command results that the TUI processes locally (when
 /// connected to a daemon). Only display-oriented commands — the
 /// state-mutating ones are forwarded to the daemon.
-fn handle_slash_result_local(app: &mut mew_tui::App, result: mew_tui::app::SlashResult) {
-    use mew_tui::app::SlashResult;
-    match result {
-        SlashResult::Message(msg) => {
-            app.push_synthetic_message(msg);
-        }
-        SlashResult::OpenModelPicker => {
-            app.set_alert("model switching not available in daemon mode");
-        }
-        SlashResult::SwitchModel(_) => {
-            app.set_alert("use the daemon's --model flag to switch models");
-        }
-        SlashResult::SetThinkingVariant(_) => {
-            app.set_alert("thinking variant switching not available in daemon mode");
-        }
-        SlashResult::SetTheme(name) => {
-            app.theme = mew_tui::theme::Theme::load(&name);
-            app.set_alert(format!("theme: {}", app.theme.name));
-        }
-        SlashResult::PermissionModeMenu => {
-            app.open_permission_mode_picker();
-        }
-        SlashResult::SetPermissionMode(m) => {
-            app.permission_mode = m;
-            app.set_alert(format!("permission mode: {}", m.id()));
-        }
-        SlashResult::PersonaSwitchConfirm(_) => {
-            app.set_alert("persona switching not available in daemon mode");
-        }
-        SlashResult::SwitchPersona(_) => {
-            app.set_alert("persona switching not available in daemon mode");
-        }
-        SlashResult::ResumeSession(_) => {
-            app.set_alert("session resume not available in daemon mode");
-        }
-        SlashResult::Rewind(_) => {
-            app.set_alert("rewind not available in daemon mode");
-        }
-        SlashResult::ToggleMouseCapture => {
-            app.set_alert("toggle mouse capture");
-        }
-        SlashResult::Todo => {
-            // TodosUpdated events come from the daemon.
-        }
-        SlashResult::Clear | SlashResult::Compact | SlashResult::Continue | SlashResult::Quit => {}
-        SlashResult::OpenHelp => {
-            app.mode = mew_tui::app::Mode::Help;
-        }
-        SlashResult::PluginCommand { .. } => {
-            app.set_alert("plugin commands not available in daemon mode");
-        }
-        SlashResult::OpenThinkingVariantPicker => {
-            app.set_alert("thinking variant switching not available in daemon mode");
-        }
-        SlashResult::OpenCommandPalette => {
-            app.open_command_palette();
-        }
-        SlashResult::OpenThemePicker => {
-            app.open_theme_picker();
-        }
-        SlashResult::OpenPersonaPicker => {
-            app.set_alert("persona switching not available in daemon mode");
-        }
-        SlashResult::OpenRewindPicker => {
-            app.set_alert("rewind not available in daemon mode");
-        }
-        SlashResult::OpenSessionPickerFromDisk => {
-            app.open_session_picker();
-        }
-    }
-}
-
 async fn connect_mcp_servers(
     configs: &[mew_mcp::McpServerConfig],
 ) -> (
@@ -2962,89 +2769,12 @@ async fn run_tui(
     result
 }
 
-fn image_mime(path: &str) -> Option<&'static str> {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase());
-    match ext.as_deref() {
-        Some("png") => Some("image/png"),
-        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
-        Some("gif") => Some("image/gif"),
-        Some("webp") => Some("image/webp"),
-        _ => None,
-    }
-}
-
 /// Resolve @mentions in `text`. Text files are inlined into the model-facing
 /// text; image files become `Part::File` attachments. Returns
 /// `(enriched, display, attachments)` where `enriched` carries the full file
 /// content for the model and `display` carries only a `<path added to
 /// context>` notification for the user's visible message — the file contents
 /// should not flood the chat.
-async fn process_mentions(
-    text: &str,
-    cwd: &std::path::Path,
-    context_files: &mut Vec<String>,
-) -> (String, String, Vec<Part>) {
-    let mentions = mew_tui::app::parse_file_mentions(text);
-    let mut enriched = text.to_string();
-    let mut display = text.to_string();
-    let mut attachments: Vec<Part> = Vec::new();
-
-    for path_str in &mentions {
-        let path = cwd.join(path_str);
-        if let Some(mime) = image_mime(path_str) {
-            let mention = format!("@{}", path_str);
-            enriched = enriched.replace(&mention, "");
-            display = display.replace(&mention, "");
-            if path.exists() {
-                let abs = path.canonicalize().unwrap_or(path.clone());
-                let filename = std::path::Path::new(path_str)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(path_str)
-                    .to_string();
-                attachments.push(Part::File(mew_message::FilePart {
-                    base: mew_message::PartBase {
-                        id: ulid::Ulid::new(),
-                        message_id: ulid::Ulid::new(),
-                        session_id: ulid::Ulid::new(),
-                    },
-                    mime: mime.to_string(),
-                    url: format!("file://{}", abs.display()),
-                    filename: Some(filename),
-                }));
-                if !context_files.contains(path_str) {
-                    context_files.push(path_str.clone());
-                }
-                display.push_str(&format!("\n<{} added to context>", path_str));
-            } else {
-                let err = format!("\n\n[error reading {}: file not found]", path_str);
-                enriched.push_str(&err);
-                display.push_str(&err);
-            }
-        } else {
-            match tokio::fs::read_to_string(&path).await {
-                Ok(content) => {
-                    enriched.push_str(&format!("\n\n--- {} ---\n{}", path_str, content));
-                    if !context_files.contains(path_str) {
-                        context_files.push(path_str.clone());
-                    }
-                    display.push_str(&format!("\n<{} added to context>", path_str));
-                }
-                Err(e) => {
-                    let err = format!("\n\n[error reading {}: {}]", path_str, e);
-                    enriched.push_str(&err);
-                    display.push_str(&err);
-                }
-            }
-        }
-    }
-
-    (enriched, display, attachments)
-}
-
 async fn discover_models(cfg: &Config, cat: Option<&Catalog>, raw: bool) -> Vec<(String, String)> {
     use std::collections::HashSet;
 

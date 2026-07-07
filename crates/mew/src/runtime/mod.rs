@@ -8,6 +8,7 @@
 //! - [`local::LocalTarget`] — owns the `Agent`, used in standalone TUI mode.
 //! - `daemon::DaemonTarget` — owns the `DaemonClient`, used in `--connect` mode.
 
+pub mod daemon;
 pub mod dispatch;
 pub mod local;
 pub mod mentions;

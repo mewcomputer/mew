@@ -196,10 +196,10 @@ arch-check:
     # Matches arm-style lines (e.g. `Action::Quit =>` or
     # `mew_tui::events::Action::Submit(_) =>`) but NOT constructions
     # or type annotations.
-    # NOTE: chat_with_daemon still has inline dispatch (Phase 2 will fix).
+    # NOTE: chat_with_daemon is now rewired to use handle_action.
     # The primary guard is deny(clippy::wildcard_enum_match_arm) in dispatch.rs.
     if grep -rnE '^\s*(mew_tui::)?(events::)?(Action|SlashResult)::[^;]*=>' \
-        crates/mew/src/runtime --include='*.rs' \
+        crates/mew/src --include='*.rs' \
         | grep -v 'runtime/dispatch.rs' \
         | grep -v '^\s*//' ; then
         echo "ERROR: Action/SlashResult match arms outside runtime/dispatch.rs" ; exit 1
