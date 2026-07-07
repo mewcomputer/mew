@@ -592,8 +592,7 @@ where
                         let title = generate_session_title(&agent, &prompt_text).await;
                         // Persist the title to disk.
                         let dir = mew_session::session_dir();
-                        if let Ok(Some(mut meta)) =
-                            mew_session::Meta::read(&dir, &session_id).await
+                        if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await
                         {
                             let _ = meta.set_custom_title(&dir, title.clone()).await;
                         }

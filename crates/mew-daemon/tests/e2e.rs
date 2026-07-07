@@ -865,7 +865,8 @@ async fn regenerate_title_returns_title_changed() {
         },
     )
     .await;
-    let ready = recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
+    let ready =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
     let session_id = match ready {
         ServerMessage::SessionReady { session_id, .. } => session_id,
         _ => unreachable!(),
@@ -907,7 +908,10 @@ async fn regenerate_title_returns_title_changed() {
     })
     .await;
     match msg {
-        ServerMessage::SessionTitleChanged { session_id: sid, title } => {
+        ServerMessage::SessionTitleChanged {
+            session_id: sid,
+            title,
+        } => {
             assert_eq!(sid, session_id);
             assert_eq!(title, "hello world");
         }

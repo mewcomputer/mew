@@ -23,7 +23,9 @@ use mew_agent::{
     AgentEvent, AskUserQuestion, QuestionOption as AgentQuestionOption, Todo, TodoStatus,
 };
 use mew_hooks::{PermissionDecision, ToolCall as HookToolCall};
+use mew_message::Part;
 use mew_protocol::{ClientMessage, PermissionDecision as WirePermissionDecision, ServerMessage};
+use mew_provider::ProviderEvent;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::connect_async;
 use tracing::warn;
@@ -564,11 +566,30 @@ async fn translate_server_message(
         }
 
         ServerMessage::SlashResult { text } => {
-            // Slash results come back as synthetic text messages.
-            // The TUI will handle this as a provider text event.
-            // For now, emit as an Error so it's visible.
-            // TODO: emit as a synthetic text AgentEvent.
-            vec![AgentEvent::Error(text.clone())]
+            // Slash results come back as synthetic text messages — NOT errors.
+            // Emit as a complete text part so it renders in the chat pane.
+            let part_id = mew_message::PartId::new();
+            let msg_id = mew_message::MessageId::new();
+            let session_id = mew_message::SessionId::new();
+            vec![
+                AgentEvent::Provider(ProviderEvent::PartStart {
+                    part: Part::Text(mew_message::TextPart {
+                        base: mew_message::PartBase {
+                            id: part_id,
+                            message_id: msg_id,
+                            session_id,
+                        },
+                        text: text.clone(),
+                        synthetic: true,
+                    }),
+                }),
+                AgentEvent::Provider(ProviderEvent::PartEnd { part_id }),
+                AgentEvent::Provider(ProviderEvent::MessageEnd {
+                    finish: mew_message::Finish::Stop,
+                    usage: mew_message::Tokens::default(),
+                    cost: 0.0,
+                }),
+            ]
         }
 
         ServerMessage::ModelList { .. }

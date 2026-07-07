@@ -301,6 +301,11 @@ pub struct App {
     /// Tool-call batch expansion state. Keys are the first tool call's
     /// `PartId` in a batch; presence means the batch is expanded.
     pub tool_batch_expanded: std::collections::HashSet<mew_message::PartId>,
+    /// Test-only instrumentation: counts how many times `ensure_chat_rendered`
+    /// rebuilds the chat (the `!cache_ok` branch). Used by `test_daemon_coalescing`
+    /// (AC.13) to assert the 4-agent-event cap is respected.
+    #[cfg(test)]
+    pub render_count: u32,
 }
 
 /// Cached result of building the chat `Text` for one transcript state.
@@ -643,6 +648,8 @@ impl App {
             auto_title: false,
             auto_summary: false,
             tool_batch_expanded: std::collections::HashSet::new(),
+            #[cfg(test)]
+            render_count: 0,
         }
     }
 
@@ -2025,6 +2032,10 @@ impl App {
             (Some(_), Some(_), true)
         ) && self.rendered_chat.as_ref().map(|c| c.dirty_gen) == dirty;
         if !cache_ok {
+            #[cfg(test)]
+            {
+                self.render_count += 1;
+            }
             let built = crate::ui::chat::build_chat_lines(self, md_width, chat_width);
             let total_lines = built.lines.len() as u16;
             let max_scroll = total_lines.saturating_sub(area_height);
