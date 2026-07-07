@@ -123,8 +123,21 @@ final class AppStore: ObservableObject {
     // Models
     @Published var availableModels: [ModelSummary] = []
 
+    // Permission mode, current model, thinking variant (per daemon)
+    @Published var permissionMode: [String: String] = [:]
+    @Published var currentModel: [String: String] = [:]
+    @Published var currentProvider: [String: String] = [:]
+    @Published var thinkingVariant: [String: String?] = [:]
+
+    // Session usage (per sessionId)
+    @Published var sessionUsage: [String: SessionUsage] = [:]
+
+    // Todos (per sessionId)
+    @Published var todos: [String: [TodoItem]] = [:]
+
     // Alerts
     @Published var alerts: [AlertItem] = []
+    @Published var activeBanner: AlertItem?
 
     // Retry: last prompt per session + per-session turn-failure tracking
     @Published var lastPrompt: [String: String] = [:]
@@ -141,7 +154,7 @@ final class AppStore: ObservableObject {
     }
 
     // The core
-    private var core: MobileCore?
+    private var core: MobileCoreProtocol?
     private var listener: CoreListenerBridge?
 
     // MARK: - Lifecycle
@@ -151,6 +164,12 @@ final class AppStore: ObservableObject {
         Task {
             await initializeCore()
         }
+    }
+
+    /// Test-only initializer: inject a mock core for unit testing.
+    /// The mock must already have a listener set (use `setListener`).
+    func injectCore(_ mock: MobileCoreProtocol) {
+        core = mock
     }
 
     private func initializeCore() async {
@@ -314,6 +333,21 @@ final class AppStore: ObservableObject {
         core.switchModel(id: daemonId, provider: provider, model: model)
     }
 
+    func setPermissionMode(_ mode: String) {
+        guard let daemonId = selectedDaemonId, let core else { return }
+        core.setPermissionMode(id: daemonId, mode: mode)
+    }
+
+    func sendSlashCommand(_ command: String) {
+        guard let daemonId = selectedDaemonId, let core else { return }
+        core.slashCommand(id: daemonId, command: command)
+    }
+
+    func setThinkingVariant(_ variant: String) {
+        guard let daemonId = selectedDaemonId, let core else { return }
+        core.setThinkingVariant(id: daemonId, variant: variant)
+    }
+
     func archiveSession(_ sessionId: String, archived: Bool) {
         guard let daemonId = selectedDaemonId, let core else { return }
         core.archiveSession(id: daemonId, sessionId: sessionId, archived: archived)
@@ -402,13 +436,27 @@ final class AppStore: ObservableObject {
             // Update the message part in place
             updatePartInMessages(partId: partId)
 
-        case .turnEnded(_, _, _, _, _, let failed):
+        case .turnEnded(let daemon, let sessionId, let inputTokens, let outputTokens, let cost, let failed):
             isStreaming = false
             streamingPartId = nil
             streamingText = ""
             if let sessionId = selectedSessionId {
                 lastTurnFailed[sessionId] = failed
             }
+            // Capture usage from the event, merging turns from snapshot if available.
+            let turns: UInt32
+            if let snap = core?.snapshot(id: DaemonId(nodeId: daemon)),
+               let session = snap.sessions.first {
+                turns = session.turns
+            } else {
+                turns = (sessionUsage[sessionId]?.turns ?? 0) + 1
+            }
+            sessionUsage[sessionId] = SessionUsage(
+                inputTokens: inputTokens,
+                outputTokens: outputTokens,
+                cost: cost,
+                turns: turns
+            )
             // Refresh messages from snapshot
             refreshMessages()
 
@@ -438,24 +486,59 @@ final class AppStore: ObservableObject {
             pendingAskUser.removeAll { $0.requestId == requestId }
 
         case .alert(_, let sessionId, let kind, let title, let detail):
-            alerts.append(AlertItem(
+            let item = AlertItem(
                 sessionId: sessionId,
                 kind: kind,
                 title: title,
                 detail: detail
-            ))
+            )
+            alerts.append(item)
+            // Show banner if the alert is for a different session than the one
+            // the user is currently viewing.
+            if sessionId != selectedSessionId {
+                activeBanner = item
+            }
 
         case .attentionChanged:
             break
 
-        case .todosUpdated:
-            break
+        case .todosUpdated(_, let sessionId, let todoItems):
+            todos[sessionId] = todoItems
 
         case .modelList(_, let models):
             availableModels = models
 
-        case .slashResult:
-            break
+        case .slashResult(_, _, let text):
+            // Append the slash result as a synthetic assistant message so it
+            // appears inline in the chat transcript.
+            messages.append(ChatMessage(
+                id: UUID().uuidString,
+                role: "assistant",
+                parts: [MessagePart(
+                    id: UUID().uuidString,
+                    kind: .text,
+                    text: text,
+                    toolName: nil,
+                    toolState: nil,
+                    toolInput: nil,
+                    toolOutput: nil,
+                    toolError: nil,
+                    toolCallId: nil,
+                    toolTimeStart: nil,
+                    toolTimeEnd: nil,
+                    toolSensitivity: nil
+                )]
+            ))
+
+        case .permissionModeChanged(let daemon, let mode):
+            permissionMode[daemon] = mode
+
+        case .modelSwitched(let daemon, let provider, let model):
+            currentProvider[daemon] = provider
+            currentModel[daemon] = model
+
+        case .thinkingVariantChanged(let daemon, let variant):
+            thinkingVariant[daemon] = variant
         }
     }
 
@@ -464,6 +547,29 @@ final class AppStore: ObservableObject {
     private func applySnapshot(_ snap: DaemonSnapshot) {
         if let session = snap.sessions.first {
             messages = session.messages
+            // Seed usage + todos from snapshot
+            if let sessionId = session.sessionId.isEmpty ? nil : Optional(session.sessionId) {
+                sessionUsage[sessionId] = SessionUsage(
+                    inputTokens: session.inputTokens,
+                    outputTokens: session.outputTokens,
+                    cost: session.usageCost,
+                    turns: session.turns
+                )
+                todos[sessionId] = session.todos
+            }
+        }
+        // Seed daemon-level state from snapshot
+        if let daemonId = selectedDaemonId?.nodeId {
+            if let mode = snap.permissionMode {
+                permissionMode[daemonId] = mode
+            }
+            if let model = snap.currentModel {
+                currentModel[daemonId] = model
+            }
+            if let provider = snap.currentProvider {
+                currentProvider[daemonId] = provider
+            }
+            thinkingVariant[daemonId] = snap.thinkingVariant
         }
     }
 
@@ -499,6 +605,16 @@ struct AlertItem: Identifiable, Equatable {
     let kind: String
     let title: String
     let detail: String?
+}
+
+// MARK: - Session usage
+
+/// Usage stats for a session, assembled from TurnEnded events + SessionInfo.
+struct SessionUsage: Equatable {
+    var inputTokens: UInt64
+    var outputTokens: UInt64
+    var cost: Double
+    var turns: UInt32
 }
 
 // MARK: - CoreListener Bridge

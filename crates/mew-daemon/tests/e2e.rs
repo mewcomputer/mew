@@ -847,3 +847,70 @@ async fn new_session_with_bad_cwd_returns_error() {
         _ => unreachable!("expected Error"),
     }
 }
+
+#[tokio::test]
+async fn regenerate_title_returns_title_changed() {
+    // The FakeProvider replays its script on every stream() call, so the
+    // title-generation LLM call will return the same text as the prompt
+    // response. We assert the SessionTitleChanged broadcast carries that text.
+    let script = Arc::new(|| FakeProvider::text_response("hello world"));
+    let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
+
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
+    let ready = recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
+    let session_id = match ready {
+        ServerMessage::SessionReady { session_id, .. } => session_id,
+        _ => unreachable!(),
+    };
+
+    // Send a prompt so the session has a user message.
+    send(
+        &mut ws,
+        ClientMessage::Prompt {
+            text: "tell me a joke".into(),
+            attachments: vec![],
+        },
+    )
+    .await;
+    // Drain the prompt's streaming events until MessageEnd.
+    let _ = recv_until(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::Provider {
+                event: mew_message::ProviderEventWire::MessageEnd { .. }
+            }
+        )
+    })
+    .await;
+
+    // Now request title regeneration. The FakeProvider will replay its script
+    // ("hello world") for the title-generation LLM call.
+    send(
+        &mut ws,
+        ClientMessage::RegenerateTitle {
+            session_id: session_id.clone(),
+        },
+    )
+    .await;
+
+    // Expect a SessionTitleChanged broadcast.
+    let msg = recv_one_matching(&mut ws, |m| {
+        matches!(m, ServerMessage::SessionTitleChanged { .. })
+    })
+    .await;
+    match msg {
+        ServerMessage::SessionTitleChanged { session_id: sid, title } => {
+            assert_eq!(sid, session_id);
+            assert_eq!(title, "hello world");
+        }
+        _ => unreachable!("expected SessionTitleChanged"),
+    }
+}

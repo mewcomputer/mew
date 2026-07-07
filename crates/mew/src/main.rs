@@ -2214,7 +2214,9 @@ async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()>
                                         });
                                         app.set_alert(format!("attaching to {arg}…"));
                                     } else {
-                                        app.set_alert("usage: /resume <session-id>");
+                                        // No arg → open the session picker.
+                                        client.list_sessions().await;
+                                        app.open_session_picker();
                                     }
                                 }
                                 "/yield" => {
@@ -2363,6 +2365,24 @@ fn handle_slash_result_local(app: &mut mew_tui::App, result: mew_tui::app::Slash
         SlashResult::Clear | SlashResult::Compact | SlashResult::Continue | SlashResult::Quit => {}
         SlashResult::PluginCommand { .. } => {
             app.set_alert("plugin commands not available in daemon mode");
+        }
+        SlashResult::OpenThinkingVariantPicker => {
+            app.set_alert("thinking variant switching not available in daemon mode");
+        }
+        SlashResult::OpenCommandPalette => {
+            app.open_command_palette();
+        }
+        SlashResult::OpenThemePicker => {
+            app.open_theme_picker();
+        }
+        SlashResult::OpenPersonaPicker => {
+            app.set_alert("persona switching not available in daemon mode");
+        }
+        SlashResult::OpenRewindPicker => {
+            app.set_alert("rewind not available in daemon mode");
+        }
+        SlashResult::OpenSessionPickerFromDisk => {
+            app.open_session_picker();
         }
     }
 }
@@ -3320,6 +3340,24 @@ async fn run_tui(
                                         }
                                     }
                                 }
+                                mew_tui::SlashResult::OpenThinkingVariantPicker => {
+                                    app.open_thinking_variant_picker();
+                                }
+                                mew_tui::SlashResult::OpenCommandPalette => {
+                                    app.open_command_palette();
+                                }
+                                mew_tui::SlashResult::OpenThemePicker => {
+                                    app.open_theme_picker();
+                                }
+                                mew_tui::SlashResult::OpenPersonaPicker => {
+                                    app.open_persona_picker();
+                                }
+                                mew_tui::SlashResult::OpenRewindPicker => {
+                                    app.open_rewind_picker();
+                                }
+                                mew_tui::SlashResult::OpenSessionPickerFromDisk => {
+                                    app.open_session_picker_from_disk();
+                                }
                             }
                         }
                         mew_tui::events::Action::Clear => {
@@ -3758,6 +3796,14 @@ async fn run_tui(
                                         // Deferred to main loop; ignored during drain.
                                         let _ = name;
                                         let _ = args;
+                                    }
+                                    mew_tui::SlashResult::OpenThinkingVariantPicker
+                                    | mew_tui::SlashResult::OpenCommandPalette
+                                    | mew_tui::SlashResult::OpenThemePicker
+                                    | mew_tui::SlashResult::OpenPersonaPicker
+                                    | mew_tui::SlashResult::OpenRewindPicker
+                                    | mew_tui::SlashResult::OpenSessionPickerFromDisk => {
+                                        // Deferred to main loop; ignored during drain.
                                     }
                                 }
                             }

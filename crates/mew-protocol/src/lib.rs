@@ -203,6 +203,14 @@ pub enum ClientMessage {
     /// project picker. The daemon responds with `ServerMessage::ProjectList`.
     ListProjects,
 
+    /// Regenerate the session title from the conversation history.
+    /// Useful when auto-title was disabled or the first message was a poor title source.
+    /// The daemon extracts the first user message, calls the LLM for a concise title,
+    /// persists it via `set_custom_title`, and broadcasts `SessionTitleChanged`.
+    RegenerateTitle {
+        session_id: String,
+    },
+
     /// Ping the daemon for liveness check and version negotiation.
     /// The daemon responds with `ServerMessage::Pong { version }`.
     Ping,
@@ -306,6 +314,11 @@ pub struct SessionInfo {
     /// Count of pending questions (ask_user awaiting response).
     #[serde(default)]
     pub pending_questions: u32,
+    /// First user message text (truncated), used as a display title fallback
+    /// when no AI-generated title or summary is available. Populated by the
+    /// daemon from session history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_message: Option<String>,
 }
 
 /// Wire-format usage stats for a session.
@@ -1764,6 +1777,12 @@ mod tests {
             ),
             ("ping", ClientMessage::Ping),
             ("list_projects", ClientMessage::ListProjects),
+            (
+                "regenerate_title",
+                ClientMessage::RegenerateTitle {
+                    session_id: "s1".into(),
+                },
+            ),
         ];
         for (expected, msg) in samples {
             let json = encode_json(&msg).unwrap();
@@ -1923,6 +1942,7 @@ mod tests {
             usage: None,
             pending_permissions: 0,
             pending_questions: 0,
+            first_message: None,
         };
         let decoded = round_trip(&info);
         assert_eq!(decoded.session_id, "sess_abc");
@@ -1955,6 +1975,7 @@ mod tests {
             usage: None,
             pending_permissions: 0,
             pending_questions: 0,
+            first_message: None,
         };
         let json = encode_json(&info).unwrap();
         assert!(
@@ -2012,6 +2033,7 @@ mod tests {
                 usage: None,
                 pending_permissions: 0,
                 pending_questions: 0,
+                first_message: None,
             },
             SessionInfo {
                 session_id: "sess_b".into(),
@@ -2031,6 +2053,7 @@ mod tests {
                 usage: None,
                 pending_permissions: 0,
                 pending_questions: 0,
+                first_message: None,
             },
         ];
         let m = ServerMessage::SessionList { sessions };
@@ -2151,6 +2174,19 @@ mod tests {
             ServerMessage::SessionTitleChanged { session_id, title } => {
                 assert_eq!(session_id, "sess_123");
                 assert_eq!(title, "hello world");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_regenerate_title_roundtrip() {
+        let m = ClientMessage::RegenerateTitle {
+            session_id: "sess_abc".into(),
+        };
+        match round_trip(&m) {
+            ClientMessage::RegenerateTitle { session_id } => {
+                assert_eq!(session_id, "sess_abc");
             }
             _ => panic!("wrong variant"),
         }

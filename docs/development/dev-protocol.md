@@ -37,6 +37,7 @@ Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
 | `SetThinkingVariant` | `variant: String` | Set or clear thinking variant ("off" or "none" disables) |
 | `Ping` | | Liveness check; daemon replies with `Pong` |
 | `ListProjects` | | List known project directories (for project picker UI) |
+| `RegenerateTitle` | `session_id: String` | Regenerate the session title from the first user message via LLM |
 
 ## Server → Client messages
 

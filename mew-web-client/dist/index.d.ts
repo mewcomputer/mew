@@ -84,6 +84,9 @@ export type ClientMessage = {
     session_id: string;
     pinned: boolean;
 } | {
+    type: "regenerate_title";
+    session_id: string;
+} | {
     type: "list_dir";
     session_id: string;
     path?: string;
@@ -311,6 +314,8 @@ export interface SessionInfo {
     usage?: SessionUsageWire;
     pending_permissions?: number;
     pending_questions?: number;
+    /** First user message text (truncated), used as a display title fallback. */
+    first_message?: string;
 }
 /** A session group. */
 export interface GroupInfo {
@@ -840,6 +845,9 @@ export declare class MewClient {
     assignSessionGroup(sessionId: string, groupId: string | null, position?: number): void;
     archiveSession(sessionId: string, archived: boolean): void;
     pinSession(sessionId: string, pinned: boolean): void;
+    /** Regenerate the session title from the first user message via LLM.
+     *  The daemon broadcasts `session-title-changed` when done. */
+    regenerateTitle(sessionId: string): void;
     listDir(sessionId: string, path?: string): void;
     readFilePreview(sessionId: string, path: string, maxBytes?: number): void;
     gitStatus(sessionId: string): void;

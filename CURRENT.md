@@ -1,5 +1,73 @@
 # CURRENT.md — mew Fixes + Right Rail Redesign Progress
 
+## 2026-07-06: iOS Batch B1-B6 — Core Feature Parity
+
+Implemented 6 core features for the mew iOS app in a single UniFFI regen batch:
+
+### Rust core (`crates/mew-mobile-core`)
+- **events.rs**: Added `TodoItem` record, `thinking_variants` field on `ModelSummary`, new `CoreEvent` variants (`PermissionModeChanged`, `ModelSwitched`, `ThinkingVariantChanged`), modified `TodosUpdated` to carry `todos: Vec<TodoItem>` payload.
+- **state.rs**: Added fields to `SessionInfo` (`input_tokens`, `output_tokens`, `turns`, `todos`), `DaemonSnapshot` (`permission_mode`, `current_model`, `current_provider`, `thinking_variant`), `ModelInfo` (`thinking_variants`), `SessionState` (same + `permission_mode`, `thinking_variant`). Updated `MessageEnd` handler to accumulate tokens and increment turns. Added unit tests `test_message_end_accumulates_tokens` and `test_todos_stored_from_update`.
+- **lib.rs**: Added `ConnState` fields for permission mode/model/provider/thinking variant. Explicit handlers for `PermissionModeChanged`, `ModelSwitched`, `ThinkingVariantChanged`. `SessionReady` now captures `permission_mode`/`model`/`provider` into `ConnState`. `TodosUpdated` maps protocol `Todo` → `TodoItem` and stores in `SessionState.todos`. `ModelList` construction includes `thinking_variants`. New `slash_command()` and `set_thinking_variant()` methods. Snapshot populates all new fields.
+- **Tests**: Added `b1_b6_feature_parity_tests` integration test covering slash commands, permission mode, model switch from SessionReady, usage snapshot, and thinking variant method. Fixed `m0_spike.rs` and `m1_integration.rs` for new `auto_summary_enabled` field on `MewIrohHandler`.
+- **Regen**: `just ios-core` completed successfully; all new types verified in generated Swift bindings.
+
+### Swift
+- **AppStore.swift**: New `@Published` state (`permissionMode`, `currentModel`, `currentProvider`, `thinkingVariant`, `sessionUsage`, `todos`, `activeBanner`). New `SessionUsage` struct. Event handlers for all new `CoreEvent` variants. `slashResult` appends synthetic assistant message. `alert` sets `activeBanner` for cross-session alerts. `applySnapshot` seeds all new state. New methods: `setPermissionMode`, `sendSlashCommand`, `setThinkingVariant`.
+- **ChatView.swift**: Slash command routing in `send()` (commands starting with `/` go to `sendSlashCommand`). ChatBar extended with permission mode picker (shield icon → menu), thinking variant sub-menu inside model picker, usage capsule showing `~NN% ctx · $cost · N turns`. Cross-device model switch syncs local picker state.
+- **RootView.swift**: Transient alert banner overlay at top, auto-dismiss after 5s, tap to navigate to alert's session.
+- **TodoPanelView.swift** (new): Collapsible checklist above composer via `safeAreaInset(.top)`, with status icons, dependency dimming, and progress count.
+
+### Build status
+- Rust: `cargo test -p mew-mobile-core --lib` = 19/19 pass. `cargo clippy -p mew-mobile-core -- -D warnings` = clean.
+- iOS: `just ios-core` regen successful. Xcode build fails only due to pre-existing `SwiftStreamingMarkdown`/`EquatableMacros` macro issue with Xcode 26.4 (not related to these changes). No errors from app source files.
+
+## 2026-07-06: Workspace View Improvements + Session Title Refresh
+
+Implemented the approved plan for improving the web UI session rail.
+
+### Changes
+
+**Protocol** (`crates/mew-protocol/src/lib.rs`):
+- Added `ClientMessage::RegenerateTitle { session_id: String }` — asks the daemon to regenerate a session title from the first user message via LLM.
+- Added `first_message: Option<String>` to `SessionInfo` — populated by the daemon from session history, used by the web UI as a title fallback before "Untitled".
+- Added roundtrip test `test_regenerate_title_roundtrip`.
+- Updated exhaustive tag test to include `RegenerateTitle`.
+
+**Daemon** (`crates/mew-daemon/src/lib.rs` + `session.rs`):
+- `RegenerateTitle` handler: attaches to session (loads from disk if idle), extracts first user message, calls `generate_session_title` (LLM), persists via `set_custom_title`, broadcasts `SessionTitleChanged`.
+- `SessionManager::list()` now populates `first_message` field for both active sessions (from `agent.messages`) and idle sessions (from JSONL on disk).
+- Added helper functions: `first_user_message_text()`, `first_user_message_from_disk()`, `truncate_message()` in `session.rs`.
+- E2E test `regenerate_title_returns_title_changed` in `tests/e2e.rs`.
+
+**Web client** (`mew-web-client/src/index.ts`):
+- Added `regenerate_title` to `ClientMessage` type.
+- Added `first_message?: string` to `SessionInfo` interface.
+- Added `regenerateTitle(sessionId: string)` method.
+
+**Web UI** (`mew-web-ui/src/components/session-rail.tsx`):
+- Extracted `groupByWorkspace()` pure function — groups by full cwd path, sorts folders by most-recent `last_message_at`.
+- Added collapsible folder headers with chevron icon, session count, full path on hover.
+- Added `RefreshCw` icon button to session row hover actions (calls `client.regenerateTitle()`).
+- `deriveTitle` fallback chain: summary → first_message → model name → "Untitled" (never raw session ID).
+- `SessionLabel` uses same fallback chain via `deriveTitle`.
+
+**Test infrastructure** (`mew-web-ui/`):
+- Created `vitest.config.ts` with jsdom environment + jest-dom setup, excludes e2e tests.
+- Created `vitest.setup.ts` with `@testing-library/jest-dom/vitest` import + `matchMedia` mock.
+- Added `src/__tests__/session-rail.test.ts` — 13 unit tests for `groupByWorkspace` (7) and `deriveTitle` (6).
+- Added `src/__tests__/session-rail-collapse.test.tsx` — 2 component tests for workspace view folder collapse.
+
+**Docs** (`docs/development/dev-protocol.md`):
+- Added `RegenerateTitle` to the client message table.
+
+### Verification Results
+- `cargo test -p mew-protocol`: 75 passed
+- `cargo test -p mew-daemon --test e2e`: 16 passed (including new `regenerate_title_returns_title_changed`)
+- `cargo clippy -p mew-protocol -p mew-daemon -- -D warnings`: clean
+- `pnpm --filter @mew/web-client build`: clean
+- `pnpm --filter mew-web-ui build`: clean (pre-existing virtual-chat-surface errors only)
+- `pnpm --filter mew-web-ui test`: 24 passed (9 store + 13 session-rail + 2 collapse)
+
 ## 2026-07-06: Restored Accidentally Removed Features
 
 A large batch commit (`7623b4d3` / `742f4bdc`) accidentally removed several features from the compiled surface while leaving dependent code (mew-mobile-core, iOS app, web client) still referencing them. All features have been restored from git history.

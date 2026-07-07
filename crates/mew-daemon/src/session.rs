@@ -333,6 +333,7 @@ impl SessionManager {
                 .and_then(|m| m.last_message_at)
                 .or_else(|| meta.as_ref().map(|m| m.created_at));
             let summary = meta.as_ref().and_then(|m| m.summary.clone());
+            let first_message = first_user_message_text(&agent.messages);
             infos.push(SessionInfo {
                 session_id: id.clone(),
                 state: if *session.is_running.lock().await {
@@ -355,6 +356,7 @@ impl SessionManager {
                 usage: meta.as_ref().and_then(|m| m.usage.as_ref().map(Into::into)),
                 pending_permissions: session.pending_permissions.lock().await.len() as u32,
                 pending_questions: session.pending_ask_user.lock().await.len() as u32,
+                first_message,
             });
         }
         drop(active);
@@ -405,6 +407,7 @@ impl SessionManager {
                             usage: meta.usage.as_ref().map(Into::into),
                             pending_permissions: 0,
                             pending_questions: 0,
+                            first_message: first_user_message_from_disk(&path).await,
                         });
                     }
                     _ => continue,
@@ -415,22 +418,15 @@ impl SessionManager {
         infos
     }
 
-    /// Broadcast a title change for a session. If the session is active,
-    /// sends to all attached clients. If only on disk, notifies via
-    /// disk meta (frontend will pick it up on next list_sessions).
+    /// Broadcast a title change for a session to all active sessions' clients.
+    /// This ensures the session rail (which may be viewing a different session)
+    /// picks up the title change in real-time.
     pub async fn broadcast_title(&self, session_id: &str, title: String) {
-        let active = self.active.lock().await;
-        if let Some(session) = active.get(session_id) {
-            session
-                .broadcast(ServerMessage::SessionTitleChanged {
-                    session_id: session_id.to_string(),
-                    title,
-                })
-                .await;
-        }
-        // If the session is idle/on-disk only, the frontend will get the
-        // title when it calls list_sessions (we don't return titles in
-        // SessionInfo yet, so this is best-effort).
+        self.broadcast_all(ServerMessage::SessionTitleChanged {
+            session_id: session_id.to_string(),
+            title,
+        })
+        .await;
     }
 
     /// Broadcast a session activity change to all clients of that session
@@ -499,5 +495,66 @@ impl SessionManager {
             Ok(Some(meta)) => meta.cwd.map(PathBuf::from),
             _ => None,
         }
+    }
+}
+
+/// Extract the first user message text from an agent's message list.
+/// Returns `None` if there are no user messages or the first user message
+/// has no text content. Truncates to 60 chars (matching `derive_session_title`).
+fn first_user_message_text(messages: &Mutex<Vec<mew_message::Message>>) -> Option<String> {
+    let msgs = messages.try_lock().ok()?;
+    for msg in msgs.iter() {
+        if msg.role == mew_message::Role::User {
+            for part in &msg.parts {
+                if let mew_message::Part::Text(tp) = part {
+                    if !tp.synthetic && !tp.text.trim().is_empty() {
+                        return Some(truncate_message(&tp.text));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Read the first user message text from a session's JSONL file on disk.
+/// Only reads the first few lines to find it — efficient for large sessions.
+async fn first_user_message_from_disk(session_dir: &std::path::Path) -> Option<String> {
+    let jsonl_path = session_dir.join("session.jsonl");
+    let data = tokio::fs::read_to_string(&jsonl_path).await.ok()?;
+    for line in data.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(msg) = serde_json::from_str::<mew_message::Message>(line) {
+            if msg.role == mew_message::Role::User {
+                for part in &msg.parts {
+                    if let mew_message::Part::Text(tp) = part {
+                        if !tp.synthetic && !tp.text.trim().is_empty() {
+                            return Some(truncate_message(&tp.text));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Truncate to 60 chars, collapsing whitespace and stripping newlines.
+fn truncate_message(text: &str) -> String {
+    let cleaned: String = text
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(60)
+        .collect();
+    if cleaned.chars().count() == 60 && text.len() > 60 {
+        format!("{cleaned}…")
+    } else {
+        cleaned
     }
 }

@@ -70,6 +70,19 @@ pub enum SlashResult {
     SetThinkingVariant(String),
     /// Switch the TUI theme (used by `/theme <name>` or `/theme` to list).
     SetTheme(String),
+    /// Open the thinking variant picker (used by `/thinking` with no arg).
+    OpenThinkingVariantPicker,
+    /// Open the command palette (used by `/help` and `Ctrl+P`).
+    OpenCommandPalette,
+    /// Open the theme picker (used by `/theme` with no arg).
+    OpenThemePicker,
+    /// Open the persona picker (used by `/persona` with no arg).
+    OpenPersonaPicker,
+    /// Open the rewind picker (used by `/rewind` with no arg).
+    OpenRewindPicker,
+    /// Open the session picker from disk (standalone mode, used by
+    /// `/sessions` and `/resume` with no arg).
+    OpenSessionPickerFromDisk,
 }
 
 /// The application's main state.
@@ -737,8 +750,9 @@ impl App {
     }
 
     /// Open the command palette with a list of commands.
+    /// Includes all built-in slash commands plus the original palette items.
     pub fn open_command_palette(&mut self) {
-        let items = vec![
+        let mut items = vec![
             PickerItem {
                 id: "switch-model".into(),
                 label: "Switch Model".into(),
@@ -765,6 +779,23 @@ impl App {
                 description: "Exit mew".into(),
             },
         ];
+        // Add all built-in slash commands as palette items. Selecting one
+        // dispatches Action::SlashCommand, which re-enters handle_slash.
+        for cmd in Self::builtin_slash_commands() {
+            // Skip commands already represented by the hardcoded items above
+            // (clear, quit, model, thinking) and /help (the palette IS help).
+            if matches!(
+                cmd.name.as_str(),
+                "/clear" | "/quit" | "/model" | "/thinking" | "/help"
+            ) {
+                continue;
+            }
+            items.push(PickerItem {
+                id: cmd.name.clone(),
+                label: cmd.name,
+                description: cmd.description,
+            });
+        }
         self.mode = Mode::CommandPalette;
         self.picker = Some(PickerState {
             kind: "command".into(),
@@ -973,6 +1004,159 @@ impl App {
         self.mode = Mode::CommandPalette;
         self.picker = Some(PickerState {
             kind: "thinking_variant".into(),
+            items,
+            filter: String::new(),
+            selected: 0,
+            cursor: 0,
+            scroll: 0,
+            visible_items: PICKER_VISIBLE_ITEMS,
+        });
+    }
+
+    /// Open a theme picker. Lists all available themes, marking the active one.
+    /// Selecting a theme dispatches `/theme <name>` via SlashCommand.
+    pub fn open_theme_picker(&mut self) {
+        let names = crate::theme::Theme::list_available();
+        let current = &self.theme.name;
+        let items: Vec<PickerItem> = names
+            .iter()
+            .map(|n| PickerItem {
+                id: n.clone(),
+                label: if n == current {
+                    format!("{n} (active)")
+                } else {
+                    n.clone()
+                },
+                description: format!("Switch to {} theme", n),
+            })
+            .collect();
+        let pre_selected = names.iter().position(|n| n == current).unwrap_or(0);
+        self.mode = Mode::CommandPalette;
+        self.picker = Some(PickerState {
+            kind: "theme".into(),
+            items,
+            filter: String::new(),
+            selected: pre_selected,
+            cursor: 0,
+            scroll: 0,
+            visible_items: PICKER_VISIBLE_ITEMS,
+        });
+    }
+
+    /// Open a persona picker. Lists all available personas with descriptions,
+    /// marking the active one. Selecting dispatches `/persona <name>` via
+    /// SlashCommand, which goes through the confirm modal flow.
+    pub fn open_persona_picker(&mut self) {
+        let items: Vec<PickerItem> = self
+            .personas
+            .iter()
+            .map(|(name, desc)| {
+                let active = self.active_persona.as_deref() == Some(name.as_str());
+                PickerItem {
+                    id: name.clone(),
+                    label: if active {
+                        format!("● {} (active)", name)
+                    } else {
+                        name.clone()
+                    },
+                    description: desc.clone(),
+                }
+            })
+            .collect();
+        self.mode = Mode::CommandPalette;
+        self.picker = Some(PickerState {
+            kind: "persona".into(),
+            items,
+            filter: String::new(),
+            selected: 0,
+            cursor: 0,
+            scroll: 0,
+            visible_items: PICKER_VISIBLE_ITEMS,
+        });
+    }
+
+    /// Open a rewind picker. Lists recent messages with role and snippet.
+    /// Selecting a message dispatches `/rewind <n>` via SlashCommand.
+    pub fn open_rewind_picker(&mut self) {
+        let total = self.messages.len();
+        let start = total.saturating_sub(15);
+        let items: Vec<PickerItem> = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i >= start)
+            .map(|(i, msg)| {
+                let role = match msg.role {
+                    mew_message::Role::User => "user",
+                    mew_message::Role::Assistant => "asst",
+                };
+                let snippet: String = msg
+                    .parts
+                    .iter()
+                    .find_map(|p| match p {
+                        mew_message::Part::Text(tp) => Some(tp.text.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or("(no text)")
+                    .chars()
+                    .take(60)
+                    .collect();
+                PickerItem {
+                    id: i.to_string(),
+                    label: format!("[{}] {}: {}", i, role, snippet),
+                    description: format!("Keep messages 0..={}", i),
+                }
+            })
+            .collect();
+        self.mode = Mode::CommandPalette;
+        self.picker = Some(PickerState {
+            kind: "rewind".into(),
+            items,
+            filter: String::new(),
+            selected: 0,
+            cursor: 0,
+            scroll: 0,
+            visible_items: PICKER_VISIBLE_ITEMS,
+        });
+    }
+
+    /// Open a session picker that reads from disk (standalone mode).
+    /// Reuses kind: "session" so the existing AttachSession dispatch works.
+    pub fn open_session_picker_from_disk(&mut self) {
+        use std::time::UNIX_EPOCH;
+        let dir = mew_session::session_dir();
+        let mut items: Vec<PickerItem> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut folders: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .filter(|e| e.path().join("session.jsonl").exists())
+                .collect();
+            folders.sort_by_key(|e| {
+                e.path()
+                    .join("session.jsonl")
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(UNIX_EPOCH)
+            });
+            for entry in folders.iter().rev().take(20) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let size = entry
+                    .path()
+                    .join("session.jsonl")
+                    .metadata()
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                items.push(PickerItem {
+                    id: name.clone(),
+                    label: name,
+                    description: format!("{} bytes", size),
+                });
+            }
+        }
+        self.mode = Mode::CommandPalette;
+        self.picker = Some(PickerState {
+            kind: "session".into(),
             items,
             filter: String::new(),
             selected: 0,
@@ -2076,10 +2260,6 @@ impl App {
                 description: "show the web UI URL for the current session".into(),
             },
             SlashCommand {
-                name: "/resume".into(),
-                description: "resume a session (e.g. /resume <id>)".into(),
-            },
-            SlashCommand {
                 name: "/yield".into(),
                 description: "yield control to other clients".into(),
             },
@@ -2118,7 +2298,7 @@ impl App {
             "/compact" => SlashResult::Compact,
             "/todo" => SlashResult::Todo,
             "/cost" => SlashResult::Message(self.build_cost_report()),
-            "/help" => SlashResult::Message(self.build_help()),
+            "/help" => SlashResult::OpenCommandPalette,
             "/model" => {
                 if let Some(id) = arg {
                     SlashResult::SwitchModel(id.to_string())
@@ -2130,32 +2310,14 @@ impl App {
                 if let Some(variant) = arg {
                     SlashResult::SetThinkingVariant(variant.trim().to_string())
                 } else {
-                    SlashResult::Message(
-                        "usage: /thinking <variant> — e.g. /thinking high, /thinking max, /thinking off".into(),
-                    )
+                    SlashResult::OpenThinkingVariantPicker
                 }
             }
             "/theme" => {
                 if let Some(name) = arg {
                     SlashResult::SetTheme(name.trim().to_string())
                 } else {
-                    // No arg → list available themes.
-                    let names = crate::theme::Theme::list_available();
-                    let current = &self.theme.name;
-                    let lines: Vec<String> = names
-                        .iter()
-                        .map(|n| {
-                            if n == current {
-                                format!("  * {n} (active)")
-                            } else {
-                                format!("    {n}")
-                            }
-                        })
-                        .collect();
-                    SlashResult::Message(format!(
-                        "available themes:\n{}\nusage: /theme <name>",
-                        lines.join("\n")
-                    ))
+                    SlashResult::OpenThemePicker
                 }
             }
             "/persona" => {
@@ -2172,20 +2334,7 @@ impl App {
                         SlashResult::PersonaSwitchConfirm(name.to_string())
                     }
                 } else {
-                    let mut out = String::from("available personas:\n");
-                    if self.personas.is_empty() {
-                        out.push_str("  (none — create .mew/personas/<name>/PERSONA.md)");
-                    } else {
-                        for (name, desc) in &self.personas {
-                            let active = if self.active_persona.as_deref() == Some(name.as_str()) {
-                                " *"
-                            } else {
-                                ""
-                            };
-                            out.push_str(&format!("  {} — {}{}\n", name, desc, active));
-                        }
-                    }
-                    SlashResult::Message(out)
+                    SlashResult::OpenPersonaPicker
                 }
             }
             "/permissions" => {
@@ -2203,7 +2352,7 @@ impl App {
                     SlashResult::PermissionModeMenu
                 }
             }
-            "/sessions" => SlashResult::Message(self.build_sessions_list()),
+            "/sessions" => SlashResult::OpenSessionPickerFromDisk,
             "/autotitle" | "/autosummary" => {
                 SlashResult::Message("this command is only available in daemon mode".into())
             }
@@ -2212,7 +2361,7 @@ impl App {
                 if let Some(id) = arg {
                     SlashResult::ResumeSession(id.to_string())
                 } else {
-                    SlashResult::Message("usage: /resume <session-id>".into())
+                    SlashResult::OpenSessionPickerFromDisk
                 }
             }
             "/rewind" => {
@@ -2224,7 +2373,7 @@ impl App {
                         ),
                     }
                 } else {
-                    SlashResult::Message(self.build_rewind_list())
+                    SlashResult::OpenRewindPicker
                 }
             }
             _ => {
@@ -2263,88 +2412,6 @@ impl App {
             }
         }
         report
-    }
-
-    fn build_help(&self) -> String {
-        let mut out = String::from("commands:\n");
-        for cmd in self.all_slash_commands() {
-            out.push_str(&format!("  {:12}  {}\n", cmd.name, cmd.description));
-        }
-        out.trim_end().to_string()
-    }
-
-    fn build_rewind_list(&self) -> String {
-        if self.messages.is_empty() {
-            return "no messages to rewind.".into();
-        }
-        let mut out = String::from("messages (keep 0..n with /rewind <n>):\n");
-        let total = self.messages.len();
-        let start = total.saturating_sub(15);
-        for (i, msg) in self.messages.iter().enumerate() {
-            if i < start {
-                continue;
-            }
-            let role = match msg.role {
-                mew_message::Role::User => "user",
-                mew_message::Role::Assistant => "asst",
-            };
-            let snippet = msg
-                .parts
-                .iter()
-                .find_map(|p| match p {
-                    mew_message::Part::Text(tp) => Some(tp.text.as_str()),
-                    _ => None,
-                })
-                .unwrap_or("(no text)")
-                .chars()
-                .take(60)
-                .collect::<String>();
-            out.push_str(&format!("  [{}] {} {:<60}\n", i, role, snippet));
-        }
-        out.push_str(&format!("\ntotal: {} messages", total));
-        out
-    }
-
-    fn build_sessions_list(&self) -> String {
-        use std::time::UNIX_EPOCH;
-        let dir = mew_session::session_dir();
-        let mut out = String::from("sessions:\n");
-        match std::fs::read_dir(&dir) {
-            Ok(entries) => {
-                // Top-level sessions are folders containing `session.jsonl`.
-                // Subagent sessions are nested under `<parent>/subagents/<id>/`
-                // and intentionally hidden from the top-level list.
-                let mut folders: Vec<_> = entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_dir())
-                    .filter(|e| e.path().join("session.jsonl").exists())
-                    .collect();
-                folders.sort_by_key(|e| {
-                    e.path()
-                        .join("session.jsonl")
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .unwrap_or(UNIX_EPOCH)
-                });
-                for entry in folders.iter().rev().take(20) {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    let size = entry
-                        .path()
-                        .join("session.jsonl")
-                        .metadata()
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    out.push_str(&format!("  {}  ({} bytes)\n", name, size));
-                }
-                if folders.is_empty() {
-                    out.push_str("  (no sessions found)\n");
-                }
-            }
-            Err(_) => {
-                out.push_str("  (unable to read sessions directory)\n");
-            }
-        }
-        out.trim_end().to_string()
     }
 
     /// Filter slash commands matching the current input.
@@ -3398,29 +3465,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_help_includes_dynamic_commands() {
-        let mut app = App::new();
-        app.add_dynamic_slash_commands(vec![SlashCommand {
-            name: "/buddy".into(),
-            description: "pet companion".into(),
-        }]);
-        let help = app.build_help();
-        assert!(help.contains("/buddy"), "help should list /buddy: {help}");
-        assert!(
-            help.contains("pet companion"),
-            "help should include description"
-        );
-    }
-
-    #[test]
-    fn test_build_help_no_dynamic_commands_works() {
-        let app = App::new();
-        let help = app.build_help();
-        assert!(help.contains("/help"), "help should list built-in commands");
-        assert!(help.contains("/clear"), "help should list /clear");
-    }
-
-    #[test]
     fn test_dynamic_slash_commands_uses_all_slash_for_autocomplete() {
         let mut app = App::new();
         app.add_dynamic_slash_commands(vec![
@@ -3969,26 +4013,26 @@ mod tests {
         ];
         app.active_persona = Some("researcher".into());
         let result = app.handle_slash("/persona");
-        match result {
-            crate::app::SlashResult::Message(msg) => {
-                assert!(msg.contains("researcher"));
-                assert!(msg.contains("executor"));
-                assert!(msg.contains("read-only"));
-            }
-            _ => panic!("expected Message"),
-        }
+        assert!(matches!(result, SlashResult::OpenPersonaPicker));
+        // Verify the picker is populated.
+        app.open_persona_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, "persona");
+        assert_eq!(picker.items.len(), 2);
+        assert!(picker.items[0].label.contains("researcher"));
+        assert!(picker.items[0].label.contains("active"));
     }
 
     #[test]
     fn test_persona_slash_command_empty_personas() {
-        let app = App::new();
+        let mut app = App::new();
         let result = app.handle_slash("/persona");
-        match result {
-            crate::app::SlashResult::Message(msg) => {
-                assert!(msg.contains("none"));
-            }
-            _ => panic!("expected Message"),
-        }
+        assert!(matches!(result, SlashResult::OpenPersonaPicker));
+        // Empty personas → empty picker (not an error message).
+        app.open_persona_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, "persona");
+        assert!(picker.items.is_empty());
     }
 
     #[test]
@@ -4011,7 +4055,7 @@ mod tests {
     #[test]
     fn test_rewind_slash_command_no_arg_lists() {
         let mut app = App::new();
-        // Add a message so the list isn't empty.
+        // Add a message so the picker isn't empty.
         let msg = mew_message::Message {
             id: ulid::Ulid::new(),
             session_id: ulid::Ulid::new(),
@@ -4033,23 +4077,25 @@ mod tests {
         };
         app.messages.push(msg);
         let result = app.handle_slash("/rewind");
-        match result {
-            SlashResult::Message(msg) => {
-                assert!(msg.contains("hello world"));
-                assert!(msg.contains("total: 1"));
-            }
-            _ => panic!("expected Message"),
-        }
+        assert!(matches!(result, SlashResult::OpenRewindPicker));
+        // Verify the picker is populated.
+        app.open_rewind_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, "rewind");
+        assert_eq!(picker.items.len(), 1);
+        assert!(picker.items[0].label.contains("hello world"));
     }
 
     #[test]
     fn test_rewind_slash_empty_messages() {
-        let app = App::new();
+        let mut app = App::new();
         let result = app.handle_slash("/rewind");
-        match result {
-            SlashResult::Message(msg) => assert!(msg.contains("no messages")),
-            _ => panic!("expected Message"),
-        }
+        assert!(matches!(result, SlashResult::OpenRewindPicker));
+        // Empty messages → empty picker.
+        app.open_rewind_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, "rewind");
+        assert!(picker.items.is_empty());
     }
 
     #[test]
@@ -4261,5 +4307,145 @@ mod tests {
         let matches = app.history_search_matches();
         assert!(matches.is_empty());
         assert_eq!(app.history_search_current_match(), None);
+    }
+
+    #[test]
+    fn test_help_opens_command_palette() {
+        let app = App::new();
+        let result = app.handle_slash("/help");
+        assert!(matches!(result, SlashResult::OpenCommandPalette));
+    }
+
+    #[test]
+    fn test_thinking_no_arg_opens_picker() {
+        let app = App::new();
+        let result = app.handle_slash("/thinking");
+        assert!(matches!(result, SlashResult::OpenThinkingVariantPicker));
+    }
+
+    #[test]
+    fn test_theme_no_arg_opens_picker() {
+        let app = App::new();
+        let result = app.handle_slash("/theme");
+        assert!(matches!(result, SlashResult::OpenThemePicker));
+    }
+
+    #[test]
+    fn test_theme_picker_lists_themes() {
+        let mut app = App::new();
+        let available = crate::theme::Theme::list_available();
+        app.open_theme_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, "theme");
+        assert_eq!(picker.items.len(), available.len());
+    }
+
+    #[test]
+    fn test_persona_no_arg_opens_picker() {
+        let mut app = App::new();
+        app.personas = vec![("test".into(), "test persona".into())];
+        let result = app.handle_slash("/persona");
+        assert!(matches!(result, SlashResult::OpenPersonaPicker));
+    }
+
+    #[test]
+    fn test_persona_picker_lists_personas() {
+        let mut app = App::new();
+        app.personas = vec![
+            ("alpha".into(), "first".into()),
+            ("beta".into(), "second".into()),
+        ];
+        app.open_persona_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, "persona");
+        assert_eq!(picker.items.len(), 2);
+    }
+
+    #[test]
+    fn test_rewind_no_arg_opens_picker() {
+        let app = App::new();
+        let result = app.handle_slash("/rewind");
+        assert!(matches!(result, SlashResult::OpenRewindPicker));
+    }
+
+    #[test]
+    fn test_rewind_picker_lists_messages() {
+        let mut app = App::new();
+        for i in 0..3 {
+            let msg = mew_message::Message {
+                id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+                role: if i % 2 == 0 {
+                    mew_message::Role::User
+                } else {
+                    mew_message::Role::Assistant
+                },
+                parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                    base: mew_message::PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: format!("msg {}", i),
+                    synthetic: false,
+                })],
+                time: mew_message::Time {
+                    created: 0,
+                    completed: None,
+                },
+                assistant: None,
+            };
+            app.messages.push(msg);
+        }
+        app.open_rewind_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, "rewind");
+        assert_eq!(picker.items.len(), 3);
+    }
+
+    #[test]
+    fn test_sessions_no_arg_opens_picker() {
+        let app = App::new();
+        let result = app.handle_slash("/sessions");
+        assert!(matches!(result, SlashResult::OpenSessionPickerFromDisk));
+    }
+
+    #[test]
+    fn test_resume_no_arg_opens_picker() {
+        let app = App::new();
+        let result = app.handle_slash("/resume");
+        assert!(matches!(result, SlashResult::OpenSessionPickerFromDisk));
+    }
+
+    #[test]
+    fn test_command_palette_includes_all_commands() {
+        let mut app = App::new();
+        app.open_command_palette();
+        let picker = app.picker.as_ref().unwrap();
+        // The palette has the 5 original items (switch-model, thinking-variant,
+        // settings, clear, quit) plus all unique builtin slash commands except
+        // /clear, /quit, /model, /thinking, /help (already represented or
+        // is the palette itself). Note: /q is a handle_slash alias, not in
+        // builtin_slash_commands().
+        let builtin = App::builtin_slash_commands();
+        let unique_names: std::collections::HashSet<&str> =
+            builtin.iter().map(|c| c.name.as_str()).collect();
+        let excluded = 5; // /clear, /quit, /model, /thinking, /help
+        let expected = 5 + unique_names.len() - excluded;
+        assert_eq!(
+            picker.items.len(),
+            expected,
+            "palette has {} items, expected {} (5 original + {} slash commands)",
+            picker.items.len(),
+            expected,
+            unique_names.len() - excluded
+        );
+    }
+
+    #[test]
+    fn test_cost_still_dumps_text() {
+        let app = App::new();
+        let result = app.handle_slash("/cost");
+        assert!(matches!(result, SlashResult::Message(_)));
     }
 }

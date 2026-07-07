@@ -109,7 +109,27 @@ pub enum CoreEvent {
     },
 
     /// Todo list updated for a session.
-    TodosUpdated { daemon: String, session_id: String },
+    TodosUpdated {
+        daemon: String,
+        session_id: String,
+        todos: Vec<TodoItem>,
+    },
+
+    /// Permission mode changed (via cross-device or local action).
+    PermissionModeChanged { daemon: String, mode: String },
+
+    /// Model was switched (via cross-device or local action).
+    ModelSwitched {
+        daemon: String,
+        provider: String,
+        model: String,
+    },
+
+    /// Thinking variant changed.
+    ThinkingVariantChanged {
+        daemon: String,
+        variant: Option<String>,
+    },
 
     /// Available models from the daemon.
     ModelList {
@@ -190,6 +210,17 @@ pub struct ModelSummary {
     pub model: String,
     pub description: Option<String>,
     pub context_window: Option<i64>,
+    pub thinking_variants: Vec<String>,
+}
+
+/// A todo item from the agent's todo list.
+/// Uses u64 for id/depends_on to match the protocol's `usize` without narrowing.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct TodoItem {
+    pub id: u64,
+    pub content: String,
+    pub status: String,
+    pub depends_on: Vec<u64>,
 }
 
 /// Callback trait implemented by the Swift layer.

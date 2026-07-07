@@ -284,6 +284,11 @@ export class MewClient {
     pinSession(sessionId, pinned) {
         this.send({ type: "pin_session", session_id: sessionId, pinned });
     }
+    /** Regenerate the session title from the first user message via LLM.
+     *  The daemon broadcasts `session-title-changed` when done. */
+    regenerateTitle(sessionId) {
+        this.send({ type: "regenerate_title", session_id: sessionId });
+    }
     // -- Phase 3: file service --
     listDir(sessionId, path) {
         this.send({ type: "list_dir", session_id: sessionId, path });

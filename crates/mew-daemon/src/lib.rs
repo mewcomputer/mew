@@ -559,6 +559,54 @@ where
                 // Broadcast to all clients.
                 session_manager.broadcast_title(&session_id, title).await;
             }
+            ClientMessage::RegenerateTitle { session_id } => {
+                // Attach (loads from disk if idle) so we can access the
+                // full message history for title generation.
+                match session_manager.attach(&session_id).await {
+                    Ok(session) => {
+                        let agent = session.agent.lock().await.clone();
+                        // Extract the first user message text.
+                        let first_user_text = {
+                            let msgs = agent.messages.lock().await;
+                            msgs.iter()
+                                .find(|m| m.role == mew_message::Role::User)
+                                .and_then(|m| {
+                                    m.parts.iter().find_map(|p| match p {
+                                        mew_message::Part::Text(tp)
+                                            if !tp.synthetic && !tp.text.trim().is_empty() =>
+                                        {
+                                            Some(tp.text.clone())
+                                        }
+                                        _ => None,
+                                    })
+                                })
+                        };
+                        let Some(prompt_text) = first_user_text else {
+                            reply(ServerMessage::Error {
+                                message: "session has no user messages to generate a title from"
+                                    .into(),
+                            });
+                            continue;
+                        };
+                        // Generate title via LLM (falls back to text truncation).
+                        let title = generate_session_title(&agent, &prompt_text).await;
+                        // Persist the title to disk.
+                        let dir = mew_session::session_dir();
+                        if let Ok(Some(mut meta)) =
+                            mew_session::Meta::read(&dir, &session_id).await
+                        {
+                            let _ = meta.set_custom_title(&dir, title.clone()).await;
+                        }
+                        // Broadcast to all clients.
+                        session_manager.broadcast_title(&session_id, title).await;
+                    }
+                    Err(_) => {
+                        reply(ServerMessage::Error {
+                            message: "session not found".into(),
+                        });
+                    }
+                }
+            }
             ClientMessage::SetAutoTitle { enabled } => {
                 auto_title_enabled = enabled;
                 tracing::info!(auto_title = enabled, "auto-title setting changed");

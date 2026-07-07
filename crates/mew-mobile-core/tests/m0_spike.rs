@@ -112,6 +112,7 @@ async fn mobile_core_ping_pong_round_trip() -> Result<()> {
         session_manager: server.session_manager.clone(),
         groups_store: server.groups_store.clone(),
         thinking_setter: None,
+        auto_summary_enabled: server.auto_summary_enabled.clone(),
     };
 
     // Start the daemon endpoint.

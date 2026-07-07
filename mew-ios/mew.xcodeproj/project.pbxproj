@@ -12,26 +12,46 @@
 		0DD408C829CFAE400C464C3A /* SessionRailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB7E2A7290847C1C578F63BE /* SessionRailView.swift */; };
 		12C0132F6E3073C7F51E5F03 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFA34EA67DA0D120E7A78DE1 /* QRScannerView.swift */; };
 		16BC594BD342DCA17509E2CF /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85285983639DD6D24B4F80F5 /* RootView.swift */; };
+		1C78D7B130B8DEBBBAED8443 /* MewFontModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B73529E452736EB47B7E83 /* MewFontModifier.swift */; };
 		1CDA1CE0CA9098BF1D1C0E1F /* MewMobileCore in Frameworks */ = {isa = PBXBuildFile; productRef = 9CC84733CE8778E2900946DD /* MewMobileCore */; };
+		1ECD909EFDFC6A663DCF0B51 /* FormatHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDC069E4C5076818999AC23D /* FormatHelper.swift */; };
 		2204447BBB5C4DE24837C742 /* SwiftStreamingMarkdown in Frameworks */ = {isa = PBXBuildFile; productRef = E21A7B5599C9DBB6EBFDB014 /* SwiftStreamingMarkdown */; };
 		25FE20CE2DBB5A85D0F1E250 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E97D7FB0A96CF8B8EC3BF945 /* Security.framework */; };
 		2B76B56664AE33DBC20E089A /* MewApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A1ADE8FFE4EDE33968D7384 /* MewApp.swift */; };
+		2E1CF27476A96286983A1997 /* MewApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A1ADE8FFE4EDE33968D7384 /* MewApp.swift */; };
+		30F3E4E8667773758FDF1426 /* SessionRailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB7E2A7290847C1C578F63BE /* SessionRailView.swift */; };
 		323BD99403811B825B87A700 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3655A4A573B1B7AC91FE0EFC /* Network.framework */; };
+		36E2687C83C9A15519FBB164 /* AppStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 545CECE3392D12E734D9A133 /* AppStore.swift */; };
 		3ECB5C0A4A6549A019628638 /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD1D5DA20DD1C3DBF5CE8EFB /* KeychainHelper.swift */; };
+		41E46AF0BE5C2433FF568197 /* TodoPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23A7B897CE17092834C10641 /* TodoPanelView.swift */; };
+		42F4BD23A9EEF6038F6DEDEB /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F9000A5647A1E452404A0D2 /* SettingsView.swift */; };
 		4F205612DED4C630D54F90DB /* Banga-VF.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 060BFA4C32C363DFB0A5DC2A /* Banga-VF.ttf */; };
+		5723B408ACF67DC4C8E46319 /* MessageItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CF93C654F76C6CC2E3B47D8 /* MessageItemView.swift */; };
 		5ED5BEC718C0C0867E591172 /* MewFonts.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF9524DB093AB7A0BC6A9D6B /* MewFonts.swift */; };
 		605F2CA9067A1B53FD5FD6BD /* garamontio.ttf in Resources */ = {isa = PBXBuildFile; fileRef = BB081877C5E2930723CD11C3 /* garamontio.ttf */; };
 		632665EBBF51BAEDC04AF1FA /* MewMarkdownTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84E0E7829B606C9933390B40 /* MewMarkdownTheme.swift */; };
+		64FF009410027CFE96073711 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */; };
 		7011CE2081771E324DCC4842 /* IoskeleyMono-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = F45D29FEF81E04698380B32C /* IoskeleyMono-Regular.ttf */; };
 		719B31FEF1EEF27D41E99D9B /* JunicodeVF-Roman.ttf in Resources */ = {isa = PBXBuildFile; fileRef = D9597B83C0928C3307E2A1AD /* JunicodeVF-Roman.ttf */; };
+		78626617983F31D8378EF494 /* MewMarkdownTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84E0E7829B606C9933390B40 /* MewMarkdownTheme.swift */; };
 		78F2165038F6E7A5F4B02918 /* IoskeleyMono-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 9D763AF8F21AA73C5478D393 /* IoskeleyMono-Medium.ttf */; };
 		7A81747C6C88584F8F89DA29 /* MewFontModifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B73529E452736EB47B7E83 /* MewFontModifier.swift */; };
+		86B19C3008AE5063DA527B2E /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 94F9FE6D3B529B719505CEA9 /* Foundation.framework */; };
+		87F139F86422F9E2C2BB1077 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFA34EA67DA0D120E7A78DE1 /* QRScannerView.swift */; };
+		8C656AA687DF734C8FC3B3FC /* AppStoreEventHandlingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FD7A599A73C712D62E6DF76 /* AppStoreEventHandlingTests.swift */; };
+		9D4F7BBD61F807B2EF078A4B /* TodoPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23A7B897CE17092834C10641 /* TodoPanelView.swift */; };
+		9D5BA18F06248ABAE6792CEC /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85285983639DD6D24B4F80F5 /* RootView.swift */; };
 		AEC055023E5D11E0B561E338 /* MessageItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CF93C654F76C6CC2E3B47D8 /* MessageItemView.swift */; };
+		B25B0163985FCF517BEB359E /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7648D55347F186781EF8A218 /* Theme.swift */; };
+		B307091C2FCB65E67531BAEF /* MewFonts.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF9524DB093AB7A0BC6A9D6B /* MewFonts.swift */; };
 		B967FFC6CC20B82D58AAF3AA /* OFLGoudyStMTT-Italic.ttf in Resources */ = {isa = PBXBuildFile; fileRef = E2329F2821DA57FBDAD6ECEB /* OFLGoudyStMTT-Italic.ttf */; };
 		BA99902191A1CE43C8C4BA11 /* OFLGoudyStMTT.ttf in Resources */ = {isa = PBXBuildFile; fileRef = B9709224898AB1D8CB8163E4 /* OFLGoudyStMTT.ttf */; };
 		C88D34820C3694AA611C616D /* FormatHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDC069E4C5076818999AC23D /* FormatHelper.swift */; };
 		CBFBCB51A0168B395BBF1213 /* garamontio_it.ttf in Resources */ = {isa = PBXBuildFile; fileRef = F14316FC19A01B05976B5676 /* garamontio_it.ttf */; };
+		CF7A311BE95F8E5D561A24A6 /* MockMobileCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DF104663A4B9CEC1F06E91E /* MockMobileCore.swift */; };
 		D3216BADB70A3EE813135568 /* DaemonListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 679C2551108B9BA54C017BBF /* DaemonListView.swift */; };
+		D7A06EE1B80E7200F99DF01E /* DaemonListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 679C2551108B9BA54C017BBF /* DaemonListView.swift */; };
+		E36840126D8EB50B8F3063E8 /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD1D5DA20DD1C3DBF5CE8EFB /* KeychainHelper.swift */; };
 		EF14AAB5D468BFCF4DF9B3A8 /* MiSansLatinVF.ttf in Resources */ = {isa = PBXBuildFile; fileRef = DCC1C2EB43A0A853DFF523E8 /* MiSansLatinVF.ttf */; };
 		F872BADD66AFD025999E2C17 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C1DAF87DF928ED741CDF5D0D /* SystemConfiguration.framework */; };
 		F92E765C3BD2C9CFF5239DDE /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7648D55347F186781EF8A218 /* Theme.swift */; };
@@ -39,21 +59,36 @@
 		FDEC179FCD1D0B1F5CA253E1 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		41FB08715FEAF43F7AB94BAF /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 5AF0B7DFE4AF7AEFA4420552 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D6005B4DBEE30C3AF9E91906;
+			remoteInfo = mew;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		060BFA4C32C363DFB0A5DC2A /* Banga-VF.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Banga-VF.ttf"; sourceTree = "<group>"; };
 		0A1ADE8FFE4EDE33968D7384 /* MewApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewApp.swift; sourceTree = "<group>"; };
+		1DF104663A4B9CEC1F06E91E /* MockMobileCore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MockMobileCore.swift; sourceTree = "<group>"; };
 		1F9000A5647A1E452404A0D2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		217C4CC15C885E0DACCF1987 /* mew.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = mew.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		23A7B897CE17092834C10641 /* TodoPanelView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TodoPanelView.swift; sourceTree = "<group>"; };
 		3655A4A573B1B7AC91FE0EFC /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
+		3FD7A599A73C712D62E6DF76 /* AppStoreEventHandlingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppStoreEventHandlingTests.swift; sourceTree = "<group>"; };
 		545CECE3392D12E734D9A133 /* AppStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStore.swift; sourceTree = "<group>"; };
 		5710FFECFB944E351E490A12 /* JunicodeVF-Italic.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "JunicodeVF-Italic.ttf"; sourceTree = "<group>"; };
 		57B73529E452736EB47B7E83 /* MewFontModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewFontModifier.swift; sourceTree = "<group>"; };
 		5CF93C654F76C6CC2E3B47D8 /* MessageItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageItemView.swift; sourceTree = "<group>"; };
 		679C2551108B9BA54C017BBF /* DaemonListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonListView.swift; sourceTree = "<group>"; };
+		6C5E5531BB092DE7A0A3929D /* mewTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = mewTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		761A142B716D6FADBAEDEE67 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		7648D55347F186781EF8A218 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		84E0E7829B606C9933390B40 /* MewMarkdownTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MewMarkdownTheme.swift; sourceTree = "<group>"; };
 		85285983639DD6D24B4F80F5 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		94F9FE6D3B529B719505CEA9 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		9D763AF8F21AA73C5478D393 /* IoskeleyMono-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "IoskeleyMono-Medium.ttf"; sourceTree = "<group>"; };
 		B674A9B93C0BAF747838F26B /* MewMobileCore */ = {isa = PBXFileReference; lastKnownFileType = folder; path = MewMobileCore; sourceTree = SOURCE_ROOT; };
 		B88D5B96B52F24E2D3C0DD85 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
@@ -86,13 +121,30 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		DAB3DCB3573E0D0AD9E40CE2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				86B19C3008AE5063DA527B2E /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		12208ECCA4E7233F372198C2 /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				94F9FE6D3B529B719505CEA9 /* Foundation.framework */,
+			);
+			name = iOS;
+			sourceTree = "<group>";
+		};
 		386AEC32238D276083DE2577 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				217C4CC15C885E0DACCF1987 /* mew.app */,
+				6C5E5531BB092DE7A0A3929D /* mewTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -104,6 +156,7 @@
 				CB9796668F9E978EF8C596D7 /* Packages */,
 				820A65A6EBD3CAA199601F88 /* Frameworks */,
 				386AEC32238D276083DE2577 /* Products */,
+				9323B1FC9B98AD3DECCFABB0 /* mewTests */,
 			);
 			sourceTree = "<group>";
 		};
@@ -113,8 +166,18 @@
 				3655A4A573B1B7AC91FE0EFC /* Network.framework */,
 				E97D7FB0A96CF8B8EC3BF945 /* Security.framework */,
 				C1DAF87DF928ED741CDF5D0D /* SystemConfiguration.framework */,
+				12208ECCA4E7233F372198C2 /* iOS */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		9323B1FC9B98AD3DECCFABB0 /* mewTests */ = {
+			isa = PBXGroup;
+			children = (
+				1DF104663A4B9CEC1F06E91E /* MockMobileCore.swift */,
+				3FD7A599A73C712D62E6DF76 /* AppStoreEventHandlingTests.swift */,
+			);
+			path = mewTests;
 			sourceTree = "<group>";
 		};
 		CB9796668F9E978EF8C596D7 /* Packages */ = {
@@ -145,6 +208,7 @@
 				1F9000A5647A1E452404A0D2 /* SettingsView.swift */,
 				7648D55347F186781EF8A218 /* Theme.swift */,
 				FB769C03A8D2DF7E375E9D64 /* Fonts */,
+				23A7B897CE17092834C10641 /* TodoPanelView.swift */,
 			);
 			path = mew;
 			sourceTree = "<group>";
@@ -169,6 +233,24 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		48722990DA7B3125E28F4389 /* mewTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F859E5EF3ED25C5E5D783542 /* Build configuration list for PBXNativeTarget "mewTests" */;
+			buildPhases = (
+				2126AD78A1EC635B6EE4BC73 /* Sources */,
+				DAB3DCB3573E0D0AD9E40CE2 /* Frameworks */,
+				F0D613EAD41AF9FEBFE6F3A7 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				6028FD403B4621CAE4500898 /* PBXTargetDependency */,
+			);
+			name = mewTests;
+			productName = mewTests;
+			productReference = 6C5E5531BB092DE7A0A3929D /* mewTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		D6005B4DBEE30C3AF9E91906 /* mew */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 93721ACA9CD8FEE43FCD17B0 /* Build configuration list for PBXNativeTarget "mew" */;
@@ -218,6 +300,7 @@
 			projectRoot = "";
 			targets = (
 				D6005B4DBEE30C3AF9E91906 /* mew */,
+				48722990DA7B3125E28F4389 /* mewTests */,
 			);
 		};
 /* End PBXProject section */
@@ -240,9 +323,41 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F0D613EAD41AF9FEBFE6F3A7 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		2126AD78A1EC635B6EE4BC73 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				36E2687C83C9A15519FBB164 /* AppStore.swift in Sources */,
+				64FF009410027CFE96073711 /* ChatView.swift in Sources */,
+				D7A06EE1B80E7200F99DF01E /* DaemonListView.swift in Sources */,
+				1ECD909EFDFC6A663DCF0B51 /* FormatHelper.swift in Sources */,
+				E36840126D8EB50B8F3063E8 /* KeychainHelper.swift in Sources */,
+				5723B408ACF67DC4C8E46319 /* MessageItemView.swift in Sources */,
+				2E1CF27476A96286983A1997 /* MewApp.swift in Sources */,
+				1C78D7B130B8DEBBBAED8443 /* MewFontModifier.swift in Sources */,
+				B307091C2FCB65E67531BAEF /* MewFonts.swift in Sources */,
+				78626617983F31D8378EF494 /* MewMarkdownTheme.swift in Sources */,
+				87F139F86422F9E2C2BB1077 /* QRScannerView.swift in Sources */,
+				9D5BA18F06248ABAE6792CEC /* RootView.swift in Sources */,
+				30F3E4E8667773758FDF1426 /* SessionRailView.swift in Sources */,
+				42F4BD23A9EEF6038F6DEDEB /* SettingsView.swift in Sources */,
+				B25B0163985FCF517BEB359E /* Theme.swift in Sources */,
+				CF7A311BE95F8E5D561A24A6 /* MockMobileCore.swift in Sources */,
+				8C656AA687DF734C8FC3B3FC /* AppStoreEventHandlingTests.swift in Sources */,
+				9D4F7BBD61F807B2EF078A4B /* TodoPanelView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		BE36F5DD36AA3E9E18B71899 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -262,10 +377,20 @@
 				0DD408C829CFAE400C464C3A /* SessionRailView.swift in Sources */,
 				F9D40665D15C1FD5BE9B29A6 /* SettingsView.swift in Sources */,
 				F92E765C3BD2C9CFF5239DDE /* Theme.swift in Sources */,
+				41E46AF0BE5C2433FF568197 /* TodoPanelView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		6028FD403B4621CAE4500898 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = mew;
+			target = D6005B4DBEE30C3AF9E91906 /* mew */;
+			targetProxy = 41FB08715FEAF43F7AB94BAF /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		58F9AC68E9ED228B17EDD820 /* Release */ = {
@@ -283,6 +408,53 @@
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
+		};
+		5F4552634D2D188AE327DD9C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = ai.mew.mewTests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/mew.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/mew";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		6822B4E80157458F42F1E0F2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_OBJC_WEAK = NO;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = ai.mew.mewTests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/mew.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/mew";
+			};
+			name = Debug;
 		};
 		7166FC57685F0ED026E83C0E /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -443,6 +615,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};
+		F859E5EF3ED25C5E5D783542 /* Build configuration list for PBXNativeTarget "mewTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5F4552634D2D188AE327DD9C /* Release */,
+				6822B4E80157458F42F1E0F2 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -455,11 +636,12 @@
 /* Begin XCRemoteSwiftPackageReference section */
 		0CCAE6E10B00E144DF565422 /* XCRemoteSwiftPackageReference "SwiftStreamingMarkdown" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/microsoft/SwiftStreamingMarkdown";
+			repositoryURL = "https://github.com/espeon/SwiftStreamingMarkdown.git";
 			requirement = {
-				kind = revision;
-				revision = 947e958edf0d5b4352ac9383ec4de7a9bf8f13b9;
+				branch = fix/equatable-pin;
+				kind = branch;
 			};
+		};
 		};
 /* End XCRemoteSwiftPackageReference section */
 

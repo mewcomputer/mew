@@ -26,7 +26,7 @@ pub mod registry;
 pub mod state;
 
 pub use codec::decode_server_message_lenient;
-pub use events::{CoreEvent, CoreListener, DaemonStatus, Decision};
+pub use events::{CoreEvent, CoreListener, DaemonStatus, Decision, TodoItem};
 pub use registry::{DaemonEntry, DaemonId, DaemonRegistry};
 pub use state::{DaemonSnapshot, SessionState};
 
@@ -157,6 +157,14 @@ struct ConnState {
     session_title: Mutex<Option<String>>,
     /// Event listener, read per-event so set_listener() after connect works.
     listener: Mutex<Option<Arc<dyn CoreListener>>>,
+    /// Current permission mode (lowercase id, e.g. "standard", "dangerous").
+    permission_mode: Mutex<Option<String>>,
+    /// Current model name.
+    current_model: Mutex<Option<String>>,
+    /// Current provider name.
+    current_provider: Mutex<Option<String>>,
+    /// Current thinking variant (None = thinking disabled).
+    thinking_variant: Mutex<Option<String>>,
 }
 
 impl ConnState {
@@ -168,6 +176,10 @@ impl ConnState {
             models: Mutex::new(Vec::new()),
             session_title: Mutex::new(None),
             listener: Mutex::new(None),
+            permission_mode: Mutex::new(None),
+            current_model: Mutex::new(None),
+            current_provider: Mutex::new(None),
+            thinking_variant: Mutex::new(None),
         }
     }
 }
@@ -492,6 +504,22 @@ impl MobileCore {
         }
     }
 
+    /// Send a slash command to the daemon. Response comes as SlashResult event.
+    pub fn slash_command(&self, id: DaemonId, command: String) {
+        let conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(&id.node_id) {
+            let _ = conn.tx.send(ClientMessage::SlashCommand { command });
+        }
+    }
+
+    /// Set the thinking variant for the active session.
+    pub fn set_thinking_variant(&self, id: DaemonId, variant: String) {
+        let conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(&id.node_id) {
+            let _ = conn.tx.send(ClientMessage::SetThinkingVariant { variant });
+        }
+    }
+
     /// Rename a session.
     pub fn rename_session(&self, id: DaemonId, session_id: String, title: String) {
         let conns = self.connections.lock().unwrap();
@@ -552,11 +580,19 @@ impl MobileCore {
         let models = conn.state.models.lock().unwrap().clone();
         let daemon_version = conn.state.daemon_version.lock().unwrap().clone();
         let title = conn.state.session_title.lock().unwrap().clone();
+        let permission_mode = conn.state.permission_mode.lock().unwrap().clone();
+        let current_model = conn.state.current_model.lock().unwrap().clone();
+        let current_provider = conn.state.current_provider.lock().unwrap().clone();
+        let thinking_variant = conn.state.thinking_variant.lock().unwrap().clone();
 
         let mut snap = DaemonSnapshot {
             attached_session: attached.clone(),
             models,
             daemon_version,
+            permission_mode,
+            current_model,
+            current_provider,
+            thinking_variant,
             ..Default::default()
         };
         if let Some(ss) = session_state.as_ref() {
@@ -568,6 +604,10 @@ impl MobileCore {
                 usage_cost: ss.usage_cost,
                 pending_permissions: ss.pending_permissions,
                 pending_questions: ss.pending_questions,
+                input_tokens: ss.input_tokens,
+                output_tokens: ss.output_tokens,
+                turns: ss.turns,
+                todos: ss.todos.clone(),
             });
         }
         Some(snap)
@@ -813,12 +853,41 @@ fn translate_message(
             });
         }
 
-        ServerMessage::SessionReady { session_id, .. } => {
-            *conn_state.session_state.lock().unwrap() = Some(SessionState::new(session_id.clone()));
+        ServerMessage::SessionReady {
+            session_id,
+            model,
+            provider,
+            permission_mode,
+        } => {
+            *conn_state.session_state.lock().unwrap() =
+                Some(SessionState::new(session_id.clone()));
+            // Capture current model/provider/permission_mode from SessionReady.
+            *conn_state.current_model.lock().unwrap() = model.clone();
+            *conn_state.current_provider.lock().unwrap() = provider.clone();
+            *conn_state.permission_mode.lock().unwrap() = permission_mode.clone();
+            if let Some(pm) = &permission_mode {
+                if let Some(ss) = conn_state.session_state.lock().unwrap().as_mut() {
+                    ss.permission_mode = Some(pm.clone());
+                }
+            }
             events.push(CoreEvent::SessionReloaded {
-                daemon: d,
+                daemon: d.clone(),
                 session_id: session_id.clone(),
             });
+            // Emit mode/model events so Swift seeds UI immediately.
+            if let Some(mode) = permission_mode {
+                events.push(CoreEvent::PermissionModeChanged {
+                    daemon: d.clone(),
+                    mode: mode.clone(),
+                });
+            }
+            if let (Some(p), Some(m)) = (provider, model) {
+                events.push(CoreEvent::ModelSwitched {
+                    daemon: d.clone(),
+                    provider: p.clone(),
+                    model: m.clone(),
+                });
+            }
         }
 
         ServerMessage::SessionList { sessions } => {
@@ -1217,6 +1286,11 @@ fn translate_message(
                     model: m.model.clone(),
                     description: m.description.clone(),
                     context_window: m.context_window,
+                    thinking_variants: m
+                        .thinking_variants
+                        .iter()
+                        .map(|v| v.name.clone())
+                        .collect(),
                 })
                 .collect();
             // Store models in shared state for snapshot.
@@ -1227,6 +1301,11 @@ fn translate_message(
                     provider: m.provider.clone(),
                     model: m.model.clone(),
                     context_window: m.context_window,
+                    thinking_variants: m
+                        .thinking_variants
+                        .iter()
+                        .map(|v| v.name.clone())
+                        .collect(),
                 })
                 .collect();
             events.push(CoreEvent::ModelList {
@@ -1264,7 +1343,7 @@ fn translate_message(
             let _ = session_id; // available if needed for multi-session later
         }
 
-        ServerMessage::TodosUpdated { .. } => {
+        ServerMessage::TodosUpdated { todos } => {
             let session_id = conn_state
                 .session_state
                 .lock()
@@ -1272,9 +1351,27 @@ fn translate_message(
                 .as_ref()
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default();
+
+            // Map protocol Todo → mobile-core TodoItem (usize → u64).
+            let todo_items: Vec<events::TodoItem> = todos
+                .iter()
+                .map(|t| events::TodoItem {
+                    id: t.id as u64,
+                    content: t.content.clone(),
+                    status: t.status.clone(),
+                    depends_on: t.depends_on.iter().map(|&d| d as u64).collect(),
+                })
+                .collect();
+
+            // Store in SessionState.
+            if let Some(ss) = conn_state.session_state.lock().unwrap().as_mut() {
+                ss.todos = todo_items.clone();
+            }
+
             events.push(CoreEvent::TodosUpdated {
                 daemon: d,
                 session_id,
+                todos: todo_items,
             });
         }
 
@@ -1318,6 +1415,38 @@ fn translate_message(
                 request_id: *request_id,
                 tool_name: format!("subagent:{tool_name}"),
                 input: input_str,
+            });
+        }
+
+        ServerMessage::PermissionModeChanged { mode } => {
+            *conn_state.permission_mode.lock().unwrap() = Some(mode.clone());
+            if let Some(ss) = conn_state.session_state.lock().unwrap().as_mut() {
+                ss.permission_mode = Some(mode.clone());
+            }
+            events.push(CoreEvent::PermissionModeChanged {
+                daemon: d,
+                mode: mode.clone(),
+            });
+        }
+
+        ServerMessage::ModelSwitched { provider, model } => {
+            *conn_state.current_model.lock().unwrap() = Some(model.clone());
+            *conn_state.current_provider.lock().unwrap() = Some(provider.clone());
+            events.push(CoreEvent::ModelSwitched {
+                daemon: d,
+                provider: provider.clone(),
+                model: model.clone(),
+            });
+        }
+
+        ServerMessage::ThinkingVariantChanged { variant } => {
+            *conn_state.thinking_variant.lock().unwrap() = variant.clone();
+            if let Some(ss) = conn_state.session_state.lock().unwrap().as_mut() {
+                ss.thinking_variant = variant.clone();
+            }
+            events.push(CoreEvent::ThinkingVariantChanged {
+                daemon: d,
+                variant: variant.clone(),
             });
         }
 

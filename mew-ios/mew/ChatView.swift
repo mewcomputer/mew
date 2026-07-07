@@ -59,6 +59,12 @@ struct ChatView: View {
                 composer
             }
         }
+        // Todo panel above the content when todos exist for this session.
+        .safeAreaInset(edge: .top) {
+            if let todos = store.todos[sessionId], !todos.isEmpty {
+                TodoPanelView(todos: todos)
+            }
+        }
         .animation(.easeInOut(duration: 0.25), value: showsRetryBanner)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
@@ -127,6 +133,16 @@ struct ChatView: View {
         // Mirror the first available model into the picker label.
         .onChange(of: store.availableModels) { models in
             if currentModel == nil { currentModel = models.first }
+        }
+        // Sync local model state when a cross-device model switch arrives.
+        .onChange(of: store.currentModel) { currentModels in
+            if let daemonId = store.selectedDaemonId?.nodeId,
+               let modelName = currentModels[daemonId] {
+                // Find the matching ModelSummary from available models.
+                if let m = store.availableModels.first(where: { $0.model == modelName }) {
+                    currentModel = m
+                }
+            }
         }
         // Dismiss loading spinner as soon as messages arrive
         .onChange(of: store.visibleMessages) { _ in
@@ -301,6 +317,7 @@ struct ChatView: View {
 
     @ViewBuilder
     private var composer: some View {
+        let daemonId = store.selectedDaemonId?.nodeId ?? ""
         ChatBar(
             text: $inputText,
             focused: $composerFocused,
@@ -314,7 +331,12 @@ struct ChatView: View {
                 currentModel = model
             },
             onRefreshModels: { store.listModels() },
-            onAttachments: { fileBrowserPath = initialBrowserPath() }
+            onAttachments: { fileBrowserPath = initialBrowserPath() },
+            permissionMode: store.permissionMode[daemonId],
+            onPickPermissionMode: { mode in store.setPermissionMode(mode) },
+            thinkingVariant: store.thinkingVariant[daemonId] ?? nil,
+            onPickThinkingVariant: { variant in store.setThinkingVariant(variant) },
+            usage: store.sessionUsage[sessionId]
         )
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
@@ -364,9 +386,12 @@ struct ChatView: View {
     private func send() {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !store.isStreaming else { return }
-        // Slash commands and ordinary text are both passed straight through;
-        // the daemon decides how to handle them.
-        store.sendPrompt(trimmed)
+        if trimmed.hasPrefix("/") {
+            // Slash commands go to the daemon's slash handler, not the LLM.
+            store.sendSlashCommand(trimmed)
+        } else {
+            store.sendPrompt(trimmed)
+        }
         inputText = ""
     }
 
@@ -558,6 +583,14 @@ struct ChatBar: View {
     let onPickModel: (ModelSummary) -> Void
     let onRefreshModels: () -> Void
     let onAttachments: () -> Void
+    // Permission mode
+    let permissionMode: String?
+    let onPickPermissionMode: (String) -> Void
+    // Thinking variant
+    let thinkingVariant: String?
+    let onPickThinkingVariant: (String) -> Void
+    // Usage
+    let usage: SessionUsage?
 
     @FocusState private var localFocus: Bool
 
@@ -571,10 +604,14 @@ struct ChatBar: View {
                 .padding(.top, 14)
                 .padding(.bottom, 10)
 
-            // Row 2: + | modelName | flex | submit
+            // Row 2: + | modelName | permMode | usage | flex | submit
             HStack(spacing: 10) {
                 attachmentsButton
                 modelPickerChip
+                permissionModeChip
+                if let usage, usage.turns > 0 {
+                    usageCapsule(usage)
+                }
                 Spacer(minLength: 8)
                 sendOrCancelButton
             }
@@ -622,43 +659,141 @@ struct ChatBar: View {
     @ViewBuilder
     private var modelPickerChip: some View {
         Menu {
-            Section("Models") {
-                ForEach(availableModels, id: \.id) { m in
-                    Button {
-                        onPickModel(m)
-                    } label: {
-                        HStack {
-                            Text(modelLabel(m))
-                            if model?.id == m.id {
-                                Image(systemName: "checkmark")
-                            }
+            modelPickerSections
+        } label: {
+            modelPickerLabel
+        }
+    }
+
+    @ViewBuilder
+    private var modelPickerLabel: some View {
+        Text(model?.model ?? "Model")
+            .font(.callout)
+            .lineLimit(1)
+            .padding(.horizontal, 14)
+            .frame(height: 36)
+            .background(
+                Capsule().fill(.clear).glassEffect(
+                    .regular,
+                    in: Capsule()
+                )
+            )
+    }
+
+    @ViewBuilder
+    private var modelPickerSections: some View {
+        Section("Models") {
+            ForEach(availableModels, id: \.id) { m in
+                modelRow(m)
+            }
+            if availableModels.isEmpty {
+                Text("No models loaded").foregroundStyle(.secondary)
+            }
+        }
+        if let model, !model.thinkingVariants.isEmpty {
+            thinkingVariantSection(model.thinkingVariants)
+        }
+        Section {
+            Button {
+                onRefreshModels()
+            } label: {
+                Label("Refresh models", systemImage: "arrow.clockwise")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func modelRow(_ m: ModelSummary) -> some View {
+        Button {
+            onPickModel(m)
+        } label: {
+            HStack {
+                Text(modelLabel(m))
+                if model?.id == m.id {
+                    Image(systemName: "checkmark")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func thinkingVariantSection(_ variants: [String]) -> some View {
+        Section("Thinking") {
+            ForEach(variants, id: \.self) { variant in
+                Button {
+                    onPickThinkingVariant(variant)
+                } label: {
+                    HStack {
+                        Text(variant)
+                        if thinkingVariant == variant {
+                            Image(systemName: "checkmark")
                         }
                     }
                 }
-                if availableModels.isEmpty {
-                    Text("No models loaded").foregroundStyle(.secondary)
+            }
+            Button {
+                onPickThinkingVariant("none")
+            } label: {
+                HStack {
+                    Text("None")
+                    if thinkingVariant == nil || thinkingVariant == "none" {
+                        Image(systemName: "checkmark")
+                    }
                 }
             }
-            Section {
+        }
+    }
+
+    @ViewBuilder
+    private var permissionModeChip: some View {
+        let modes = ["standard", "permissive", "auto", "auto_plus", "dangerous"]
+        let labels = ["Standard", "Permissive", "Auto", "Auto+", "Dangerous!"]
+        Menu {
+            ForEach(Array(modes.enumerated()), id: \.offset) { idx, mode in
                 Button {
-                    onRefreshModels()
+                    onPickPermissionMode(mode)
                 } label: {
-                    Label("Refresh models", systemImage: "arrow.clockwise")
+                    HStack {
+                        Text(labels[idx])
+                        if permissionMode == mode {
+                            Image(systemName: "checkmark")
+                        }
+                    }
                 }
             }
         } label: {
-            Text(model?.model ?? "Model")
-                .font(.callout)
-                .lineLimit(1)
-                .padding(.horizontal, 14)
-                .frame(height: 36)
+            Image(systemName: "shield")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .frame(width: 36, height: 36)
                 .background(
-                    Capsule().fill(.clear).glassEffect(
-                        .regular,
-                        in: Capsule()
-                    )
+                    Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
                 )
         }
+        .accessibilityLabel("Permission mode")
+    }
+
+    @ViewBuilder
+    private func usageCapsule(_ usage: SessionUsage) -> some View {
+        HStack(spacing: 4) {
+            if let model, let ctx = model.contextWindow, ctx > 0, usage.inputTokens > 0 {
+                let pct = min(100, Int(Double(usage.inputTokens) / Double(ctx) * 100))
+                Text("~\(pct)% ctx")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Text(String(format: "$%.4f", usage.cost))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("\(usage.turns) turn\(usage.turns == 1 ? "" : "s")")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 36)
+        .background(
+            Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
+        )
     }
 
     @ViewBuilder

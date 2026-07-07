@@ -15,6 +15,10 @@ pub struct DaemonSnapshot {
     pub pending_ask_user: Vec<PendingAskUser>,
     pub models: Vec<ModelInfo>,
     pub daemon_version: Option<String>,
+    pub permission_mode: Option<String>,
+    pub current_model: Option<String>,
+    pub current_provider: Option<String>,
+    pub thinking_variant: Option<String>,
 }
 
 /// A session in the snapshot.
@@ -27,6 +31,10 @@ pub struct SessionInfo {
     pub usage_cost: f64,
     pub pending_permissions: u32,
     pub pending_questions: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub turns: u32,
+    pub todos: Vec<crate::events::TodoItem>,
 }
 
 /// A chat message in the snapshot.
@@ -90,6 +98,7 @@ pub struct ModelInfo {
     pub provider: String,
     pub model: String,
     pub context_window: Option<i64>,
+    pub thinking_variants: Vec<String>,
 }
 
 /// Per-session state tracker. Assembles parts from provider events.
@@ -105,6 +114,12 @@ pub struct SessionState {
     pub streaming_text: String,
     /// Dedup: the last prompt text we sent, to drop the echoed UserMessage.
     pub last_sent_prompt: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub turns: u32,
+    pub todos: Vec<crate::events::TodoItem>,
+    pub permission_mode: Option<String>,
+    pub thinking_variant: Option<String>,
 }
 
 impl SessionState {
@@ -119,6 +134,12 @@ impl SessionState {
             streaming_part_id: None,
             streaming_text: String::new(),
             last_sent_prompt: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            turns: 0,
+            todos: Vec::new(),
+            permission_mode: None,
+            thinking_variant: None,
         }
     }
 
@@ -230,9 +251,12 @@ impl SessionState {
                 }
                 true
             }
-            ProviderEventWire::MessageEnd { cost, .. } => {
+            ProviderEventWire::MessageEnd { cost, usage, .. } => {
                 self.running = false;
                 self.usage_cost += cost;
+                self.input_tokens += usage.input as u64;
+                self.output_tokens += usage.output as u64;
+                self.turns += 1;
                 self.streaming_part_id = None;
                 self.streaming_text.clear();
                 true
@@ -344,5 +368,75 @@ mod tests {
             cost: 0.0042,
         });
         assert_eq!(state.usage_cost, 0.0042);
+    }
+
+    #[test]
+    fn test_message_end_accumulates_tokens() {
+        let mut state = SessionState::new("sess1".into());
+        assert_eq!(state.input_tokens, 0);
+        assert_eq!(state.output_tokens, 0);
+        assert_eq!(state.turns, 0);
+
+        // First turn: 100 input, 50 output tokens.
+        state.apply_provider_event(&mew_message::ProviderEventWire::MessageEnd {
+            finish: mew_message::Finish::Stop,
+            usage: mew_message::Tokens {
+                input: 100,
+                output: 50,
+                ..Default::default()
+            },
+            cost: 0.001,
+        });
+        assert_eq!(state.input_tokens, 100);
+        assert_eq!(state.output_tokens, 50);
+        assert_eq!(state.turns, 1);
+
+        // Second turn: 200 input, 75 output tokens — should accumulate.
+        state.apply_provider_event(&mew_message::ProviderEventWire::MessageEnd {
+            finish: mew_message::Finish::Stop,
+            usage: mew_message::Tokens {
+                input: 200,
+                output: 75,
+                ..Default::default()
+            },
+            cost: 0.002,
+        });
+        assert_eq!(state.input_tokens, 300);
+        assert_eq!(state.output_tokens, 125);
+        assert_eq!(state.turns, 2);
+    }
+
+    #[test]
+    fn test_todos_stored_from_update() {
+        let mut state = SessionState::new("sess1".into());
+        assert!(state.todos.is_empty());
+
+        let todos = vec![
+            crate::events::TodoItem {
+                id: 1,
+                content: "First task".into(),
+                status: "done".into(),
+                depends_on: vec![],
+            },
+            crate::events::TodoItem {
+                id: 2,
+                content: "Second task".into(),
+                status: "in_progress".into(),
+                depends_on: vec![1],
+            },
+            crate::events::TodoItem {
+                id: 3,
+                content: "Third task".into(),
+                status: "pending".into(),
+                depends_on: vec![1, 2],
+            },
+        ];
+
+        state.todos = todos.clone();
+        assert_eq!(state.todos.len(), 3);
+        assert_eq!(state.todos[0].content, "First task");
+        assert_eq!(state.todos[0].status, "done");
+        assert_eq!(state.todos[1].depends_on, vec![1]);
+        assert_eq!(state.todos[2].depends_on, vec![1, 2]);
     }
 }

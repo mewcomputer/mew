@@ -43,13 +43,15 @@ import {
   Check,
   FolderInput,
   ArrowUpDown,
+  RefreshCw,
+  ChevronRight,
 } from "lucide-react";
 
 interface SessionRailProps {
   client: MewClient | null;
 }
 
-type ViewMode = "timeline" | "workspace" | "grouped";
+export type ViewMode = "timeline" | "workspace" | "grouped";
 
 export function SessionRail({ client }: SessionRailProps) {
   const sessions = useSessionStore((s) => s.availableSessions);
@@ -64,6 +66,7 @@ export function SessionRail({ client }: SessionRailProps) {
   const [view, setView] = useState<ViewMode>("timeline");
   const [showArchived, setShowArchived] = useState(false);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (client && connectionState === "connected") {
@@ -137,48 +140,10 @@ export function SessionRail({ client }: SessionRailProps) {
     (s) => s.session_id !== currentSessionId && s.state === "idle" && s.model && !s.archived,
   );
 
-  type GroupedSection = { label: string; items: SessionInfo[]; groupId?: string };
-
-  const grouped = useMemo<GroupedSection[]>(() => {
-    if (view === "workspace") {
-      const map = new Map<string, SessionInfo[]>();
-      for (const s of sorted) {
-        const key = deriveWorkspaceName(s.cwd);
-        const list = map.get(key) ?? [];
-        list.push(s);
-        map.set(key, list);
-      }
-      return Array.from(map.entries()).map(([label, items]) => ({ label, items }));
-    }
-    if (view === "grouped") {
-      // Preserve group order from the store; ungrouped sessions land last.
-      const map = new Map<string, { items: SessionInfo[]; groupId: string }>();
-      const ungrouped: SessionInfo[] = [];
-      for (const s of sorted) {
-        if (s.group_id) {
-          const group = groups.find((g) => g.id === s.group_id);
-          const key = group?.id ?? s.group_id;
-          const entry = map.get(key);
-          if (entry) {
-            entry.items.push(s);
-          } else {
-            map.set(key, { items: [s], groupId: key });
-          }
-        } else {
-          ungrouped.push(s);
-        }
-      }
-      const result: GroupedSection[] = Array.from(map.entries()).map(
-        ([, { items, groupId }]) => {
-          const g = groups.find((x) => x.id === groupId);
-          return { label: g?.name ?? "Unknown", items, groupId };
-        },
-      );
-      if (ungrouped.length > 0) result.push({ label: "Ungrouped", items: ungrouped });
-      return result;
-    }
-    return [{ label: "All Sessions", items: sorted }];
-  }, [sorted, view, groups]);
+  const grouped = useMemo<GroupedSection[]>(
+    () => groupSessions(view, sorted, groups),
+    [sorted, view, groups],
+  );
 
   return (
     <Sidebar side="left" variant="floating" collapsible="icon">
@@ -239,21 +204,68 @@ export function SessionRail({ client }: SessionRailProps) {
             </div>
           </SidebarGroup>
         )}
-        {grouped.map((section) => (
+        {grouped.map((section) => {
+          const folderKey = section.cwd ?? section.label;
+          const isCollapsed = collapsedFolders.has(folderKey);
+          const toggleCollapse = () =>
+            setCollapsedFolders((prev) => {
+              const next = new Set(prev);
+              if (next.has(folderKey)) next.delete(folderKey);
+              else next.add(folderKey);
+              return next;
+            });
+          return (
           <SidebarGroup key={section.groupId ?? section.label}>
             {view !== "timeline" && (
               <SidebarGroupLabel className="flex items-center gap-1">
-                {view === "workspace" && <Folder className="h-3 w-3" />}
+                {view === "workspace" && (
+                  <button
+                    onClick={toggleCollapse}
+                    className="flex items-center gap-1"
+                    title={section.cwd ?? undefined}
+                  >
+                    <ChevronRight
+                      className={cn(
+                        "h-3 w-3 transition-transform",
+                        !isCollapsed && "rotate-90",
+                      )}
+                    />
+                    <Folder className="h-3 w-3" />
+                  </button>
+                )}
+                {view === "workspace" && !isCollapsed && (
+                  <span
+                    className="cursor-pointer select-none"
+                    onClick={toggleCollapse}
+                  >
+                    {section.label}
+                    <span className="text-muted-foreground">({section.items.length})</span>
+                  </span>
+                )}
+                {view === "workspace" && isCollapsed && (
+                  <span
+                    className="cursor-pointer select-none text-muted-foreground"
+                    onClick={toggleCollapse}
+                  >
+                    {section.label}
+                    <span className="text-muted-foreground">({section.items.length})</span>
+                  </span>
+                )}
                 {view === "grouped" && section.groupId && (
                   <GroupColorSwatch groupId={section.groupId} groups={groups} />
                 )}
-                {section.label}
-                <span className="text-muted-foreground">({section.items.length})</span>
+                {view === "grouped" && (
+                  <>
+                    {section.label}
+                    <span className="text-muted-foreground">({section.items.length})</span>
+                  </>
+                )}
                 {view === "grouped" && section.groupId && (
                   <GroupActions groupId={section.groupId} groups={groups} client={client} />
                 )}
               </SidebarGroupLabel>
             )}
+            {(!isCollapsed || view !== "workspace") && (
             <SidebarGroupContent>
               {loading && sorted.length === 0 && (
                 <div className="px-3 py-4 text-center text-xs text-muted-foreground">Loading sessions…</div>
@@ -271,6 +283,7 @@ export function SessionRail({ client }: SessionRailProps) {
                       onClick={() => handleAttach(s.session_id)}
                       onArchive={(archived) => handleArchive(s.session_id, archived)}
                       onPin={(pinned) => handlePin(s.session_id, pinned)}
+                      onRegenerateTitle={() => client?.regenerateTitle(s.session_id)}
                       groups={groups}
                       client={client}
                     />
@@ -278,8 +291,10 @@ export function SessionRail({ client }: SessionRailProps) {
                 ))}
               </SidebarMenu>
             </SidebarGroupContent>
+            )}
           </SidebarGroup>
-        ))}
+          );
+        })}
       </SidebarContent>
       <ProjectPickerModal
         open={showProjectPicker}
@@ -291,11 +306,13 @@ export function SessionRail({ client }: SessionRailProps) {
   );
 }
 
-function SessionRow({ session: s, isActive, title, onClick, onArchive, onPin, groups, client }: {
+function SessionRow({ session: s, isActive, title, onClick, onArchive, onPin, onRegenerateTitle, groups, client }: {
   session: SessionInfo; isActive: boolean; title: string;
   onClick: () => void; onArchive: (a: boolean) => void; onPin: (p: boolean) => void;
+  onRegenerateTitle: () => void;
   groups: GroupInfo[]; client: MewClient | null;
 }) {
+  const [regenerating, setRegenerating] = useState(false);
   return (
     <div className="group relative">
       <SidebarMenuButton isActive={isActive} onClick={onClick} className="flex-col items-start gap-0.5 pb-10">
@@ -331,6 +348,9 @@ function SessionRow({ session: s, isActive, title, onClick, onArchive, onPin, gr
         )}
       </SidebarMenuButton>
       <div className="absolute right-1 top-1 hidden gap-0.5 group-hover:flex">
+        <Button variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => { e.stopPropagation(); onRegenerateTitle(); setRegenerating(true); setTimeout(() => setRegenerating(false), 3000); }} title="Regenerate title (uses AI)" disabled={regenerating}>
+          <RefreshCw className={cn("h-3 w-3", regenerating && "animate-spin")} />
+        </Button>
         <Button variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => { e.stopPropagation(); onPin(!s.pinned); }} title={s.pinned ? "Unpin" : "Pin"}>
           <Pin className={cn("h-3 w-3", s.pinned && "fill-yellow-500 text-yellow-500")} />
         </Button>
@@ -567,20 +587,105 @@ function ViewSwitcher({ view, onChange }: { view: ViewMode; onChange: (v: ViewMo
 function SessionLabel() {
   const sessionId = useSessionStore((s) => s.sessionId);
   const titles = useSessionStore((s) => s.sessionTitles);
-  const label = sessionId ? (titles.get(sessionId) ?? sessionId.slice(0, 10) + "…") : "no session";
+  const sessions = useSessionStore((s) => s.availableSessions);
+  const label = sessionId
+    ? (titles.get(sessionId) ?? (() => {
+        const s = sessions.find((x) => x.session_id === sessionId);
+        return s ? deriveTitle(s) : "Untitled";
+      })())
+    : "no session";
   return <span className="truncate text-[10px] text-muted-foreground">{label}</span>;
 }
 
-function deriveTitle(s: SessionInfo): string {
+export function deriveTitle(s: SessionInfo): string {
   if (s.summary) return s.summary;
+  if (s.first_message) return s.first_message;
   if (s.model) return s.model.split("/").pop() ?? s.model;
-  return s.session_id.slice(0, 8);
+  return "Untitled";
 }
 
 function deriveWorkspaceName(cwd?: string): string {
   if (!cwd) return "~";
   const parts = cwd.replace(/\/+$/, "").split("/");
   return parts[parts.length - 1] ?? cwd;
+}
+
+/** A section of sessions grouped by workspace, group, or flat list. */
+export interface GroupedSection {
+  label: string;
+  items: SessionInfo[];
+  groupId?: string;
+  cwd?: string;
+}
+
+/**
+ * Group sessions by workspace (full cwd path). Folders are sorted by the
+ * most recent `last_message_at` across all sessions in that folder.
+ * Sessions within each folder retain the input order (already sorted by
+ * state priority then recency).
+ */
+export function groupByWorkspace(sorted: SessionInfo[]): GroupedSection[] {
+  const map = new Map<string, SessionInfo[]>();
+  for (const s of sorted) {
+    const key = s.cwd ?? "~";
+    const list = map.get(key) ?? [];
+    list.push(s);
+    map.set(key, list);
+  }
+  const entries = Array.from(map.entries());
+  // Sort folders by the most recent last_message_at (or created_at) in each folder.
+  entries.sort((a, b) => {
+    const recentA = Math.max(...a[1].map((s) => s.last_message_at ?? s.created_at));
+    const recentB = Math.max(...b[1].map((s) => s.last_message_at ?? s.created_at));
+    return recentB - recentA;
+  });
+  return entries.map(([cwd, items]) => ({
+    label: deriveWorkspaceName(cwd === "~" ? undefined : cwd),
+    cwd,
+    items,
+  }));
+}
+
+/**
+ * Group sessions by view mode. Dispatches to the appropriate grouping
+ * function based on the current view.
+ */
+export function groupSessions(
+  view: ViewMode,
+  sorted: SessionInfo[],
+  groups: GroupInfo[],
+): GroupedSection[] {
+  if (view === "workspace") {
+    return groupByWorkspace(sorted);
+  }
+  if (view === "grouped") {
+    // Preserve group order from the store; ungrouped sessions land last.
+    const map = new Map<string, { items: SessionInfo[]; groupId: string }>();
+    const ungrouped: SessionInfo[] = [];
+    for (const s of sorted) {
+      if (s.group_id) {
+        const group = groups.find((g) => g.id === s.group_id);
+        const key = group?.id ?? s.group_id;
+        const entry = map.get(key);
+        if (entry) {
+          entry.items.push(s);
+        } else {
+          map.set(key, { items: [s], groupId: key });
+        }
+      } else {
+        ungrouped.push(s);
+      }
+    }
+    const result: GroupedSection[] = Array.from(map.entries()).map(
+      ([, { items, groupId }]) => {
+        const g = groups.find((x) => x.id === groupId);
+        return { label: g?.name ?? "Unknown", items, groupId };
+      },
+    );
+    if (ungrouped.length > 0) result.push({ label: "Ungrouped", items: ungrouped });
+    return result;
+  }
+  return [{ label: "All Sessions", items: sorted }];
 }
 
 function shortModel(model: string): string {

@@ -921,22 +921,26 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             if let Some((id, kind, label)) = picker_data {
                 app.close_picker();
                 if kind == "command" {
-                    match id.as_str() {
-                        "switch-model" => {
-                            app.open_model_picker();
-                            None
+                    if id.starts_with('/') {
+                        Some(Action::SlashCommand(id))
+                    } else {
+                        match id.as_str() {
+                            "switch-model" => {
+                                app.open_model_picker();
+                                None
+                            }
+                            "thinking-variant" => {
+                                app.open_thinking_variant_picker();
+                                None
+                            }
+                            "settings" => Some(Action::OpenSettings),
+                            "clear" => Some(Action::Clear),
+                            "quit" => {
+                                app.should_quit = true;
+                                Some(Action::Quit)
+                            }
+                            _ => None,
                         }
-                        "thinking-variant" => {
-                            app.open_thinking_variant_picker();
-                            None
-                        }
-                        "settings" => Some(Action::OpenSettings),
-                        "clear" => Some(Action::Clear),
-                        "quit" => {
-                            app.should_quit = true;
-                            Some(Action::Quit)
-                        }
-                        _ => None,
                     }
                 } else if kind == "model" {
                     Some(Action::SwitchModel(id))
@@ -952,6 +956,12 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     }
                 } else if kind == "session" {
                     Some(Action::AttachSession(id))
+                } else if kind == "theme" {
+                    Some(Action::SlashCommand(format!("/theme {}", id)))
+                } else if kind == "persona" {
+                    Some(Action::SlashCommand(format!("/persona {}", id)))
+                } else if kind == "rewind" {
+                    Some(Action::SlashCommand(format!("/rewind {}", id)))
                 } else {
                     None
                 }

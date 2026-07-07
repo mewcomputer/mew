@@ -71,6 +71,7 @@ export type ClientMessage =
     }
   | { type: "archive_session"; session_id: string; archived: boolean }
   | { type: "pin_session"; session_id: string; pinned: boolean }
+  | { type: "regenerate_title"; session_id: string }
   | { type: "list_dir"; session_id: string; path?: string }
   | {
       type: "read_file_preview";
@@ -278,6 +279,8 @@ export interface SessionInfo {
   usage?: SessionUsageWire;
   pending_permissions?: number;
   pending_questions?: number;
+  /** First user message text (truncated), used as a display title fallback. */
+  first_message?: string;
 }
 
 /** A session group. */
@@ -906,6 +909,12 @@ export class MewClient {
   }
   pinSession(sessionId: string, pinned: boolean): void {
     this.send({ type: "pin_session", session_id: sessionId, pinned });
+  }
+
+  /** Regenerate the session title from the first user message via LLM.
+   *  The daemon broadcasts `session-title-changed` when done. */
+  regenerateTitle(sessionId: string): void {
+    this.send({ type: "regenerate_title", session_id: sessionId });
   }
 
   // -- Phase 3: file service --
