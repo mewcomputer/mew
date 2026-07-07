@@ -13,6 +13,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod command_registry;
+
+pub use command_registry::{is_known, lookup, CommandDef, CommandLocus, BUILTIN_COMMANDS};
+
 // ---------------------------------------------------------------------------
 // Client → Daemon messages
 // ---------------------------------------------------------------------------

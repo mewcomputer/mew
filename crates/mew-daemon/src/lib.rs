@@ -784,7 +784,16 @@ where
                                     Some("wiki generated at .mew/wiki.md".to_string())
                                 }
                             }
-                            _ => None,
+                            _ => {
+                                // Unknown command — check the registry.
+                                if mew_protocol::is_known(cmd) {
+                                    // Known command but not handled by daemon —
+                                    // it's a client-side command. Silently ignore.
+                                    None
+                                } else {
+                                    Some(format!("unknown command {}", cmd))
+                                }
+                            }
                         }
                     };
                     if let Some(text) = result {
