@@ -53,11 +53,23 @@ static NAME_RE: LazyLock<Regex> =
 /// Discovers and loads skills from the filesystem.
 pub struct Loader {
     cwd: PathBuf,
+    extra_dirs: Vec<PathBuf>,
 }
 
 impl Loader {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
-        Self { cwd: cwd.into() }
+        Self {
+            cwd: cwd.into(),
+            extra_dirs: Vec::new(),
+        }
+    }
+
+    /// Create a loader with additional search dirs (e.g. from extension packages).
+    pub fn with_extra_dirs(cwd: impl Into<PathBuf>, extra_dirs: Vec<PathBuf>) -> Self {
+        Self {
+            cwd: cwd.into(),
+            extra_dirs,
+        }
     }
 
     /// Scans for skills in the standard locations and loads them.
@@ -78,12 +90,21 @@ impl Loader {
             prefixes: SKILL_PREFIXES,
             file: mew_harness::LoadFileSpec::SubdirFile("SKILL.md"),
         };
-        let mut skills =
-            mew_harness::load_markdown_dirs(&self.cwd, &spec, |path| -> Result<_, SkillError> {
-                let skill = load_skill_file(path)?;
-                let name = skill.name.clone();
-                Ok(mew_harness::Loaded { value: skill, name })
-            })?;
+        let parse_fn = |path: &std::path::Path| -> Result<_, SkillError> {
+            let skill = load_skill_file(path)?;
+            let name = skill.name.clone();
+            Ok(mew_harness::Loaded { value: skill, name })
+        };
+        let mut skills = if self.extra_dirs.is_empty() {
+            mew_harness::load_markdown_dirs(&self.cwd, &spec, parse_fn)?
+        } else {
+            mew_harness::load_markdown_dirs_with_extra(
+                &self.cwd,
+                &spec,
+                parse_fn,
+                &self.extra_dirs,
+            )?
+        };
 
         // Append built-in skills for any name not already provided by the
         // user. User-defined skills override built-ins by name.

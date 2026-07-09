@@ -165,6 +165,49 @@ where
     Ok(results)
 }
 
+/// Like `load_markdown_dirs` but also scans `extra_dirs` (extension-provided
+/// paths). Extra dirs are scanned after project dirs but before global dirs,
+/// so project-local wins, then extension-provided, then global.
+pub fn load_markdown_dirs_with_extra<T, E, F>(
+    cwd: &Path,
+    spec: &LoadSpec,
+    parse_and_name: F,
+    extra_dirs: &[PathBuf],
+) -> Result<Vec<T>, E>
+where
+    F: Fn(&Path) -> Result<Loaded<T>, E>,
+    E: From<std::io::Error> + std::fmt::Display,
+{
+    let mut results: Vec<T> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let root =
+        find_git_root(cwd).unwrap_or_else(|| dirs_home().unwrap_or_else(|| cwd.to_path_buf()));
+    let project_dirs = paths_between(&root, cwd);
+
+    // Project paths: walk cwd → git root (reverse), so project-local beats
+    // project-root.
+    for dir in project_dirs.iter().rev() {
+        scan_project_dir(dir, spec, &parse_and_name, &mut results, &mut seen)?;
+    }
+
+    // Extension-provided extra dirs (scanned after project, before global).
+    for extra in extra_dirs {
+        if extra.is_dir() {
+            scan_location(extra, spec, &parse_and_name, &mut results, &mut seen)?;
+        }
+    }
+
+    // Global paths.
+    if let Some(home) = dirs_home() {
+        for global in global_dirs_for(&home, dir_kind_from_prefix(spec.prefixes)) {
+            scan_global_dir(&global, spec, &parse_and_name, &mut results, &mut seen)?;
+        }
+    }
+
+    Ok(results)
+}
+
 fn dir_kind_from_prefix<'a>(prefixes: &'a [&'a str]) -> &'a str {
     // E.g. ".mew/skills" → "skills"
     prefixes

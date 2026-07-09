@@ -140,6 +140,7 @@ static NAME_RE: LazyLock<Regex> =
 /// Discovers and loads personas from the filesystem.
 pub struct Loader {
     cwd: PathBuf,
+    extra_dirs: Vec<PathBuf>,
     /// If true, skip appending built-in personas (planner, builder) in
     /// `load()`. Defaults to `false` (built-ins are included). Tests that
     /// want to verify the scan logic without built-in noise use
@@ -151,6 +152,16 @@ impl Loader {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
         Self {
             cwd: cwd.into(),
+            extra_dirs: Vec::new(),
+            skip_builtins: false,
+        }
+    }
+
+    /// Create a loader with additional search dirs (e.g. from extension packages).
+    pub fn with_extra_dirs(cwd: impl Into<PathBuf>, extra_dirs: Vec<PathBuf>) -> Self {
+        Self {
+            cwd: cwd.into(),
+            extra_dirs,
             skip_builtins: false,
         }
     }
@@ -181,15 +192,24 @@ impl Loader {
             prefixes: PERSONA_PREFIXES,
             file: mew_harness::LoadFileSpec::SubdirFile("PERSONA.md"),
         };
-        let mut personas =
-            mew_harness::load_markdown_dirs(&self.cwd, &spec, |path| -> Result<_, PersonaError> {
-                let persona = load_persona_file(path)?;
-                let name = persona.name.clone();
-                Ok(mew_harness::Loaded {
-                    value: persona,
-                    name,
-                })
-            })?;
+        let parse_fn = |path: &std::path::Path| -> Result<_, PersonaError> {
+            let persona = load_persona_file(path)?;
+            let name = persona.name.clone();
+            Ok(mew_harness::Loaded {
+                value: persona,
+                name,
+            })
+        };
+        let mut personas = if self.extra_dirs.is_empty() {
+            mew_harness::load_markdown_dirs(&self.cwd, &spec, parse_fn)?
+        } else {
+            mew_harness::load_markdown_dirs_with_extra(
+                &self.cwd,
+                &spec,
+                parse_fn,
+                &self.extra_dirs,
+            )?
+        };
 
         // Append built-in defaults (planner, builder) for any name not
         // already provided by the user. User-defined personas override

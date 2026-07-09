@@ -223,11 +223,23 @@ pub trait ModelResolver: Send + Sync {
 
 pub struct Loader {
     cwd: PathBuf,
+    extra_dirs: Vec<PathBuf>,
 }
 
 impl Loader {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
-        Self { cwd: cwd.into() }
+        Self {
+            cwd: cwd.into(),
+            extra_dirs: Vec::new(),
+        }
+    }
+
+    /// Create a loader with additional search dirs (e.g. from extension packages).
+    pub fn with_extra_dirs(cwd: impl Into<PathBuf>, extra_dirs: Vec<PathBuf>) -> Self {
+        Self {
+            cwd: cwd.into(),
+            extra_dirs,
+        }
     }
 
     pub fn load(&self) -> Result<Vec<SubagentDef>, SubagentError> {
@@ -235,15 +247,21 @@ impl Loader {
             prefixes: SUBAGENT_PREFIXES,
             file: mew_harness::LoadFileSpec::FlatMd,
         };
-        let mut defs = mew_harness::load_markdown_dirs(
-            &self.cwd,
-            &spec,
-            |path| -> Result<_, SubagentError> {
-                let def = load_agent_file(path)?;
-                let name = def.name.clone();
-                Ok(mew_harness::Loaded { value: def, name })
-            },
-        )?;
+        let parse_fn = |path: &std::path::Path| -> Result<_, SubagentError> {
+            let def = load_agent_file(path)?;
+            let name = def.name.clone();
+            Ok(mew_harness::Loaded { value: def, name })
+        };
+        let mut defs = if self.extra_dirs.is_empty() {
+            mew_harness::load_markdown_dirs(&self.cwd, &spec, parse_fn)?
+        } else {
+            mew_harness::load_markdown_dirs_with_extra(
+                &self.cwd,
+                &spec,
+                parse_fn,
+                &self.extra_dirs,
+            )?
+        };
 
         // Add built-in defaults for any not already defined by the user.
         let mut seen: std::collections::HashSet<String> =
