@@ -9,6 +9,7 @@ pub mod audit_log;
 pub mod broker;
 pub mod capabilities;
 pub mod consent;
+pub mod discovery;
 pub mod event_queue;
 pub mod manifest;
 pub mod principal;
@@ -20,6 +21,7 @@ pub use capabilities::{
     Capability, CapabilityDelta, CapabilitySet, EventContent, EventScope, RiskTier,
 };
 pub use consent::{ConsentDecision, ConsentResolver, ConsentState};
+pub use discovery::{discover_extensions, DiscoveredExtension, ExtensionScope};
 pub use manifest::{
     EventsConfig, ExtensionCapabilities, ExtensionEntry, ExtensionManifest, ExtensionMeta,
     ExtensionProvides, ExtensionSandbox, HooksConfig,
