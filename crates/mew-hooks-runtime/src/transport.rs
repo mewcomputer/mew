@@ -409,7 +409,7 @@ impl PluginSlot {
 }
 
 /// Run a request/response call via cloned handles (no Mutex guard held).
-pub(crate) async fn call_via_handles(
+pub async fn call_via_handles(
     name: &str,
     method: &str,
     params: &Value,

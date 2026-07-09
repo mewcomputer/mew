@@ -31,6 +31,7 @@ mew-mcp = { workspace = true }
 mew-daemon = { workspace = true }
 mew-protocol = { workspace = true }
 mew-hooks-runtime = { workspace = true }
+mew-ext-broker = { workspace = true }
 mew-subagents = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }

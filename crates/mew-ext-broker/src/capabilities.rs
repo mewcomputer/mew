@@ -188,6 +188,31 @@ impl CapabilitySet {
         set
     }
 
+    /// Create a set with ALL capabilities granted — the legacy profile for
+    /// bare executables that have no manifest. This preserves current
+    /// behavior exactly: every hook fires for every extension.
+    pub fn legacy_full() -> Self {
+        let mut set = Self::always_granted();
+        set.grant(Capability::Ui);
+        set.grant(Capability::Register);
+        set.grant(Capability::SessionsRead);
+        set.grant(Capability::SessionsManage);
+        set.grant(Capability::SessionsPrompt);
+        set.grant(Capability::PermissionsResolve);
+        set.grant(Capability::Events {
+            scope: EventScope::Global,
+            content: EventContent::Full,
+        });
+        set.grant(Capability::HooksObserve);
+        set.grant(Capability::HooksMutate);
+        set.grant(Capability::HooksMutateHeaders);
+        set.grant(Capability::HooksMutateShellEnv);
+        set.grant(Capability::HooksMutateChatParams);
+        set.grant(Capability::HooksGate);
+        set.grant(Capability::HooksGateMutate);
+        set
+    }
+
     /// Grant a capability.
     pub fn grant(&mut self, cap: Capability) {
         self.caps.insert(cap);
@@ -348,6 +373,32 @@ mod tests {
         assert!(set.has(&Capability::ConfigRead));
         assert!(!set.has(&Capability::Ui));
         assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn test_legacy_full_satisfies_all_hooks() {
+        let set = CapabilitySet::legacy_full();
+        // Every hook capability must be satisfied
+        assert!(set.satisfies(&Capability::HooksObserve));
+        assert!(set.satisfies(&Capability::HooksMutate));
+        assert!(set.satisfies(&Capability::HooksMutateHeaders));
+        assert!(set.satisfies(&Capability::HooksMutateShellEnv));
+        assert!(set.satisfies(&Capability::HooksMutateChatParams));
+        assert!(set.satisfies(&Capability::HooksGate));
+        assert!(set.satisfies(&Capability::HooksGateMutate));
+        // All host function capabilities
+        assert!(set.has(&Capability::Ui));
+        assert!(set.has(&Capability::Register));
+        assert!(set.has(&Capability::PermissionsResolve));
+        // All session capabilities (hierarchy: manage → prompt → read)
+        assert!(set.satisfies(&Capability::SessionsRead));
+        assert!(set.satisfies(&Capability::SessionsManage));
+        assert!(set.satisfies(&Capability::SessionsPrompt));
+        // Events: global+full satisfies everything
+        assert!(set.satisfies(&Capability::Events {
+            scope: EventScope::Session,
+            content: EventContent::Meta
+        }));
     }
 
     #[test]

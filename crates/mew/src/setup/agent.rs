@@ -12,8 +12,8 @@ use tracing::{info, warn};
 use mew_agent::Agent;
 use mew_catalog::Catalog;
 use mew_config::Config;
+use mew_ext_broker::ExtensionBroker;
 use mew_hooks::{Dispatcher, NopDispatcher, PluginHost};
-use mew_hooks_runtime::SubprocessDispatcher;
 
 /// Apply catalog pricing for `model_id` onto `agent`.
 ///
@@ -236,12 +236,12 @@ pub(crate) async fn build_dispatcher(
     };
 
     let dirs = mew_hooks_runtime::PluginLoader::default_dirs();
-    match SubprocessDispatcher::from_dirs_filtered_with_config(
+    match ExtensionBroker::from_dirs_filtered_with_config(
         dirs,
         host.clone(),
         disabled_plugins,
         plugin_configs,
-        SubprocessDispatcher::default_timeout(),
+        ExtensionBroker::default_timeout(),
     )
     .await
     {

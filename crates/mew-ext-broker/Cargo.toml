@@ -11,3 +11,18 @@ serde_json = { workspace = true }
 ulid = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+http = "1"
+sha2 = "0.10"
+directories = { workspace = true }
+mew-hooks = { workspace = true }
+mew-hooks-runtime = { workspace = true }
+mew-message = { workspace = true }
+mew-provider = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
