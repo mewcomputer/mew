@@ -331,6 +331,7 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             Ok(())
         }
         Some(Commands::Theme { command }) => commands::theme::theme_cmd(command),
+        Some(Commands::Ext { command }) => commands::ext::ext_cmd(command),
     }
 }
 

@@ -58,3 +58,4 @@ iroh = ["dep:iroh", "mew-daemon/iroh"]
 
 [dev-dependencies]
 strum = { version = "0.26", features = ["derive"] }
+tempfile = "3"

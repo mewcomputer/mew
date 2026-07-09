@@ -219,6 +219,25 @@ pub enum Commands {
         #[command(subcommand)]
         command: ThemeCommands,
     },
+    /// Manage extensions
+    Ext {
+        #[command(subcommand)]
+        command: ExtCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ExtCommands {
+    /// List installed extensions (packages + bare plugins)
+    List,
+    /// Enable a disabled extension
+    Enable { name: String },
+    /// Disable an extension (stops it from loading)
+    Disable { name: String },
+    /// Remove an extension package
+    Remove { name: String },
+    /// Diagnose extension discovery, conflicts, and health
+    Doctor,
 }
 
 #[derive(Subcommand)]
