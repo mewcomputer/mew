@@ -249,6 +249,23 @@ impl CapabilitySet {
                 self.caps.contains(&Capability::HooksGate)
                     || self.caps.contains(&Capability::HooksGateMutate)
             }
+            // Gate:mutate satisfies mutate (highest mutation tier
+            // encompasses benign mutations).
+            Capability::HooksMutate => {
+                self.caps.contains(&Capability::HooksMutate)
+                    || self.caps.contains(&Capability::HooksGateMutate)
+            }
+            // Session capability hierarchy: manage → prompt → read.
+            // If you can manage sessions, you can also prompt and read.
+            Capability::SessionsRead => {
+                self.caps.contains(&Capability::SessionsRead)
+                    || self.caps.contains(&Capability::SessionsManage)
+                    || self.caps.contains(&Capability::SessionsPrompt)
+            }
+            Capability::SessionsPrompt => {
+                self.caps.contains(&Capability::SessionsPrompt)
+                    || self.caps.contains(&Capability::SessionsManage)
+            }
             _ => self.caps.contains(required),
         }
     }
@@ -392,6 +409,35 @@ mod tests {
             scope: EventScope::Global,
             content: EventContent::Meta
         }));
+    }
+
+    #[test]
+    fn test_satisfies_gate_mutate_implies_mutate() {
+        // HooksGateMutate (highest tier) should satisfy HooksMutate (medium)
+        let set = CapabilitySet::from_iter([Capability::HooksGateMutate]);
+        assert!(set.satisfies(&Capability::HooksMutate));
+        // But not the reverse
+        let set2 = CapabilitySet::from_iter([Capability::HooksMutate]);
+        assert!(!set2.satisfies(&Capability::HooksGateMutate));
+    }
+
+    #[test]
+    fn test_satisfies_sessions_hierarchy() {
+        // SessionsManage implies SessionsPrompt and SessionsRead
+        let set = CapabilitySet::from_iter([Capability::SessionsManage]);
+        assert!(set.satisfies(&Capability::SessionsPrompt));
+        assert!(set.satisfies(&Capability::SessionsRead));
+
+        // SessionsPrompt implies SessionsRead
+        let set2 = CapabilitySet::from_iter([Capability::SessionsPrompt]);
+        assert!(set2.satisfies(&Capability::SessionsRead));
+        // But not the reverse
+        assert!(!set2.satisfies(&Capability::SessionsManage));
+
+        // SessionsRead does not imply higher
+        let set3 = CapabilitySet::from_iter([Capability::SessionsRead]);
+        assert!(!set3.satisfies(&Capability::SessionsPrompt));
+        assert!(!set3.satisfies(&Capability::SessionsManage));
     }
 
     #[test]
