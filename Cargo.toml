@@ -64,6 +64,10 @@ shell-words = "1"
 # id generation
 ulid = { version = "1", features = ["serde"] }
 
+# PKCE / OAuth helpers (in-tree openai oauth flow)
+base64 = "0.22"
+sha2 = "0.10"
+
 # tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
@@ -146,7 +150,6 @@ mew-provider-anthropic = { path = "crates/mew-provider-anthropic" }
 mew-provider-router = { path = "crates/mew-provider-router" }
 mew-provider-fake = { path = "crates/mew-provider-fake" }
 mew-provider-responses = { path = "crates/mew-provider-responses" }
-openai-auth = "1"
 mew-protocol = { path = "crates/mew-protocol" }
 mew-daemon = { path = "crates/mew-daemon" }
 mew-web-bridge = { path = "crates/mew-web-bridge" }

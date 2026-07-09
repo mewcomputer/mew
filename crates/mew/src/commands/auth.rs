@@ -44,7 +44,7 @@ fn select_provider(
 
 pub async fn auth_cmd(command: AuthCommands) -> Result<()> {
     match command {
-        AuthCommands::Login { provider } => {
+        AuthCommands::Login { provider, headless } => {
             let registry = providers();
             let selected = match provider {
                 Some(name) => {
@@ -82,7 +82,7 @@ pub async fn auth_cmd(command: AuthCommands) -> Result<()> {
                     }
                 }
             };
-            mew_provider::auth::login(selected.as_ref()).await?;
+            mew_provider::auth::login(selected.as_ref(), headless).await?;
             Ok(())
         }
         AuthCommands::Status => {

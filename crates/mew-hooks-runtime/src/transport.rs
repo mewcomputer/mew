@@ -50,6 +50,47 @@ pub struct PluginHandles {
     pub next_id: Arc<AtomicU64>,
 }
 
+// ── SpawnSpec ──────────────────────────────────────────────────────
+
+/// How to spawn a plugin process.
+#[derive(Debug, Clone)]
+pub enum SpawnSpec {
+    /// Bare executable path (legacy plugins).
+    Path(PathBuf),
+    /// Command + args (manifest-based extensions, e.g. `["node", "dist/index.js"]`).
+    Command { program: String, args: Vec<String> },
+}
+
+impl SpawnSpec {
+    /// Derive a name from the spec (used for logging).
+    fn derive_name(&self) -> String {
+        match self {
+            Self::Path(p) => p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            Self::Command { program, .. } => std::path::Path::new(program)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(program)
+                .to_string(),
+        }
+    }
+
+    /// Build the tokio Command from the spec.
+    fn to_command(&self) -> Command {
+        match self {
+            Self::Path(p) => Command::new(p),
+            Self::Command { program, args } => {
+                let mut cmd = Command::new(program);
+                cmd.args(args);
+                cmd
+            }
+        }
+    }
+}
+
 // ── PluginProcess (inner) ──────────────────────────────────────────
 
 /// A running plugin subprocess with multiplexed JSON-RPC transport.
@@ -71,16 +112,13 @@ impl PluginProcess {
     /// Spawn the subprocess and return the process + its handles + stdout.
     /// The caller (PluginSlot) owns the reader task.
     pub(crate) async fn spawn(
-        path: &PathBuf,
+        spec: &SpawnSpec,
         timeout: Duration,
     ) -> anyhow::Result<(Self, PluginHandles, tokio::process::ChildStdout)> {
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let name = spec.derive_name();
 
-        let mut child = Command::new(path)
+        let mut child = spec
+            .to_command()
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
@@ -215,7 +253,7 @@ pub trait ExtensionConnection: Send + Sync {
 /// `Arc<PluginSlot>` in the dispatcher's `Vec`.
 pub struct PluginSlot {
     name: String,
-    path: PathBuf,
+    spec: SpawnSpec,
     timeout: Duration,
     host: PluginHost,
     /// The current process. `None` during the restart window.
@@ -245,26 +283,22 @@ const BACKOFF_SCHEDULE: &[Duration] = &[
 impl PluginSlot {
     /// Spawn a plugin as a restartable slot.
     pub async fn spawn(
-        path: PathBuf,
+        spec: SpawnSpec,
         host: PluginHost,
         timeout: Duration,
     ) -> anyhow::Result<Arc<Self>> {
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        let name = spec.derive_name();
 
-        info!("starting plugin: {} ({})", name, path.display());
+        info!("starting plugin: {} ({:?})", name, spec);
 
-        let (process, handles, stdout) = PluginProcess::spawn(&path, timeout).await?;
+        let (process, handles, stdout) = PluginProcess::spawn(&spec, timeout).await?;
 
         // Create the watch channel with the initial handles.
         let (handles_tx, _handles_rx) = watch::channel(handles.clone());
 
         let slot = Arc::new(Self {
             name: name.clone(),
-            path,
+            spec,
             timeout,
             host,
             process: StdMutex::new(Some(process)),
@@ -348,7 +382,7 @@ impl PluginSlot {
 
         // Spawn new process.
         let (new_process, new_handles, stdout) =
-            PluginProcess::spawn(&slot.path, slot.timeout).await?;
+            PluginProcess::spawn(&slot.spec, slot.timeout).await?;
 
         // Send new handles through the watch channel.
         let _ = slot.handles_tx.send(new_handles.clone());

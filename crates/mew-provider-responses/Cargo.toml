@@ -20,9 +20,11 @@ futures = { workspace = true }
 chrono = { workspace = true }
 tokio-util = { workspace = true }
 http = "1"
-openai-auth = { version = "1", features = ["callback-server"] }
 mew-config = { workspace = true }
 anyhow = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 wiremock = "0.6"

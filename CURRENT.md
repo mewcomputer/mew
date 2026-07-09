@@ -1,6 +1,22 @@
 # Current Progress — Consolidate Agent Construction
 
-## 2026-07-09 — W4: Extension Broker Implementation
+## 2026-07-09 — Phase 2a: Manifest Parser + Discovery (in progress)
+
+**Status: IN PROGRESS**
+
+### Completed
+- **Phase 1 ✅** — Manifest parser: `parse_manifest()` + `validate_manifest()` in manifest.rs. Added `toml` dep. 3 tests (parse valid, parse invalid, validate denylist).
+- **Phase 2 ✅** — Extension discovery: `discovery.rs` with `DiscoveredExtension`, `ExtensionScope`, `discover_extensions(cwd)`. Scans `~/.config/mew/extensions/` and `.mew/extensions/`. Dedup: project beats global. 4 tests.
+
+### Next
+- **Phase 3** — SpawnSpec enum + broker integration (manifest-based extensions get scoped capabilities)
+- **Phase 4** — Loader changes (load_markdown_dirs_with_extra) + [provides] integration
+- **Phase 5** — `mew ext` CLI (list/enable/disable/remove/doctor)
+- **Phase 6** — Integration tests + verify
+
+---
+
+## Previous: W4 + W5 (Phase 1 complete)
 
 **Status: COMPLETE ✅**
 

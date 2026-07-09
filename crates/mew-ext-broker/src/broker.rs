@@ -118,7 +118,13 @@ impl ExtensionBroker {
                 .map(Duration::from_millis)
                 .unwrap_or(global_timeout);
 
-            match PluginSlot::spawn(path.clone(), host.as_ref().clone(), plugin_timeout).await {
+            match PluginSlot::spawn(
+                mew_hooks_runtime::SpawnSpec::Path(path.clone()),
+                host.as_ref().clone(),
+                plugin_timeout,
+            )
+            .await
+            {
                 Ok(slot) => {
                     // Determine consent: call resolver if provided, else approve all.
                     let decision = match &consent_resolver {

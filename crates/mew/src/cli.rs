@@ -305,6 +305,10 @@ pub enum AuthCommands {
     Login {
         /// Provider to log in to (currently only "openai-responses").
         provider: Option<String>,
+        /// Use the device-code flow instead of opening a browser. For
+        /// headless machines or when a browser can't be launched.
+        #[arg(long)]
+        headless: bool,
     },
     /// Show current auth status for all providers.
     Status,

@@ -289,7 +289,13 @@ impl SubprocessDispatcher {
                 .map(Duration::from_millis)
                 .unwrap_or(global_timeout);
 
-            match PluginSlot::spawn(path.clone(), host.as_ref().clone(), plugin_timeout).await {
+            match PluginSlot::spawn(
+                crate::transport::SpawnSpec::Path(path.clone()),
+                host.as_ref().clone(),
+                plugin_timeout,
+            )
+            .await
+            {
                 Ok(slot) => {
                     slots.push(slot);
                 }

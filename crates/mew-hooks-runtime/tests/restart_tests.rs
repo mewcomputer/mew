@@ -29,9 +29,13 @@ async fn test_restart_after_external_restart() {
     // Spawn a plugin slot directly.
     let dir = make_plugin_dir_with_binary();
     let path = dir.path().join("sample-plugin");
-    let slot = PluginSlot::spawn(path, test_host(), Duration::from_secs(5))
-        .await
-        .expect("spawn slot");
+    let slot = PluginSlot::spawn(
+        mew_hooks_runtime::SpawnSpec::Path(path),
+        test_host(),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("spawn slot");
 
     // Plugin should be healthy initially.
     assert!(slot.is_healthy(), "plugin should be healthy after spawn");
@@ -76,9 +80,13 @@ async fn test_restart_after_external_restart() {
 async fn test_restarted_plugin_receives_hooks() {
     let dir = make_plugin_dir_with_binary();
     let path = dir.path().join("sample-plugin");
-    let slot = PluginSlot::spawn(path, test_host(), Duration::from_secs(5))
-        .await
-        .expect("spawn slot");
+    let slot = PluginSlot::spawn(
+        mew_hooks_runtime::SpawnSpec::Path(path),
+        test_host(),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("spawn slot");
 
     // Verify the system-prompt hook works before restart.
     let result = slot
@@ -124,9 +132,13 @@ async fn test_restarted_plugin_receives_hooks() {
 async fn test_call_during_restart_does_not_panic() {
     let dir = make_plugin_dir_with_binary();
     let path = dir.path().join("sample-plugin");
-    let slot = PluginSlot::spawn(path, test_host(), Duration::from_secs(1))
-        .await
-        .expect("spawn slot");
+    let slot = PluginSlot::spawn(
+        mew_hooks_runtime::SpawnSpec::Path(path),
+        test_host(),
+        Duration::from_secs(1),
+    )
+    .await
+    .expect("spawn slot");
 
     // Trigger a restart.
     Arc::clone(&slot).restart();

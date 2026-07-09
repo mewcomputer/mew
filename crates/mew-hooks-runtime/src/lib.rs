@@ -17,4 +17,4 @@ mod dynamic_tool;
 pub use dynamic_tool::DynamicTool;
 
 mod transport;
-pub use transport::{call_via_handles, ExtensionConnection, PluginHandles, PluginSlot};
+pub use transport::{call_via_handles, ExtensionConnection, PluginHandles, PluginSlot, SpawnSpec};

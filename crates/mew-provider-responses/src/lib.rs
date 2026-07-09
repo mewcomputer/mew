@@ -9,6 +9,8 @@
 
 pub mod oauth;
 
+mod openai_oauth;
+
 use async_trait::async_trait;
 use futures::{channel::mpsc, SinkExt, StreamExt};
 use mew_message::{

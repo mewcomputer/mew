@@ -83,7 +83,10 @@ pub trait OAuthProvider: Send + Sync {
 
     /// Run the full OAuth login flow (browser, callback, token exchange).
     /// Returns the token set + extra headers to send on every request.
-    async fn login(&self) -> anyhow::Result<OAuthSession>;
+    ///
+    /// When `headless` is true, providers should use a device-code flow
+    /// (no local callback server, no browser launch) for headless machines.
+    async fn login(&self, headless: bool) -> anyhow::Result<OAuthSession>;
 
     /// Derive extra HTTP headers from the current token set.
     /// Called after login and after every token refresh.
@@ -214,8 +217,8 @@ pub fn resolve(provider: &dyn OAuthProvider, api_key: Option<String>) -> anyhow:
 }
 
 /// Run the full login flow for a provider and persist the result.
-pub async fn login(provider: &dyn OAuthProvider) -> anyhow::Result<()> {
-    let session = provider.login().await?;
+pub async fn login(provider: &dyn OAuthProvider, headless: bool) -> anyhow::Result<()> {
+    let session = provider.login(headless).await?;
 
     let stored = StoredAuth {
         tokens: session.tokens,
@@ -325,7 +328,7 @@ mod tests {
         fn oauth_base_url(&self) -> &str {
             "https://mock.example.com/api"
         }
-        async fn login(&self) -> anyhow::Result<OAuthSession> {
+        async fn login(&self, _headless: bool) -> anyhow::Result<OAuthSession> {
             Ok(OAuthSession {
                 tokens: TokenSet {
                     access_token: "mock-access".to_string(),
