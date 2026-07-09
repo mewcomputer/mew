@@ -107,6 +107,7 @@ async fn test_e2e_hook_delivery() {
         &[],
         std::collections::HashMap::new(),
         Duration::from_secs(5),
+        None,
     )
     .await
     .expect("broker creation");
@@ -134,6 +135,7 @@ async fn test_noop_equivalence() {
         &[],
         std::collections::HashMap::new(),
         Duration::from_secs(5),
+        None,
     )
     .await
     .expect("broker creation with no dirs");
@@ -206,6 +208,7 @@ async fn test_collision_rejection() {
         &[],
         std::collections::HashMap::new(),
         Duration::from_secs(5),
+        None,
     )
     .await
     .expect("broker creation");
@@ -240,6 +243,7 @@ async fn test_gate_audit() {
         &[],
         std::collections::HashMap::new(),
         Duration::from_secs(5),
+        None,
     )
     .await
     .expect("broker creation");
@@ -301,6 +305,7 @@ async fn test_last_writer_wins() {
         &[],
         std::collections::HashMap::new(),
         Duration::from_secs(5),
+        None,
     )
     .await
     .expect("broker creation");
@@ -372,4 +377,122 @@ async fn test_capability_enforcement() {
     assert_eq!(chat_params_cap, Some(Capability::HooksMutateChatParams));
     assert!(mutate_only.satisfies(&Capability::HooksMutate));
     assert!(!mutate_only.satisfies(&Capability::HooksMutateChatParams));
+}
+
+/// AC.4: Restricted legacy plugin only receives observe hooks.
+/// A plugin with Restricted consent gets observe_only() capabilities.
+/// Mutate hooks (on_system_prompt) pass through unchanged.
+/// Registration hooks (on_register_tools) return empty.
+#[tokio::test]
+async fn test_legacy_plugin_restricted() {
+    use mew_ext_broker::consent::{ConsentDecision, ConsentResolver};
+
+    let dir = make_sample_plugin_dir();
+    let host = test_host();
+
+    // Resolver that always restricts.
+    let resolver: ConsentResolver = Box::new(|_| ConsentDecision::Restricted);
+
+    let broker = ExtensionBroker::from_dirs_filtered_with_config(
+        vec![dir.path().to_path_buf()],
+        host.clone(),
+        &[],
+        std::collections::HashMap::new(),
+        Duration::from_secs(5),
+        Some(resolver),
+    )
+    .await
+    .expect("broker creation");
+
+    broker.init(&host).await;
+
+    // Mutate hook: on_system_prompt should pass through UNCHANGED
+    // (restricted plugins lack HooksMutate capability).
+    let result = broker.on_system_prompt("test prompt".to_string()).await;
+    assert_eq!(
+        result, "test prompt",
+        "restricted plugin should NOT mutate system prompt"
+    );
+
+    // Registration: on_register_tools should return EMPTY
+    // (restricted plugins lack Register capability).
+    let tools = broker.on_register_tools().await;
+    assert!(
+        tools.is_empty(),
+        "restricted plugin should NOT register tools"
+    );
+
+    // Observe hook: on_turn_end should fire (fire-and-forget, no return value).
+    // We just verify it doesn't panic.
+    use mew_message::{
+        Message, MessageId, Part, PartBase, PartId, Role, SessionId, TextPart, Time,
+    };
+    let mid = MessageId::new();
+    let sid = SessionId::new();
+    let msg = Message {
+        id: mid,
+        session_id: sid,
+        role: Role::User,
+        parts: vec![Part::Text(TextPart {
+            base: PartBase {
+                id: PartId::new(),
+                message_id: mid,
+                session_id: sid,
+            },
+            text: "test".into(),
+            synthetic: false,
+        })],
+        time: Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    };
+    broker.on_turn_end(&[msg]).await;
+
+    broker.shutdown().await;
+}
+
+/// AC.5: Consent is persisted — resolver called twice for the same plugin
+/// only prompts once (second call returns persisted decision).
+#[tokio::test]
+async fn test_consent_persisted() {
+    use mew_ext_broker::consent::ConsentState;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = ConsentState::with_path(dir.path().join("consent.json"));
+    let prompt_count = Arc::new(AtomicU32::new(0));
+
+    let count_clone = prompt_count.clone();
+    let state_clone = state;
+    let resolver: mew_ext_broker::consent::ConsentResolver = Box::new(move |name: &str| {
+        if let Some(existing) = state_clone.get(name) {
+            return existing;
+        }
+        count_clone.fetch_add(1, Ordering::Relaxed);
+        // Simulate user saying "yes" (approved).
+        state_clone.set(name, mew_ext_broker::consent::ConsentDecision::Approved);
+        state_clone.save().ok();
+        mew_ext_broker::consent::ConsentDecision::Approved
+    });
+
+    // First call: prompts and persists.
+    assert_eq!(
+        resolver("plugin-x"),
+        mew_ext_broker::consent::ConsentDecision::Approved
+    );
+    assert_eq!(prompt_count.load(Ordering::Relaxed), 1);
+
+    // Second call: returns persisted decision WITHOUT prompting.
+    assert_eq!(
+        resolver("plugin-x"),
+        mew_ext_broker::consent::ConsentDecision::Approved
+    );
+    assert_eq!(
+        prompt_count.load(Ordering::Relaxed),
+        1,
+        "should not prompt again"
+    );
 }

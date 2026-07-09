@@ -235,6 +235,13 @@ pub(crate) async fn build_dispatcher(
         set_ui: Arc::new(set_ui),
     };
 
+    // Build consent resolver for legacy plugins.
+    let consent_state = mew_ext_broker::ConsentState::load();
+    let is_interactive = std::io::stdin().is_terminal();
+    use std::io::IsTerminal as _;
+    let resolver =
+        build_consent_resolver(is_interactive, Box::new(crate::prompt_yn), consent_state);
+
     let dirs = mew_hooks_runtime::PluginLoader::default_dirs();
     match ExtensionBroker::from_dirs_filtered_with_config(
         dirs,
@@ -242,6 +249,7 @@ pub(crate) async fn build_dispatcher(
         disabled_plugins,
         plugin_configs,
         ExtensionBroker::default_timeout(),
+        Some(resolver),
     )
     .await
     {
@@ -254,6 +262,44 @@ pub(crate) async fn build_dispatcher(
             Arc::new(NopDispatcher)
         }
     }
+}
+
+/// Prompt function type — takes a question string, returns y/n/None.
+type PromptFn = Box<dyn Fn(&str) -> Option<bool> + Send + Sync>;
+
+/// Build a consent resolver for legacy plugins.
+///
+/// The resolver checks persisted consent state first. If no decision
+/// exists, it prompts the user (if interactive) or auto-restricts
+/// (if non-interactive). Decisions are persisted.
+///
+/// `is_interactive` is injected (from `stdin().is_terminal()`) so
+/// this function can be unit-tested with `false`.
+/// `prompt_fn` is injected so tests can use a mock instead of the
+/// real `prompt_yn`.
+pub(crate) fn build_consent_resolver(
+    is_interactive: bool,
+    prompt_fn: PromptFn,
+    state: mew_ext_broker::ConsentState,
+) -> mew_ext_broker::ConsentResolver {
+    Box::new(move |name: &str| {
+        if let Some(existing) = state.get(name) {
+            return existing;
+        }
+        let decision = if is_interactive {
+            match prompt_fn(name) {
+                Some(true) => mew_ext_broker::ConsentDecision::Approved,
+                Some(false) => mew_ext_broker::ConsentDecision::Restricted,
+                None => mew_ext_broker::ConsentDecision::Restricted,
+            }
+        } else {
+            tracing::warn!("plugin '{}' auto-restricted (non-interactive)", name);
+            mew_ext_broker::ConsentDecision::Restricted
+        };
+        state.set(name, decision);
+        state.save().ok();
+        decision
+    })
 }
 
 /// Load MCP server configs from standard locations.

@@ -18,7 +18,7 @@ use commands::tui::{chat_cmd, chat_with_daemon};
 /// - `Some(true)` / `Some(false)` for explicit y/n.
 /// - `None` if stdin isn't a TTY (e.g. piped / CI) or the read fails —
 ///   callers should treat None as "can't ask, bail out".
-fn prompt_yn(question: &str) -> Option<bool> {
+pub(crate) fn prompt_yn(question: &str) -> Option<bool> {
     use std::io::{IsTerminal, Write};
     if !std::io::stdin().is_terminal() {
         return None;

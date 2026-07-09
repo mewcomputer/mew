@@ -72,14 +72,16 @@ impl ExtensionBroker {
     }
 
     /// Construct from plugin discovery dirs, host, disabled list, configs, timeout.
-    /// Creates a `Principal::extension` with `CapabilitySet::legacy_full()`
-    /// for each bare executable — matching current behavior exactly.
+    /// The consent resolver is called for each discovered plugin to determine
+    /// whether to grant `legacy_full()` (approved) or `observe_only()` (restricted).
+    /// Pass `None` to approve all (for tests / backward compat).
     pub async fn from_dirs_filtered_with_config(
         dirs: Vec<PathBuf>,
         host: PluginHost,
         disabled: &[String],
         configs: HashMap<String, mew_hooks::PluginHookConfig>,
         global_timeout: Duration,
+        consent_resolver: Option<crate::consent::ConsentResolver>,
     ) -> anyhow::Result<Self> {
         // Validate plugin configs.
         for (name, cfg) in &configs {
@@ -118,8 +120,18 @@ impl ExtensionBroker {
 
             match PluginSlot::spawn(path.clone(), host.as_ref().clone(), plugin_timeout).await {
                 Ok(slot) => {
-                    let principal =
-                        Principal::extension(name.clone(), CapabilitySet::legacy_full());
+                    // Determine consent: call resolver if provided, else approve all.
+                    let decision = match &consent_resolver {
+                        Some(resolver) => resolver(&name),
+                        None => crate::consent::ConsentDecision::Approved,
+                    };
+                    let caps = match decision {
+                        crate::consent::ConsentDecision::Approved => CapabilitySet::legacy_full(),
+                        crate::consent::ConsentDecision::Restricted => {
+                            CapabilitySet::observe_only()
+                        }
+                    };
+                    let principal = Principal::extension(name.clone(), caps);
                     pairs.push((slot, principal));
                 }
                 Err(e) => {

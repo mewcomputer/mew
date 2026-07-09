@@ -213,6 +213,15 @@ impl CapabilitySet {
         set
     }
 
+    /// Create a set with only observe hooks — for restricted legacy plugins.
+    /// Grants Storage + ConfigRead (always-granted) + HooksObserve.
+    /// No mutations, no gates, no registration, no events, no sessions.
+    pub fn observe_only() -> Self {
+        let mut set = Self::always_granted();
+        set.grant(Capability::HooksObserve);
+        set
+    }
+
     /// Grant a capability.
     pub fn grant(&mut self, cap: Capability) {
         self.caps.insert(cap);
@@ -373,6 +382,28 @@ mod tests {
         assert!(set.has(&Capability::ConfigRead));
         assert!(!set.has(&Capability::Ui));
         assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn test_observe_only_satisfies() {
+        let set = CapabilitySet::observe_only();
+        // Observe hooks are satisfied.
+        assert!(set.satisfies(&Capability::HooksObserve));
+        // Always-granted capabilities.
+        assert!(set.has(&Capability::Storage));
+        assert!(set.has(&Capability::ConfigRead));
+        // Mutation/gate/registration capabilities are NOT satisfied.
+        assert!(!set.satisfies(&Capability::HooksMutate));
+        assert!(!set.satisfies(&Capability::HooksMutateHeaders));
+        assert!(!set.satisfies(&Capability::HooksMutateShellEnv));
+        assert!(!set.satisfies(&Capability::HooksMutateChatParams));
+        assert!(!set.satisfies(&Capability::HooksGate));
+        assert!(!set.satisfies(&Capability::HooksGateMutate));
+        assert!(!set.has(&Capability::Register));
+        assert!(!set.has(&Capability::Ui));
+        // Sessions/events are not granted.
+        assert!(!set.satisfies(&Capability::SessionsRead));
+        assert!(!set.satisfies(&Capability::PermissionsResolve));
     }
 
     #[test]
