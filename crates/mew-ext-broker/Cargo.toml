@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 ulid = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }

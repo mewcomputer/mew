@@ -406,7 +406,15 @@ impl Adapter {
                             }
                         }
                         Part::ToolCall(tc) => {
-                            let args = tc.state.input().to_string();
+                            // Backends reject non-object arguments (sessions
+                            // persisted before object-input was enforced can
+                            // still carry Null, which stringifies to "null").
+                            let tc_input = tc.state.input();
+                            let args = if tc_input.is_object() {
+                                tc_input.to_string()
+                            } else {
+                                "{}".to_string()
+                            };
                             input.push(json!({
                                 "type": "function_call",
                                 "call_id": tc.call_id,
@@ -670,7 +678,10 @@ impl Adapter {
                 tool_name: event.item.name.unwrap_or_default(),
                 call_id: event.item.call_id.unwrap_or_default(),
                 state: ToolState::Pending(ToolStatePending {
-                    input: serde_json::Value::Null,
+                    // Backends require function arguments to be a JSON object,
+                    // even when no argument deltas ever arrive. Null here
+                    // poisons the history and 400s on replay.
+                    input: serde_json::json!({}),
                     time: ToolTime {
                         start: chrono::Utc::now().timestamp_millis(),
                         end: None,
@@ -1186,6 +1197,61 @@ mod tests {
         assert_eq!(input[0]["call_id"], "call_123");
         assert_eq!(input[0]["name"], "bash");
         assert!(input[0]["arguments"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_build_request_body_null_tool_input_becomes_object() {
+        // A tool call whose arguments never streamed carried `input: Null`.
+        // Replaying that as `arguments: "null"` is rejected by backends
+        // ("arguments must be a JSON object"). It must be "{}".
+        let adapter = make_adapter();
+        let assistant_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                tool_name: "write".to_string(),
+                call_id: "call_null".to_string(),
+                state: ToolState::Pending(ToolStatePending {
+                    input: serde_json::Value::Null,
+                    time: ToolTime {
+                        start: 0,
+                        end: None,
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+
+        let req = Request {
+            model: "gpt-5-codex".to_string(),
+            messages: vec![assistant_msg],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: http::HeaderMap::new(),
+        };
+
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let input = v["input"].as_array().unwrap();
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(
+            input[0]["arguments"], "{}",
+            "null tool input must serialize as \"{{}}\""
+        );
     }
 
     #[tokio::test]

@@ -325,11 +325,18 @@ impl Adapter {
                             content.push(serde_json::Value::Object(block));
                         }
                         Part::ToolCall(pt) => {
+                            // The API rejects non-object input (sessions
+                            // persisted before object-input was enforced can
+                            // still carry Null).
+                            let input = match pt.state.input() {
+                                v @ serde_json::Value::Object(_) => v.clone(),
+                                _ => json!({}),
+                            };
                             content.push(json!({
                                 "type": "tool_use",
                                 "id": pt.call_id,
                                 "name": pt.tool_name,
-                                "input": pt.state.input(),
+                                "input": input,
                             }));
                         }
                         _ => {}
@@ -513,7 +520,10 @@ impl Adapter {
                     tool_name: event.content_block.name.unwrap_or_default(),
                     call_id: event.content_block.id.unwrap_or_default(),
                     state: ToolState::Pending(ToolStatePending {
-                        input: serde_json::Value::Null,
+                        // The API requires tool_use input to be a JSON object,
+                        // even when no argument deltas ever arrive. Null here
+                        // poisons the history and 400s on replay.
+                        input: serde_json::json!({}),
                         time: ToolTime {
                             start: chrono::Utc::now().timestamp_millis(),
                             end: None,
@@ -902,6 +912,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_build_wire_message_null_tool_input_becomes_object() {
+        // A tool call whose arguments never streamed (or failed to parse)
+        // historically carried `input: Null`. Replaying that as
+        // `"input": null` is rejected by the API ("input must be a JSON
+        // object"), killing the session. Null must serialize as `{}`.
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                tool_name: "write".to_string(),
+                call_id: "call_null".to_string(),
+                state: ToolState::Pending(ToolStatePending {
+                    input: serde_json::Value::Null,
+                    time: ToolTime {
+                        start: 0,
+                        end: None,
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: Some(AssistantMeta {
+                provider_id: String::new(),
+                model_id: String::new(),
+                cost: 0.0,
+                tokens: Tokens::default(),
+                finish: None,
+                error: None,
+            }),
+        };
+        let wire = adapter.build_wire_message(&[], &msg).await.unwrap();
+        let content = wire["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "tool_use");
+        assert!(
+            content[0]["input"].is_object(),
+            "null tool input must serialize as an object, got {}",
+            content[0]["input"]
+        );
+    }
+
+    #[tokio::test]
     async fn test_build_wire_message_tool_result() {
         let adapter = Adapter::new(
             "test".to_string(),
@@ -1155,6 +1221,64 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_fixture_tool_call_no_arguments_starts_with_object_input() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let fixture = std::fs::read_to_string("src/testdata/tool-call-empty-input.sse")
+            .expect("read tool-call-empty-input fixture");
+
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(fixture, "text/event-stream"))
+            .mount(&mock_server)
+            .await;
+
+        let adapter = Adapter::new(
+            "test".to_string(),
+            mock_server.uri(),
+            "test-model".to_string(),
+            "test-key".to_string(),
+        );
+
+        let req = Request {
+            model: "test-model".into(),
+            messages: vec![],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: Default::default(),
+        };
+
+        let mut stream = adapter.stream(req).await.expect("stream");
+        let mut events: Vec<ProviderEvent> = Vec::new();
+        while let Some(ev) = futures::StreamExt::next(&mut stream).await {
+            events.push(ev);
+        }
+
+        // The agent only ever sees the part from PartStart (arguments arrive
+        // as deltas). When no deltas come, the input it was born with is what
+        // gets executed and replayed — it must be `{}`, never Null.
+        let tool_input = events.iter().find_map(|e| {
+            if let ProviderEvent::PartStart {
+                part: Part::ToolCall(tc),
+            } = e
+            {
+                Some(tc.state.input().clone())
+            } else {
+                None
+            }
+        });
+        let tool_input = tool_input.expect("expected tool call part start");
+        assert!(
+            tool_input.is_object(),
+            "tool call with no argument deltas must start with object input, got {tool_input}"
+        );
     }
 
     // -- max_output_tokens wire-format tests -------------------------------

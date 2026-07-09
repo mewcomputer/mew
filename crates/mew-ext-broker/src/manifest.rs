@@ -1,8 +1,10 @@
 //! Extension manifest types — the parsed `mew-ext.toml` structure.
 //!
-//! This module defines the types; the actual parser/loader is Phase 2.
+//! Types + parser/loader for `mew-ext.toml` manifest files.
 
 use std::path::PathBuf;
+
+use anyhow::Context;
 
 use crate::capabilities::{Capability, EventContent, EventScope};
 
@@ -276,6 +278,33 @@ pub fn validate_fs_paths(sandbox: &ExtensionSandbox) -> Vec<String> {
     denied
 }
 
+/// Parse a `mew-ext.toml` file from disk.
+pub fn parse_manifest(path: &std::path::Path) -> anyhow::Result<ExtensionManifest> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("reading manifest at {}", path.display()))?;
+    let manifest: ExtensionManifest = toml::from_str(&content)
+        .with_context(|| format!("parsing manifest at {}", path.display()))?;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+/// Validate a parsed manifest: non-empty name, valid version, no
+/// denied fs paths, etc.
+fn validate_manifest(manifest: &ExtensionManifest) -> anyhow::Result<()> {
+    if manifest.extension.name.is_empty() {
+        anyhow::bail!("extension name is empty");
+    }
+    if manifest.extension.version.is_empty() {
+        anyhow::bail!("extension version is empty");
+    }
+    // Check sensitive paths in sandbox config.
+    let denied = validate_fs_paths(&manifest.sandbox);
+    if !denied.is_empty() {
+        anyhow::bail!("denied sensitive paths in sandbox config: {:?}", denied);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,5 +446,79 @@ mod tests {
         };
         let denied = validate_fs_paths(&sandbox);
         assert_eq!(denied, vec!["~/.ssh/id_rsa"]);
+    }
+
+    #[test]
+    fn test_parse_valid_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("mew-ext.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+[extension]
+name = "test-ext"
+version = "0.1.0"
+description = "A test extension"
+
+[extension.capabilities.hooks]
+observe = true
+"#,
+        )
+        .unwrap();
+
+        let manifest = parse_manifest(&manifest_path).expect("parse should succeed");
+        assert_eq!(manifest.extension.name, "test-ext");
+        assert_eq!(manifest.extension.version, "0.1.0");
+        let caps = manifest.requested_capabilities();
+        assert!(caps.has(&Capability::HooksObserve));
+    }
+
+    #[test]
+    fn test_parse_invalid_manifest_empty_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("mew-ext.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+[extension]
+name = ""
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+
+        let result = parse_manifest(&manifest_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("name is empty"),
+            "error should mention empty name: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_denylist() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("mew-ext.toml");
+        std::fs::write(
+            &manifest_path,
+            r#"
+[extension]
+name = "evil-ext"
+version = "0.1.0"
+
+[sandbox]
+fs_read = ["~/.ssh/id_rsa"]
+"#,
+        )
+        .unwrap();
+
+        let result = parse_manifest(&manifest_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("denied sensitive paths"),
+            "error should mention denied paths: {err}"
+        );
     }
 }

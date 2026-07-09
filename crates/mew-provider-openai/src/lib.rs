@@ -310,12 +310,21 @@ impl Adapter {
                             reasoning.push_str(&pt.text);
                         }
                         Part::ToolCall(pt) => {
+                            // Backends reject non-object arguments (sessions
+                            // persisted before object-input was enforced can
+                            // still carry Null, which stringifies to "null").
+                            let input = pt.state.input();
+                            let arguments = if input.is_object() {
+                                input.to_string()
+                            } else {
+                                "{}".to_string()
+                            };
                             tool_calls.push(json!({
                                 "id": pt.call_id,
                                 "type": "function",
                                 "function": {
                                     "name": pt.tool_name,
-                                    "arguments": pt.state.input().to_string(),
+                                    "arguments": arguments,
                                 }
                             }));
                         }
@@ -697,7 +706,10 @@ fn new_tool_call_part() -> ToolCallPart {
         tool_name: String::new(),
         call_id: String::new(),
         state: ToolState::Pending(ToolStatePending {
-            input: serde_json::Value::Null,
+            // Backends require function.arguments to be a JSON object, even
+            // when no argument deltas ever arrive. Null here poisons the
+            // history and 400s on replay.
+            input: serde_json::json!({}),
             time: ToolTime {
                 start: chrono::Utc::now().timestamp_millis(),
                 end: None,
@@ -814,6 +826,59 @@ mod tests {
         assert!(wire[0]["tool_calls"].is_array());
         assert_eq!(wire[0]["tool_calls"][0]["id"], "call_123");
         assert_eq!(wire[0]["tool_calls"][0]["function"]["name"], "echo");
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_null_tool_input_becomes_object() {
+        // A tool call whose arguments never streamed carried `input: Null`.
+        // Replaying that as `function.arguments = "null"` is rejected by
+        // backends ("arguments must be a JSON object"). It must be "{}".
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                tool_name: "write".to_string(),
+                call_id: "call_null".to_string(),
+                state: ToolState::Pending(ToolStatePending {
+                    input: serde_json::Value::Null,
+                    time: ToolTime {
+                        start: 0,
+                        end: None,
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: Some(AssistantMeta {
+                provider_id: String::new(),
+                model_id: String::new(),
+                cost: 0.0,
+                tokens: Tokens::default(),
+                finish: None,
+                error: None,
+            }),
+        };
+        let wire = adapter.build_wire_message(&[], &msg).await;
+        assert_eq!(wire.len(), 1);
+        assert_eq!(
+            wire[0]["tool_calls"][0]["function"]["arguments"], "{}",
+            "null tool input must serialize as \"{{}}\""
+        );
     }
 
     #[tokio::test]
