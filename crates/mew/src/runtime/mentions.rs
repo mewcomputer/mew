@@ -89,3 +89,43 @@ pub async fn process_mentions(
 
     (enriched, display, attachments)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_mime_png() {
+        assert_eq!(image_mime("foo.png"), Some("image/png"));
+    }
+
+    #[test]
+    fn image_mime_jpg_and_jpeg() {
+        assert_eq!(image_mime("foo.jpg"), Some("image/jpeg"));
+        assert_eq!(image_mime("foo.jpeg"), Some("image/jpeg"));
+    }
+
+    #[test]
+    fn image_mime_gif() {
+        assert_eq!(image_mime("foo.gif"), Some("image/gif"));
+    }
+
+    #[test]
+    fn image_mime_webp() {
+        assert_eq!(image_mime("foo.webp"), Some("image/webp"));
+    }
+
+    #[test]
+    fn image_mime_case_insensitive() {
+        assert_eq!(image_mime("foo.PNG"), Some("image/png"));
+        assert_eq!(image_mime("foo.Jpg"), Some("image/jpeg"));
+    }
+
+    #[test]
+    fn image_mime_unknown_extension() {
+        assert_eq!(image_mime("foo.txt"), None);
+        assert_eq!(image_mime("foo.pdf"), None);
+        assert_eq!(image_mime("foo"), None);
+        assert_eq!(image_mime(""), None);
+    }
+}

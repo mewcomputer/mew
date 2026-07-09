@@ -194,6 +194,11 @@ pub enum Commands {
     /// iroh connection's peer ID is added to the allowlist automatically.
     #[cfg(feature = "iroh")]
     Pair,
+    /// Manage authentication for providers
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommands,
+    },
     /// View or edit configuration
     Config {
         #[command(subcommand)]
@@ -290,5 +295,22 @@ pub enum VfsCommands {
     Cat {
         /// Path relative to the VFS root (e.g. "personas/researcher").
         path: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuthCommands {
+    /// Log in to OpenAI via ChatGPT OAuth (browser-based PKCE flow).
+    /// Uses your ChatGPT Plus/Pro subscription credits.
+    Login {
+        /// Provider to log in to (currently only "openai-responses").
+        provider: Option<String>,
+    },
+    /// Show current auth status for all providers.
+    Status,
+    /// Log out and delete stored credentials.
+    Logout {
+        /// Provider to log out from.
+        provider: Option<String>,
     },
 }

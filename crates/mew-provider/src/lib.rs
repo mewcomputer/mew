@@ -1,3 +1,5 @@
+pub mod auth;
+
 use std::pin::Pin;
 use std::time::Duration;
 

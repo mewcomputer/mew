@@ -7,6 +7,7 @@ members = [
     "crates/mew-provider-anthropic",
     "crates/mew-provider-router",
     "crates/mew-provider-fake",
+    "crates/mew-provider-responses",
     "crates/mew-protocol",
     "crates/mew-daemon",
     "crates/mew-web-bridge",
@@ -142,6 +143,8 @@ mew-provider-openai = { path = "crates/mew-provider-openai" }
 mew-provider-anthropic = { path = "crates/mew-provider-anthropic" }
 mew-provider-router = { path = "crates/mew-provider-router" }
 mew-provider-fake = { path = "crates/mew-provider-fake" }
+mew-provider-responses = { path = "crates/mew-provider-responses" }
+openai-auth = "1"
 mew-protocol = { path = "crates/mew-protocol" }
 mew-daemon = { path = "crates/mew-daemon" }
 mew-web-bridge = { path = "crates/mew-web-bridge" }

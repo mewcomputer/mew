@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use mew_tui::harness::run_script;
+use mew_tui::harness::{run_script, Harness};
 
 /// Directory containing `.frame` golden files.
 fn golden_dir() -> PathBuf {
@@ -140,19 +140,65 @@ fn narrow_40col() {
 }
 
 /// Tool call display (collapsed).
+/// Uses the Harness API directly (not the script DSL) because say_tool_call
+/// takes multiple structured arguments that the DSL doesn't parse.
 #[test]
 fn tool_call_collapsed() {
-    golden_test(
-        "tool_call_collapsed",
-        "# Show a tool call\nsay_tool_call bash \"ls -la\" None\nsnapshot tool",
+    let mut h = Harness::new(80, 24);
+    h.say_tool_call("bash", "total 0\ndrwxr-xr-x  2 user user 40 Jul  8 00:00 .\ndrwxr-xr-x  3 user user 96 Jul  8 00:00 ..", None);
+    let rendered = normalize_frame(&h.render());
+    let dir = golden_dir();
+    fs::create_dir_all(&dir).expect("create golden dir");
+    let frame_path = dir.join("tool_call_collapsed.frame");
+    let update = std::env::var("MEW_UPDATE_GOLDEN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        .unwrap_or(false);
+    if update {
+        fs::write(&frame_path, &rendered).expect("write golden frame");
+        eprintln!("updated: {}", frame_path.display());
+        return;
+    }
+    let expected = fs::read_to_string(&frame_path).unwrap_or_else(|_| {
+        panic!(
+            "golden frame not found: {}\nRun with MEW_UPDATE_GOLDEN=1 to generate it.",
+            frame_path.display()
+        )
+    });
+    assert_eq!(
+        rendered.trim_end(),
+        expected.trim_end(),
+        "golden frame mismatch for 'tool_call_collapsed'\nRun with MEW_UPDATE_GOLDEN=1 to regenerate."
     );
 }
 
 /// Reasoning block display.
+/// Uses the Harness API directly (not the script DSL) because say_reasoning
+/// is a Harness method not recognized by the script DSL.
 #[test]
 fn reasoning_block() {
-    golden_test(
-        "reasoning_block",
-        "# Show a reasoning block\nsay_reasoning I need to think about this carefully.\nsnapshot reasoning",
+    let mut h = Harness::new(80, 24);
+    h.say_reasoning("I need to think about this carefully.");
+    let rendered = normalize_frame(&h.render());
+    let dir = golden_dir();
+    fs::create_dir_all(&dir).expect("create golden dir");
+    let frame_path = dir.join("reasoning_block.frame");
+    let update = std::env::var("MEW_UPDATE_GOLDEN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        .unwrap_or(false);
+    if update {
+        fs::write(&frame_path, &rendered).expect("write golden frame");
+        eprintln!("updated: {}", frame_path.display());
+        return;
+    }
+    let expected = fs::read_to_string(&frame_path).unwrap_or_else(|_| {
+        panic!(
+            "golden frame not found: {}\nRun with MEW_UPDATE_GOLDEN=1 to generate it.",
+            frame_path.display()
+        )
+    });
+    assert_eq!(
+        rendered.trim_end(),
+        expected.trim_end(),
+        "golden frame mismatch for 'reasoning_block'\nRun with MEW_UPDATE_GOLDEN=1 to regenerate."
     );
 }

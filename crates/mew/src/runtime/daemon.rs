@@ -28,19 +28,28 @@ impl DaemonTarget {
 
 #[async_trait::async_trait]
 impl CommandTarget for DaemonTarget {
-    fn prompt(&mut self, enriched: String, _parts: Vec<Part>) -> Receiver<AgentEvent> {
-        // Daemon client's prompt is async but returns a Receiver synchronously
-        // via a spawn. We need to block, but since this is called from an async
-        // context, we can't. Instead, we use the client's prompt method which
-        // spawns internally.
-        //
-        // Actually, client.prompt() is async and returns Receiver<AgentEvent>.
-        // We can't await in a non-async fn. Let's use a channel.
+    fn prompt(&mut self, enriched: String, parts: Vec<Part>) -> Receiver<AgentEvent> {
+        // Convert Part::File attachments to protocol Attachment structs.
+        // Other part types (Text, Reasoning, etc.) are inlined into the
+        // prompt text by process_mentions and don't need separate attachment.
+        let attachments: Vec<mew_protocol::Attachment> = parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::File(fp) => Some(mew_protocol::Attachment {
+                    path: fp.url.clone(),
+                    mime: Some(fp.mime.clone()),
+                }),
+                _ => None,
+            })
+            .collect();
+
+        // Bridge the async client.prompt() into the sync fn prompt() signature
+        // by spawning a forwarding task that drains the client's receiver into
+        // a channel.
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         let client = self.client.clone();
         tokio::spawn(async move {
-            let mut recv = client.prompt(enriched).await;
-            // Forward events from recv to tx
+            let mut recv = client.prompt(enriched, attachments).await;
             while let Some(event) = recv.recv().await {
                 if tx.send(event).await.is_err() {
                     break;
@@ -56,14 +65,18 @@ impl CommandTarget for DaemonTarget {
 
     async fn clear(&mut self) -> Result<(), Unsupported> {
         let client = self.client.clone();
-        client.slash_command("/clear".into()).await;
-        Ok(())
+        client
+            .slash_command("/clear".into())
+            .await
+            .map_err(|_| Unsupported("daemon connection failed during clear"))
     }
 
     async fn compact(&mut self) -> Result<(), Unsupported> {
         let client = self.client.clone();
-        client.slash_command("/compact".into()).await;
-        Ok(())
+        client
+            .slash_command("/compact".into())
+            .await
+            .map_err(|_| Unsupported("daemon connection failed during compact"))
     }
 
     async fn todos(&mut self) -> Result<String, Unsupported> {
@@ -73,24 +86,23 @@ impl CommandTarget for DaemonTarget {
     }
 
     async fn switch_model(&mut self, spec: &str) -> Result<SwitchedModel, Unsupported> {
-        let (provider_id, model_id) = if let Some(idx) = spec.find('/') {
-            (spec[..idx].to_string(), spec[idx + 1..].to_string())
-        } else {
-            (String::new(), spec.to_string())
-        };
+        let (provider_id, model_id) = crate::setup::providers::split_provider_model(spec, "");
         let client = self.client.clone();
         let msg = mew_protocol::ClientMessage::SwitchModel {
             provider: provider_id.clone(),
             model: model_id.clone(),
         };
-        if let Ok(json) = mew_protocol::encode_json(&msg) {
-            let _ = client.send_raw(&json).await;
+        match mew_protocol::encode_json(&msg) {
+            Ok(json) => match client.send_raw(&json).await {
+                Ok(()) => Ok(SwitchedModel {
+                    provider_id,
+                    model_id,
+                    display: spec.to_string(),
+                }),
+                Err(_) => Err(Unsupported("daemon connection failed during model switch")),
+            },
+            Err(_) => Err(Unsupported("failed to encode model switch message")),
         }
-        Ok(SwitchedModel {
-            provider_id,
-            model_id,
-            display: spec.to_string(),
-        })
     }
 
     async fn set_permission_mode(&mut self, mode: PermissionMode) -> Result<(), Unsupported> {
@@ -98,10 +110,15 @@ impl CommandTarget for DaemonTarget {
         let msg = mew_protocol::ClientMessage::SetPermissionMode {
             mode: mode.id().to_string(),
         };
-        if let Ok(json) = mew_protocol::encode_json(&msg) {
-            let _ = client.send_raw(&json).await;
+        match mew_protocol::encode_json(&msg) {
+            Ok(json) => match client.send_raw(&json).await {
+                Ok(()) => Ok(()),
+                Err(_) => Err(Unsupported(
+                    "daemon connection failed during permission mode change",
+                )),
+            },
+            Err(_) => Err(Unsupported("failed to encode permission mode message")),
         }
-        Ok(())
     }
 
     async fn set_thinking(&mut self, variant: &str) -> Result<(), Unsupported> {
@@ -109,17 +126,26 @@ impl CommandTarget for DaemonTarget {
         let msg = mew_protocol::ClientMessage::SetThinkingVariant {
             variant: variant.to_string(),
         };
-        if let Ok(json) = mew_protocol::encode_json(&msg) {
-            let _ = client.send_raw(&json).await;
+        match mew_protocol::encode_json(&msg) {
+            Ok(json) => match client.send_raw(&json).await {
+                Ok(()) => Ok(()),
+                Err(_) => Err(Unsupported(
+                    "daemon connection failed during thinking variant change",
+                )),
+            },
+            Err(_) => Err(Unsupported("failed to encode thinking variant message")),
         }
-        Ok(())
     }
 
     async fn attach_session(&mut self, id: &str) -> Result<(), Unsupported> {
         let client = self.client.clone();
-        let _ = client.attach_session(id).await;
-        client.list_sessions().await;
-        Ok(())
+        match client.attach_session(id).await {
+            Ok(()) => {
+                client.list_sessions().await;
+                Ok(())
+            }
+            Err(_) => Err(Unsupported("failed to attach to daemon session")),
+        }
     }
 
     async fn resume(&mut self, id: &str) -> Result<(), Unsupported> {
@@ -140,14 +166,18 @@ impl CommandTarget for DaemonTarget {
         let msg = mew_protocol::ClientMessage::SwitchPersona {
             name: name.to_string(),
         };
-        if let Ok(json) = mew_protocol::encode_json(&msg) {
-            let _ = client.send_raw(&json).await;
+        match mew_protocol::encode_json(&msg) {
+            Ok(json) => match client.send_raw(&json).await {
+                Ok(()) => Ok(PersonaApplied {
+                    pinned_model: None,
+                    display: format!("switched to persona: {}", name),
+                }),
+                Err(_) => Err(Unsupported(
+                    "daemon connection failed during persona switch",
+                )),
+            },
+            Err(_) => Err(Unsupported("failed to encode persona switch message")),
         }
-        Ok(PersonaApplied {
-            name: name.to_string(),
-            pinned_model: None,
-            display: format!("switched to persona: {}", name),
-        })
     }
 
     async fn plugin_command(&mut self, _name: &str, _args: &str) -> Result<String, Unsupported> {

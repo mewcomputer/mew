@@ -17,3 +17,4 @@ http = "1"
 tokio = { workspace = true }
 anyhow = { workspace = true }
 base64 = "0.22"
+tracing = { workspace = true }

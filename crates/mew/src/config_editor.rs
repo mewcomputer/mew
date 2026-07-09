@@ -290,21 +290,9 @@ impl ConfigEditor {
         }
     }
 
-    /// Borrow the current config.
-    #[allow(dead_code)]
-    pub fn config(&self) -> &Config {
-        &self.config
-    }
-
     /// Whether the config has unsaved changes.
     pub fn is_dirty(&self) -> bool {
         self.dirty
-    }
-
-    /// The current plugin list (with toggle state).
-    #[allow(dead_code)]
-    pub fn plugins(&self) -> &[PluginEntry] {
-        &self.plugins
     }
 
     fn run(&mut self) -> Result<()> {

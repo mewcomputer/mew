@@ -185,18 +185,19 @@ impl DaemonClient {
     }
 
     /// Send a prompt and return an `AgentEvent` stream — same interface as
-    /// `Agent::run()`.
-    pub async fn prompt(&self, text: String) -> mpsc::Receiver<AgentEvent> {
+    /// `Agent::run()`. Attachments (file paths) are forwarded to the daemon.
+    pub async fn prompt(
+        &self,
+        text: String,
+        attachments: Vec<mew_protocol::Attachment>,
+    ) -> mpsc::Receiver<AgentEvent> {
         let (event_tx, event_rx) = mpsc::channel(256);
 
         // Set the event sender so the background reader forwards events.
         *self.state.event_tx.lock().await = Some(event_tx);
 
         // Send the prompt message.
-        let msg = ClientMessage::Prompt {
-            text,
-            attachments: vec![],
-        };
+        let msg = ClientMessage::Prompt { text, attachments };
         let json = mew_protocol::encode_json(&msg).unwrap_or_default();
         let _ = self.state.ws_out.send(json).await;
 
@@ -222,10 +223,14 @@ impl DaemonClient {
     }
 
     /// Send a slash command to the daemon.
-    pub async fn slash_command(&self, command: String) {
+    pub async fn slash_command(&self, command: String) -> Result<()> {
         let msg = ClientMessage::SlashCommand { command };
-        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
-        let _ = self.state.ws_out.send(json).await;
+        let json = mew_protocol::encode_json(&msg)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
     }
 
     /// Request the daemon's session list. The response arrives as

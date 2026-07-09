@@ -14,11 +14,11 @@ use mew_tui::app::Mode as TuiMode;
 use mew_tui::events::Action;
 use mew_tui::SlashResult;
 
+use crate::commands::tui::copy_to_clipboard;
 use crate::config_editor::{self, ConfigEditor};
-use crate::copy_to_clipboard;
-use crate::persona_summary;
 use crate::runtime::mentions::process_mentions;
 use crate::runtime::target::{CommandTarget, Unsupported};
+use crate::setup::personas::persona_summary;
 
 /// Whether to continue or quit the event loop after handling an action.
 #[derive(Debug)]
@@ -66,9 +66,13 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             Flow::Quit
         }
         Action::Clear => {
-            let _ = cx.target.clear().await;
-            cx.app.clear_messages();
-            cx.app.push_synthetic_message("context cleared".into());
+            match cx.target.clear().await {
+                Ok(()) => {
+                    cx.app.clear_messages();
+                    cx.app.push_synthetic_message("context cleared".into());
+                }
+                Err(Unsupported(reason)) => cx.app.set_alert(reason),
+            }
             Flow::Continue
         }
         Action::SwitchModel(spec) => {
@@ -138,6 +142,11 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
 
 /// Handle `Action::Submit` — process mentions, push user message, start the turn.
 async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String) {
+    if cx.app.streaming {
+        cx.app
+            .set_alert("wait for the current response to finish (or press Ctrl+C to cancel)");
+        return;
+    }
     let text = cx.target.intercept_user_input(text).await;
     let cwd = std::env::current_dir().unwrap_or_default();
     let (enriched, display, attachments) =
@@ -155,6 +164,10 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
         SlashResult::Continue => {
             // Unknown slash command — fall through to the model as a normal prompt.
             // This matches the enum doc comment ("fall through to the model").
+            if cx.app.streaming {
+                cx.app.set_alert("wait for the current response to finish");
+                return Flow::Continue;
+            }
             let cwd = std::env::current_dir().unwrap_or_default();
             let (enriched, display, attachments) =
                 process_mentions(&text, &cwd, &mut cx.app.context_files).await;
@@ -169,9 +182,13 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
             Flow::Quit
         }
         SlashResult::Clear => {
-            let _ = cx.target.clear().await;
-            cx.app.clear_messages();
-            cx.app.push_synthetic_message("context cleared".into());
+            match cx.target.clear().await {
+                Ok(()) => {
+                    cx.app.clear_messages();
+                    cx.app.push_synthetic_message("context cleared".into());
+                }
+                Err(Unsupported(reason)) => cx.app.set_alert(reason),
+            }
             Flow::Continue
         }
         SlashResult::Message(msg) => {
@@ -257,9 +274,11 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
             Flow::Continue
         }
         SlashResult::ToggleMouseCapture => {
-            // The caller handles the actual terminal toggle since it needs
-            // a DefaultTerminal reference. We just mark the intent.
-            cx.app.set_alert("toggle mouse capture");
+            // Signal the event loop to perform the terminal toggle.
+            // The actual toggle needs a Terminal reference, which dispatch
+            // doesn't have. The loop checks pending_mouse_toggle after
+            // handle_action returns.
+            cx.app.pending_mouse_toggle = true;
             Flow::Continue
         }
         SlashResult::PluginCommand { name, args } => {
@@ -396,14 +415,11 @@ async fn handle_switch_persona<T: CommandTarget>(cx: &mut Ctx<'_, T>, name: &str
                 }
                 // If persona pinned a model, update app status
                 if let Some(ref model_str) = applied.pinned_model {
-                    let (_, new_model_id) = if let Some(idx) = model_str.find('/') {
-                        (&model_str[..idx], &model_str[idx + 1..])
-                    } else {
-                        ("", model_str.as_str())
-                    };
-                    cx.app.status.model = new_model_id.to_string();
+                    let (_, new_model_id) =
+                        crate::setup::providers::split_provider_model(model_str, "");
+                    cx.app.status.model = new_model_id.clone();
                     if let Some(c) = cx.cat {
-                        cx.app.status.context_window = c.context_window(new_model_id) as u32;
+                        cx.app.status.context_window = c.context_window(&new_model_id) as u32;
                     }
                 }
             }
@@ -460,7 +476,7 @@ async fn handle_rewind<T: CommandTarget>(cx: &mut Ctx<'_, T>, n: usize) {
             .push_synthetic_message("cannot rewind while streaming".into());
         return;
     }
-    if n > cx.app.messages().len() {
+    if n >= cx.app.messages().len() {
         cx.app
             .push_synthetic_message(format!("only {} messages exist", cx.app.messages().len()));
         return;
@@ -480,6 +496,12 @@ async fn handle_rewind<T: CommandTarget>(cx: &mut Ctx<'_, T>, n: usize) {
 async fn handle_attach_session<T: CommandTarget>(cx: &mut Ctx<'_, T>, id: &str) {
     match cx.target.attach_session(id).await {
         Ok(()) => {
+            // Clear the display — the daemon will push new messages
+            // for the attached session. Without this, the old session's
+            // messages persist and look stale.
+            cx.app.clear_messages();
+            cx.app
+                .push_synthetic_message(format!("attached to session {}", id));
             cx.app.auto_scroll = true;
             cx.app.scroll = cx.app.max_scroll;
         }

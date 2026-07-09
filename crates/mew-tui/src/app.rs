@@ -226,6 +226,10 @@ pub struct App {
     pub retry_status: Option<String>,
     /// Whether mouse capture (scroll/clicks) is enabled instead of native selection.
     pub mouse_capture: bool,
+    /// Flag set by dispatch when the user requests a mouse-capture toggle.
+    /// The event loop checks this after handle_action and performs the
+    /// actual terminal toggle (which needs a Terminal reference).
+    pub pending_mouse_toggle: bool,
     /// Chat area position from last render, for mouse click mapping.
     pub chat_area: Rect,
     /// Input area position from last render, for mouse click mapping.
@@ -310,6 +314,8 @@ pub struct App {
     /// Test-only instrumentation: counts how many times `ensure_chat_rendered`
     /// rebuilds the chat (the `!cache_ok` branch). Used by `test_daemon_coalescing`
     /// (AC.13) to assert the 4-agent-event cap is respected.
+    /// Renamed from `render_count` doc — the test that uses this field
+    /// is now `test_render_cache_batches_deltas`.
     #[cfg(test)]
     pub render_count: u32,
 }
@@ -621,6 +627,7 @@ impl App {
             ctrl_c_quit_pending: None,
             retry_status: None,
             mouse_capture: true,
+            pending_mouse_toggle: false,
             chat_area: Rect::ZERO,
             input_area: Rect::ZERO,
             sel_anchor_row: None,
@@ -3324,34 +3331,6 @@ mod tests {
     }
 
     #[test]
-    fn test_permission_mode_picker_has_three_items() {
-        // Back-compat shim — kept as a 3-item check to make the picker
-        // expansion to Auto visible. The new comprehensive test is
-        // `test_permission_mode_picker_has_four_items` below.
-        let mut app = App::new();
-        app.open_permission_mode_picker();
-        let picker = app.picker.as_ref().unwrap();
-        assert!(
-            picker.items.len() >= 3,
-            "picker should show at least three modes"
-        );
-    }
-
-    #[test]
-    fn test_permission_mode_picker_has_four_items() {
-        // Back-compat shim — kept so a refactor that drops AutoPlus still
-        // catches the regression. The comprehensive test is
-        // `test_permission_mode_picker_has_five_items` below.
-        let mut app = App::new();
-        app.open_permission_mode_picker();
-        let picker = app.picker.as_ref().unwrap();
-        assert!(
-            picker.items.len() >= 4,
-            "picker should show at least four modes"
-        );
-    }
-
-    #[test]
     fn test_permission_mode_picker_preselects_permissive() {
         let mut app = App::new();
         app.permission_mode = mew_hooks::PermissionMode::Permissive;
@@ -4523,5 +4502,196 @@ mod tests {
         let app = App::new();
         let result = app.handle_slash("/cost");
         assert!(matches!(result, SlashResult::Message(_)));
+    }
+
+    /// AC.12: PartStart on an existing assistant message marks chat dirty.
+    /// Before the fix, the existing-message branch returned before
+    /// calling mark_chat_dirty(), causing stale renders.
+    #[test]
+    fn test_partstart_existing_message_dirty() {
+        let mut app = App::new();
+
+        // Start with a clean dirty state.
+        app.chat_dirty = None;
+
+        // Push an initial assistant message so there's an existing one
+        // to append to.
+        app.messages.push(Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![],
+            time: mew_message::Time {
+                created: chrono::Utc::now().timestamp_millis(),
+                completed: None,
+            },
+            assistant: None,
+        });
+
+        // Simulate PartStart(Text) arriving for the existing message.
+        let part = Part::Text(mew_message::TextPart {
+            base: mew_message::PartBase {
+                id: mew_message::PartId::new(),
+                message_id: mew_message::MessageId::new(),
+                session_id: mew_message::SessionId::new(),
+            },
+            text: "hello".into(),
+            synthetic: false,
+        });
+        app.handle_agent_event(mew_agent::AgentEvent::Provider(
+            mew_provider::ProviderEvent::PartStart { part },
+        ));
+
+        // The chat should be marked dirty — before the fix, this was None.
+        assert!(
+            app.chat_dirty.is_some(),
+            "PartStart on existing assistant message must mark chat dirty"
+        );
+    }
+
+    /// AC.10: A message with two text parts does not thrash the markdown cache.
+    /// The cache is keyed by PartId, so each text part gets its own entry.
+    /// Verify by inserting cache entries for both PartIds and confirming
+    /// neither is evicted — if the cache were keyed by MessageId, the second
+    /// insert would overwrite the first.
+    #[test]
+    fn test_multipart_cache_keyed_by_partid() {
+        let mut app = App::new();
+
+        let part1_id = mew_message::PartId::new();
+        let part2_id = mew_message::PartId::new();
+        let msg_id = mew_message::MessageId::new();
+        let sess_id = mew_message::SessionId::new();
+
+        let msg = Message {
+            id: msg_id,
+            session_id: sess_id,
+            role: Role::Assistant,
+            parts: vec![
+                Part::Text(mew_message::TextPart {
+                    base: mew_message::PartBase {
+                        id: part1_id,
+                        message_id: msg_id,
+                        session_id: sess_id,
+                    },
+                    text: "First text".into(),
+                    synthetic: false,
+                }),
+                Part::Text(mew_message::TextPart {
+                    base: mew_message::PartBase {
+                        id: part2_id,
+                        message_id: msg_id,
+                        session_id: sess_id,
+                    },
+                    text: "Second text".into(),
+                    synthetic: false,
+                }),
+            ],
+            time: mew_message::Time {
+                created: chrono::Utc::now().timestamp_millis(),
+                completed: None,
+            },
+            assistant: None,
+        };
+        app.messages.push(msg);
+
+        // Simulate rendering both parts into the cache — each part gets
+        // its own cache entry keyed by PartId.
+        app.rendered_md_cache.insert(
+            part1_id,
+            (80, "first".to_string(), std::rc::Rc::new(vec![])),
+        );
+        app.rendered_md_cache.insert(
+            part2_id,
+            (80, "second".to_string(), std::rc::Rc::new(vec![])),
+        );
+
+        // Both entries must survive — if the cache were keyed by MessageId,
+        // the second insert would have evicted the first.
+        assert_eq!(
+            app.rendered_md_cache.len(),
+            2,
+            "cache should hold 2 entries for 2 PartIds in one message"
+        );
+        assert!(
+            app.rendered_md_cache.contains_key(&part1_id),
+            "first PartId should have a cache entry"
+        );
+        assert!(
+            app.rendered_md_cache.contains_key(&part2_id),
+            "second PartId should have a cache entry"
+        );
+    }
+
+    /// AC.13: Verify that the render cache coalesces multiple deltas between
+    /// renders. This tests the render-cache invariant (dirty flag batches
+    /// multiple deltas into one rebuild), which is the mechanism the drain loop
+    /// relies on. The drain loop itself (event_rx batching in run_tui) is not
+    /// tested here — that would require simulating the event channel.
+    #[test]
+    fn test_render_cache_batches_deltas() {
+        let mut app = App::new();
+        app.streaming = true;
+
+        // Create an assistant message with a text part to stream into.
+        let part_id = mew_message::PartId::new();
+        let msg_id = mew_message::MessageId::new();
+        let sess_id = mew_message::SessionId::new();
+
+        app.messages.push(Message {
+            id: msg_id,
+            session_id: sess_id,
+            role: Role::Assistant,
+            parts: vec![Part::Text(mew_message::TextPart {
+                base: mew_message::PartBase {
+                    id: part_id,
+                    message_id: msg_id,
+                    session_id: sess_id,
+                },
+                text: String::new(),
+                synthetic: false,
+            })],
+            time: mew_message::Time {
+                created: chrono::Utc::now().timestamp_millis(),
+                completed: None,
+            },
+            assistant: None,
+        });
+
+        // Initialize the markdown stream for the text part.
+        app.md_stream = Some(mdstream::MdStream::new(mdstream::Options::default()));
+        app.md_state = mdstream::DocumentState::new();
+
+        // Reset render_count to start fresh.
+        app.render_count = 0;
+
+        // Simulate 10 char-granularity deltas arriving in drain batches.
+        // The drain cap is 4, so we process 4 deltas, render, repeat.
+        const STREAMING_DRAIN_LIMIT: usize = 4;
+        let deltas: Vec<char> = "helloworld".chars().collect();
+
+        for chunk in deltas.chunks(STREAMING_DRAIN_LIMIT) {
+            // Feed up to STREAMING_DRAIN_LIMIT deltas (simulating one drain batch).
+            for ch in chunk {
+                app.handle_agent_event(mew_agent::AgentEvent::Provider(
+                    mew_provider::ProviderEvent::PartDelta {
+                        part_id,
+                        field: "text",
+                        delta: ch.to_string(),
+                    },
+                ));
+            }
+            // Render after the drain batch (simulates one frame).
+            app.ensure_chat_rendered(80, 80, 24);
+        }
+
+        // With batching, we expect exactly ceil(10/4) = 3 renders.
+        // A broken cache that re-renders on every delta would give 10.
+        assert_eq!(
+            app.render_count, 3,
+            "expected exactly 3 render rebuilds for 10 deltas in batches of 4 \
+             (got {} — broken would be 10)",
+            app.render_count
+        );
     }
 }

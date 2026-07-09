@@ -1,65 +1,88 @@
-# Current Progress — Unified Runtime + TUI UX Plan
+# Current Progress — Consolidate Agent Construction
 
-## All Phases Status
+## Status: COMPLETE ✅
 
-### Phase 0 — COMPLETE ✅
-- 3 dispatch regression tests (no longer ignored)
-- 5 golden frame tests
+## What was done
 
-### Phase 1 — COMPLETE ✅
-- runtime/ module tree: dispatch.rs, target.rs, local.rs, mentions.rs, mod.rs
-- handle_action with deny(clippy::wildcard_enum_match_arm)
-- run_tui main loop + drain loop rewired through handle_action
-- SlashResult::Continue falls through (AC.5), Ctrl+C cancel-first (AC.15)
-- All messages.push replaced (AC.1)
+Eliminated ~420 lines of triplicated agent-construction code by making `run_tui` and `build_and_run` delegate to `build_session_agent`, and extracting shared helpers.
 
-### Phase 2 — COMPLETE ✅
-- DaemonTarget created (runtime/daemon.rs)
-- chat_with_daemon rewired through handle_action
-- SlashResult rendering fix (AC.8)
-- render_count instrumentation (AC.13 prep)
-- handle_slash_result_local deleted
-- arch-check expanded to all of crates/mew/src (AC.2 fully enforced)
+### Phase 1 ✅ — build_session_agent accepts dispatcher
+- Added `dispatcher: Arc<dyn Dispatcher>` and `todos_path: Option<PathBuf>` params
+- Kept sync (daemon AgentBuilder closure is sync)
+- Updated daemon.rs call site to pass `NopDispatcher` + `None`
 
-### Phase 3 — COMPLETE ✅
-- App.messages privatized to pub(crate)
-- messages() accessor added
+### Phase 2 ✅ — make_provider_builder helper
+- Extracted to `setup/providers.rs`
+- Returns `Box<dyn Fn(&str) -> Result<Arc<dyn Provider>, String> + Send + Sync>`
+- Replaced 3 inline closure sites (agent.rs, chat.rs x2)
 
-### Phase 4 — COMPLETE ✅
-- RenderCache adopted for streaming (AC.11)
-- rendered_md_cache rekeyed from MessageId to PartId (AC.10)
-- PartStart early-return dirty miss fixed (AC.12)
+### Phase 3 ✅ — wire_subagents helper
+- Extracted to `setup/agent.rs`
+- Called inside `build_session_agent` (for daemon path)
+- Called again by `run_tui`/`build_and_run` after `register_plugin_tools` (refresh with plugin tools)
+- Replaced 3 inline blocks (agent.rs, chat.rs x2)
 
-### Phase 5 — COMPLETE ✅
-- arch-check recipe in justfile (AC.1, AC.2, AC.18)
-- CLAUDE.md runtime invariants section
-- deny(wildcard) enforced in dispatch.rs
-- strum EnumIter derived on Action and SlashResult
-- test_action_variant_table: every Action variant tested (AC.7)
+### Phase 4 ✅ — run_tui delegates to build_session_agent
+- Replaced ~130 lines of inlined construction with single call
+- TUI-specific steps remain: dispatcher construction, MCP status, sidebar, App state
 
-### Phase 6 — COMPLETE ✅
-- Command registry in mew-protocol (command_registry.rs)
-- BUILTIN_COMMANDS static table with CommandLocus
-- Daemon unknown-command returns error (AC.14)
+### Phase 5 ✅ — build_and_run delegates to build_session_agent
+- Replaced ~80 lines of inlined construction with single call
+- Dropped unused MCP tool loading (was only keeping clients alive, never read)
 
-### Phase 7 — PARTIAL
-- 5 golden frames: welcome, user_assistant_turn, narrow_40col, tool_call_collapsed, reasoning_block
-- Remaining: adversarial FakeProvider, SSE fixtures, e2e smoke, time seam
-
-### Phase 8 — COMPLETE ✅
-- adjust_slash_scroll, /permissions, /help, web never-default (AC.20), mobile-core arms (AC.21)
-
-### Phase 9 — PARTIAL
-- CLI types extracted to cli.rs (4718 → 3634 lines)
-- setup/ extraction deferred (pure code motion, low risk)
+### Phase 6 ✅ — Verification
+- All 8 mew tests pass
+- All 137 mew-tui tests pass
+- clippy clean, fmt clean, arch-check passes
 
 ## Acceptance Criteria
-AC.1 ✅ AC.2 ✅ AC.5 ✅ AC.7 ✅ AC.8 ✅ AC.10 ✅ AC.12 ✅ AC.14 ✅ AC.15 ✅ AC.18 ✅ AC.20 ✅ AC.21 ✅
+- AC.1 ✅ — Agent::new count in chat.rs = 0
+- AC.2 ✅ — Same (both run_tui and build_and_run delegate)
+- AC.3 ✅ — set_provider_builder = 0 inline closures (all use make_provider_builder)
+- AC.4 ✅ — SubagentStart::new count in chat.rs = 0 (only in wire_subagents)
+- AC.5 ✅ — build_session_agent is sync, register_plugin_tools called by callers
+- AC.6 ✅ — No behavior change (all tests pass)
+- AC.7 ⚠️ — chat.rs at 1148 lines (target was <1000, but remaining code is non-duplicated)
 
-## Test Status
-- 134 mew-tui lib tests pass
-- 3 dispatch regression tests pass
-- 1 dispatch table test passes (AC.7)
-- 5 golden frame tests pass
-- clippy --tests -D warnings: zero warnings
-- just arch-check: passes
+## 2026-07-08 — Heal corrupted state.toml on startup
+
+**Problem:** `mew` crashed with `unknown provider t` when `state.toml` had
+stale `last_provider = "t"` / `last_model = "t"` values (likely written by
+an earlier partial run during refactoring). Resolvers trusted state blindly.
+
+**Fix (two layers):**
+
+1. **Resilient read** — `setup::providers::resolve_provider` /
+   `resolve_model_opt` now validate persisted state against `cfg.providers`
+   before using it. Falls back to the built-in default when the persisted
+   value is unknown, so a corrupted state file doesn't crash startup.
+
+2. **Startup heal prompt** — `mew-config` gained `validate_state`,
+   `heal_state`, and `backup_state_file`. `main.rs` calls
+   `startup_state_health_check` before subcommand dispatch:
+   - clean state → no prompt, continue.
+   - dirty state + interactive TTY → warn + `[y/N]` prompt. `y` → back up
+     to `state.toml.bak.<unix-epoch-seconds>` and heal; `n` → exit 0.
+   - dirty state + non-TTY (piped stdin, CI) → exit 2 with a message to
+     re-run from a terminal.
+
+**Files touched:**
+- `crates/mew-config/src/lib.rs` — `validate_state`, `heal_state`,
+  `backup_state_file`, `state_file_path` (+ 10 tests).
+- `crates/mew/src/setup/providers.rs` — resolver signature now takes `&Config`,
+  new `is_known_model` helper, 6 new tests for the corrupted-state case.
+- `crates/mew/src/main.rs` — `prompt_yn`, `startup_state_health_check`,
+  load `cfg` early, wired into all four resolve_provider/resolve_model_opt
+  call sites (Run / Chat / Daemon / no-subcommand).
+
+**Verification:**
+- `cargo test -p mew --bin mew` → 66 passed
+- `cargo test -p mew-tui --lib` → 135 passed
+- `cargo test -p mew-config` → 116 passed (10 new)
+- `cargo clippy -p mew --all-targets -- -D warnings` → clean
+- `cargo fmt -p mew -- --check` → clean
+- `just arch-check` → passes
+- Manual E2E (via `expect`): heal-yes path created
+  `state.toml.bak.1783495830` with the original content and rewrote
+  `state.toml` keeping only `disabled_plugins = ["buddy"]`. Decline path
+  left state unchanged and exited 0. Non-TTY path exited 2.

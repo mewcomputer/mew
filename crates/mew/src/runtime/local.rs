@@ -13,20 +13,16 @@ use mew_personas::Persona;
 use tokio::sync::mpsc::Receiver;
 
 use crate::runtime::target::{CommandTarget, PersonaApplied, SwitchedModel, Unsupported};
-use crate::{build_provider, resolve_reasoning};
+use crate::setup::providers::{build_provider, resolve_reasoning};
 
 /// The local (standalone) command target. Borrows the `Agent` and implements
 /// all `CommandTarget` methods directly against it. Holds config/catalog
 /// for model switching.
 pub struct LocalTarget<'a> {
     pub agent: &'a mut mew_agent::Agent,
-    #[allow(dead_code)]
     pub cfg: Config,
-    #[allow(dead_code)]
     pub cat: Option<Catalog>,
-    #[allow(dead_code)]
     pub provider_id: String,
-    #[allow(dead_code)]
     pub raw: bool,
 }
 
@@ -78,11 +74,8 @@ impl<'a> CommandTarget for LocalTarget<'a> {
     }
 
     async fn switch_model(&mut self, spec: &str) -> Result<SwitchedModel, Unsupported> {
-        let (new_provider_id, new_model_id) = if let Some(idx) = spec.find('/') {
-            (spec[..idx].to_string(), spec[idx + 1..].to_string())
-        } else {
-            (self.provider_id.clone(), spec.to_string())
-        };
+        let (new_provider_id, new_model_id) =
+            crate::setup::providers::split_provider_model(spec, &self.provider_id);
         match build_provider(
             &self.cfg,
             self.cat.as_ref(),
@@ -94,15 +87,11 @@ impl<'a> CommandTarget for LocalTarget<'a> {
                 self.agent.provider = new_provider;
                 self.agent.set_model_info(&new_model_id, &new_provider_id);
                 // Update pricing from catalog
-                if let Some(c) = &self.cat {
-                    if let Some(m) = c.lookup(&new_model_id) {
-                        self.agent.input_price = m.pricing.input;
-                        self.agent.output_price = m.pricing.output;
-                        self.agent.cache_read_price = m.pricing.cache_read;
-                        self.agent.cache_write_price = m.pricing.cache_write;
-                        self.agent.reasoning_price = m.pricing.reasoning;
-                    }
-                }
+                crate::setup::agent::apply_catalog_pricing(
+                    self.agent,
+                    self.cat.as_ref(),
+                    &new_model_id,
+                );
                 Ok(SwitchedModel {
                     provider_id: new_provider_id.clone(),
                     model_id: new_model_id.clone(),
@@ -177,7 +166,6 @@ impl<'a> CommandTarget for LocalTarget<'a> {
         if name == "default" || name == "none" {
             self.agent.clear_persona();
             return Ok(PersonaApplied {
-                name: "default".to_string(),
                 pinned_model: None,
                 display: "persona cleared (default)".to_string(),
             });
@@ -186,14 +174,8 @@ impl<'a> CommandTarget for LocalTarget<'a> {
             let pinned_model = self.agent.apply_persona(persona);
             // If persona pins a model, switch to it
             if let Some(ref model_str) = pinned_model {
-                let (new_provider_id, new_model_id) = if let Some(idx) = model_str.find('/') {
-                    (
-                        model_str[..idx].to_string(),
-                        model_str[idx + 1..].to_string(),
-                    )
-                } else {
-                    (self.provider_id.clone(), model_str.clone())
-                };
+                let (new_provider_id, new_model_id) =
+                    crate::setup::providers::split_provider_model(model_str, &self.provider_id);
                 if let Ok(new_provider) = build_provider(
                     &self.cfg,
                     self.cat.as_ref(),
@@ -203,19 +185,14 @@ impl<'a> CommandTarget for LocalTarget<'a> {
                 ) {
                     self.agent.provider = new_provider;
                     self.agent.set_model_info(&new_model_id, &new_provider_id);
-                    if let Some(c) = &self.cat {
-                        if let Some(m) = c.lookup(&new_model_id) {
-                            self.agent.input_price = m.pricing.input;
-                            self.agent.output_price = m.pricing.output;
-                            self.agent.cache_read_price = m.pricing.cache_read;
-                            self.agent.cache_write_price = m.pricing.cache_write;
-                            self.agent.reasoning_price = m.pricing.reasoning;
-                        }
-                    }
+                    crate::setup::agent::apply_catalog_pricing(
+                        self.agent,
+                        self.cat.as_ref(),
+                        &new_model_id,
+                    );
                 }
             }
             Ok(PersonaApplied {
-                name: persona.name.clone(),
                 pinned_model: pinned_model.clone(),
                 display: format!(
                     "switched to persona: {}{}",

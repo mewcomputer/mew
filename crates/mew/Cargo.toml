@@ -15,6 +15,7 @@ mew-provider = { workspace = true }
 mew-provider-openai = { workspace = true }
 mew-provider-anthropic = { workspace = true }
 mew-provider-fake = { workspace = true }
+mew-provider-responses = { workspace = true }
 mew-agent = { workspace = true }
 mew-tools = { workspace = true }
 mew-config = { workspace = true }
@@ -33,7 +34,6 @@ mew-hooks-runtime = { workspace = true }
 mew-subagents = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
-chrono = { workspace = true }
 
 tokio = { workspace = true }
 ulid = { workspace = true }
