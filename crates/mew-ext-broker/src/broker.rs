@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +28,8 @@ use mew_hooks::{
 use mew_message::Message;
 
 use mew_hooks_runtime::{call_via_handles, PluginHandles, PluginLoader, PluginSlot};
+
+use sha2::Digest;
 
 use crate::audit::GateOutcome;
 use crate::audit_log::AuditLog;
@@ -236,29 +237,35 @@ impl ExtensionBroker {
     }
 
     /// Fire-and-forget notification to all eligible extensions.
+    /// Extensions are notified concurrently (join_all) so a single
+    /// slow/dead extension can't stall the turn loop.
     async fn notify_all_filtered(&self, hook: HookId, params: Value, subject: Option<&str>) {
-        let wire = hook.as_wire();
-        for (idx, slot) in self.slots.iter().enumerate() {
-            if !self.check_capability(idx, hook, subject) {
-                continue;
-            }
-            slot.notify(wire, &params).await;
-        }
+        let wire = hook.as_wire().to_string();
+        let futs: Vec<_> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| self.check_capability(*idx, hook, subject))
+            .map(|(_, slot)| {
+                let wire = wire.clone();
+                let params = params.clone();
+                async move { slot.notify(&wire, &params).await }
+            })
+            .collect();
+        futures::future::join_all(futs).await;
     }
 
     /// Pipe a value through extensions, filtering by hook + subject.
     /// All eligible extensions run in parallel; last alphabetical
     /// non-error response wins.
-    async fn pipe_json_filtered<T, F, G>(
+    async fn pipe_json_filtered<T, G>(
         &self,
         hook: HookId,
         initial: &str,
         subject: Option<&str>,
-        _default: F,
         parse: G,
     ) -> T
     where
-        F: Fn() -> T,
         G: Fn(&str) -> T,
     {
         let wire = hook.as_wire().to_string();
@@ -472,37 +479,23 @@ impl Dispatcher for ExtensionBroker {
     }
 
     async fn on_system_prompt(&self, prompt: String) -> String {
-        self.pipe_json_filtered(
-            HookId::SystemPrompt,
-            &prompt,
-            None,
-            || prompt.clone(),
-            |s| s.to_string(),
-        )
-        .await
+        self.pipe_json_filtered(HookId::SystemPrompt, &prompt, None, |s| s.to_string())
+            .await
     }
 
     async fn on_chat_message(&self, msg: Message) -> Message {
         let json = serde_json::to_string(&msg).unwrap_or_default();
-        self.pipe_json_filtered(
-            HookId::ChatMessage,
-            &json,
-            None,
-            || msg.clone(),
-            |s| serde_json::from_str(s).unwrap_or(msg.clone()),
-        )
+        self.pipe_json_filtered(HookId::ChatMessage, &json, None, |s| {
+            serde_json::from_str(s).unwrap_or(msg.clone())
+        })
         .await
     }
 
     async fn on_chat_params(&self, p: ChatParams) -> ChatParams {
         let json = serde_json::to_value(&p).unwrap_or_default().to_string();
-        self.pipe_json_filtered(
-            HookId::ChatParams,
-            &json,
-            None,
-            || p.clone(),
-            |s| serde_json::from_str(s).unwrap_or(p.clone()),
-        )
+        self.pipe_json_filtered(HookId::ChatParams, &json, None, |s| {
+            serde_json::from_str(s).unwrap_or(p.clone())
+        })
         .await
     }
 
@@ -513,13 +506,9 @@ impl Dispatcher for ExtensionBroker {
             .collect();
         let json = serde_json::to_string(&pairs).unwrap_or_default();
         let result: Vec<(String, String)> = self
-            .pipe_json_filtered(
-                HookId::ChatHeaders,
-                &json,
-                None,
-                || pairs.clone(),
-                |s| serde_json::from_str(s).unwrap_or(pairs.clone()),
-            )
+            .pipe_json_filtered(HookId::ChatHeaders, &json, None, |s| {
+                serde_json::from_str(s).unwrap_or(pairs.clone())
+            })
             .await;
         let mut headers = http::HeaderMap::new();
         for (name, value) in &result {
@@ -593,7 +582,6 @@ impl Dispatcher for ExtensionBroker {
             HookId::ToolExecuteAfter,
             &json,
             Some(&call.tool_name),
-            || output.clone(),
             |s| serde_json::from_str(s).unwrap_or(output.clone()),
         )
         .await
@@ -657,25 +645,15 @@ impl Dispatcher for ExtensionBroker {
 
     async fn on_shell_env(&self, env: HashMap<String, String>) -> HashMap<String, String> {
         let json = serde_json::to_string(&env).unwrap_or_default();
-        self.pipe_json_filtered(
-            HookId::ShellEnv,
-            &json,
-            None,
-            || env.clone(),
-            |s| serde_json::from_str(s).unwrap_or(env.clone()),
-        )
+        self.pipe_json_filtered(HookId::ShellEnv, &json, None, |s| {
+            serde_json::from_str(s).unwrap_or(env.clone())
+        })
         .await
     }
 
     async fn on_user_input(&self, prompt: String) -> String {
-        self.pipe_json_filtered(
-            HookId::UserInput,
-            &prompt,
-            None,
-            || prompt.clone(),
-            |s| s.to_string(),
-        )
-        .await
+        self.pipe_json_filtered(HookId::UserInput, &prompt, None, |s| s.to_string())
+            .await
     }
 
     async fn on_persona_change(&self, old_persona: Option<&str>, new_persona: &str) {
@@ -711,8 +689,15 @@ impl Dispatcher for ExtensionBroker {
 
     async fn on_register_tools(&self) -> Vec<ToolRegistration> {
         let mut all: Vec<ToolRegistration> = Vec::new();
-        for slot in &self.slots {
+        for (idx, slot) in self.slots.iter().enumerate() {
             if !slot.is_healthy() {
+                continue;
+            }
+            if !self.principals[idx].has_capability(&Capability::Register) {
+                debug!(
+                    "extension {} lacks register capability; skipping tool registration",
+                    slot.name()
+                );
                 continue;
             }
             match slot.call("on-register-tools", &serde_json::json!({})).await {
@@ -769,50 +754,23 @@ impl Dispatcher for ExtensionBroker {
                                 let receiver = handles_receiver.clone();
                                 Box::pin(async move {
                                     let handles = receiver.borrow().clone();
-                                    if !handles.healthy.load(Ordering::Acquire) {
-                                        return format!("plugin '{}' is not running", plugin_name);
-                                    }
-                                    let id = handles.next_id.fetch_add(1, Ordering::Relaxed);
-                                    let (tx, rx) = tokio::sync::oneshot::channel();
-                                    {
-                                        let mut p = handles.pending.lock().await;
-                                        p.insert(id, tx);
-                                    }
-                                    let request = serde_json::json!({
-                                        "jsonrpc": "2.0",
-                                        "method": "call-tool",
-                                        "params": {
-                                            "name": tool_name,
-                                            "input": input,
-                                        },
-                                        "id": id,
+                                    let params = serde_json::json!({
+                                        "name": tool_name,
+                                        "input": input,
                                     });
-                                    let mut line =
-                                        serde_json::to_string(&request).unwrap_or_default();
-                                    line.push('\n');
+                                    match call_via_handles(
+                                        &plugin_name,
+                                        "call-tool",
+                                        &params,
+                                        &handles,
+                                    )
+                                    .await
                                     {
-                                        let mut w = handles.writer.lock().await;
-                                        if let Some(w) = w.as_mut() {
-                                            let _ = tokio::io::AsyncWriteExt::write_all(
-                                                w,
-                                                line.as_bytes(),
-                                            )
-                                            .await;
-                                            let _ = tokio::io::AsyncWriteExt::flush(w).await;
-                                        }
-                                    }
-                                    match tokio::time::timeout(handles.timeout, rx).await {
-                                        Ok(Ok(Ok(result))) => {
-                                            serde_json::from_str::<String>(&result)
-                                                .unwrap_or(result)
-                                        }
-                                        Ok(Ok(Err(e))) => format!(
+                                        Ok(result) => serde_json::from_str::<String>(&result)
+                                            .unwrap_or(result),
+                                        Err(e) => format!(
                                             "plugin '{}' tool '{}' error: {}",
                                             plugin_name, tool_name, e
-                                        ),
-                                        _ => format!(
-                                            "plugin '{}' tool '{}' timed out",
-                                            plugin_name, tool_name
                                         ),
                                     }
                                 })
@@ -835,7 +793,14 @@ impl Dispatcher for ExtensionBroker {
 
     async fn on_register_slash_commands(&self) -> Vec<SlashCommandDef> {
         let mut all: Vec<SlashCommandDef> = Vec::new();
-        for slot in &self.slots {
+        for (idx, slot) in self.slots.iter().enumerate() {
+            if !self.principals[idx].has_capability(&Capability::Register) {
+                debug!(
+                    "extension {} lacks register capability; skipping command registration",
+                    slot.name()
+                );
+                continue;
+            }
             match slot
                 .call("on-register-slash-commands", &serde_json::json!({}))
                 .await
@@ -900,5 +865,3 @@ impl Dispatcher for ExtensionBroker {
         None
     }
 }
-
-use sha2::Digest;

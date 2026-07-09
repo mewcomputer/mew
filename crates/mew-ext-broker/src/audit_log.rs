@@ -5,7 +5,7 @@
 //! JSONL file. Each extension gets its own file to avoid cross-extension
 //! write contention.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -21,7 +21,7 @@ pub struct AuditLog {
     dir: PathBuf,
     /// Inner writer state — mutex-protected. Each extension name maps to
     /// its own BufWriter. Lazily opened on first write for that extension.
-    writers: Mutex<HashMap<String, BufWriter<File>>>,
+    writers: Mutex<HashMap<String, BufWriter<Box<dyn Write + Send>>>>,
 }
 
 use std::collections::HashMap;
@@ -63,33 +63,20 @@ impl AuditLog {
 
         // Get or create the writer for this extension.
         let writer = writers.entry(ext_name.clone()).or_insert_with(|| {
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .unwrap_or_else(|e| {
+            match OpenOptions::new().create(true).append(true).open(&path) {
+                Ok(file) => BufWriter::new(Box::new(file) as Box<dyn Write + Send>),
+                Err(e) => {
                     tracing::warn!("failed to open audit file {:?}: {}", path, e);
-                    // Create a dummy file to /dev/null equivalent — we can't
-                    // return a default BufWriter easily, so panic-free fallback.
-                    // In practice this only fails if the dir is unwritable.
-                    File::create("/dev/null").unwrap_or_else(|_| {
-                        // Last resort: open the original path for reading (will fail on write).
-                        OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&path)
-                            .unwrap()
-                    })
-                });
-            BufWriter::new(file)
+                    // No-op sink — avoids panic on unwritable dirs.
+                    BufWriter::new(Box::new(std::io::sink()) as Box<dyn Write + Send>)
+                }
+            }
         });
 
         if let Err(e) = writeln!(writer, "{}", json) {
             tracing::warn!("failed to write audit entry: {}", e);
         }
-        if let Err(e) = writer.flush() {
-            tracing::warn!("failed to flush audit log: {}", e);
-        }
+        let _ = writer.flush();
     }
 
     /// Read all audit entries for a given extension.
