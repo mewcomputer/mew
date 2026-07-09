@@ -55,9 +55,9 @@ pub struct ExtensionBroker {
     /// Session ID for audit entries (set by the agent setup path).
     session_id: Option<String>,
     /// Registered tool names → extension name (for collision detection).
-    registered_tools: HashMap<String, String>,
+    registered_tools: std::sync::Mutex<HashMap<String, String>>,
     /// Registered command names → extension name (for collision detection).
-    registered_commands: HashMap<String, String>,
+    registered_commands: std::sync::Mutex<HashMap<String, String>>,
 }
 
 impl ExtensionBroker {
@@ -143,14 +143,19 @@ impl ExtensionBroker {
             principals,
             audit,
             session_id: None,
-            registered_tools: HashMap::new(),
-            registered_commands: HashMap::new(),
+            registered_tools: std::sync::Mutex::new(HashMap::new()),
+            registered_commands: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
     /// Set the session ID for audit log entries.
     pub fn set_session_id(&mut self, id: String) {
         self.session_id = Some(id);
+    }
+
+    /// Read audit entries for a given extension (for tests and `mew ext audit`).
+    pub fn audit_entries(&self, extension_name: &str) -> Vec<crate::audit::GateAuditEntry> {
+        self.audit.read_all(extension_name)
     }
 
     /// True if `plugin_name` should receive `hook` for the given `subject`.
@@ -171,7 +176,7 @@ impl ExtensionBroker {
 
     /// Map a `HookId` to its required capability.
     /// Returns `None` for lifecycle hooks (init/shutdown).
-    fn hook_capability(hook: HookId) -> Option<Capability> {
+    pub fn hook_capability(hook: HookId) -> Option<Capability> {
         match hook {
             // observe-event
             HookId::ProviderEvent
@@ -742,14 +747,18 @@ impl Dispatcher for ExtensionBroker {
 
                         // Collision detection: skip if another extension
                         // already registered this tool name.
-                        if let Some(existing) = self.registered_tools.get(&name) {
-                            if existing != &plugin_name {
-                                warn!(
-                                    "tool '{}' from extension '{}' conflicts with extension '{}'; skipping",
-                                    name, plugin_name, existing
-                                );
-                                continue;
+                        {
+                            let mut reg = self.registered_tools.lock().unwrap();
+                            if let Some(existing) = reg.get(&name) {
+                                if existing != &plugin_name {
+                                    warn!(
+                                        "tool '{}' from extension '{}' conflicts with extension '{}'; skipping",
+                                        name, plugin_name, existing
+                                    );
+                                    continue;
+                                }
                             }
+                            reg.insert(name.clone(), plugin_name.clone());
                         }
 
                         let handles_receiver = slot.handles();
@@ -835,14 +844,18 @@ impl Dispatcher for ExtensionBroker {
                     if let Ok(cmds) = serde_json::from_str::<Vec<SlashCommandDef>>(&json_str) {
                         for cmd in cmds {
                             // Collision detection.
-                            if let Some(existing) = self.registered_commands.get(&cmd.name) {
-                                if existing != slot.name() {
-                                    warn!(
-                                        "command '{}' from extension '{}' conflicts with extension '{}'; skipping",
-                                        cmd.name, slot.name(), existing
-                                    );
-                                    continue;
+                            {
+                                let mut reg = self.registered_commands.lock().unwrap();
+                                if let Some(existing) = reg.get(&cmd.name) {
+                                    if existing != slot.name() {
+                                        warn!(
+                                            "command '{}' from extension '{}' conflicts with extension '{}'; skipping",
+                                            cmd.name, slot.name(), existing
+                                        );
+                                        continue;
+                                    }
                                 }
+                                reg.insert(cmd.name.clone(), slot.name().to_string());
                             }
                             all.push(cmd);
                         }
