@@ -101,6 +101,7 @@ pub(crate) async fn build_daemon_server(
                 session_id,
                 Arc::new(mew_hooks::NopDispatcher),
                 None,
+                &[],
             )?;
             Ok((
                 agent,

@@ -415,6 +415,7 @@ pub(crate) async fn run_tui(
         None,
         dispatcher.clone(),
         todos_path.clone(),
+        &[],
     )?;
 
     // Collect non-MCP tool names for the sidebar (before MCP tools are
@@ -435,7 +436,15 @@ pub(crate) async fn run_tui(
     agent.register_plugin_tools().await;
 
     // Refresh subagent wiring now that plugin tools are registered.
-    wire_subagents(&mut agent, cfg, cat, &provider_id, raw, dispatcher.clone());
+    wire_subagents(
+        &mut agent,
+        cfg,
+        cat,
+        &provider_id,
+        raw,
+        dispatcher.clone(),
+        &[],
+    );
 
     // Load the saved todo list (if any) into the agent.
     if let Some(ref tp) = todos_path {

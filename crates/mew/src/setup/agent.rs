@@ -426,10 +426,19 @@ pub(crate) fn wire_subagents(
     provider_id: &str,
     raw: bool,
     dispatcher: Arc<dyn Dispatcher>,
+    discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
+    let subagents_extra: Vec<std::path::PathBuf> = discovered_extensions
+        .iter()
+        .filter_map(|ext| ext.provides_subagents())
+        .collect();
     let subagent_defs = {
-        let loader = mew_subagents::Loader::new(cwd);
+        let loader = if subagents_extra.is_empty() {
+            mew_subagents::Loader::new(cwd)
+        } else {
+            mew_subagents::Loader::with_extra_dirs(cwd, subagents_extra)
+        };
         Arc::new(loader.load().unwrap_or_default())
     };
     if !subagent_defs.is_empty() {
@@ -480,14 +489,34 @@ pub(crate) fn build_session_agent(
     session_id: Option<SessionId>,
     dispatcher: Arc<dyn Dispatcher>,
     todos_path: Option<std::path::PathBuf>,
+    discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
 ) -> Result<Agent> {
     let provider =
         build_provider(cfg, cat, provider_id, model_id, raw).context("build provider")?;
     let cwd = std::env::current_dir().unwrap_or_default();
-    let skills_loader = mew_skills::Loader::new(cwd.clone());
+
+    // Collect [provides] paths from discovered extensions.
+    let skills_extra: Vec<std::path::PathBuf> = discovered_extensions
+        .iter()
+        .filter_map(|ext| ext.provides_skills())
+        .collect();
+    let personas_extra: Vec<std::path::PathBuf> = discovered_extensions
+        .iter()
+        .filter_map(|ext| ext.provides_personas())
+        .collect();
+
+    let skills_loader = if skills_extra.is_empty() {
+        mew_skills::Loader::new(cwd.clone())
+    } else {
+        mew_skills::Loader::with_extra_dirs(cwd.clone(), skills_extra)
+    };
     let skills = Arc::new(skills_loader.load().unwrap_or_default());
     let skill_filter = Arc::new(tokio::sync::RwLock::new(None));
-    let persona_loader = mew_personas::Loader::new(cwd.clone());
+    let persona_loader = if personas_extra.is_empty() {
+        mew_personas::Loader::new(cwd.clone())
+    } else {
+        mew_personas::Loader::with_extra_dirs(cwd.clone(), personas_extra)
+    };
     let personas_arc = Arc::new(persona_loader.load().unwrap_or_default());
     let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
     let current_persona_name = Arc::new(tokio::sync::RwLock::new(None));
@@ -552,7 +581,15 @@ pub(crate) fn build_session_agent(
     }
 
     // Wire up subagent infrastructure.
-    wire_subagents(&mut agent, cfg, cat, provider_id, raw, dispatcher.clone());
+    wire_subagents(
+        &mut agent,
+        cfg,
+        cat,
+        provider_id,
+        raw,
+        dispatcher.clone(),
+        discovered_extensions,
+    );
 
     // Load project context and skills for system prompt.
     let ctx_loader = mew_context::Loader::new(&cwd);
