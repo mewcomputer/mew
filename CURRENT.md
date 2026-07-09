@@ -1,5 +1,71 @@
 # Current Progress — Consolidate Agent Construction
 
+## 2026-07-09 — W4: Extension Broker Implementation
+
+**Status: COMPLETE ✅**
+
+Implemented the `ExtensionBroker` that implements `mew_hooks::Dispatcher`, routing hook calls to extension processes with capability enforcement, concurrency, timeouts, audit logging, and event delivery. Replaces `SubprocessDispatcher` as the runtime's `Dispatcher` impl.
+
+### What was done
+
+**Phase 1 — Move routing logic into the broker:**
+- Created `crates/mew-ext-broker/src/broker.rs` with `ExtensionBroker` struct + full `Dispatcher` impl (all 26 methods)
+- `ExtensionBroker::from_dirs_filtered_with_config()` — same signature as `SubprocessDispatcher`'s, creates `Principal::extension()` with `CapabilitySet::legacy_full()` per slot
+- Routing helpers (`should_fire`, `notify_all_filtered`, `pipe_json_filtered`, `pipe_json_raw`, `detect_outcome`) moved into the broker
+- `build_dispatcher` in `setup/agent.rs` switched from `SubprocessDispatcher` to `ExtensionBroker`
+- `SubprocessDispatcher` left as dead code for rollback safety
+- `call_via_handles` made `pub` in transport.rs for broker consumption
+
+**Phase 2 — Capability enforcement:**
+- `hook_capability(HookId) -> Option<Capability>` maps each hook to its required capability
+- `check_capability()` checks `Principal.has_capability()` + `should_fire()` before routing
+- Legacy extensions get `CapabilitySet::legacy_full()` (all caps) — no-ops for them, active for future manifest-based extensions
+
+**Phase 3 — Gate audit logging:**
+- Created `crates/mew-ext-broker/src/audit_log.rs` with `AuditLog` (Mutex<BufWriter<File>> + PathBuf)
+- `on_tool_execute_before` and `on_permission_ask` write `GateAuditEntry` per extension
+- `set_session_id()` method for audit session context
+- `audit_entries()` public accessor for tests/future CLI
+
+**Phase 4 — Event queues (scaffolding):**
+- Created `crates/mew-ext-broker/src/event_queue.rs` with `EventQueue` (bounded mpsc, drop-oldest, Lagged)
+- Not wired — Phase 2 activates it when socket transport lands
+
+**Phase 5 — Collision-rejecting registration:**
+- `registered_tools`/`registered_commands` as `Mutex<HashMap<String, String>>` (interior mutability)
+- Duplicate tool/command names from different extensions are skipped with a warning
+- Same-extension re-registration allowed (restart case)
+
+**Phase 6 — Tests:**
+- Created `conflicting-plugin.rs` example binary (registers `sample-echo`, transforms `on-system-prompt` with `[conflicting-plugin]`)
+- 6 integration tests: e2e_hook_delivery, noop_equivalence, collision_rejection, gate_audit, last_writer_wins, capability_enforcement
+- 35 unit tests (capabilities, audit_log, event_queue, manifest, principal)
+- All 41 tests pass, clippy clean, fmt clean
+
+### Acceptance Criteria
+- AC.1 ✅ — `cargo build -p mew` compiles with `ExtensionBroker`
+- AC.2 ✅ — Existing `SubprocessDispatcher` tests pass (11 + 5)
+- AC.3 ✅ — `test_e2e_hook_delivery` passes
+- AC.4 ✅ — `test_noop_equivalence` passes
+- AC.5 ✅ — `test_collision_rejection` passes
+- AC.6 ✅ — `test_gate_audit` passes
+- AC.7 ✅ — `test_capability_enforcement` passes (HooksGate + sub-scope non-implication)
+- AC.8 ✅ — clippy clean, fmt clean
+- AC.9 ✅ — `test_last_writer_wins` passes (sample-plugin wins, alphabetically last)
+- AC.10 (stretch) — Not implemented (Phase 7 lifecycle hardening deferred)
+
+### Files
+- New: `crates/mew-ext-broker/src/broker.rs`, `audit_log.rs`, `event_queue.rs`
+- New: `crates/mew-ext-broker/tests/broker_integration.rs`
+- New: `crates/mew-hooks-runtime/examples/conflicting-plugin.rs`
+- Modified: `crates/mew-ext-broker/Cargo.toml`, `src/lib.rs`, `src/capabilities.rs`
+- Modified: `crates/mew-hooks-runtime/src/lib.rs`, `src/transport.rs`
+- Modified: `crates/mew/src/setup/agent.rs`, `crates/mew/Cargo.toml`
+
+---
+
+## Previous: Consolidate Agent Construction
+
 ## Status: COMPLETE ✅
 
 ## What was done
