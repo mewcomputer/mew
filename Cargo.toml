@@ -26,6 +26,7 @@ members = [
     "crates/mew-subagents",
     "crates/mew-hooks",
     "crates/mew-hooks-runtime",
+    "crates/mew-ext-broker",
     "crates/mew-tui",
     "crates/ratatui-mdstream",
     "crates/mew-mobile-core",
@@ -125,6 +126,7 @@ mew-message = { path = "crates/mew-message" }
 mew-provider = { path = "crates/mew-provider" }
 mew-hooks = { path = "crates/mew-hooks" }
 mew-hooks-runtime = { path = "crates/mew-hooks-runtime" }
+mew-ext-broker = { path = "crates/mew-ext-broker" }
 mew-tools = { path = "crates/mew-tools" }
 mew-hashline = { path = "crates/mew-hashline" }
 mew-mcp = { path = "crates/mew-mcp" }

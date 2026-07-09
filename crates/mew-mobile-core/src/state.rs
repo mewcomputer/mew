@@ -76,7 +76,7 @@ pub enum PartKind {
 /// A pending permission request.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PendingPermission {
-    pub request_id: u64,
+    pub request_id: String,
     pub session_id: String,
     pub tool_name: String,
     pub input: String,
@@ -85,7 +85,7 @@ pub struct PendingPermission {
 /// A pending ask-user request.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PendingAskUser {
-    pub request_id: u64,
+    pub request_id: String,
     pub session_id: String,
     pub call_id: String,
     pub questions: Vec<String>,

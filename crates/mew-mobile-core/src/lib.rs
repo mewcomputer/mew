@@ -299,18 +299,16 @@ impl MobileCore {
                 )
                 .await;
 
-                match result {
+                // Resolve the outcome into either "stop" or a reason to surface.
+                let error = match result {
                     Err(e) => {
-                        warn!(daemon = %daemon_id, error = %e, attempt, "connection failed");
+                        let msg = e.to_string();
+                        warn!(daemon = %daemon_id, error = %msg, attempt, "connection failed");
+                        msg
                     }
-                    Ok(should_stop) => {
-                        // Ok(true) = channel closed (user disconnected) — stop.
-                        // Ok(false) = connection dropped — retry.
-                        if should_stop {
-                            break;
-                        }
-                    }
-                }
+                    Ok(ConnOutcome::UserDisconnected) => break,
+                    Ok(ConnOutcome::Dropped { reason }) => reason,
+                };
 
                 // Exponential backoff with jitter.
                 let base_secs = 1u64 << attempt.min(5); // 1, 2, 4, 8, 16, 32
@@ -321,7 +319,10 @@ impl MobileCore {
                 if let Some(ref l) = *conn_state_for_task.listener.lock().unwrap() {
                     l.on_event(CoreEvent::DaemonStatusChanged {
                         daemon: daemon_id.clone(),
-                        status: DaemonStatus::Backoff { attempt },
+                        status: DaemonStatus::Backoff {
+                            attempt,
+                            error: error.clone(),
+                        },
                     });
                 }
 
@@ -417,7 +418,7 @@ impl MobileCore {
     }
 
     /// Respond to a permission request.
-    pub fn respond_permission(&self, id: DaemonId, request_id: u64, decision: Decision) {
+    pub fn respond_permission(&self, id: DaemonId, request_id: String, decision: Decision) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
             let wire_decision = match decision {
@@ -433,7 +434,7 @@ impl MobileCore {
     }
 
     /// Respond to an ask-user request.
-    pub fn respond_ask_user(&self, id: DaemonId, request_id: u64, answers: Vec<String>) {
+    pub fn respond_ask_user(&self, id: DaemonId, request_id: String, answers: Vec<String>) {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
             let _ = conn.tx.send(ClientMessage::AskUserResponse {
@@ -614,6 +615,19 @@ impl MobileCore {
     }
 }
 
+/// Outcome of a single `connect_and_run` attempt.
+///
+/// Carries the reason the connection ended so the reconnect loop can
+/// surface it in the `Backoff` status event. `Err` is reserved for
+/// failures to establish the connection (connect / open_bi / handshake);
+/// mid-stream drops are `Ok(Dropped)` with a descriptive reason.
+enum ConnOutcome {
+    /// The user (or daemon-removal) closed our outbound channel — stop.
+    UserDisconnected,
+    /// The connection dropped mid-stream. Retry, surfacing `reason`.
+    Dropped { reason: String },
+}
+
 /// Connect to a daemon over iroh and run the message loop.
 ///
 /// This function owns the WebSocket connection and processes incoming
@@ -625,7 +639,7 @@ async fn connect_and_run(
     node_id: &str,
     rx: &mut mpsc::UnboundedReceiver<ClientMessage>,
     conn_state: &Arc<ConnState>,
-) -> Result<bool> {
+) -> Result<ConnOutcome> {
     let emit_event = |event: CoreEvent| {
         if let Some(ref l) = *conn_state.listener.lock().unwrap() {
             l.on_event(event);
@@ -685,6 +699,9 @@ async fn connect_and_run(
 
     let mut last_sent_prompt: Option<String> = None;
     let mut user_disconnected = false;
+    // Reason the connection dropped (set on every non-user break). Surfaced
+    // via ConnOutcome::Dropped so the reconnect loop can show it in Backoff.
+    let mut drop_reason: Option<String> = None;
 
     // TextDelta coalescing buffer (spec note #8).
     let mut delta_buffer = String::new();
@@ -704,6 +721,7 @@ async fn connect_and_run(
                         }
                         let json = mew_protocol::encode_json(&client_msg)?;
                         if ws.send(Message::Text(json)).await.is_err() {
+                            drop_reason = Some("failed to send message to daemon".to_string());
                             break;
                         }
                     }
@@ -716,10 +734,12 @@ async fn connect_and_run(
                     Some(Ok(m)) => m,
                     Some(Err(e)) => {
                         warn!(daemon = %daemon_id, error = %e, "ws error");
+                        drop_reason = Some(format!("connection error: {e}"));
                         break;
                     }
                     None => {
                         info!(daemon = %daemon_id, "ws stream ended");
+                        drop_reason = Some("connection closed".to_string());
                         break;
                     }
                 };
@@ -728,6 +748,7 @@ async fn connect_and_run(
                     Message::Text(t) => t.to_string(),
                     Message::Close(_) => {
                         info!(daemon = %daemon_id, "connection closed by daemon");
+                        drop_reason = Some("closed by daemon".to_string());
                         break;
                     }
                     _ => continue,
@@ -829,7 +850,13 @@ async fn connect_and_run(
         }
     }
 
-    Ok(user_disconnected)
+    Ok(if user_disconnected {
+        ConnOutcome::UserDisconnected
+    } else {
+        ConnOutcome::Dropped {
+            reason: drop_reason.unwrap_or_else(|| "unknown reason".to_string()),
+        }
+    })
 }
 
 /// Translate a `ServerMessage` into zero or more `CoreEvent`s, updating
@@ -1204,7 +1231,7 @@ fn translate_message(
             events.push(CoreEvent::PermissionRequested {
                 daemon: d,
                 session_id,
-                request_id: *request_id,
+                request_id: request_id.clone(),
                 tool_name: tool_name.clone(),
                 input: input_str,
             });
@@ -1226,7 +1253,7 @@ fn translate_message(
             events.push(CoreEvent::AskUserRequested {
                 daemon: d,
                 session_id,
-                request_id: *request_id,
+                request_id: request_id.clone(),
                 call_id: call_id.clone(),
                 questions: questions.iter().map(|q| q.prompt.clone()).collect(),
             });
@@ -1239,7 +1266,7 @@ fn translate_message(
             }
             events.push(CoreEvent::RequestResolved {
                 daemon: d,
-                request_id: *request_id,
+                request_id: request_id.clone(),
             });
         }
 
@@ -1379,7 +1406,7 @@ fn translate_message(
             events.push(CoreEvent::PermissionRequested {
                 daemon: d,
                 session_id,
-                request_id: *request_id,
+                request_id: request_id.clone(),
                 tool_name: "workspace_escape".into(),
                 input: path.clone(),
             });
@@ -1403,7 +1430,7 @@ fn translate_message(
             events.push(CoreEvent::PermissionRequested {
                 daemon: d,
                 session_id,
-                request_id: *request_id,
+                request_id: request_id.clone(),
                 tool_name: format!("subagent:{tool_name}"),
                 input: input_str,
             });

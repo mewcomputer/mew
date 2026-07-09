@@ -15,3 +15,6 @@ pub use runtime::SubprocessDispatcher;
 
 mod dynamic_tool;
 pub use dynamic_tool::DynamicTool;
+
+mod transport;
+pub use transport::{ExtensionConnection, PluginHandles, PluginSlot};

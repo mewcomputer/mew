@@ -2,79 +2,11 @@
 //!
 //! Uses the sample-plugin example binary (cargo build --example sample-plugin).
 
-use std::env;
-use std::path::PathBuf;
-use std::process::Command;
-use std::sync::Arc;
-
-use mew_hooks::{Dispatcher, PermissionDecision, PluginHost, ToolCall, ToolOutput};
+use mew_hooks::{Dispatcher, PermissionDecision, ToolCall, ToolOutput};
 use mew_hooks_runtime::SubprocessDispatcher;
 
-fn test_host() -> PluginHost {
-    PluginHost {
-        notify: Arc::new(|msg| eprintln!("[plugin-notify] {msg}")),
-        config_read: Arc::new(|_key| None),
-        log: Arc::new(|msg| eprintln!("[plugin-log] {msg}")),
-        storage_read: Arc::new(|_key| None),
-        storage_write: Arc::new(|_key, _val| {}),
-        storage_delete: Arc::new(|_key| {}),
-        set_ui: Arc::new(|_key, _val| {}),
-    }
-}
-
-/// Find the sample plugin binary.
-fn sample_plugin_path() -> PathBuf {
-    // Try the target directory first (cargo test --examples sets this up)
-    if let Ok(path) = env::var("CARGO_BIN_EXE_sample-plugin") {
-        return PathBuf::from(path);
-    }
-    // Fallback: look relative to CARGO_MANIFEST_DIR (tests/..)
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let target = manifest
-        .parent()
-        .and_then(|p| p.parent())
-        .unwrap_or(&manifest)
-        .join("target")
-        .join("debug")
-        .join("examples")
-        .join("sample-plugin");
-
-    if target.exists() {
-        return target;
-    }
-
-    // Last resort: build it on the fly
-    let status = Command::new("cargo")
-        .args(["build", "--example", "sample-plugin"])
-        .current_dir(&manifest)
-        .status()
-        .expect("cargo build example");
-
-    assert!(status.success(), "failed to build sample-plugin example");
-
-    assert!(
-        target.exists(),
-        "sample-plugin binary not found at {:?}",
-        target
-    );
-    target
-}
-
-fn make_plugin_dir_with_binary() -> tempfile::TempDir {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let src = sample_plugin_path();
-    let dst = dir.path().join("sample-plugin");
-    std::fs::copy(&src, &dst).expect("copy plugin binary");
-    // Make executable on unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&dst).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&dst, perms).unwrap();
-    }
-    dir
-}
+mod common;
+use common::{make_plugin_dir_with_binary, test_host};
 
 #[tokio::test]
 async fn test_plugin_init_and_shutdown() {

@@ -44,10 +44,10 @@ export type ClientMessage =
   | { type: "cancel" }
   | {
       type: "permission_response";
-      request_id: number;
+      request_id: string;
       decision: PermissionDecision;
     }
-  | { type: "ask_user_response"; request_id: number; answers: string[] }
+  | { type: "ask_user_response"; request_id: string; answers: string[] }
   | { type: "slash_command"; command: string }
   | { type: "list_models" }
   | { type: "switch_model"; provider: string; model: string }
@@ -357,14 +357,14 @@ export type ServerMessage =
   | { type: "error_event"; message: string }
   | {
       type: "permission_request";
-      request_id: number;
+      request_id: string;
       tool_name: string;
       input: Record<string, unknown>;
     }
-  | { type: "workspace_permission_request"; request_id: number; path: string }
+  | { type: "workspace_permission_request"; request_id: string; path: string }
   | {
       type: "ask_user_request";
-      request_id: number;
+      request_id: string;
       call_id: string;
       questions: Question[];
     }
@@ -389,7 +389,7 @@ export type ServerMessage =
     }
   | {
       type: "subagent_permission_request";
-      request_id: number;
+      request_id: string;
       parent_call_id: string;
       tool_name: string;
       input: Record<string, unknown>;
@@ -398,7 +398,7 @@ export type ServerMessage =
   | { type: "persona_switch_requested"; name: string }
   | { type: "job_update"; job_id: string; command: string; state: string }
   | { type: "slash_result"; text: string }
-  | { type: "request_resolved"; request_id: number }
+  | { type: "request_resolved"; request_id: string }
   | { type: "session_cleared" }
   | { type: "session_list"; sessions: SessionInfo[] }
   | { type: "session_history"; messages: Message[] }
@@ -515,18 +515,18 @@ export interface MewClientEvents {
 
   "permission-request": (
     data: {
-      request_id: number;
+      request_id: string;
       tool_name: string;
       input: Record<string, unknown>;
     },
     respond: (decision: PermissionDecision) => void,
   ) => void;
   "workspace-permission-request": (
-    data: { request_id: number; path: string },
+    data: { request_id: string; path: string },
     respond: (decision: PermissionDecision) => void,
   ) => void;
   "ask-user-request": (data: {
-    request_id: number;
+    request_id: string;
     call_id: string;
     questions: Question[];
   }) => void;
@@ -555,7 +555,7 @@ export interface MewClientEvents {
     state: string;
   }) => void;
   "slash-result": (data: { text: string }) => void;
-  "request-resolved": (data: { request_id: number }) => void;
+  "request-resolved": (data: { request_id: string }) => void;
   "session-cleared": () => void;
   "session-list": (data: { sessions: SessionInfo[] }) => void;
   "session-history": (data: { messages: Message[] }) => void;
@@ -755,13 +755,13 @@ export class MewClient {
   }
 
   /** Respond to a `permission_request`. The callback in `on("permission-request", ...)` calls this. */
-  respondToPermission(request_id: number, decision: PermissionDecision): void {
+  respondToPermission(request_id: string, decision: PermissionDecision): void {
     this.send({ type: "permission_response", request_id, decision });
   }
 
   /** Respond to an `ask_user_request`. The UI calls this after the user
    *  submits answers to the questions. */
-  respondToAskUser(request_id: number, answers: string[]): void {
+  respondToAskUser(request_id: string, answers: string[]): void {
     this.send({ type: "ask_user_response", request_id, answers });
   }
 
@@ -1047,6 +1047,17 @@ export class MewClient {
           call_id: msg.call_id,
           questions: msg.questions,
         });
+        break;
+      case "subagent_permission_request":
+        this.emit(
+          "permission-request",
+          {
+            request_id: msg.request_id,
+            tool_name: msg.tool_name,
+            input: msg.input,
+          },
+          (decision) => this.respondToPermission(msg.request_id, decision),
+        );
         break;
       case "subagent_start":
         this.emit("subagent-start", {

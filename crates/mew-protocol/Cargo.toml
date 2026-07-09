@@ -13,3 +13,4 @@ mew-hooks = { workspace = true }
 mew-provider = { workspace = true }
 mew-subagents = { workspace = true }
 mew-session = { workspace = true }
+mew-ext-broker = { workspace = true }

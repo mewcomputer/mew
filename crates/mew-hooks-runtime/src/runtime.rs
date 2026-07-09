@@ -16,16 +16,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::io::AsyncWriteExt;
 use tracing::{debug, error, info, warn};
 
 use mew_hooks::{
@@ -35,257 +32,20 @@ use mew_hooks::{
 use mew_message::Message;
 
 use crate::loader::PluginLoader;
+use crate::transport::{call_via_handles, PluginHandles, PluginSlot};
 
-/// A running plugin subprocess with multiplexed JSON-RPC transport.
-struct PluginProcess {
-    name: String,
-    /// The process handle, kept alive so the subprocess isn't killed.
-    _child: Child,
-    /// Pending host→plugin requests keyed by request id.
-    pending: Arc<AsyncMutex<HashMap<u64, oneshot::Sender<String>>>>,
-    writer: Arc<tokio::sync::Mutex<Option<tokio::process::ChildStdin>>>,
-    next_id: AtomicU64,
-    timeout: Duration,
-    /// Health: true while the plugin is alive and accepting calls.
-    /// Flipped to false by the reader task on EOF. Dispatch methods
-    /// skip plugins that are false.
-    healthy: Arc<AtomicBool>,
-}
-
-impl PluginProcess {
-    /// Spawn a plugin subprocess and start the stdout reader task.
-    async fn spawn(
-        path: &PathBuf,
-        host: PluginHost,
-        timeout: Duration,
-    ) -> anyhow::Result<(Self, tokio::task::JoinHandle<()>)> {
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-
-        let mut child = Command::new(path)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .context("spawn plugin")?;
-
-        let stdout = child.stdout.take().context("plugin stdout")?;
-        let stdin = child.stdin.take().context("plugin stdin")?;
-
-        let pending: Arc<AsyncMutex<HashMap<u64, oneshot::Sender<String>>>> =
-            Arc::new(AsyncMutex::new(HashMap::new()));
-        let writer = Arc::new(tokio::sync::Mutex::new(Some(stdin)));
-        let healthy = Arc::new(AtomicBool::new(true));
-
-        // Spawn the reader task. On EOF (Ok(0)) or read error, the plugin
-        // is marked unhealthy and a restart is scheduled with exponential
-        // backoff. Three attempts max; after that, the plugin is given up
-        // on and a notification is sent to the user.
-        let reader_pending = pending.clone();
-        let reader_writer = writer.clone();
-        let reader_name = name.clone();
-        let reader_host = host;
-        let reader_healthy = healthy.clone();
-        let reader_handle = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
-            // The read loop exits via break when the plugin dies or EOF.
-            // The reason string is the loop's return value.
-            let death_reason: String = loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break "stdout closed".into(),
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        match serde_json::from_str::<Value>(trimmed) {
-                            Ok(msg) => {
-                                handle_plugin_message(
-                                    &reader_name,
-                                    &msg,
-                                    &reader_pending,
-                                    &reader_writer,
-                                    &reader_host,
-                                )
-                                .await;
-                            }
-                            Err(e) => {
-                                warn!("plugin {} sent unparseable json: {}", reader_name, e);
-                            }
-                        }
-                    }
-                    Err(e) => break format!("read error: {}", e),
-                }
-            };
-
-            // Plugin died. Mark unhealthy so dispatch methods skip it.
-            reader_healthy.store(false, Ordering::Release);
-            // Drop the writer so call() returns immediately.
-            {
-                let mut w = reader_writer.lock().await;
-                *w = None;
-            }
-            // Fail any in-flight requests so callers don't hang.
-            let mut pending = reader_pending.lock().await;
-            for (_id, tx) in pending.drain() {
-                let _ = tx.send(String::new());
-            }
-            drop(pending);
-
-            error!("plugin {} died: {}", reader_name, death_reason);
-            (reader_host.notify)(format!(
-                "plugin '{}' stopped ({}); disabled for this session",
-                reader_name, death_reason
-            ));
-        });
-
-        let process = Self {
-            name,
-            _child: child,
-            pending,
-            writer,
-            next_id: AtomicU64::new(1),
-            timeout,
-            healthy,
-        };
-
-        Ok((process, reader_handle))
-    }
-
-    /// Send a request to the plugin and await the response.
-    async fn call(&self, method: &str, params: &Value) -> anyhow::Result<String> {
-        // Skip dead plugins. The hook falls back to its default value.
-        if !self.healthy.load(Ordering::Acquire) {
-            return Err(anyhow::anyhow!(
-                "plugin '{}' is not running; skipping call to '{}'",
-                self.name,
-                method
-            ));
-        }
-
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-            "id": id,
-        });
-
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(id, tx);
-        }
-
-        let mut line = serde_json::to_string(&request)?;
-        line.push('\n');
-        {
-            // Take the writer under the lock. If it's None, the plugin
-            // died between the healthy check and now — fall back to dead.
-            let mut w = self.writer.lock().await;
-            let Some(w) = w.as_mut() else {
-                self.healthy.store(false, Ordering::Release);
-                return Err(anyhow::anyhow!(
-                    "plugin '{}' stdin closed; skipping call to '{}'",
-                    self.name,
-                    method
-                ));
-            };
-            w.write_all(line.as_bytes()).await?;
-            w.flush().await?;
-        }
-
-        let result = tokio::time::timeout(self.timeout, rx)
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "plugin '{}' timed out after {:?} on method '{}'",
-                    self.name,
-                    self.timeout,
-                    method
-                )
-            })?
-            .context("plugin response channel closed")?;
-
-        // Remove the pending entry (in case the reader task didn't).
-        {
-            let mut pending = self.pending.lock().await;
-            pending.remove(&id);
-        }
-
-        Ok(result)
-    }
-
-    /// Send a notification to the plugin (no response expected).
-    async fn notify(&self, method: &str, params: &Value) {
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        });
-
-        // Fire-and-forget: skip dead plugins silently. No error — the
-        // hook is observational, not transactional.
-        if !self.healthy.load(Ordering::Acquire) {
-            return;
-        }
-
-        let mut line = match serde_json::to_string(&request) {
-            Ok(l) => l,
-            Err(e) => {
-                error!(
-                    "plugin {} failed to serialize {} notification: {}",
-                    self.name, method, e
-                );
-                return;
-            }
-        };
-        line.push('\n');
-
-        let mut w = self.writer.lock().await;
-        let Some(w) = w.as_mut() else {
-            return;
-        };
-        if let Err(e) = w.write_all(line.as_bytes()).await {
-            error!(
-                "plugin {} failed to send {} notification: {}",
-                self.name, method, e
-            );
-        }
-        if let Err(e) = w.flush().await {
-            error!(
-                "plugin {} failed to flush {} notification: {}",
-                self.name, method, e
-            );
-        }
-    }
-}
-
-// Restart strategy: a full restart requires re-spawning the process and
-// wiring the new PluginProcess back into the dispatcher's plugin list.
-// The current Vec<PluginProcess> doesn't support that without a larger
-// Arc<Mutex<Option<PluginProcess>>> refactor around each slot. For now,
-// crashed plugins are disabled for the session. The user is notified
-// via the PluginHost.notify callback so they know what happened.
-//
-// TODO: implement Arc<Mutex<Option<PluginProcess>>> per slot and
-// restart_with_backoff (1s, 5s, 30s, 3 attempts) here.
+// handle_plugin_message and handle_host_request remain in this file
+// (pub(crate)) and are called from transport.rs's reader task.
 
 /// Handle one JSON message from a plugin's stdout.
 ///
 /// Messages with an `id` matching a pending request are routed as responses.
 /// Messages with a `method` field are plugin→host requests; they are handled
 /// and a response is written back to the plugin's stdin.
-async fn handle_plugin_message(
+pub(crate) async fn handle_plugin_message(
     name: &str,
     msg: &Value,
-    pending: &AsyncMutex<HashMap<u64, oneshot::Sender<String>>>,
+    pending: &crate::transport::PendingMap,
     writer: &tokio::sync::Mutex<Option<tokio::process::ChildStdin>>,
     host: &PluginHost,
 ) {
@@ -300,7 +60,7 @@ async fn handle_plugin_message(
                         .unwrap_or_else(|| v.to_string())
                 })
                 .unwrap_or_default();
-            let _ = sender.send(result_str);
+            let _ = sender.send(Ok(result_str));
             return;
         }
         // If we have an id but no matching pending request, it's a stale
@@ -336,7 +96,7 @@ async fn handle_plugin_message(
 }
 
 /// Handle a plugin→host function call.
-fn handle_host_request(
+pub(crate) fn handle_host_request(
     _name: &str,
     method: &str,
     params: Option<&Value>,
@@ -413,10 +173,7 @@ fn handle_host_request(
 }
 
 pub struct SubprocessDispatcher {
-    plugins: Vec<PluginProcess>,
-    /// Reader task handles — kept alive so stdout keeps being read.
-    #[allow(dead_code)]
-    reader_handles: Vec<tokio::task::JoinHandle<()>>,
+    slots: Vec<Arc<PluginSlot>>,
     /// Per-call deadline for each plugin hook invocation. A hung plugin
     /// can't stall the turn loop — the timeout fires, the hook falls back
     /// to its default value, and the error is logged.
@@ -460,9 +217,9 @@ impl SubprocessDispatcher {
     /// callers that want a different value than the env var default.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
-        for plugin in &mut self.plugins {
-            plugin.timeout = timeout;
-        }
+        // Per-slot timeout is set at spawn time and can't be retroactively
+        // changed on a running process. The self.timeout value is used
+        // for any future slots spawned by from_dirs* constructors.
         self
     }
 
@@ -516,8 +273,7 @@ impl SubprocessDispatcher {
             .collect();
 
         let host = Arc::new(host);
-        let mut processes = Vec::new();
-        let mut reader_handles = Vec::new();
+        let mut slots = Vec::new();
 
         for path in &plugin_paths {
             let name = path
@@ -526,8 +282,6 @@ impl SubprocessDispatcher {
                 .unwrap_or("unknown")
                 .to_string();
 
-            info!("starting plugin: {} ({})", name, path.display());
-
             // Use per-plugin timeout if configured, otherwise the global.
             let plugin_timeout = configs
                 .get(&name)
@@ -535,11 +289,9 @@ impl SubprocessDispatcher {
                 .map(Duration::from_millis)
                 .unwrap_or(global_timeout);
 
-            match PluginProcess::spawn(path, host.as_ref().clone(), plugin_timeout).await {
-                Ok((process, reader_handle)) => {
-                    info!("plugin started: {}", name);
-                    processes.push(process);
-                    reader_handles.push(reader_handle);
+            match PluginSlot::spawn(path.clone(), host.as_ref().clone(), plugin_timeout).await {
+                Ok(slot) => {
+                    slots.push(slot);
                 }
                 Err(e) => {
                     warn!("failed to start plugin {}: {}", path.display(), e);
@@ -548,11 +300,10 @@ impl SubprocessDispatcher {
         }
 
         // Sort alphabetically by name for deterministic hook ordering.
-        processes.sort_by(|a, b| a.name.cmp(&b.name));
+        slots.sort_by(|a, b| a.name().cmp(b.name()));
 
         Ok(Self {
-            plugins: processes,
-            reader_handles,
+            slots,
             timeout: global_timeout,
             configs,
         })
@@ -583,11 +334,15 @@ impl SubprocessDispatcher {
         params: Value,
         subject: Option<&str>,
     ) {
-        for plugin in &self.plugins {
-            if !self.should_fire(&plugin.name, hook.as_config(), subject) {
+        let wire = hook.as_wire();
+        for slot in &self.slots {
+            if !self.should_fire(slot.name(), hook.as_config(), subject) {
                 continue;
             }
-            plugin.notify(hook.as_wire(), &params).await;
+            if !slot.is_healthy() {
+                continue;
+            }
+            slot.notify(wire, &params).await;
         }
     }
 
@@ -609,23 +364,35 @@ impl SubprocessDispatcher {
         F: Fn() -> T,
         G: Fn(&str) -> T,
     {
-        // Filter to plugins that should fire, then run them in parallel.
-        // Plugin latency becomes max(plugin timeouts) instead of sum.
-        let mut candidates: Vec<&PluginProcess> = self
-            .plugins
-            .iter()
-            .filter(|p| self.should_fire(&p.name, hook.as_config(), subject))
-            .collect();
-        candidates.sort_by(|a, b| a.name.cmp(&b.name));
-
-        let params = serde_json::json!({
-            "value": initial,
-        });
+        // Collect candidates: clone name + handles from each healthy slot.
+        // We must not hold any guard across the join_all await.
         let wire = hook.as_wire().to_string();
-        let results = futures::future::join_all(candidates.iter().map(|p| {
+        let params = serde_json::json!({ "value": initial });
+
+        let mut candidates: Vec<(String, PluginHandles)> = Vec::new();
+        for slot in &self.slots {
+            if !self.should_fire(slot.name(), hook.as_config(), subject) {
+                continue;
+            }
+            if !slot.is_healthy() {
+                continue;
+            }
+            let receiver = slot.handles();
+            let handles = receiver.borrow().clone();
+            candidates.push((slot.name().to_string(), handles));
+        }
+        // Sort by name for deterministic last-writer-wins resolution.
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let results = futures::future::join_all(candidates.iter().map(|(name, handles)| {
             let params = params.clone();
             let method = wire.clone();
-            async move { (p.name.clone(), p.call(&method, &params).await) }
+            let name = name.clone();
+            let handles = handles.clone();
+            async move {
+                let result = call_via_handles(&name, &method, &params, &handles).await;
+                (name, result)
+            }
         }))
         .await;
 
@@ -633,7 +400,7 @@ impl SubprocessDispatcher {
         for (name, result) in results {
             match result {
                 Ok(s) => last = Some(s),
-                Err(e) => error!("plugin {} {}() failed: {}", name, hook.as_wire(), e),
+                Err(e) => error!("plugin {} {}() failed: {}", name, wire, e),
             }
         }
         match last {
@@ -652,21 +419,32 @@ impl SubprocessDispatcher {
         initial: &str,
         subject: Option<&str>,
     ) -> Option<String> {
-        let mut candidates: Vec<&PluginProcess> = self
-            .plugins
-            .iter()
-            .filter(|p| self.should_fire(&p.name, hook.as_config(), subject))
-            .collect();
-        candidates.sort_by(|a, b| a.name.cmp(&b.name));
-
-        let params = serde_json::json!({
-            "value": initial,
-        });
         let wire = hook.as_wire().to_string();
-        let results = futures::future::join_all(candidates.iter().map(|p| {
+        let params = serde_json::json!({ "value": initial });
+
+        let mut candidates: Vec<(String, PluginHandles)> = Vec::new();
+        for slot in &self.slots {
+            if !self.should_fire(slot.name(), hook.as_config(), subject) {
+                continue;
+            }
+            if !slot.is_healthy() {
+                continue;
+            }
+            let receiver = slot.handles();
+            let handles = receiver.borrow().clone();
+            candidates.push((slot.name().to_string(), handles));
+        }
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let results = futures::future::join_all(candidates.iter().map(|(name, handles)| {
             let params = params.clone();
             let method = wire.clone();
-            async move { (p.name.clone(), p.call(&method, &params).await) }
+            let name = name.clone();
+            let handles = handles.clone();
+            async move {
+                let result = call_via_handles(&name, &method, &params, &handles).await;
+                (name, result)
+            }
         }))
         .await;
 
@@ -674,7 +452,7 @@ impl SubprocessDispatcher {
         for (name, result) in results {
             match result {
                 Ok(s) => last = Some(s),
-                Err(e) => error!("plugin {} {}() failed: {}", name, hook.as_wire(), e),
+                Err(e) => error!("plugin {} {}() failed: {}", name, wire, e),
             }
         }
         last
@@ -704,18 +482,18 @@ impl SubprocessDispatcher {
 #[async_trait]
 impl Dispatcher for SubprocessDispatcher {
     async fn init(&self, _host: &PluginHost) {
-        for plugin in &self.plugins {
-            if let Err(e) = plugin.call("init", &serde_json::json!({})).await {
-                error!("plugin {} init failed: {}", plugin.name, e);
+        for slot in &self.slots {
+            if let Err(e) = slot.call("init", &serde_json::json!({})).await {
+                error!("plugin {} init failed: {}", slot.name(), e);
             } else {
-                info!("plugin {} initialised", plugin.name);
+                info!("plugin {} initialised", slot.name());
             }
         }
     }
 
     async fn shutdown(&self) {
-        for plugin in &self.plugins {
-            let _ = plugin.call("shutdown", &serde_json::json!({})).await;
+        for slot in &self.slots {
+            slot.shutdown().await;
         }
     }
 
@@ -1006,21 +784,19 @@ impl Dispatcher for SubprocessDispatcher {
 
     async fn on_register_tools(&self) -> Vec<ToolRegistration> {
         let mut all: Vec<ToolRegistration> = Vec::new();
-        for plugin in &self.plugins {
-            if !plugin.healthy.load(Ordering::Acquire) {
+        for slot in &self.slots {
+            if !slot.is_healthy() {
                 continue;
             }
-            match plugin
-                .call("on-register-tools", &serde_json::json!({}))
-                .await
-            {
+            match slot.call("on-register-tools", &serde_json::json!({})).await {
                 Ok(json_str) => {
                     let defs: Vec<serde_json::Value> = match serde_json::from_str(&json_str) {
                         Ok(v) => v,
                         Err(e) => {
                             error!(
                                 "plugin {} on-register-tools response invalid: {}",
-                                plugin.name, e
+                                slot.name(),
+                                e
                             );
                             continue;
                         }
@@ -1039,29 +815,27 @@ impl Dispatcher for SubprocessDispatcher {
                             .get("input_schema")
                             .cloned()
                             .unwrap_or(serde_json::json!({}));
-                        let plugin_name = plugin.name.clone();
-                        let plugin_writer = plugin.writer.clone();
-                        let plugin_pending = plugin.pending.clone();
-                        let plugin_healthy = plugin.healthy.clone();
-                        let plugin_timeout = plugin.timeout;
+                        let plugin_name = slot.name().to_string();
                         let tool_name = name.clone();
-                        let tool_next_id = Arc::new(AtomicU64::new(1));
+                        // Capture the watch receiver — tool closures always
+                        // see the current process's handles, even after restart.
+                        let handles_receiver = slot.handles();
                         let execute: Box<dyn Fn(Value) -> BoxFuture<String> + Send + Sync> =
                             Box::new(move |input: Value| {
                                 let tool_name = tool_name.clone();
                                 let plugin_name = plugin_name.clone();
-                                let writer = plugin_writer.clone();
-                                let pending = plugin_pending.clone();
-                                let healthy = plugin_healthy.clone();
-                                let next_id = tool_next_id.clone();
+                                let receiver = handles_receiver.clone();
                                 Box::pin(async move {
-                                    if !healthy.load(Ordering::Acquire) {
+                                    // borrow() is lock-free, but the Ref
+                                    // can't be held across .await — clone out.
+                                    let handles = receiver.borrow().clone();
+                                    if !handles.healthy.load(Ordering::Acquire) {
                                         return format!("plugin '{}' is not running", plugin_name);
                                     }
-                                    let id = next_id.fetch_add(1, Ordering::Relaxed);
+                                    let id = handles.next_id.fetch_add(1, Ordering::Relaxed);
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     {
-                                        let mut p = pending.lock().await;
+                                        let mut p = handles.pending.lock().await;
                                         p.insert(id, tx);
                                     }
                                     let request = serde_json::json!({
@@ -1077,7 +851,7 @@ impl Dispatcher for SubprocessDispatcher {
                                         serde_json::to_string(&request).unwrap_or_default();
                                     line.push('\n');
                                     {
-                                        let mut w = writer.lock().await;
+                                        let mut w = handles.writer.lock().await;
                                         if let Some(w) = w.as_mut() {
                                             let _ = tokio::io::AsyncWriteExt::write_all(
                                                 w,
@@ -1087,9 +861,15 @@ impl Dispatcher for SubprocessDispatcher {
                                             let _ = tokio::io::AsyncWriteExt::flush(w).await;
                                         }
                                     }
-                                    match tokio::time::timeout(plugin_timeout, rx).await {
-                                        Ok(Ok(result)) => serde_json::from_str::<String>(&result)
-                                            .unwrap_or(result),
+                                    match tokio::time::timeout(handles.timeout, rx).await {
+                                        Ok(Ok(Ok(result))) => {
+                                            serde_json::from_str::<String>(&result)
+                                                .unwrap_or(result)
+                                        }
+                                        Ok(Ok(Err(e))) => format!(
+                                            "plugin '{}' tool '{}' error: {}",
+                                            plugin_name, tool_name, e
+                                        ),
                                         _ => format!(
                                             "plugin '{}' tool '{}' timed out",
                                             plugin_name, tool_name
@@ -1107,7 +887,7 @@ impl Dispatcher for SubprocessDispatcher {
                 }
                 Err(e) => {
                     // Plugin doesn't support tool registration — fine.
-                    debug!("plugin {} on-register-tools: {}", plugin.name, e);
+                    debug!("plugin {} on-register-tools: {}", slot.name(), e);
                 }
             }
         }
@@ -1116,8 +896,8 @@ impl Dispatcher for SubprocessDispatcher {
 
     async fn on_register_slash_commands(&self) -> Vec<SlashCommandDef> {
         let mut all: Vec<SlashCommandDef> = Vec::new();
-        for plugin in &self.plugins {
-            match plugin
+        for slot in &self.slots {
+            match slot
                 .call("on-register-slash-commands", &serde_json::json!({}))
                 .await
             {
@@ -1127,14 +907,15 @@ impl Dispatcher for SubprocessDispatcher {
                     } else {
                         warn!(
                             "plugin {} returned invalid slash commands: {}",
-                            plugin.name, json_str
+                            slot.name(),
+                            json_str
                         );
                     }
                 }
                 Err(e) => {
                     tracing::debug!(
                         "plugin {} does not support slash commands: {}",
-                        plugin.name,
+                        slot.name(),
                         e
                     );
                 }
@@ -1144,17 +925,17 @@ impl Dispatcher for SubprocessDispatcher {
     }
 
     async fn execute_slash_command(&self, command: &str, args: &str) -> Option<String> {
-        for plugin in &self.plugins {
+        for slot in &self.slots {
             let params = serde_json::json!({
                 "command": command,
                 "args": args,
             });
-            match plugin.call("execute-slash-command", &params).await {
+            match slot.call("execute-slash-command", &params).await {
                 Ok(result) => return Some(result),
                 Err(e) => {
                     tracing::debug!(
                         "plugin {} does not handle slash command '{}': {}",
-                        plugin.name,
+                        slot.name(),
                         command,
                         e
                     );

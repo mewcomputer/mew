@@ -157,8 +157,17 @@ struct SessionRailView: View {
                 Label(statusTitle, systemImage: statusIcon)
                     .font(.title2)
             } description: {
-                Text(statusDescription)
-                    .foregroundStyle(.secondary)
+                VStack(spacing: 8) {
+                    Text(statusDescription)
+                        .foregroundStyle(.secondary)
+                    if !statusError.isEmpty {
+                        Text(statusError)
+                            .font(.footnote.monospaced())
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal)
+                    }
+                }
             }
             .frame(maxWidth: .infinity)
             .padding(.top, 80)
@@ -339,7 +348,7 @@ struct SessionRailView: View {
         switch status {
         case .connected:                return "Connected"
         case .connecting:                return "Connecting…"
-        case .backoff(let attempt):      return "Reconnecting (attempt \(attempt))"
+        case .backoff(let attempt, _):  return "Reconnecting (attempt \(attempt))"
         case .pairedLost:               return "Lost Pairing"
         case .disconnected:             return "Disconnected"
         }
@@ -359,10 +368,18 @@ struct SessionRailView: View {
         switch status {
         case .connected:     return "Session list unavailable."
         case .connecting:    return "Establishing a connection to \(navigationTitle)."
-        case .backoff:       return "Waiting to retry. The daemon will reconnect automatically."
+        case .backoff:       return "Waiting to retry. Pull down to retry now."
         case .pairedLost:    return "This daemon is no longer paired. Re-pair from the daemons list."
         case .disconnected:  return "Not connected to \(navigationTitle). Pull down to retry."
         }
+    }
+
+    /// The machine-readable reason for the most recent connection failure.
+    /// Surfaced under the status description so the user can diagnose
+    /// pairing / connectivity issues without Console.app.
+    private var statusError: String {
+        if case .backoff(_, let error) = status { return error }
+        return ""
     }
 
     // MARK: - Helpers

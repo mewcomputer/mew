@@ -74,7 +74,7 @@ pub enum CoreEvent {
     PermissionRequested {
         daemon: String,
         session_id: String,
-        request_id: u64,
+        request_id: String,
         tool_name: String,
         input: String,
     },
@@ -83,13 +83,13 @@ pub enum CoreEvent {
     AskUserRequested {
         daemon: String,
         session_id: String,
-        request_id: u64,
+        request_id: String,
         call_id: String,
         questions: Vec<String>,
     },
 
     /// A request was resolved (by this device or another). Dismiss the sheet.
-    RequestResolved { daemon: String, request_id: u64 },
+    RequestResolved { daemon: String, request_id: String },
 
     /// Cross-session alert from the daemon.
     Alert {
@@ -149,14 +149,19 @@ pub enum CoreEvent {
 }
 
 /// Connection status for a daemon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum DaemonStatus {
     Disconnected,
     Connecting,
     Connected,
     /// Backing off before reconnect attempt N.
+    ///
+    /// `error` carries the human-readable reason for the most recent
+    /// failure so the UI can surface it instead of a generic "retrying"
+    /// string. Empty when no specific reason is available.
     Backoff {
         attempt: u32,
+        error: String,
     },
     /// Pairing was lost (NodeId changed or unauthorized).
     PairedLost,

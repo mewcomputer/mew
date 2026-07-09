@@ -1767,7 +1767,11 @@ async fn translate_event(
         }
         AgentEvent::PermissionRequest { call, tx } => {
             let id = session.next_request_id();
-            session.pending_permissions.lock().await.insert(id, tx);
+            session
+                .pending_permissions
+                .lock()
+                .await
+                .insert(id.clone(), tx);
             let title = session.display_title().await;
             let alert = ServerMessage::SessionAlert {
                 session_id: session.id.clone(),
@@ -1791,7 +1795,11 @@ async fn translate_event(
         }
         AgentEvent::WorkspacePermissionRequest { path, tx } => {
             let id = session.next_request_id();
-            session.pending_permissions.lock().await.insert(id, tx);
+            session
+                .pending_permissions
+                .lock()
+                .await
+                .insert(id.clone(), tx);
             vec![ServerMessage::WorkspacePermissionRequest {
                 request_id: id,
                 path: path.display().to_string(),
@@ -1803,7 +1811,7 @@ async fn translate_event(
             tx,
         } => {
             let id = session.next_request_id();
-            session.pending_ask_user.lock().await.insert(id, tx);
+            session.pending_ask_user.lock().await.insert(id.clone(), tx);
             vec![
                 ServerMessage::AskUserRequest {
                     request_id: id,
@@ -1877,7 +1885,11 @@ async fn translate_event(
             tx,
         } => {
             let id = session.next_request_id();
-            session.pending_permissions.lock().await.insert(id, tx);
+            session
+                .pending_permissions
+                .lock()
+                .await
+                .insert(id.clone(), tx);
             vec![ServerMessage::SubagentPermissionRequest {
                 request_id: id,
                 parent_call_id,

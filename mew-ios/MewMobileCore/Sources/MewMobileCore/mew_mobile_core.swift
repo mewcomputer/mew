@@ -3079,8 +3079,12 @@ public enum DaemonStatus: Equatable, Hashable {
     case connected
     /**
      * Backing off before reconnect attempt N.
+     *
+     * `error` carries the human-readable reason for the most recent
+     * failure so the UI can surface it instead of a generic "retrying"
+     * string. Empty when no specific reason is available.
      */
-    case backoff(attempt: UInt32
+    case backoff(attempt: UInt32, error: String
     )
     /**
      * Pairing was lost (NodeId changed or unauthorized).
@@ -3113,7 +3117,7 @@ public struct FfiConverterTypeDaemonStatus: FfiConverterRustBuffer {
         
         case 3: return .connected
         
-        case 4: return .backoff(attempt: try FfiConverterUInt32.read(from: &buf)
+        case 4: return .backoff(attempt: try FfiConverterUInt32.read(from: &buf), error: try FfiConverterString.read(from: &buf)
         )
         
         case 5: return .pairedLost
@@ -3138,9 +3142,10 @@ public struct FfiConverterTypeDaemonStatus: FfiConverterRustBuffer {
             writeInt(&buf, Int32(3))
         
         
-        case let .backoff(attempt):
+        case let .backoff(attempt,error):
             writeInt(&buf, Int32(4))
             FfiConverterUInt32.write(attempt, into: &buf)
+            FfiConverterString.write(error, into: &buf)
             
         
         case .pairedLost:

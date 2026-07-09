@@ -69,6 +69,10 @@ impl HookId {
         Self::ToolError,
         Self::SubagentStart,
         Self::SubagentEnd,
+        Self::UserInput,
+        Self::PersonaChange,
+        Self::SessionSave,
+        Self::ModelFinish,
     ];
 
     /// The JSON-RPC method name sent to subprocess plugins.
@@ -941,5 +945,56 @@ mod tests {
         assert_eq!(parsed.name, "/buddy");
         assert_eq!(parsed.description, "pet companion");
         assert_eq!(parsed.handler_id, "buddy-handler");
+    }
+
+    /// Every `HookId` variant must appear in `ALL`. This test uses a
+    /// match-without-wildcard so the build breaks if a variant is added
+    /// without also updating `ALL`. This prevents the config-validation
+    /// false "possible typo" warning that occurs when `ALL` is missing
+    /// variants that are actually wired and dispatched.
+    #[test]
+    fn test_hook_id_all_is_exhaustive() {
+        // If you add a new variant to HookId, this match will fail to
+        // compile until you also add it to ALL.
+        let all_variants = [
+            HookId::PreModelTurn,
+            HookId::Stop,
+            HookId::PreCompaction,
+            HookId::PostCompaction,
+            HookId::TurnEnd,
+            HookId::SystemPrompt,
+            HookId::ChatMessage,
+            HookId::ChatParams,
+            HookId::ChatHeaders,
+            HookId::ToolExecuteBefore,
+            HookId::ToolExecuteAfter,
+            HookId::PermissionAsk,
+            HookId::ShellEnv,
+            HookId::ProviderEvent,
+            HookId::ToolError,
+            HookId::SubagentStart,
+            HookId::SubagentEnd,
+            HookId::UserInput,
+            HookId::PersonaChange,
+            HookId::SessionSave,
+            HookId::ModelFinish,
+        ];
+
+        for variant in all_variants {
+            assert!(
+                HookId::ALL.contains(&variant),
+                "HookId::{:?} is missing from HookId::ALL",
+                variant
+            );
+        }
+
+        // ALL must not have duplicates or extras.
+        assert_eq!(
+            HookId::ALL.len(),
+            all_variants.len(),
+            "HookId::ALL has {} entries but there are {} variants",
+            HookId::ALL.len(),
+            all_variants.len()
+        );
     }
 }

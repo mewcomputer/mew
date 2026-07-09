@@ -162,7 +162,7 @@ test("permission-request handler can respond", async () => {
 
   latest().peerSend({
     type: "PermissionRequest",
-    request_id: 7,
+    request_id: "uuid-7",
     tool_name: "bash",
     input: { command: "ls" },
   });
@@ -171,7 +171,7 @@ test("permission-request handler can respond", async () => {
   // The PermissionResponse is auto-sent by the library via respond().
   const last = latest().sent[latest().sent.length - 1]!;
   assert.equal(last.type, "PermissionResponse");
-  assert.equal((last as any).request_id, 7);
+  assert.equal((last as any).request_id, "uuid-7");
   assert.equal((last as any).decision, "allow_once");
 });
 

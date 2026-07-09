@@ -69,9 +69,9 @@ pub struct Session {
         )>,
     >,
     /// Pending permission / workspace-permission / subagent-permission requests.
-    pub pending_permissions: Mutex<HashMap<u64, oneshot::Sender<PermissionDecision>>>,
+    pub pending_permissions: Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>,
     /// Pending ask-user requests.
-    pub pending_ask_user: Mutex<HashMap<u64, oneshot::Sender<Vec<String>>>>,
+    pub pending_ask_user: Mutex<HashMap<String, oneshot::Sender<Vec<String>>>>,
     /// Monotonically increasing IDs for both clients and permission requests.
     pub next_id: AtomicU64,
     /// Token for the turn currently in progress, if any.
@@ -130,8 +130,8 @@ impl Session {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub fn next_request_id(&self) -> u64 {
-        self.next_id()
+    pub fn next_request_id(&self) -> String {
+        ulid::Ulid::new().to_string()
     }
 
     /// Attach a client sender. Returns (client_id, was_first_client).

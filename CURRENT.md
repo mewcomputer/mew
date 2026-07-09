@@ -86,3 +86,48 @@ an earlier partial run during refactoring). Resolvers trusted state blindly.
   `state.toml.bak.1783495830` with the original content and rewrote
   `state.toml` keeping only `disabled_plugins = ["buddy"]`. Decline path
   left state unchanged and exited 0. Non-TTY path exited 2.
+
+## 2026-07-08 — Surface connection errors in iOS reconnect UI
+
+**Problem:** When the iOS app couldn't connect to a daemon over iroh
+(e.g. pairing failures, relay unreachable, allowlist rejection), it just
+showed "Waiting to retry. The daemon will reconnect automatically." with
+no diagnostic info. The actual errors were `warn!`'d in the Rust core but
+went nowhere on iOS (no `tracing` subscriber installed). Impossible to
+diagnose without Console.app.
+
+**Fix:** Threaded the connection failure reason through the event system
+so it shows in the UI the user is already looking at.
+
+1. `DaemonStatus::Backoff` gained an `error: String` field (dropped `Copy`
+   from the enum since `String` isn't `Copy`). — `events.rs`
+2. `connect_and_run` now returns `Result<ConnOutcome>` where `ConnOutcome`
+   is `UserDisconnected` (stop) or `Dropped { reason }` (retry with
+   reason). Every break point in the message loop sets a `drop_reason`
+   ("connection error: {e}", "connection closed", "closed by daemon",
+   "failed to send message to daemon"). The reconnect loop binds the
+   reason from the match and passes it into the `Backoff` event. — `lib.rs`
+3. `SessionRailView.connectingState` now renders the error string in red
+   monospaced `.footnote` text below the status description when non-empty.
+   Added `statusError` computed property that extracts it from the
+   `Backoff` case. Updated all `.backoff` pattern matches in Swift for
+   the new 2-field shape. — `SessionRailView.swift`
+4. Regenerated Swift bindings + XCFramework via `just ios-core`.
+
+**Files touched:**
+- `crates/mew-mobile-core/src/events.rs` — `Backoff { error }`, drop `Copy`.
+- `crates/mew-mobile-core/src/lib.rs` — `ConnOutcome` enum,
+  `connect_and_run` return type + `drop_reason` tracking, reconnect loop
+  error threading.
+- `mew-ios/mew/SessionRailView.swift` — `statusError`, error display in
+  `connectingState`, pattern match updates.
+- `mew-ios/MewMobileCore/Sources/MewMobileCore/mew_mobile_core.swift` —
+  regenerated bindings (auto).
+
+**Verification:**
+- `cargo build -p mew-mobile-core` → clean (no warnings)
+- `cargo clippy -p mew-mobile-core --all-targets -- -D warnings` → clean
+- `cargo test -p mew-mobile-core` → 19 passed
+- `cargo fmt -p mew-mobile-core -- --check` → clean
+- `just ios-core` → framework + bindings rebuilt
+- `xcodebuild ... build` (iPhone 17 sim) → BUILD SUCCEEDED

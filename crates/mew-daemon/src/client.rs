@@ -36,9 +36,9 @@ struct ClientState {
     /// `request_id → receiver` for permission decisions.
     /// The receiver is awaited by a spawned task that forwards the
     /// decision back to the daemon.
-    pending_permissions: Mutex<HashMap<u64, oneshot::Receiver<PermissionDecision>>>,
+    pending_permissions: Mutex<HashMap<String, oneshot::Receiver<PermissionDecision>>>,
     /// `request_id → receiver` for ask-user answers.
-    pending_ask_user: Mutex<HashMap<u64, oneshot::Receiver<Vec<String>>>>,
+    pending_ask_user: Mutex<HashMap<String, oneshot::Receiver<Vec<String>>>>,
     /// The current event sender (set by `prompt()`, cleared when the
     /// receiver is dropped). The background reader uses this to forward
     /// translated AgentEvents.
@@ -385,9 +385,9 @@ async fn translate_server_message(
                 .pending_permissions
                 .lock()
                 .await
-                .insert(*request_id, rx);
+                .insert(request_id.clone(), rx);
 
-            spawn_permission_forwarder(*request_id, state);
+            spawn_permission_forwarder(request_id.clone(), state);
 
             vec![AgentEvent::PermissionRequest {
                 call: HookToolCall {
@@ -405,9 +405,9 @@ async fn translate_server_message(
                 .pending_permissions
                 .lock()
                 .await
-                .insert(*request_id, rx);
+                .insert(request_id.clone(), rx);
 
-            spawn_permission_forwarder(*request_id, state);
+            spawn_permission_forwarder(request_id.clone(), state);
 
             vec![AgentEvent::WorkspacePermissionRequest {
                 path: std::path::PathBuf::from(path),
@@ -421,9 +421,13 @@ async fn translate_server_message(
             questions,
         } => {
             let (tx, rx) = oneshot::channel();
-            state.pending_ask_user.lock().await.insert(*request_id, rx);
+            state
+                .pending_ask_user
+                .lock()
+                .await
+                .insert(request_id.clone(), rx);
 
-            let request_id = *request_id;
+            let request_id = request_id.clone();
             let state = state.clone();
             tokio::spawn(async move {
                 let rx = {
@@ -525,9 +529,9 @@ async fn translate_server_message(
                 .pending_permissions
                 .lock()
                 .await
-                .insert(*request_id, rx);
+                .insert(request_id.clone(), rx);
 
-            spawn_permission_forwarder(*request_id, state);
+            spawn_permission_forwarder(request_id.clone(), state);
 
             vec![AgentEvent::SubagentPermissionRequest {
                 parent_call_id: parent_call_id.clone(),
@@ -645,7 +649,7 @@ async fn translate_server_message(
 
 /// Spawn a task that waits for the TUI's permission decision and forwards
 /// it back to the daemon.
-fn spawn_permission_forwarder(request_id: u64, state: &Arc<ClientState>) {
+fn spawn_permission_forwarder(request_id: String, state: &Arc<ClientState>) {
     let state = state.clone();
     tokio::spawn(async move {
         let rx = {

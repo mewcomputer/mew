@@ -81,13 +81,13 @@ pub enum ClientMessage {
 
     /// Respond to a `PermissionRequest` from the daemon.
     PermissionResponse {
-        request_id: u64,
+        request_id: String,
         decision: PermissionDecision,
     },
 
     /// Respond to an `AskUserRequest` from the daemon.
     AskUserResponse {
-        request_id: u64,
+        request_id: String,
         /// One answer per question, in order.
         answers: Vec<String>,
     },
@@ -480,7 +480,7 @@ pub enum ServerMessage {
     // -- Request/response pairs (replaces oneshot::Sender variants) --
     /// Request user approval for a tool call.
     PermissionRequest {
-        request_id: u64,
+        request_id: String,
         tool_name: String,
         /// The tool input as JSON.
         input: serde_json::Value,
@@ -488,13 +488,13 @@ pub enum ServerMessage {
 
     /// Request user approval for a path outside the workspace.
     WorkspacePermissionRequest {
-        request_id: u64,
+        request_id: String,
         path: String,
     },
 
     /// Ask the user one to four free-text questions.
     AskUserRequest {
-        request_id: u64,
+        request_id: String,
         call_id: String,
         questions: Vec<Question>,
     },
@@ -521,7 +521,7 @@ pub enum ServerMessage {
 
     /// A permission request from a child subagent.
     SubagentPermissionRequest {
-        request_id: u64,
+        request_id: String,
         parent_call_id: String,
         tool_name: String,
         input: serde_json::Value,
@@ -554,7 +554,7 @@ pub enum ServerMessage {
     /// request has been resolved by any attached client. All frontends should
     /// dismiss the matching modal.
     RequestResolved {
-        request_id: u64,
+        request_id: String,
     },
 
     /// Broadcast when the session context has been cleared (e.g. `/clear`).
@@ -861,8 +861,194 @@ pub enum GitFileStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Codec helpers
+// Extension protocol surface (additive — no changes to existing types)
 // ---------------------------------------------------------------------------
+
+/// Protocol version for extension handshake. The daemon rejects mismatches
+/// with a clear message. The SDK majors in lockstep with this.
+pub const EXTENSION_PROTOCOL_VERSION: u32 = 1;
+
+/// A message from an extension process to the daemon.
+///
+/// The first message on any extension connection is always `ExtensionHello`.
+/// After the daemon responds with `ExtensionReady`, the extension may send
+/// any of the other variants.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExtensionMessage {
+    /// Handshake: sent first by the extension.
+    ExtensionHello {
+        name: String,
+        version: String,
+        protocol_version: u32,
+        /// Capability IDs requested (strings from `Capability::id()`).
+        requested_capabilities: Vec<String>,
+        /// Hook IDs this extension subscribes to (e.g. ["on-system-prompt",
+        /// "on-tool-execute-before"]).
+        hook_subscriptions: Vec<String>,
+        /// Event types this extension subscribes to (e.g. ["MessageEnd",
+        /// "ToolEnd"]). Empty means no events.
+        event_subscriptions: Vec<String>,
+    },
+
+    /// Response to a hook request from the daemon.
+    HookResponse {
+        request_id: String,
+        /// The raw JSON result string, or "block:reason" / "suppress".
+        outcome: String,
+    },
+
+    /// Call a session method (requires `sessions:*` capability).
+    ExtensionListSessions,
+
+    ExtensionAttachSession {
+        session_id: String,
+    },
+
+    ExtensionNewSession {
+        cwd: Option<String>,
+    },
+
+    ExtensionPrompt {
+        session_id: String,
+        text: String,
+    },
+
+    ExtensionCancel {
+        session_id: String,
+    },
+
+    /// Subscribe to events (requires `events` capability).
+    ExtensionSubscribeEvents {
+        /// Event types to receive (e.g. ["MessageEnd", "ToolEnd"]).
+        types: Vec<String>,
+    },
+
+    /// Resolve a permission prompt (requires `permissions:resolve`).
+    ExtensionResolvePermission {
+        request_id: String,
+        decision: String,
+    },
+
+    /// Call a host function (notify, storage, set_ui — under `ui`/`storage`).
+    ExtensionHostCall(ExtensionHostCall),
+
+    /// Read session history (requires `sessions:read`).
+    ExtensionReadSessionHistory {
+        session_id: String,
+    },
+}
+
+/// A message from the daemon to an extension process.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DaemonMessage {
+    /// Handshake response: grants (a subset of) requested capabilities.
+    ExtensionReady {
+        /// Capability IDs that were granted.
+        granted: Vec<String>,
+        /// Daemon's protocol version.
+        protocol_version: u32,
+    },
+
+    /// Handshake rejected (version mismatch or invalid capabilities).
+    ExtensionRejected { reason: String },
+
+    /// A hook request: the extension must respond with `HookResponse`
+    /// using the same `request_id`.
+    HookRequest {
+        request_id: String,
+        /// Hook method name (e.g. "on-system-prompt", "on-permission-ask").
+        hook: String,
+        /// Parameters as a JSON value.
+        params: serde_json::Value,
+    },
+
+    /// An event the extension subscribed to.
+    ExtensionEvent(ExtensionEvent),
+
+    /// Response to `ExtensionListSessions`.
+    SessionList { sessions: Vec<SessionInfo> },
+
+    /// Response to `ExtensionAttachSession` / `ExtensionNewSession`.
+    SessionAttached { session_id: String },
+
+    /// Response to `ExtensionReadSessionHistory`.
+    SessionHistory {
+        session_id: String,
+        messages: Vec<mew_message::Message>,
+    },
+
+    /// Response to `ExtensionHostCall`.
+    HostCallResult { result: String },
+
+    /// A permission request surfaced to the extension (for
+    /// `permissions:resolve` — the extension should respond with
+    /// `ExtensionResolvePermission`).
+    PermissionRequest {
+        request_id: String,
+        session_id: String,
+        tool: String,
+        input: serde_json::Value,
+        current_decision: String,
+    },
+
+    /// Error response for any extension request.
+    Error { message: String },
+}
+
+/// An event delivered to an extension.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExtensionEvent {
+    /// Session lifecycle: created, turn ended, tool ran — no message bodies.
+    SessionCreated {
+        session_id: String,
+        cwd: String,
+    },
+    SessionDestroyed {
+        session_id: String,
+    },
+    TurnEnded {
+        session_id: String,
+    },
+    ToolStarted {
+        session_id: String,
+        tool: String,
+    },
+    ToolEnded {
+        session_id: String,
+        tool: String,
+        success: bool,
+    },
+    /// Full message content (requires `events` with `content: full`).
+    MessageEnd {
+        session_id: String,
+        message: mew_message::Message,
+    },
+    /// The extension's event queue overflowed — some events were dropped.
+    Lagged {
+        count: u64,
+    },
+}
+
+/// A host function call from the extension to the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
+pub enum ExtensionHostCall {
+    /// Show a toast notification (requires `ui`).
+    Notify { message: String },
+    /// Set an input-area widget (requires `ui`).
+    SetUi { key: String, value: String },
+    /// Read from namespaced storage (always granted).
+    StorageRead { key: String },
+    /// Write to namespaced storage (always granted).
+    StorageWrite { key: String, value: String },
+    /// Delete from namespaced storage (always granted).
+    StorageDelete { key: String },
+    /// Read own config subtree (always granted).
+    ConfigRead { key: String },
+}
 
 /// Encode a message as a JSON string (WebSocket text frame).
 pub fn encode_json<T: Serialize>(msg: &T) -> Result<String, serde_json::Error> {
@@ -975,7 +1161,7 @@ mod tests {
     #[test]
     fn test_roundtrip_permission() {
         let msg = ClientMessage::PermissionResponse {
-            request_id: 42,
+            request_id: "uuid-42".into(),
             decision: PermissionDecision::AllowOnce,
         };
         let json = encode_json(&msg).unwrap();
@@ -985,7 +1171,7 @@ mod tests {
                 request_id,
                 decision,
             } => {
-                assert_eq!(request_id, 42);
+                assert_eq!(request_id, "uuid-42");
                 assert_eq!(decision, PermissionDecision::AllowOnce);
             }
             _ => panic!("wrong variant"),
@@ -1145,7 +1331,7 @@ mod tests {
             (PermissionDecision::Deny, 2u8),
         ] {
             let m = ClientMessage::PermissionResponse {
-                request_id: 7,
+                request_id: "uuid-7".into(),
                 decision,
             };
             match round_trip(&m) {
@@ -1153,7 +1339,7 @@ mod tests {
                     request_id,
                     decision: d,
                 } => {
-                    assert_eq!(request_id, 7);
+                    assert_eq!(request_id, "uuid-7");
                     assert_eq!(d as u8, expected);
                 }
                 _ => panic!(),
@@ -1164,7 +1350,7 @@ mod tests {
     #[test]
     fn client_message_ask_user_response_multiple_answers_roundtrip() {
         let m = ClientMessage::AskUserResponse {
-            request_id: 5,
+            request_id: "uuid-5".into(),
             answers: vec!["alpha".into(), "beta".into(), "gamma".into()],
         };
         match round_trip(&m) {
@@ -1172,7 +1358,7 @@ mod tests {
                 request_id,
                 answers,
             } => {
-                assert_eq!(request_id, 5);
+                assert_eq!(request_id, "uuid-5");
                 assert_eq!(answers, vec!["alpha", "beta", "gamma"]);
             }
             _ => panic!(),
@@ -1409,7 +1595,7 @@ mod tests {
     #[test]
     fn server_message_permission_request_roundtrip() {
         let m = ServerMessage::PermissionRequest {
-            request_id: 1,
+            request_id: "uuid-1".into(),
             tool_name: "bash".into(),
             input: serde_json::json!({"command": "ls"}),
         };
@@ -1419,7 +1605,7 @@ mod tests {
                 tool_name,
                 input,
             } => {
-                assert_eq!(request_id, 1);
+                assert_eq!(request_id, "uuid-1");
                 assert_eq!(tool_name, "bash");
                 assert_eq!(input["command"], "ls");
             }
@@ -1430,12 +1616,12 @@ mod tests {
     #[test]
     fn server_message_workspace_permission_request_roundtrip() {
         let m = ServerMessage::WorkspacePermissionRequest {
-            request_id: 2,
+            request_id: "uuid-2".into(),
             path: "/etc/passwd".into(),
         };
         match round_trip(&m) {
             ServerMessage::WorkspacePermissionRequest { request_id, path } => {
-                assert_eq!(request_id, 2);
+                assert_eq!(request_id, "uuid-2");
                 assert_eq!(path, "/etc/passwd");
             }
             _ => panic!(),
@@ -1445,7 +1631,7 @@ mod tests {
     #[test]
     fn server_message_ask_user_request_multiple_questions_roundtrip() {
         let m = ServerMessage::AskUserRequest {
-            request_id: 3,
+            request_id: "uuid-3".into(),
             call_id: "ask_1".into(),
             questions: vec![
                 Question {
@@ -1476,7 +1662,7 @@ mod tests {
                 call_id,
                 questions,
             } => {
-                assert_eq!(request_id, 3);
+                assert_eq!(request_id, "uuid-3");
                 assert_eq!(call_id, "ask_1");
                 assert_eq!(questions.len(), 2);
                 assert_eq!(questions[0].options.len(), 2);
@@ -1544,7 +1730,7 @@ mod tests {
     #[test]
     fn server_message_subagent_permission_request_roundtrip() {
         let m = ServerMessage::SubagentPermissionRequest {
-            request_id: 9,
+            request_id: "uuid-9".into(),
             parent_call_id: "p1".into(),
             tool_name: "write".into(),
             input: serde_json::json!({"path": "/x"}),
@@ -1556,7 +1742,7 @@ mod tests {
                 tool_name,
                 ..
             } => {
-                assert_eq!(request_id, 9);
+                assert_eq!(request_id, "uuid-9");
                 assert_eq!(parent_call_id, "p1");
                 assert_eq!(tool_name, "write");
             }
@@ -1710,10 +1896,11 @@ mod tests {
 
     #[test]
     fn wrong_type_for_known_field_is_rejected() {
-        // request_id must be a number, not a string.
-        let bad = r#"{"type":"permission_response","request_id":"oops","decision":"allow_once"}"#;
+        // request_id is now a String (UUID), not a number.
+        // A numeric request_id must be rejected.
+        let bad = r#"{"type":"permission_response","request_id":42,"decision":"allow_once"}"#;
         let result: Result<ClientMessage, _> = decode_json(bad);
-        assert!(result.is_err(), "string in number field must be rejected");
+        assert!(result.is_err(), "number in string field must be rejected");
     }
 
     #[test]
@@ -1762,14 +1949,14 @@ mod tests {
             (
                 "permission_response",
                 ClientMessage::PermissionResponse {
-                    request_id: 0,
+                    request_id: "uuid-0".into(),
                     decision: PermissionDecision::AllowOnce,
                 },
             ),
             (
                 "ask_user_response",
                 ClientMessage::AskUserResponse {
-                    request_id: 0,
+                    request_id: "uuid-0".into(),
                     answers: vec![],
                 },
             ),
@@ -2003,9 +2190,11 @@ mod tests {
 
     #[test]
     fn server_message_request_resolved_roundtrip() {
-        let m = ServerMessage::RequestResolved { request_id: 99 };
+        let m = ServerMessage::RequestResolved {
+            request_id: "uuid-99".into(),
+        };
         match round_trip(&m) {
-            ServerMessage::RequestResolved { request_id } => assert_eq!(request_id, 99),
+            ServerMessage::RequestResolved { request_id } => assert_eq!(request_id, "uuid-99"),
             _ => panic!("wrong variant"),
         }
     }
@@ -2297,5 +2486,469 @@ mod tests {
         let j = encode_json(&m).unwrap();
         // permission_mode should be skipped from serialization when None.
         assert!(!j.contains(r#""permission_mode""#));
+    }
+
+    // -- Extension protocol tests (W3a) ------------------------------------
+
+    #[test]
+    fn test_extension_hello_roundtrip() {
+        let msg = ExtensionMessage::ExtensionHello {
+            name: "zedra-host".into(),
+            version: "0.4.0".into(),
+            protocol_version: EXTENSION_PROTOCOL_VERSION,
+            requested_capabilities: vec![
+                "sessions:read".into(),
+                "sessions:prompt".into(),
+                "events:global:meta".into(),
+            ],
+            hook_subscriptions: vec!["on-system-prompt".into()],
+            event_subscriptions: vec!["MessageEnd".into(), "ToolEnd".into()],
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            ExtensionMessage::ExtensionHello {
+                name,
+                version,
+                protocol_version,
+                requested_capabilities,
+                hook_subscriptions,
+                event_subscriptions,
+            } => {
+                assert_eq!(name, "zedra-host");
+                assert_eq!(version, "0.4.0");
+                assert_eq!(protocol_version, EXTENSION_PROTOCOL_VERSION);
+                assert_eq!(requested_capabilities.len(), 3);
+                assert_eq!(requested_capabilities[0], "sessions:read");
+                assert_eq!(hook_subscriptions, vec!["on-system-prompt"]);
+                assert_eq!(event_subscriptions, vec!["MessageEnd", "ToolEnd"]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_extension_ready_roundtrip() {
+        let msg = DaemonMessage::ExtensionReady {
+            granted: vec!["sessions:read".into(), "hooks:observe".into()],
+            protocol_version: EXTENSION_PROTOCOL_VERSION,
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            DaemonMessage::ExtensionReady {
+                granted,
+                protocol_version,
+            } => {
+                assert_eq!(granted, vec!["sessions:read", "hooks:observe"]);
+                assert_eq!(protocol_version, EXTENSION_PROTOCOL_VERSION);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_extension_rejected_roundtrip() {
+        let msg = DaemonMessage::ExtensionRejected {
+            reason: "protocol version mismatch: extension v2, daemon v1".into(),
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            DaemonMessage::ExtensionRejected { reason } => {
+                assert!(reason.contains("protocol version mismatch"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_hook_request_roundtrip() {
+        let msg = DaemonMessage::HookRequest {
+            request_id: "01HXYZ123ABC".into(),
+            hook: "on-system-prompt".into(),
+            params: serde_json::json!({ "value": "hello world" }),
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            DaemonMessage::HookRequest {
+                request_id,
+                hook,
+                params,
+            } => {
+                assert_eq!(request_id, "01HXYZ123ABC");
+                assert_eq!(hook, "on-system-prompt");
+                assert_eq!(params["value"], "hello world");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_hook_response_roundtrip() {
+        let msg = ExtensionMessage::HookResponse {
+            request_id: "01HXYZ123ABC".into(),
+            outcome: "[sample-plugin] hello world".into(),
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            ExtensionMessage::HookResponse {
+                request_id,
+                outcome,
+            } => {
+                assert_eq!(request_id, "01HXYZ123ABC");
+                assert_eq!(outcome, "[sample-plugin] hello world");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_hook_response_block_outcome_roundtrip() {
+        let msg = ExtensionMessage::HookResponse {
+            request_id: "01BLOCK456".into(),
+            outcome: "block:nope".into(),
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            ExtensionMessage::HookResponse { outcome, .. } => {
+                assert_eq!(outcome, "block:nope");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_extension_list_sessions_roundtrip() {
+        let msg = ExtensionMessage::ExtensionListSessions;
+        let parsed: ExtensionMessage = round_trip(&msg);
+        assert!(matches!(parsed, ExtensionMessage::ExtensionListSessions));
+    }
+
+    #[test]
+    fn test_extension_prompt_roundtrip() {
+        let msg = ExtensionMessage::ExtensionPrompt {
+            session_id: "s123".into(),
+            text: "what files are in this dir?".into(),
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            ExtensionMessage::ExtensionPrompt { session_id, text } => {
+                assert_eq!(session_id, "s123");
+                assert_eq!(text, "what files are in this dir?");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_extension_resolve_permission_roundtrip() {
+        let msg = ExtensionMessage::ExtensionResolvePermission {
+            request_id: "perm-uuid-123".into(),
+            decision: "Deny".into(),
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            ExtensionMessage::ExtensionResolvePermission {
+                request_id,
+                decision,
+            } => {
+                assert_eq!(request_id, "perm-uuid-123");
+                assert_eq!(decision, "Deny");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_permission_request_roundtrip() {
+        let msg = DaemonMessage::PermissionRequest {
+            request_id: "perm-uuid-456".into(),
+            session_id: "s789".into(),
+            tool: "bash".into(),
+            input: serde_json::json!({ "command": "rm -rf /" }),
+            current_decision: "Prompt".into(),
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            DaemonMessage::PermissionRequest {
+                request_id,
+                session_id,
+                tool,
+                input,
+                current_decision,
+            } => {
+                assert_eq!(request_id, "perm-uuid-456");
+                assert_eq!(session_id, "s789");
+                assert_eq!(tool, "bash");
+                assert_eq!(input["command"], "rm -rf /");
+                assert_eq!(current_decision, "Prompt");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_extension_event_lifecycle_roundtrip() {
+        let msg = ExtensionEvent::SessionCreated {
+            session_id: "s1".into(),
+            cwd: "/home/user/project".into(),
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            ExtensionEvent::SessionCreated { session_id, cwd } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(cwd, "/home/user/project");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_extension_event_lagged_roundtrip() {
+        let msg = ExtensionEvent::Lagged { count: 42 };
+        let parsed = round_trip(&msg);
+        match parsed {
+            ExtensionEvent::Lagged { count } => assert_eq!(count, 42),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_extension_event_tool_ended_roundtrip() {
+        let msg = ExtensionEvent::ToolEnded {
+            session_id: "s1".into(),
+            tool: "bash".into(),
+            success: true,
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            ExtensionEvent::ToolEnded {
+                session_id,
+                tool,
+                success,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(tool, "bash");
+                assert!(success);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_extension_host_call_notify_roundtrip() {
+        let msg = ExtensionMessage::ExtensionHostCall(ExtensionHostCall::Notify {
+            message: "deployment complete".into(),
+        });
+        let parsed = round_trip(&msg);
+        match parsed {
+            ExtensionMessage::ExtensionHostCall(ExtensionHostCall::Notify { message }) => {
+                assert_eq!(message, "deployment complete");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_extension_host_call_storage_write_roundtrip() {
+        let msg = ExtensionHostCall::StorageWrite {
+            key: "last_run".into(),
+            value: "2026-07-08".into(),
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            ExtensionHostCall::StorageWrite { key, value } => {
+                assert_eq!(key, "last_run");
+                assert_eq!(value, "2026-07-08");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_error_roundtrip() {
+        let msg = DaemonMessage::Error {
+            message: "capability not granted: sessions:prompt".into(),
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            DaemonMessage::Error { message } => {
+                assert!(message.contains("capability not granted"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_protocol_version_rejection() {
+        // An extension sending protocol_version=99 should be rejected by
+        // the daemon. We simulate this by checking that the version
+        // field survives round-trip and can be compared.
+        let msg = ExtensionMessage::ExtensionHello {
+            name: "bad-ext".into(),
+            version: "0.1.0".into(),
+            protocol_version: 99, // mismatch
+            requested_capabilities: vec![],
+            hook_subscriptions: vec![],
+            event_subscriptions: vec![],
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            ExtensionMessage::ExtensionHello {
+                protocol_version, ..
+            } => {
+                assert_eq!(protocol_version, 99);
+                assert_ne!(protocol_version, EXTENSION_PROTOCOL_VERSION);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_daemon_session_list_roundtrip() {
+        let msg = DaemonMessage::SessionList {
+            sessions: vec![SessionInfo {
+                session_id: "s1".into(),
+                state: SessionState::Active,
+                model: None,
+                provider: None,
+                created_at: 1000,
+                last_message_at: Some(2000),
+                summary: None,
+                client_count: 1,
+                cwd: Some("/tmp".into()),
+                last_turn_failed: false,
+                archived: false,
+                pinned: false,
+                group_id: None,
+                change_stats: None,
+                usage: None,
+                pending_permissions: 0,
+                pending_questions: 0,
+                first_message: None,
+            }],
+        };
+        let parsed = round_trip(&msg);
+        match parsed {
+            DaemonMessage::SessionList { sessions } => {
+                assert_eq!(sessions.len(), 1);
+                assert_eq!(sessions[0].session_id, "s1");
+                assert_eq!(sessions[0].state, SessionState::Active);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_every_extension_message_variant_has_distinct_type_tag() {
+        // Ensure no two ExtensionMessage variants serialize to the same
+        // "type" tag, which would cause ambiguity on the wire.
+        let variants = [
+            ExtensionMessage::ExtensionHello {
+                name: "x".into(),
+                version: "1".into(),
+                protocol_version: 1,
+                requested_capabilities: vec![],
+                hook_subscriptions: vec![],
+                event_subscriptions: vec![],
+            },
+            ExtensionMessage::HookResponse {
+                request_id: "r".into(),
+                outcome: "ok".into(),
+            },
+            ExtensionMessage::ExtensionListSessions,
+            ExtensionMessage::ExtensionAttachSession {
+                session_id: "s".into(),
+            },
+            ExtensionMessage::ExtensionNewSession { cwd: None },
+            ExtensionMessage::ExtensionPrompt {
+                session_id: "s".into(),
+                text: "t".into(),
+            },
+            ExtensionMessage::ExtensionCancel {
+                session_id: "s".into(),
+            },
+            ExtensionMessage::ExtensionSubscribeEvents { types: vec![] },
+            ExtensionMessage::ExtensionResolvePermission {
+                request_id: "r".into(),
+                decision: "Deny".into(),
+            },
+            ExtensionMessage::ExtensionHostCall(ExtensionHostCall::Notify {
+                message: "m".into(),
+            }),
+            ExtensionMessage::ExtensionReadSessionHistory {
+                session_id: "s".into(),
+            },
+        ];
+        let mut tags: Vec<String> = variants
+            .iter()
+            .map(|v| {
+                let json = encode_json(v).unwrap();
+                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                parsed["type"].as_str().unwrap().to_string()
+            })
+            .collect();
+        tags.sort();
+        tags.dedup();
+        assert_eq!(
+            tags.len(),
+            variants.len(),
+            "duplicate type tags in ExtensionMessage: {:?}",
+            tags
+        );
+    }
+
+    #[test]
+    fn test_every_daemon_message_variant_has_distinct_type_tag() {
+        let variants = [
+            DaemonMessage::ExtensionReady {
+                granted: vec![],
+                protocol_version: 1,
+            },
+            DaemonMessage::ExtensionRejected { reason: "x".into() },
+            DaemonMessage::HookRequest {
+                request_id: "r".into(),
+                hook: "h".into(),
+                params: serde_json::json!({}),
+            },
+            DaemonMessage::ExtensionEvent(ExtensionEvent::TurnEnded {
+                session_id: "s".into(),
+            }),
+            DaemonMessage::SessionList { sessions: vec![] },
+            DaemonMessage::SessionAttached {
+                session_id: "s".into(),
+            },
+            DaemonMessage::SessionHistory {
+                session_id: "s".into(),
+                messages: vec![],
+            },
+            DaemonMessage::HostCallResult {
+                result: "ok".into(),
+            },
+            DaemonMessage::PermissionRequest {
+                request_id: "r".into(),
+                session_id: "s".into(),
+                tool: "t".into(),
+                input: serde_json::json!({}),
+                current_decision: "Prompt".into(),
+            },
+            DaemonMessage::Error {
+                message: "e".into(),
+            },
+        ];
+        let mut tags: Vec<String> = variants
+            .iter()
+            .map(|v| {
+                let json = encode_json(v).unwrap();
+                let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+                parsed["type"].as_str().unwrap().to_string()
+            })
+            .collect();
+        tags.sort();
+        tags.dedup();
+        assert_eq!(
+            tags.len(),
+            variants.len(),
+            "duplicate type tags in DaemonMessage: {:?}",
+            tags
+        );
     }
 }
