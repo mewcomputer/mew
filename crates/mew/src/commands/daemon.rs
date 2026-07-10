@@ -132,12 +132,13 @@ pub(crate) async fn build_daemon_server(
             let cfg = &*cfg_lister;
             let mut models = Vec::new();
 
-            // Collect provider IDs that have credentials. Only show models
-            // the user can actually call.
+            // Collect provider IDs that are usable. Only show models the user
+            // can actually call — an API-key credential OR an OAuth token file
+            // (for codex, whose credential is the token file).
             let cred_pids: Vec<String> = cfg
                 .providers
                 .keys()
-                .filter(|pid| crate::setup::providers::provider_has_credential(cfg, pid))
+                .filter(|pid| crate::setup::providers::provider_available(cfg, pid))
                 .cloned()
                 .collect();
 

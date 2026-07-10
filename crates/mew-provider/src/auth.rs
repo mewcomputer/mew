@@ -75,7 +75,7 @@ pub trait OAuthProvider: Send + Sync {
     /// Human-readable name (e.g. "OpenAI Responses (ChatGPT)").
     fn display_name(&self) -> &str;
 
-    /// Slug for token file path and CLI (e.g. "openai-responses").
+    /// Slug for token file path and CLI (e.g. "codex").
     fn slug(&self) -> &str;
 
     /// Base URL for API requests when using OAuth.

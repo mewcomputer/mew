@@ -23,6 +23,8 @@ mew-hooks = { workspace = true }
 mew-hooks-runtime = { workspace = true }
 mew-message = { workspace = true }
 mew-provider = { workspace = true }
+keyring = "3"
+mew-config = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

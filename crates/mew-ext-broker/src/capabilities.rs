@@ -148,6 +148,49 @@ impl Capability {
         matches!(self.risk_tier(), RiskTier::High | RiskTier::Highest)
     }
 
+    /// Reverse-map an ID string back to a `Capability`.
+    ///
+    /// Returns `None` for unknown IDs. Used to reconstruct a `CapabilitySet`
+    /// from persisted consent state (which stores capability ID strings).
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "storage" => Some(Self::Storage),
+            "config:read" => Some(Self::ConfigRead),
+            "ui" => Some(Self::Ui),
+            "register" => Some(Self::Register),
+            "sessions:read" => Some(Self::SessionsRead),
+            "sessions:manage" => Some(Self::SessionsManage),
+            "sessions:prompt" => Some(Self::SessionsPrompt),
+            "permissions:resolve" => Some(Self::PermissionsResolve),
+            "hooks:observe" => Some(Self::HooksObserve),
+            "hooks:mutate" => Some(Self::HooksMutate),
+            "hooks:mutate:headers" => Some(Self::HooksMutateHeaders),
+            "hooks:mutate:shell_env" => Some(Self::HooksMutateShellEnv),
+            "hooks:mutate:chat_params" => Some(Self::HooksMutateChatParams),
+            "hooks:gate" => Some(Self::HooksGate),
+            "hooks:gate:mutate" => Some(Self::HooksGateMutate),
+            // Events: format is "events:<scope>:<content>".
+            s if s.starts_with("events:") => {
+                let parts: Vec<&str> = s.split(':').collect();
+                if parts.len() != 3 {
+                    return None;
+                }
+                let scope = match parts[1] {
+                    "session" => EventScope::Session,
+                    "global" => EventScope::Global,
+                    _ => return None,
+                };
+                let content = match parts[2] {
+                    "meta" => EventContent::Meta,
+                    "full" => EventContent::Full,
+                    _ => return None,
+                };
+                Some(Self::Events { scope, content })
+            }
+            _ => None,
+        }
+    }
+
     /// Whether this capability is a gate capability (gate or gate:mutate).
     pub fn is_gate(&self) -> bool {
         matches!(self, Self::HooksGate | Self::HooksGateMutate)
@@ -316,9 +359,30 @@ impl CapabilitySet {
         }
     }
 
+    /// Return only capabilities present in both sets (exact match).
+    ///
+    /// Unlike `satisfies()`, this does NOT apply the capability hierarchy
+    /// (e.g., `events:global:full` does not intersect with a set that only
+    /// has `events:session:meta`). This is intentional for security clamping:
+    /// we want to drop any stored capability the manifest didn't explicitly request.
+    pub fn intersect(&self, other: &CapabilitySet) -> CapabilitySet {
+        let mut result = CapabilitySet::empty();
+        for cap in &self.caps {
+            if other.caps.contains(cap) {
+                result.caps.insert(cap.clone());
+            }
+        }
+        result
+    }
+
     /// Iterate over granted capabilities.
     pub fn iter(&self) -> impl Iterator<Item = &Capability> {
         self.caps.iter()
+    }
+
+    /// Collect capability ID strings from this set.
+    pub fn to_ids(&self) -> Vec<String> {
+        self.caps.iter().map(|c| c.id().to_string()).collect()
     }
 
     /// Number of granted capabilities.
@@ -338,6 +402,21 @@ impl FromIterator<Capability> for CapabilitySet {
             caps: iter.into_iter().collect(),
         }
     }
+}
+
+/// Reconstruct a `CapabilitySet` from a list of capability ID strings.
+///
+/// Used to rebuild the capability set from persisted consent state.
+/// Unknown IDs are skipped with a `tracing::warn`.
+pub fn reconstruct_caps(ids: &[String]) -> CapabilitySet {
+    let mut caps = CapabilitySet::empty();
+    for id in ids {
+        match Capability::from_id(id) {
+            Some(cap) => caps.grant(cap),
+            None => tracing::warn!("unknown capability ID in consent state: {}", id),
+        }
+    }
+    caps
 }
 
 // ── Capability delta ───────────────────────────────────────────────
@@ -539,6 +618,29 @@ mod tests {
     }
 
     #[test]
+    fn test_intersect() {
+        // Overlapping sets → result is the overlap.
+        let a = CapabilitySet::from_iter([Capability::HooksObserve, Capability::HooksGate]);
+        let b = CapabilitySet::from_iter([Capability::HooksGate, Capability::HooksMutate]);
+        let overlap = a.intersect(&b);
+        assert!(overlap.has(&Capability::HooksGate));
+        assert!(!overlap.has(&Capability::HooksObserve));
+        assert!(!overlap.has(&Capability::HooksMutate));
+        assert_eq!(overlap.len(), 1);
+
+        // Disjoint sets → result is empty.
+        let c = CapabilitySet::from_iter([Capability::Ui, Capability::Register]);
+        let d = CapabilitySet::from_iter([Capability::HooksGate, Capability::HooksObserve]);
+        let empty = c.intersect(&d);
+        assert!(empty.is_empty());
+
+        // Self-intersect → returns a copy (all caps present in both).
+        let e = CapabilitySet::from_iter([Capability::HooksObserve, Capability::HooksGate]);
+        let self_overlap = e.intersect(&e);
+        assert_eq!(self_overlap, e);
+    }
+
+    #[test]
     fn test_delta_has_sensitive_additions() {
         let old = CapabilitySet::empty();
         let new = CapabilitySet::from_iter([Capability::HooksGate, Capability::Ui]);
@@ -613,5 +715,91 @@ mod tests {
         assert!(Capability::HooksMutateHeaders.is_mutate());
         assert!(Capability::HooksGateMutate.is_mutate());
         assert!(!Capability::HooksGate.is_mutate());
+    }
+
+    #[test]
+    fn test_from_id_round_trip() {
+        // Every capability should round-trip: id() → from_id() → original.
+        let all_caps = [
+            Capability::Storage,
+            Capability::ConfigRead,
+            Capability::Ui,
+            Capability::Register,
+            Capability::SessionsRead,
+            Capability::SessionsManage,
+            Capability::SessionsPrompt,
+            Capability::PermissionsResolve,
+            Capability::Events {
+                scope: EventScope::Session,
+                content: EventContent::Meta,
+            },
+            Capability::Events {
+                scope: EventScope::Session,
+                content: EventContent::Full,
+            },
+            Capability::Events {
+                scope: EventScope::Global,
+                content: EventContent::Meta,
+            },
+            Capability::Events {
+                scope: EventScope::Global,
+                content: EventContent::Full,
+            },
+            Capability::HooksObserve,
+            Capability::HooksMutate,
+            Capability::HooksMutateHeaders,
+            Capability::HooksMutateShellEnv,
+            Capability::HooksMutateChatParams,
+            Capability::HooksGate,
+            Capability::HooksGateMutate,
+        ];
+        for cap in &all_caps {
+            let id = cap.id();
+            let reconstructed = Capability::from_id(id);
+            assert_eq!(
+                reconstructed.as_ref(),
+                Some(cap),
+                "round-trip failed for id {:?}",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_id_unknown() {
+        assert!(Capability::from_id("nonexistent").is_none());
+        assert!(Capability::from_id(crate::consent::LEGACY_FULL_SENTINEL).is_none());
+        assert!(Capability::from_id("events:bogus").is_none());
+        assert!(Capability::from_id("events:session:unknown").is_none());
+        assert!(Capability::from_id("events:unknown:meta").is_none());
+    }
+
+    #[test]
+    fn test_reconstruct_caps() {
+        let ids = vec![
+            "storage".to_string(),
+            "hooks:observe".to_string(),
+            "hooks:gate".to_string(),
+            "nonexistent".to_string(), // skipped
+        ];
+        let caps = reconstruct_caps(&ids);
+        assert!(caps.has(&Capability::Storage));
+        assert!(caps.has(&Capability::HooksObserve));
+        assert!(caps.has(&Capability::HooksGate));
+        assert_eq!(caps.len(), 3); // nonexistent skipped
+    }
+
+    #[test]
+    fn test_to_ids() {
+        let set = CapabilitySet::from_iter([
+            Capability::Storage,
+            Capability::HooksObserve,
+            Capability::HooksGate,
+        ]);
+        let ids = set.to_ids();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&"storage".to_string()));
+        assert!(ids.contains(&"hooks:observe".to_string()));
+        assert!(ids.contains(&"hooks:gate".to_string()));
     }
 }

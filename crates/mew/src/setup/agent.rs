@@ -13,6 +13,11 @@ use mew_agent::Agent;
 use mew_catalog::Catalog;
 use mew_config::Config;
 use mew_ext_broker::ExtensionBroker;
+use mew_ext_broker::{
+    build_consent_prompt, build_delta_prompt, build_sensitive_cap_prompt, is_legacy_full,
+    reconstruct_caps, Capability, CapabilitySet, ConsentDecision, DiscoveredExtension,
+    ExtensionManifest,
+};
 use mew_hooks::{Dispatcher, NopDispatcher, PluginHost};
 
 /// Apply catalog pricing for `model_id` onto `agent`.
@@ -224,6 +229,7 @@ pub(crate) async fn build_dispatcher(
     set_ui: impl Fn(&str, &str) + Send + Sync + 'static,
     disabled_plugins: &[String],
     plugin_configs: std::collections::HashMap<String, mew_hooks::PluginHookConfig>,
+    discovered_extensions: &[DiscoveredExtension],
 ) -> Arc<dyn Dispatcher> {
     let host = PluginHost {
         notify: Arc::new(notify),
@@ -250,6 +256,7 @@ pub(crate) async fn build_dispatcher(
         plugin_configs,
         ExtensionBroker::default_timeout(),
         Some(resolver),
+        discovered_extensions,
     )
     .await
     {
@@ -267,11 +274,15 @@ pub(crate) async fn build_dispatcher(
 /// Prompt function type — takes a question string, returns y/n/None.
 type PromptFn = Box<dyn Fn(&str) -> Option<bool> + Send + Sync>;
 
-/// Build a consent resolver for legacy plugins.
+/// Build a consent resolver for extensions and legacy plugins.
 ///
 /// The resolver checks persisted consent state first. If no decision
 /// exists, it prompts the user (if interactive) or auto-restricts
 /// (if non-interactive). Decisions are persisted.
+///
+/// For manifest-based extensions, the resolver shows a capability-delta
+/// prompt listing each requested capability. For bare-executable plugins,
+/// it shows a simple approved/restricted prompt.
 ///
 /// `is_interactive` is injected (from `stdin().is_terminal()`) so
 /// this function can be unit-tested with `false`.
@@ -282,24 +293,181 @@ pub(crate) fn build_consent_resolver(
     prompt_fn: PromptFn,
     state: mew_ext_broker::ConsentState,
 ) -> mew_ext_broker::ConsentResolver {
-    Box::new(move |name: &str| {
-        if let Some(existing) = state.get(name) {
-            return existing;
+    Box::new(move |name: &str, manifest: Option<&ExtensionManifest>| {
+        // ── Bare-plugin path (no manifest) ──
+        let persisted = state.get_granted_caps(name);
+        if let Some(ref granted) = persisted {
+            match manifest {
+                None => {
+                    return if is_legacy_full(granted) {
+                        ConsentDecision::Approved
+                    } else {
+                        ConsentDecision::Restricted
+                    };
+                }
+                Some(_) if is_legacy_full(granted) => {
+                    // Stale sentinel — fall through to manifest first-run.
+                }
+                Some(_) => {} // Handled below.
+            }
         }
+
+        // ── Manifest path ──
+        if let Some(m) = manifest {
+            let manifest_caps = m.requested_capabilities();
+
+            // Check for persisted consent with valid (non-sentinel) stored IDs.
+            if let Some(ref granted) = persisted {
+                if !is_legacy_full(granted) {
+                    let granted_caps = reconstruct_caps(granted);
+
+                    // Determine last-requested for delta detection.
+                    // Empty (migration) → treat as current manifest (no delta).
+                    let last_requested_ids = state
+                        .get_last_requested(name)
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or_else(|| manifest_caps.to_ids());
+                    let last_requested = reconstruct_caps(&last_requested_ids);
+
+                    // Delta: what's new in the manifest?
+                    let delta = manifest_caps.difference(&last_requested);
+
+                    if delta.added.is_empty() {
+                        // No new capabilities — clamp and return.
+                        return ConsentDecision::ApprovedWithCaps(
+                            granted_caps.intersect(&manifest_caps),
+                        );
+                    }
+
+                    // Manifest grew — re-prompt for new capabilities only.
+                    let added_caps = reconstruct_caps(&delta.added);
+                    let base = granted_caps.intersect(&manifest_caps);
+
+                    if !is_interactive {
+                        // Non-interactive: keep existing granted caps, deny new ones.
+                        tracing::warn!(
+                            "extension '{}' new caps auto-denied (non-interactive)",
+                            name
+                        );
+                        let ids = base.to_ids();
+                        state.set_consent(name, ids, manifest_caps.to_ids());
+                        state.save().ok();
+                        return ConsentDecision::ApprovedWithCaps(base);
+                    }
+
+                    // Interactive: prompt for new caps with individual consent.
+                    let added_vec: Vec<Capability> = added_caps.iter().cloned().collect();
+                    let batch_prompt = build_delta_prompt(name, m, &added_vec);
+                    let newly_approved = prompt_and_consent_caps(
+                        name,
+                        &m.extension.version,
+                        &added_caps,
+                        &batch_prompt,
+                        &prompt_fn,
+                    );
+
+                    // Combine: existing granted (clamped) + newly approved.
+                    let mut final_caps = base;
+                    for cap in newly_approved.iter() {
+                        final_caps.grant(cap.clone());
+                    }
+
+                    let ids = final_caps.to_ids();
+                    state.set_consent(name, ids, manifest_caps.to_ids());
+                    state.save().ok();
+                    return ConsentDecision::ApprovedWithCaps(final_caps);
+                }
+            }
+
+            // First run (no persisted consent, or stale sentinel).
+            if !is_interactive {
+                // Non-interactive: auto-restrict (same as current behavior).
+                // Restricted → broker maps to observe_only(), preserving HooksObserve.
+                tracing::warn!("extension '{}' auto-restricted (non-interactive)", name);
+                state.set_consent(name, vec![], manifest_caps.to_ids());
+                state.save().ok();
+                return ConsentDecision::Restricted;
+            }
+            let batch_prompt = build_consent_prompt(name, m);
+            let approved = prompt_and_consent_caps(
+                name,
+                &m.extension.version,
+                &manifest_caps,
+                &batch_prompt,
+                &prompt_fn,
+            );
+            let ids = approved.to_ids();
+            state.set_consent(name, ids, manifest_caps.to_ids());
+            state.save().ok();
+            return ConsentDecision::ApprovedWithCaps(approved);
+        }
+
+        // ── Bare-plugin first run (no persisted, no manifest) ──
+        let question = format!(
+            "Plugin '{}' has been running with full access. Grant full access?",
+            name
+        );
         let decision = if is_interactive {
-            match prompt_fn(name) {
-                Some(true) => mew_ext_broker::ConsentDecision::Approved,
-                Some(false) => mew_ext_broker::ConsentDecision::Restricted,
-                None => mew_ext_broker::ConsentDecision::Restricted,
+            match prompt_fn(&question) {
+                Some(true) => ConsentDecision::Approved,
+                _ => ConsentDecision::Restricted,
             }
         } else {
             tracing::warn!("plugin '{}' auto-restricted (non-interactive)", name);
-            mew_ext_broker::ConsentDecision::Restricted
+            ConsentDecision::Restricted
         };
-        state.set(name, decision);
+        let ids = decision.to_granted_ids();
+        state.set_granted_caps(name, ids);
         state.save().ok();
         decision
     })
+}
+
+/// Prompt for a set of capabilities using two-phase consent.
+///
+/// Phase 1: batch prompt for non-sensitive caps (excluding always-granted).
+/// Phase 2: individual prompts for each sensitive cap.
+///
+/// Phase 1 and Phase 2 are independent — the user can deny the batch
+/// but still approve individual sensitive caps, and vice versa.
+///
+/// Returns the approved `CapabilitySet` (always-granted + approved).
+fn prompt_and_consent_caps(
+    name: &str,
+    version: &str,
+    caps: &CapabilitySet,
+    batch_prompt: &str,
+    prompt_fn: &PromptFn,
+) -> CapabilitySet {
+    use mew_ext_broker::is_sensitive;
+
+    let mut approved = CapabilitySet::always_granted();
+
+    let (non_sensitive, sensitive): (Vec<_>, Vec<_>) =
+        caps.iter().cloned().partition(|c| !is_sensitive(c));
+
+    // Phase 1: batch prompt for non-sensitive (excluding always-granted).
+    let promptable: Vec<_> = non_sensitive
+        .into_iter()
+        .filter(|c| !approved.has(c))
+        .collect();
+
+    if !promptable.is_empty() && prompt_fn(batch_prompt) == Some(true) {
+        for cap in &promptable {
+            approved.grant(cap.clone());
+        }
+        // If user denied, approved stays at always-granted.
+    }
+
+    // Phase 2: individual prompts for sensitive caps.
+    for cap in &sensitive {
+        let p = build_sensitive_cap_prompt(name, version, cap);
+        if prompt_fn(&p) == Some(true) {
+            approved.grant(cap.clone());
+        }
+    }
+
+    approved
 }
 
 /// Load MCP server configs from standard locations.
@@ -744,5 +912,294 @@ mod tests {
         apply_catalog_pricing(&mut agent, Some(&cat), "nonexistent-model");
         assert_eq!(agent.input_price, 0.0);
         assert_eq!(agent.output_price, 0.0);
+    }
+
+    // ── Consent resolver tests ──────────────────────────────────────────
+
+    /// Build a test manifest with specific hooks config.
+    fn test_manifest(
+        name: &str,
+        version: &str,
+        observe: bool,
+        gate: Vec<String>,
+        gate_mutate: bool,
+        mutate_headers: bool,
+    ) -> mew_ext_broker::ExtensionManifest {
+        use mew_ext_broker::{
+            ExtensionCapabilities, ExtensionMeta, ExtensionProvides, ExtensionSandbox, HooksConfig,
+        };
+        ExtensionManifest {
+            extension: ExtensionMeta {
+                name: name.into(),
+                version: version.into(),
+                description: String::new(),
+                entry: None,
+                capabilities: ExtensionCapabilities {
+                    hooks: Some(HooksConfig {
+                        observe,
+                        gate,
+                        gate_mutate,
+                        mutate_headers,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            },
+            sandbox: ExtensionSandbox::default(),
+            provides: ExtensionProvides::default(),
+        }
+    }
+
+    #[test]
+    fn test_first_run_individual_consent() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        // Manifest requests hooks:observe (non-sensitive), hooks:gate (sensitive),
+        // hooks:mutate:headers (sensitive).
+        let manifest = test_manifest("ext", "1.0.0", true, vec!["bash".into()], false, true);
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = mew_ext_broker::ConsentState::with_path(dir.path().join("consent.json"));
+        let call_count = Arc::new(AtomicU32::new(0));
+
+        // prompt_fn: returns true for batch prompt, true for hooks:gate,
+        // false for hooks:mutate:headers.
+        let count_clone = call_count.clone();
+        let prompt_fn: PromptFn = Box::new(move |q: &str| -> Option<bool> {
+            count_clone.fetch_add(1, Ordering::Relaxed);
+            if q.contains("hooks:mutate:headers") && q.contains("Grant?") {
+                Some(false) // Deny hooks:mutate:headers
+            } else {
+                Some(true) // Approve batch + hooks:gate
+            }
+        });
+
+        let resolver = build_consent_resolver(true, prompt_fn, state);
+        let decision = resolver("ext", Some(&manifest));
+
+        match decision {
+            ConsentDecision::ApprovedWithCaps(caps) => {
+                // hooks:observe should be granted (non-sensitive, batch approved).
+                assert!(caps.has(&mew_ext_broker::Capability::HooksObserve));
+                // hooks:gate should be granted (sensitive, individually approved).
+                assert!(caps.has(&mew_ext_broker::Capability::HooksGate));
+                // hooks:mutate:headers should NOT be granted (sensitive, individually denied).
+                assert!(!caps.has(&mew_ext_broker::Capability::HooksMutateHeaders));
+            }
+            other => panic!("expected ApprovedWithCaps, got {:?}", other),
+        }
+
+        // Prompt called: 1 (batch) + 1 (hooks:gate) + 1 (hooks:mutate:headers) = 3.
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            3,
+            "expected 3 prompt calls (batch + 2 sensitive)"
+        );
+    }
+
+    #[test]
+    fn test_first_run_noninteractive_denies_sensitive() {
+        let manifest = test_manifest("ext", "1.0.0", true, vec!["bash".into()], false, true);
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = mew_ext_broker::ConsentState::with_path(dir.path().join("consent.json"));
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = call_count.clone();
+        let prompt_fn: PromptFn = Box::new(move |_q: &str| -> Option<bool> {
+            count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(true)
+        });
+
+        let resolver = build_consent_resolver(false, prompt_fn, state);
+        let decision = resolver("ext", Some(&manifest));
+
+        // Non-interactive first run → Restricted.
+        assert_eq!(decision, ConsentDecision::Restricted);
+        // Prompt_fn NOT called.
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "non-interactive should not prompt"
+        );
+    }
+
+    #[test]
+    fn test_upgrade_noninteractive_keeps_existing() {
+        // Store consent with observe + gate, last_requested = observe + gate.
+        let manifest_v1 = test_manifest("ext", "1.0.0", true, vec!["bash".into()], false, false);
+        let dir = tempfile::tempdir().unwrap();
+        let state = mew_ext_broker::ConsentState::with_path(dir.path().join("consent.json"));
+
+        let v1_caps = manifest_v1.requested_capabilities();
+        state.set_consent("ext", v1_caps.to_ids(), v1_caps.to_ids());
+        state.save().unwrap();
+
+        // Now call resolver non-interactive with manifest v2 (adds mutate_headers).
+        let manifest_v2 = test_manifest("ext", "2.0.0", true, vec!["bash".into()], false, true);
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = call_count.clone();
+        let prompt_fn: PromptFn = Box::new(move |_q: &str| -> Option<bool> {
+            count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(true)
+        });
+
+        let resolver = build_consent_resolver(false, prompt_fn, state);
+        let decision = resolver("ext", Some(&manifest_v2));
+
+        match decision {
+            ConsentDecision::ApprovedWithCaps(caps) => {
+                // Existing caps preserved.
+                assert!(caps.has(&mew_ext_broker::Capability::HooksObserve));
+                assert!(caps.has(&mew_ext_broker::Capability::HooksGate));
+                // New cap NOT granted (non-interactive → auto-denied).
+                assert!(!caps.has(&mew_ext_broker::Capability::HooksMutateHeaders));
+            }
+            other => panic!("expected ApprovedWithCaps, got {:?}", other),
+        }
+
+        // Prompt_fn NOT called (non-interactive).
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "non-interactive upgrade should not prompt"
+        );
+    }
+
+    #[test]
+    fn test_upgrade_delta_reprompts() {
+        // Store consent with observe + gate, last_requested = observe + gate.
+        let manifest_v1 = test_manifest("ext", "1.0.0", true, vec!["bash".into()], false, false);
+        let dir = tempfile::tempdir().unwrap();
+        let state = mew_ext_broker::ConsentState::with_path(dir.path().join("consent.json"));
+
+        let v1_caps = manifest_v1.requested_capabilities();
+        state.set_consent("ext", v1_caps.to_ids(), v1_caps.to_ids());
+        state.save().unwrap();
+
+        // Manifest v2 adds mutate_headers (sensitive).
+        let manifest_v2 = test_manifest("ext", "2.0.0", true, vec!["bash".into()], false, true);
+
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = call_count.clone();
+        let prompt_fn: PromptFn = Box::new(move |q: &str| -> Option<bool> {
+            count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Approve everything (the delta has only a sensitive cap,
+            // so we get just the individual sensitive prompt).
+            let _ = q;
+            Some(true)
+        });
+
+        let resolver = build_consent_resolver(true, prompt_fn, state);
+        let decision = resolver("ext", Some(&manifest_v2));
+
+        match decision {
+            ConsentDecision::ApprovedWithCaps(caps) => {
+                // Existing caps preserved.
+                assert!(caps.has(&mew_ext_broker::Capability::HooksObserve));
+                assert!(caps.has(&mew_ext_broker::Capability::HooksGate));
+                // New cap granted (interactive, approved).
+                assert!(caps.has(&mew_ext_broker::Capability::HooksMutateHeaders));
+            }
+            other => panic!("expected ApprovedWithCaps, got {:?}", other),
+        }
+
+        // Prompt was called at least once (for the new sensitive cap).
+        assert!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed) >= 1,
+            "upgrade delta should prompt"
+        );
+    }
+
+    #[test]
+    fn test_upgrade_no_change_no_reprompt() {
+        // Store consent with observe + gate, last_requested = observe + gate.
+        let manifest = test_manifest("ext", "1.0.0", true, vec!["bash".into()], false, false);
+        let dir = tempfile::tempdir().unwrap();
+        let state = mew_ext_broker::ConsentState::with_path(dir.path().join("consent.json"));
+
+        let caps = manifest.requested_capabilities();
+        state.set_consent("ext", caps.to_ids(), caps.to_ids());
+        state.save().unwrap();
+
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = call_count.clone();
+        let prompt_fn: PromptFn = Box::new(move |_q: &str| -> Option<bool> {
+            count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(true)
+        });
+
+        let resolver = build_consent_resolver(true, prompt_fn, state);
+        let decision = resolver("ext", Some(&manifest));
+
+        match decision {
+            ConsentDecision::ApprovedWithCaps(caps) => {
+                // Clamped persisted caps.
+                assert!(caps.has(&mew_ext_broker::Capability::HooksObserve));
+                assert!(caps.has(&mew_ext_broker::Capability::HooksGate));
+            }
+            other => panic!("expected ApprovedWithCaps, got {:?}", other),
+        }
+
+        // No prompt when manifest hasn't changed.
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "no reprompt when manifest unchanged"
+        );
+    }
+
+    #[test]
+    fn test_upgrade_backward_compat() {
+        // Simulate an old entry: granted = observe only (subset), no last_requested.
+        // The resolver should treat empty last_requested as "current manifest"
+        // (no delta → no spurious re-prompt).
+        let manifest = test_manifest("ext", "1.0.0", true, vec!["bash".into()], false, false);
+        let dir = tempfile::tempdir().unwrap();
+        let state = mew_ext_broker::ConsentState::with_path(dir.path().join("consent.json"));
+
+        // Store using set_granted_caps (which preserves last_requested as empty
+        // for a new entry — simulating old data).
+        state.set_granted_caps(
+            "ext",
+            vec![
+                "storage".into(),
+                "config:read".into(),
+                "ui".into(),
+                "register".into(),
+                "hooks:observe".into(),
+            ],
+        );
+        state.save().unwrap();
+
+        // Verify last_requested is empty (old entry migration).
+        assert!(state.get_last_requested("ext").unwrap().is_empty());
+
+        let call_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = call_count.clone();
+        let prompt_fn: PromptFn = Box::new(move |_q: &str| -> Option<bool> {
+            count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(true)
+        });
+
+        let resolver = build_consent_resolver(true, prompt_fn, state);
+        let decision = resolver("ext", Some(&manifest));
+
+        match decision {
+            ConsentDecision::ApprovedWithCaps(caps) => {
+                // Clamped to manifest caps. The granted subset is observe only
+                // (no gate), so the result should have observe but NOT gate.
+                assert!(caps.has(&mew_ext_broker::Capability::HooksObserve));
+                assert!(!caps.has(&mew_ext_broker::Capability::HooksGate));
+            }
+            other => panic!("expected ApprovedWithCaps, got {:?}", other),
+        }
+
+        // No spurious re-prompt (migration: empty last_requested → no delta).
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "backward-compat: no spurious reprompt"
+        );
     }
 }

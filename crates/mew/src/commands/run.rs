@@ -93,6 +93,13 @@ pub(crate) async fn build_and_run(
 
     let dispatcher = Arc::new(NopDispatcher);
 
+    // Discover manifest-based extension packages (shared with build_session_agent
+    // for [provides] paths). The run command uses NopDispatcher, so manifest
+    // extensions are not spawned here — only their declarative [provides]
+    // directories are collected.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let discovered = mew_ext_broker::discover_extensions(&cwd);
+
     // Build the full session agent (provider, tools, personas, skills,
     // subagents, context files, pricing, etc.) via the shared builder.
     let mut agent = build_session_agent(
@@ -106,7 +113,7 @@ pub(crate) async fn build_and_run(
         None,
         dispatcher.clone(),
         todos_path.clone(),
-        &[],
+        &discovered,
     )?;
 
     // Register plugin-discovered tools (no-op for NopDispatcher).
@@ -120,7 +127,7 @@ pub(crate) async fn build_and_run(
         &provider_id,
         raw,
         dispatcher.clone(),
-        &[],
+        &discovered,
     );
 
     // Load the saved todo list (if any) into the agent.

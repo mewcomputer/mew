@@ -113,11 +113,11 @@ impl Default for Config {
             },
         );
         providers.insert(
-            "openai-responses".into(),
+            "codex".into(),
             ProviderConfig {
                 shape: "responses".into(),
                 base_url: "https://api.openai.com/v1".into(),
-                credential_ref: "openai-responses".into(),
+                credential_ref: "codex".into(),
                 ..Default::default()
             },
         );
@@ -161,6 +161,9 @@ pub struct CustomModel {
     /// User-defined thinking variants. When set, overrides built-in defaults.
     #[serde(default)]
     pub thinking_variants: Vec<ThinkingVariantDef>,
+    /// True for OpenAI Codex models that require the Responses Lite transport.
+    #[serde(default)]
+    pub responses_lite: bool,
 }
 
 /// A named thinking variant in config.toml.
@@ -375,6 +378,9 @@ pub struct State {
     /// Plugin names that the user has disabled.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disabled_plugins: Vec<String>,
+    /// Extension names whose attach tokens have been revoked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked_extensions: Vec<String>,
     /// Active theme name (overrides config when set via /theme command).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub theme: String,
@@ -610,6 +616,7 @@ context_window = 128000
 [[models]]
 id = "custom-llama"
 provider = "my-provider"
+responses_lite = true
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.models.len(), 2);
@@ -617,6 +624,7 @@ provider = "my-provider"
         assert_eq!(cfg.models[0].shape, "anthropic");
         assert_eq!(cfg.models[1].id, "custom-llama");
         assert!(cfg.models[1].shape.is_empty());
+        assert!(cfg.models[1].responses_lite);
     }
 
     #[test]
@@ -842,6 +850,7 @@ values = ["sk_test_deadbeef"]
             last_model: "t".into(),
             last_provider: "t".into(),
             disabled_plugins: vec!["buddy".into()],
+            revoked_extensions: vec![],
             theme: "dark".into(),
             sidebar_collapsed: HashMap::new(),
         };

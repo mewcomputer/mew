@@ -238,6 +238,26 @@ pub enum ExtCommands {
     Remove { name: String },
     /// Diagnose extension discovery, conflicts, and health
     Doctor,
+    /// Install an extension from a git URL or local path
+    Install {
+        /// Git URL (https://...) or local directory path
+        source: String,
+        /// Override the install name (defaults to repo name or dir name)
+        #[arg(long)]
+        name: Option<String>,
+        /// Overwrite if already installed
+        #[arg(long)]
+        force: bool,
+        /// Show what would be installed without copying any files
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Revoke an extension's attach token
+    Revoke { name: String },
+    /// Re-mint all extension attach tokens
+    RotateAll,
+    /// Show the attach token for an extension
+    Token { name: String },
 }
 
 #[derive(Subcommand)]
@@ -322,7 +342,7 @@ pub enum AuthCommands {
     /// Log in to OpenAI via ChatGPT OAuth (browser-based PKCE flow).
     /// Uses your ChatGPT Plus/Pro subscription credits.
     Login {
-        /// Provider to log in to (currently only "openai-responses").
+        /// Provider to log in to (currently only "codex").
         provider: Option<String>,
         /// Use the device-code flow instead of opening a browser. For
         /// headless machines or when a browser can't be launched.

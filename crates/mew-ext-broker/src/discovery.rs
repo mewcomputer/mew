@@ -106,28 +106,25 @@ impl DiscoveredExtension {
 ///
 /// Dedup precedence: project beats global. If the same extension name
 /// appears in both, the project one wins.
-pub fn discover_extensions(cwd: &Path) -> Vec<DiscoveredExtension> {
+/// Discover extensions from explicit project and global dirs (testable).
+pub fn discover_extensions_from_dirs(
+    project_dir: &Path,
+    global_dir: &Path,
+) -> Vec<DiscoveredExtension> {
     let mut extensions = Vec::new();
 
-    // Project-local: .mew/extensions/<name>/
-    let project_ext_dir = cwd.join(".mew").join("extensions");
+    // Project-local: <project_dir>/.mew/extensions/<name>/
+    let project_ext_dir = project_dir.join(".mew").join("extensions");
     if project_ext_dir.is_dir() {
         for ext in scan_extensions_dir(&project_ext_dir, ExtensionScope::Project) {
             extensions.push(ext);
         }
     }
 
-    // Global: ~/.config/mew/extensions/<name>/
-    if let Some(home) = directories::UserDirs::new() {
-        let global_ext_dir = home
-            .home_dir()
-            .join(".config")
-            .join("mew")
-            .join("extensions");
-        if global_ext_dir.is_dir() {
-            for ext in scan_extensions_dir(&global_ext_dir, ExtensionScope::Global) {
-                extensions.push(ext);
-            }
+    // Global: <global_dir>/<name>/
+    if global_dir.is_dir() {
+        for ext in scan_extensions_dir(global_dir, ExtensionScope::Global) {
+            extensions.push(ext);
         }
     }
 
@@ -140,6 +137,20 @@ pub fn discover_extensions(cwd: &Path) -> Vec<DiscoveredExtension> {
     extensions.sort_by(|a, b| a.name.cmp(&b.name));
 
     extensions
+}
+
+/// Discover extensions: scan project-local and global extension dirs.
+///
+/// Dedup precedence: project beats global. If the same extension name
+/// appears in both, the project one wins.
+pub fn discover_extensions(cwd: &Path) -> Vec<DiscoveredExtension> {
+    // MUST use UserDirs (not ProjectDirs) to match existing behavior.
+    // discovery.rs uses directories::UserDirs::new().home_dir()
+    // .join(".config").join("mew").join("extensions").
+    let global_dir = directories::UserDirs::new()
+        .map(|d| d.home_dir().join(".config").join("mew").join("extensions"))
+        .unwrap_or_else(|| PathBuf::from(".config/mew/extensions"));
+    discover_extensions_from_dirs(cwd, &global_dir)
 }
 
 /// Scan a single extensions directory for packages.

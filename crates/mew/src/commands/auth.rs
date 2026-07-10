@@ -1,7 +1,7 @@
 //! `mew auth` subcommand — manage provider authentication.
 //!
 //! Supports multiple OAuth providers via the `OAuthProvider` trait.
-//! Currently only `openai-responses` (ChatGPT OAuth) is registered.
+//! Currently only `codex` (ChatGPT OAuth) is registered.
 
 use std::sync::Arc;
 
@@ -13,12 +13,10 @@ use crate::cli::AuthCommands;
 
 /// The registry of OAuth-capable providers. Add new providers here.
 fn providers() -> Vec<Arc<dyn OAuthProvider>> {
-    vec![Arc::new(
-        mew_provider_responses::oauth::OpenaiResponsesOAuth,
-    )]
+    vec![Arc::new(mew_provider_responses::oauth::CodexOAuth)]
 }
 
-/// Find a provider by slug (e.g. "openai-responses").
+/// Find a provider by slug (e.g. "codex").
 fn find_provider(slug: &str) -> Option<Arc<dyn OAuthProvider>> {
     providers().into_iter().find(|p| p.slug() == slug)
 }
@@ -46,42 +44,7 @@ pub async fn auth_cmd(command: AuthCommands) -> Result<()> {
     match command {
         AuthCommands::Login { provider, headless } => {
             let registry = providers();
-            let selected = match provider {
-                Some(name) => {
-                    // Provider specified — look it up directly.
-                    find_provider(&name).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "unknown provider: {name}. Available: {}",
-                            registry
-                                .iter()
-                                .map(|p| p.slug())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    })?
-                }
-                None => {
-                    // No provider specified — list and prompt.
-                    if registry.len() == 1 {
-                        // Only one provider, use it directly.
-                        registry[0].clone()
-                    } else {
-                        eprintln!("Available providers:");
-                        for (i, p) in registry.iter().enumerate() {
-                            eprintln!("  {}. {}", i + 1, p.display_name());
-                        }
-                        eprint!("Select provider [1]: ");
-                        use std::io::Write;
-                        let _ = std::io::stderr().flush();
-                        let mut input = String::new();
-                        std::io::stdin().read_line(&mut input)?;
-                        let input = input.trim();
-                        let input = if input.is_empty() { "1" } else { input };
-                        select_provider(input, &registry)
-                            .ok_or_else(|| anyhow::anyhow!("invalid selection: {input}"))?
-                    }
-                }
-            };
+            let selected = select_or_prompt(provider, &registry)?;
             mew_provider::auth::login(selected.as_ref(), headless).await?;
             Ok(())
         }
@@ -109,39 +72,69 @@ pub async fn auth_cmd(command: AuthCommands) -> Result<()> {
         }
         AuthCommands::Logout { provider } => {
             let registry = providers();
-            let selected = match provider {
-                Some(name) => find_provider(&name).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "unknown provider: {name}. Available: {}",
+            let selected = select_or_prompt(provider, &registry)?;
+            mew_provider::auth::logout(selected.as_ref())?;
+            Ok(())
+        }
+    }
+}
+
+/// Resolve a provider from an explicit name, or prompt interactively when
+/// multiple providers are registered and stdin is a TTY.
+///
+/// When stdin is NOT a TTY (scripts, harnesses, pipes) and no provider is
+/// specified, fails fast with a fix-forward error listing valid providers
+/// instead of hanging on read_line.
+fn select_or_prompt(
+    provider: Option<String>,
+    registry: &[Arc<dyn OAuthProvider>],
+) -> Result<Arc<dyn OAuthProvider>> {
+    match provider {
+        Some(name) => {
+            // Provider specified — look it up directly.
+            find_provider(&name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown provider: {name}. Available: {}",
+                    registry
+                        .iter()
+                        .map(|p| p.slug())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+        }
+        None => {
+            if registry.len() == 1 {
+                // Only one provider, use it directly.
+                Ok(registry[0].clone())
+            } else {
+                // Multiple providers — need interactive selection.
+                use std::io::IsTerminal;
+                if !std::io::stdin().is_terminal() {
+                    // Non-interactive: fail fast instead of hanging.
+                    anyhow::bail!(
+                        "no provider specified. Pass --provider <name> (valid: {})",
                         registry
                             .iter()
                             .map(|p| p.slug())
                             .collect::<Vec<_>>()
                             .join(", ")
-                    )
-                })?,
-                None => {
-                    if registry.len() == 1 {
-                        registry[0].clone()
-                    } else {
-                        eprintln!("Available providers:");
-                        for (i, p) in registry.iter().enumerate() {
-                            eprintln!("  {}. {}", i + 1, p.display_name());
-                        }
-                        eprint!("Select provider [1]: ");
-                        use std::io::Write;
-                        let _ = std::io::stderr().flush();
-                        let mut input = String::new();
-                        std::io::stdin().read_line(&mut input)?;
-                        let input = input.trim();
-                        let input = if input.is_empty() { "1" } else { input };
-                        select_provider(input, &registry)
-                            .ok_or_else(|| anyhow::anyhow!("invalid selection: {input}"))?
-                    }
+                    );
                 }
-            };
-            mew_provider::auth::logout(selected.as_ref())?;
-            Ok(())
+                eprintln!("Available providers:");
+                for (i, p) in registry.iter().enumerate() {
+                    eprintln!("  {}. {}", i + 1, p.display_name());
+                }
+                eprint!("Select provider [1]: ");
+                use std::io::Write;
+                let _ = std::io::stderr().flush();
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let input = input.trim();
+                let input = if input.is_empty() { "1" } else { input };
+                select_provider(input, registry)
+                    .ok_or_else(|| anyhow::anyhow!("invalid selection: {input}"))
+            }
         }
     }
 }
@@ -151,17 +144,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_registry_contains_openai_responses() {
+    fn test_registry_contains_codex() {
         let registry = providers();
-        assert!(registry.iter().any(|p| p.slug() == "openai-responses"));
+        assert!(registry.iter().any(|p| p.slug() == "codex"));
     }
 
     #[test]
     fn test_select_provider_by_slug() {
         let registry = providers();
-        let selected = select_provider("openai-responses", &registry);
+        let selected = select_provider("codex", &registry);
         assert!(selected.is_some());
-        assert_eq!(selected.unwrap().slug(), "openai-responses");
+        assert_eq!(selected.unwrap().slug(), "codex");
     }
 
     #[test]
@@ -169,7 +162,7 @@ mod tests {
         let registry = providers();
         let selected = select_provider("1", &registry);
         assert!(selected.is_some());
-        assert_eq!(selected.unwrap().slug(), "openai-responses");
+        assert_eq!(selected.unwrap().slug(), "codex");
     }
 
     #[test]
@@ -181,7 +174,7 @@ mod tests {
 
     #[test]
     fn test_find_provider_by_slug() {
-        let found = find_provider("openai-responses");
+        let found = find_provider("codex");
         assert!(found.is_some());
         assert!(find_provider("nonexistent").is_none());
     }

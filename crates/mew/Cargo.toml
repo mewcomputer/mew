@@ -48,6 +48,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 nix = { workspace = true }
+tempfile = "3"
 
 iroh = { workspace = true, optional = true }
 qrcode = { workspace = true }

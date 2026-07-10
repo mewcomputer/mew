@@ -12,6 +12,13 @@ const CATALOG_URL: &str = "https://models.dev/api.json";
 /// entries for umans-served models (umans is not in the public models.dev
 /// catalog).
 const UMANS_MODELS_URL: &str = "https://api.code.umans.ai/v1/models/info";
+/// OpenAI's official Codex model catalog (the same `models.json` the codex
+/// CLI bundles as a cache fallback for the authed `/models` endpoint). Used
+/// to surface ChatGPT-subscription (OAuth) models in the picker, since they
+/// aren't in models.dev. Tracked on `main`; parsing ignores unknown fields so
+/// shape drift degrades gracefully.
+const CODEX_MODELS_URL: &str =
+    "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json";
 const CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Error, Debug)]
@@ -64,6 +71,15 @@ pub struct Model {
     /// When empty, built-in defaults are used.
     #[serde(default)]
     pub thinking_variants: Vec<ThinkingVariant>,
+    /// True for OpenAI Codex models that use the Responses Lite transport
+    /// (e.g. gpt-5.6-sol/terra/luna). Drives request-body/ header differences
+    /// in the responses adapter.
+    #[serde(default)]
+    pub responses_lite: bool,
+    /// Codex multi-agent schema version, if any. Stored for future use;
+    /// the current agent loop does not act on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_agent_version: Option<String>,
 }
 
 /// A named thinking/reasoning variant for a model.
@@ -521,6 +537,8 @@ fn parse_models_dev_model(val: &serde_json::Value, provider_id: &str) -> Option<
         shape: String::new(),
         pricing,
         thinking_variants: Vec::new(),
+        responses_lite: false,
+        multi_agent_version: None,
     })
 }
 
@@ -750,6 +768,8 @@ fn parse_umans(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
             shape: "anthropic".into(),
             pricing: Pricing::default(),
             thinking_variants: build_umans_thinking_variants(entry.capabilities.reasoning.as_ref()),
+            responses_lite: false,
+            multi_agent_version: None,
         };
         out.push(model);
     }
@@ -798,6 +818,204 @@ fn build_umans_thinking_variants(reasoning: Option<&UmansReasoning>) -> Vec<Thin
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Codex (ChatGPT-subscription OAuth) catalog source
+// ---------------------------------------------------------------------------
+
+/// Fetches OpenAI's Codex model catalog (`models.json`) and converts it to
+/// catalog `Model` entries for `Catalog::merge_local`.
+///
+/// The cache/ETag handling mirrors `load_umans` — the response is a separate,
+/// independently cached resource. `pricing` is zero (ChatGPT subscription;
+/// like opencode, cost is reported as 0 for OAuth-served models).
+///
+/// This is the daemon/offline baseline. The standalone TUI additionally calls
+/// the authed `/models` endpoint live (see `mew-provider-responses`), which
+/// refreshes this cache with the user's plan-filtered model set.
+pub async fn load_codex() -> Result<Vec<Model>, CatalogError> {
+    load_codex_with_client(reqwest::Client::new()).await
+}
+
+async fn load_codex_with_client(client: reqwest::Client) -> Result<Vec<Model>, CatalogError> {
+    let cache_dir = cache_dir();
+    tokio::fs::create_dir_all(&cache_dir).await?;
+    let cache_path = codex_cache_path();
+    let etag_path = cache_dir.join("catalog_codex.etag");
+
+    // Try cached copy first.
+    if let Ok(meta) = tokio::fs::metadata(&cache_path).await {
+        if let Ok(modified) = meta.modified() {
+            if modified.elapsed().unwrap_or(Duration::MAX) < CACHE_MAX_AGE {
+                if let Ok(data) = tokio::fs::read(&cache_path).await {
+                    debug!("using fresh cached codex catalog");
+                    return parse_codex(&data);
+                }
+            }
+        }
+    }
+
+    // Fetch fresh copy.
+    let mut req = client.get(CODEX_MODELS_URL);
+
+    if let Ok(etag) = tokio::fs::read_to_string(&etag_path).await {
+        req = req.header("If-None-Match", etag.trim());
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(?e, "network error fetching codex models");
+            if let Ok(data) = tokio::fs::read(&cache_path).await {
+                debug!("falling back to stale codex cache after network error");
+                return parse_codex(&data);
+            }
+            return Err(CatalogError::Network(e.to_string()));
+        }
+    };
+
+    let status = resp.status();
+
+    if status == reqwest::StatusCode::NOT_MODIFIED {
+        if let Ok(data) = tokio::fs::read(&cache_path).await {
+            debug!("codex models not modified, using cached copy");
+            return parse_codex(&data);
+        }
+    }
+
+    if !status.is_success() {
+        warn!(%status, "non-success status fetching codex models");
+        if let Ok(data) = tokio::fs::read(&cache_path).await {
+            debug!("falling back to stale codex cache after non-success status");
+            return parse_codex(&data);
+        }
+        return Err(CatalogError::FetchStatus(status.as_u16()));
+    }
+
+    let etag = resp
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let data = match resp.bytes().await {
+        Ok(b) => b.to_vec(),
+        Err(e) => {
+            warn!(?e, "error reading codex models body");
+            if let Ok(stale) = tokio::fs::read(&cache_path).await {
+                return parse_codex(&stale);
+            }
+            return Err(CatalogError::Network(e.to_string()));
+        }
+    };
+
+    let _ = tokio::fs::write(&cache_path, &data).await;
+    if let Some(etag) = etag {
+        let _ = tokio::fs::write(&etag_path, etag).await;
+    }
+
+    parse_codex(&data)
+}
+
+/// Load a Codex catalog from a local path. Used for project-level overrides
+/// (`catalog_codex.json` discovered from cwd up to git root) so users can
+/// ship model metadata with a repo without waiting for the network cache.
+pub async fn load_codex_from_path(path: &std::path::Path) -> Result<Vec<Model>, CatalogError> {
+    let data = tokio::fs::read(path).await?;
+    parse_codex(&data)
+}
+
+/// Parse the Codex `models.json` / authed `/models` response into catalog
+/// `Model` entries. Both sources share the `ModelsResponse { models: [...] }`
+/// shape. Public so the Responses adapter can reuse it for the live `/models`
+/// call.
+pub fn parse_codex(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
+    let payload: CodexModelsResponse = serde_json::from_slice(data)?;
+    let mut out = Vec::with_capacity(payload.models.len());
+    for m in payload.models {
+        // Only picker-visible, API-supported models. `visibility: "list"` is
+        // codex's marker for "show in picker"; hidden/api-only entries are
+        // dropped.
+        if m.visibility != "list" || !m.supported_in_api {
+            continue;
+        }
+        let thinking_variants = m
+            .supported_reasoning_levels
+            .iter()
+            .map(|r| ThinkingVariant {
+                name: r.effort.clone(),
+                params: serde_json::json!({"reasoning_effort": r.effort}),
+            })
+            .collect();
+        out.push(Model {
+            id: m.slug,
+            provider: "codex".into(),
+            context_window: m.context_window,
+            max_output: 0,
+            tool_call: m.supports_parallel_tool_calls,
+            reasoning: m.default_reasoning_level.is_some(),
+            vision: m.input_modalities.iter().any(|x| x == "image"),
+            shape: "responses".into(),
+            pricing: Pricing::default(),
+            thinking_variants,
+            responses_lite: m.use_responses_lite,
+            multi_agent_version: m.multi_agent_version.clone(),
+        });
+    }
+    Ok(out)
+}
+
+#[derive(serde::Deserialize)]
+struct CodexModelsResponse {
+    #[serde(default)]
+    models: Vec<CodexModelInfo>,
+}
+
+#[derive(serde::Deserialize)]
+struct CodexModelInfo {
+    slug: String,
+    #[serde(default)]
+    context_window: i64,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<CodexReasoningLevel>,
+    #[serde(default)]
+    default_reasoning_level: Option<String>,
+    #[serde(default)]
+    input_modalities: Vec<String>,
+    #[serde(default)]
+    supports_parallel_tool_calls: bool,
+    #[serde(default)]
+    visibility: String,
+    #[serde(default)]
+    supported_in_api: bool,
+    #[serde(default)]
+    use_responses_lite: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    multi_agent_version: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct CodexReasoningLevel {
+    effort: String,
+}
+
+/// Path to the Codex catalog cache file. Exposed so the Responses adapter's
+/// live `/models` fetch can refresh it (plan-filtered) for the daemon path.
+pub fn codex_cache_path() -> PathBuf {
+    cache_dir().join("catalog_codex.json")
+}
+
+/// Overwrite the Codex catalog cache with a fresh (typically live, authed)
+/// response body. Best-effort: callers ignore the error so a failed cache
+/// write never breaks a successful model fetch.
+pub fn write_codex_cache(body: &str) -> Result<(), CatalogError> {
+    let path = codex_cache_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, body)?;
+    Ok(())
+}
+
 /// Returns the directory used for caching catalog files (main models.dev +
 /// umans model info). Exposed so CLI commands can show or clear the cache.
 pub fn cache_dir() -> PathBuf {
@@ -811,8 +1029,8 @@ pub fn cache_dir() -> PathBuf {
 }
 
 /// Removes all on-disk catalog cache files (main models.dev catalog + ETag +
-/// umans model info + ETag). Next launch will re-fetch from the network.
-/// Returns the list of files that were removed.
+/// umans model info + ETag + codex model info + ETag). Next launch will
+/// re-fetch from the network. Returns the list of files that were removed.
 pub fn clear_cache() -> Vec<PathBuf> {
     let dir = cache_dir();
     let names = [
@@ -820,6 +1038,8 @@ pub fn clear_cache() -> Vec<PathBuf> {
         "catalog.etag",
         "catalog_umans.json",
         "catalog_umans.etag",
+        "catalog_codex.json",
+        "catalog_codex.etag",
     ];
     let mut removed = Vec::new();
     for name in names {
@@ -990,11 +1210,18 @@ mod tests {
         let present = tmp.path().join("catalog.json");
         let etag = tmp.path().join("catalog.etag");
         let umans = tmp.path().join("catalog_umans.json");
+        let codex = tmp.path().join("catalog_codex.json");
         std::fs::write(&present, b"{}").unwrap();
         std::fs::write(&etag, b"W/\"1\"").unwrap();
         std::fs::write(&umans, b"{}").unwrap();
+        std::fs::write(&codex, b"{}").unwrap();
 
-        let names = ["catalog.json", "catalog.etag", "catalog_umans.json"];
+        let names = [
+            "catalog.json",
+            "catalog.etag",
+            "catalog_umans.json",
+            "catalog_codex.json",
+        ];
         let mut removed = Vec::new();
         for name in names {
             let path = tmp.path().join(name);
@@ -1003,12 +1230,13 @@ mod tests {
                 removed.push(path);
             }
         }
-        assert_eq!(removed.len(), 3);
+        assert_eq!(removed.len(), 4);
         assert!(!present.exists());
         assert!(!etag.exists());
         assert!(!umans.exists());
-        // catalog_umans.etag never existed → not in the removed list.
-        let nonexistent = tmp.path().join("catalog_umans.etag");
+        assert!(!codex.exists());
+        // catalog_codex.etag never existed → not in the removed list.
+        let nonexistent = tmp.path().join("catalog_codex.etag");
         assert!(!nonexistent.exists());
         assert!(!removed.contains(&nonexistent));
     }
@@ -1063,6 +1291,96 @@ mod tests {
         assert_eq!(cat.models.len(), 1);
         let m = cat.lookup("array-model").unwrap();
         assert_eq!(m.shape, "anthropic");
+    }
+
+    #[test]
+    fn test_parse_codex_maps_visible_model() {
+        // Mirrors the codex models.json shape: { "models": [ { slug, ... } ] }.
+        // Unknown fields (model_messages, base_instructions, …) must be ignored.
+        let json = br#"{
+            "models": [
+                {
+                    "slug": "gpt-5.6-sol",
+                    "display_name": "GPT-5.6-Sol",
+                    "context_window": 372000,
+                    "max_context_window": 372000,
+                    "default_reasoning_level": "low",
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "Fast"},
+                        {"effort": "high", "description": "Deep"},
+                        {"effort": "ultra", "description": "Max"}
+                    ],
+                    "input_modalities": ["text", "image"],
+                    "supports_parallel_tool_calls": true,
+                    "visibility": "list",
+                    "supported_in_api": true,
+                    "use_responses_lite": true,
+                    "multi_agent_version": "v2",
+                    "base_instructions": "ignored blob",
+                    "model_messages": {"instructions_template": "also ignored"}
+                }
+            ]
+        }"#;
+        let models = parse_codex(json).unwrap();
+        assert_eq!(models.len(), 1);
+        let m = &models[0];
+        assert_eq!(m.id, "gpt-5.6-sol");
+        assert_eq!(m.provider, "codex");
+        assert_eq!(m.shape, "responses");
+        assert_eq!(m.context_window, 372_000);
+        assert!(m.tool_call);
+        assert!(m.vision);
+        assert!(m.reasoning);
+        assert!(m.responses_lite);
+        assert_eq!(m.multi_agent_version.as_deref(), Some("v2"));
+        assert_eq!(m.pricing.input, 0.0);
+        // Reasoning levels → thinking variants (codex slugs no longer contain
+        // "codex", so the builtin gpt-5 arm must NOT be relied on).
+        let names: Vec<&str> = m
+            .thinking_variants
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["low", "high", "ultra"]);
+        assert_eq!(m.thinking_variants[0].params["reasoning_effort"], "low");
+    }
+
+    #[test]
+    fn test_parse_codex_filters_hidden_and_api_only() {
+        let json = br#"{
+            "models": [
+                {"slug": "visible", "visibility": "list", "supported_in_api": true, "context_window": 100},
+                {"slug": "hidden", "visibility": "hidden", "supported_in_api": true, "context_window": 100},
+                {"slug": "api-only", "visibility": "list", "supported_in_api": false, "context_window": 100}
+            ]
+        }"#;
+        let models = parse_codex(json).unwrap();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["visible"]);
+    }
+
+    #[test]
+    fn test_parse_codex_empty() {
+        assert!(parse_codex(b"{}").unwrap().is_empty());
+        assert!(parse_codex(b"{\"models\":[]}").unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_codex_from_path_reads_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("catalog_codex.json");
+        std::fs::write(
+            &path,
+            br#"{"models":[{"slug":"gpt-5.6-luna","context_window":372000,"visibility":"list","supported_in_api":true,"use_responses_lite":true,"supported_reasoning_levels":[{"effort":"medium"}]}]}"#,
+        )
+        .unwrap();
+        let models = load_codex_from_path(&path).await.unwrap();
+        assert_eq!(models.len(), 1);
+        let m = &models[0];
+        assert_eq!(m.id, "gpt-5.6-luna");
+        assert!(m.responses_lite);
+        assert_eq!(m.thinking_variants.len(), 1);
+        assert_eq!(m.thinking_variants[0].name, "medium");
     }
 
     #[test]

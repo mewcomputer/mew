@@ -294,6 +294,18 @@ fn validate_manifest(manifest: &ExtensionManifest) -> anyhow::Result<()> {
     if manifest.extension.name.is_empty() {
         anyhow::bail!("extension name is empty");
     }
+    // Reject path traversal in extension name — prevents escaping the
+    // extensions directory via a crafted manifest name like "../../etc/pwned".
+    if manifest.extension.name.contains('/')
+        || manifest.extension.name.contains('\\')
+        || manifest.extension.name == ".."
+        || manifest.extension.name.contains("..")
+    {
+        anyhow::bail!(
+            "invalid extension name '{}': must be a single path component",
+            manifest.extension.name
+        );
+    }
     if manifest.extension.version.is_empty() {
         anyhow::bail!("extension version is empty");
     }

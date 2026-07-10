@@ -88,7 +88,10 @@ pub(crate) fn generate_pkce() -> PkcePair {
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let challenge = pkce_challenge(&verifier);
-    PkcePair { verifier, challenge }
+    PkcePair {
+        verifier,
+        challenge,
+    }
 }
 
 /// Compute the S256 challenge for a verifier. Split out so the RFC 7636
@@ -268,16 +271,14 @@ impl CallbackServer {
     /// browser so an in-use port fails fast rather than mid-flow.
     pub(crate) async fn bind(port: u16) -> Result<Self> {
         let addr = format!("127.0.0.1:{port}");
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| {
-                let hint = if port == 1455 {
-                    " — port 1455 is in use; try `mew auth login --headless`"
-                } else {
-                    ""
-                };
-                anyhow::anyhow!("failed to bind callback server on {addr}: {e}{hint}")
-            })?;
+        let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
+            let hint = if port == 1455 {
+                " — port 1455 is in use; try `mew auth login --headless`"
+            } else {
+                ""
+            };
+            anyhow::anyhow!("failed to bind callback server on {addr}: {e}{hint}")
+        })?;
         Ok(Self { listener })
     }
 
@@ -285,10 +286,7 @@ impl CallbackServer {
     /// discover the ephemeral port the OS assigned.
     #[cfg(test)]
     pub(crate) fn port(&self) -> u16 {
-        self.listener
-            .local_addr()
-            .map(|a| a.port())
-            .unwrap_or(0)
+        self.listener.local_addr().map(|a| a.port()).unwrap_or(0)
     }
 
     /// Accept connections until a callback resolves the code (or an error).
@@ -514,10 +512,7 @@ pub(crate) async fn request_device_code(cfg: &OAuthConfig) -> Result<DeviceCode>
         let body = resp.text().await.unwrap_or_default();
         anyhow::bail!("device code request failed (HTTP {status}): {body}");
     }
-    let parsed: DeviceCodeResponse = resp
-        .json()
-        .await
-        .context("parsing device code response")?;
+    let parsed: DeviceCodeResponse = resp.json().await.context("parsing device code response")?;
     let interval = match parsed.interval {
         serde_json::Value::Number(n) => n.as_u64().unwrap_or(5),
         serde_json::Value::String(s) => s.parse().unwrap_or(5),
@@ -559,10 +554,8 @@ pub(crate) async fn poll_device_token(
             .await?;
         let status = resp.status();
         if status.is_success() {
-            let parsed: DeviceTokenResponse = resp
-                .json()
-                .await
-                .context("parsing device token response")?;
+            let parsed: DeviceTokenResponse =
+                resp.json().await.context("parsing device token response")?;
             return Ok((parsed.authorization_code, parsed.code_verifier));
         }
         let code = status.as_u16();
@@ -620,9 +613,17 @@ mod tests {
     fn generated_pkce_is_well_formed_and_unique() {
         let a = generate_pkce();
         let b = generate_pkce();
-        assert_eq!(a.verifier.len(), 43, "verifier must be 43 chars (32 bytes b64url)");
+        assert_eq!(
+            a.verifier.len(),
+            43,
+            "verifier must be 43 chars (32 bytes b64url)"
+        );
         assert!(!a.verifier.contains('='), "verifier must be unpadded");
-        assert_eq!(pkce_challenge(&a.verifier), a.challenge, "challenge must match verifier");
+        assert_eq!(
+            pkce_challenge(&a.verifier),
+            a.challenge,
+            "challenge must match verifier"
+        );
         assert_ne!(a.verifier, b.verifier, "two generations must differ");
     }
 
@@ -637,8 +638,7 @@ mod tests {
     #[test]
     fn build_authorize_url_contains_all_params() {
         let cfg = OAuthConfig::default();
-        let url =
-            build_authorize_url(&cfg, PROD_REDIRECT_URI, "thechallenge", "thestate").unwrap();
+        let url = build_authorize_url(&cfg, PROD_REDIRECT_URI, "thechallenge", "thestate").unwrap();
         assert!(url.starts_with("https://auth.openai.com/oauth/authorize?"));
         assert!(url.contains("response_type=code"));
         assert!(url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
@@ -690,24 +690,28 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/oauth/token"))
             .and(body_string_contains("grant_type=authorization_code"))
-            .and(body_string_contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"))
+            .and(body_string_contains(
+                "client_id=app_EMoamEEZ73f0CkXaXp7hrann",
+            ))
             .and(body_string_contains("code=mycode"))
             .and(body_string_contains("code_verifier=myverifier"))
             .and(body_string_contains("redirect_uri="))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": "at",
-                    "refresh_token": "rt",
-                    "expires_in": 7200,
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "at",
+                "refresh_token": "rt",
+                "expires_in": 7200,
+            })))
             .mount(&server)
             .await;
 
-        let tokens =
-            exchange_code(&cfg, "mycode", "myverifier", "http://localhost:1455/auth/callback")
-                .await
-                .unwrap();
+        let tokens = exchange_code(
+            &cfg,
+            "mycode",
+            "myverifier",
+            "http://localhost:1455/auth/callback",
+        )
+        .await
+        .unwrap();
         assert_eq!(tokens.access_token, "at");
         assert_eq!(tokens.refresh_token, "rt");
         let now = now_secs();
@@ -751,7 +755,9 @@ mod tests {
             .and(path("/oauth/token"))
             .and(body_string_contains("grant_type=refresh_token"))
             .and(body_string_contains("refresh_token=oldrt"))
-            .and(body_string_contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"))
+            .and(body_string_contains(
+                "client_id=app_EMoamEEZ73f0CkXaXp7hrann",
+            ))
             // Response omits refresh_token → caller must reuse the old one.
             .respond_with(
                 ResponseTemplate::new(200)
@@ -762,7 +768,10 @@ mod tests {
 
         let tokens = refresh_tokens(&cfg, "oldrt").await.unwrap();
         assert_eq!(tokens.access_token, "newat");
-        assert_eq!(tokens.refresh_token, "oldrt", "must reuse old refresh_token when omitted");
+        assert_eq!(
+            tokens.refresh_token, "oldrt",
+            "must reuse old refresh_token when omitted"
+        );
     }
 
     #[tokio::test]
@@ -772,9 +781,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/oauth/token"))
-            .respond_with(
-                ResponseTemplate::new(400).set_body_string("invalid_grant: bad code"),
-            )
+            .respond_with(ResponseTemplate::new(400).set_body_string("invalid_grant: bad code"))
             .mount(&server)
             .await;
 
@@ -800,13 +807,11 @@ mod tests {
                 "client_id": "app_EMoamEEZ73f0CkXaXp7hrann"
             })))
             // The API returns interval as a string (opencode parseInts it).
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "device_auth_id": "daid",
-                    "user_code": "ABC-123",
-                    "interval": "1"
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "device_auth_id": "daid",
+                "user_code": "ABC-123",
+                "interval": "1"
+            })))
             .mount(&server)
             .await;
 
@@ -823,13 +828,11 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/api/accounts/deviceauth/usercode"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "device_auth_id": "d",
-                    "user_code": "U",
-                    "interval": 2
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "device_auth_id": "d",
+                "user_code": "U",
+                "interval": 2
+            })))
             .mount(&server)
             .await;
 
@@ -851,12 +854,10 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/api/accounts/deviceauth/token"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "authorization_code": "theauthcode",
-                    "code_verifier": "serververifier"
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "authorization_code": "theauthcode",
+                "code_verifier": "serververifier"
+            })))
             .mount(&server)
             .await;
 
@@ -898,10 +899,11 @@ mod tests {
         let port = server.port();
         let task = tokio::spawn(async move { server.wait_for_code("st").await });
 
-        let resp =
-            reqwest::get(format!("http://127.0.0.1:{port}/auth/callback?code=abc&state=st"))
-                .await
-                .unwrap();
+        let resp = reqwest::get(format!(
+            "http://127.0.0.1:{port}/auth/callback?code=abc&state=st"
+        ))
+        .await
+        .unwrap();
         assert!(resp.status().is_success());
 
         let code = task.await.unwrap().unwrap();
@@ -914,10 +916,11 @@ mod tests {
         let port = server.port();
         let task = tokio::spawn(async move { server.wait_for_code("expected").await });
 
-        let resp =
-            reqwest::get(format!("http://127.0.0.1:{port}/auth/callback?code=abc&state=wrong"))
-                .await
-                .unwrap();
+        let resp = reqwest::get(format!(
+            "http://127.0.0.1:{port}/auth/callback?code=abc&state=wrong"
+        ))
+        .await
+        .unwrap();
         assert_eq!(resp.status().as_u16(), 400);
 
         let err = task.await.unwrap().unwrap_err();
@@ -941,7 +944,10 @@ mod tests {
         let err = task.await.unwrap().unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("access_denied"), "msg: {msg}");
-        assert!(msg.contains("user declined it"), "must contain decoded description: {msg}");
+        assert!(
+            msg.contains("user declined it"),
+            "must contain decoded description: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -956,10 +962,11 @@ mod tests {
         assert_eq!(fav.status().as_u16(), 404);
 
         // Server must still be waiting — send a real callback.
-        let resp =
-            reqwest::get(format!("http://127.0.0.1:{port}/auth/callback?code=ok&state=st"))
-                .await
-                .unwrap();
+        let resp = reqwest::get(format!(
+            "http://127.0.0.1:{port}/auth/callback?code=ok&state=st"
+        ))
+        .await
+        .unwrap();
         assert!(resp.status().is_success());
 
         let code = task.await.unwrap().unwrap();
@@ -969,9 +976,14 @@ mod tests {
     #[tokio::test]
     async fn callback_no_request_times_out() {
         let server = CallbackServer::bind(0).await.unwrap();
-        let res =
-            tokio::time::timeout(std::time::Duration::from_millis(100), server.wait_for_code("st"))
-                .await;
-        assert!(res.is_err(), "outer timeout must fire when no request arrives");
+        let res = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            server.wait_for_code("st"),
+        )
+        .await;
+        assert!(
+            res.is_err(),
+            "outer timeout must fire when no request arrives"
+        );
     }
 }

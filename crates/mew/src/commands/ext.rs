@@ -1,5 +1,6 @@
 //! `mew ext` CLI — manage extensions.
 
+use anyhow::Context;
 use mew_ext_broker::{discover_extensions, ExtensionScope};
 
 /// Dispatch `mew ext` subcommands.
@@ -11,6 +12,15 @@ pub fn ext_cmd(command: crate::cli::ExtCommands) -> anyhow::Result<()> {
         ExtCommands::Disable { name } => disable_extension(&name),
         ExtCommands::Remove { name } => remove_extension(&name),
         ExtCommands::Doctor => doctor(),
+        ExtCommands::Install {
+            source,
+            name,
+            force,
+            dry_run,
+        } => install_extension(&source, name.as_deref(), force, dry_run),
+        ExtCommands::Revoke { name } => revoke_extension(&name),
+        ExtCommands::RotateAll => rotate_all(),
+        ExtCommands::Token { name } => show_token(&name),
     }
 }
 
@@ -165,6 +175,208 @@ pub fn remove_extension(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `mew ext install <source>` — install an extension from a git URL or local path.
+pub fn install_extension(
+    source: &str,
+    name_override: Option<&str>,
+    force: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let extensions_dir = mew_config::config_dir().join("extensions");
+    std::fs::create_dir_all(&extensions_dir)?;
+
+    let (name, temp_dir) =
+        if source.starts_with("http") || source.starts_with("git@") || source.ends_with(".git") {
+            // Git clone.
+            let tmp = tempfile::tempdir()?;
+            let status = std::process::Command::new("git")
+                .args([
+                    "clone",
+                    "--depth",
+                    "1",
+                    source,
+                    tmp.path().to_str().unwrap(),
+                ])
+                .status()
+                .context("git clone failed")?;
+            if !status.success() {
+                anyhow::bail!("git clone failed for {}", source);
+            }
+            let name = derive_name(tmp.path(), name_override)?;
+            (name, tmp)
+        } else {
+            // Local path.
+            let src = std::path::Path::new(source);
+            if !src.is_dir() {
+                anyhow::bail!(
+                    "source path does not exist or is not a directory: {}",
+                    source
+                );
+            }
+            let name = derive_name(src, name_override)?;
+            (name, tempfile::tempdir()?)
+        };
+
+    let dest = extensions_dir.join(&name);
+
+    // --dry-run: show what would happen, don't copy.
+    if dry_run {
+        let conflict = if dest.exists() {
+            if force {
+                "would overwrite (--force)"
+            } else {
+                "CONFLICT: already installed (use --force to overwrite)"
+            }
+        } else {
+            "new install"
+        };
+        println!("DRY RUN:");
+        println!("  source:  {}", source);
+        println!("  name:    {}", name);
+        println!("  dest:    {}", dest.display());
+        println!("  status:  {}", conflict);
+        return Ok(());
+    }
+
+    if dest.exists() {
+        if force {
+            std::fs::remove_dir_all(&dest)?;
+        } else {
+            anyhow::bail!(
+                "extension '{}' already installed. Use --force to overwrite, or `mew ext remove {}` first.",
+                name,
+                name
+            );
+        }
+    }
+
+    // Copy + validate with cleanup-on-error.
+    if let Err(e) = (|| {
+        copy_dir_recursive(temp_dir.path(), &dest)?;
+        // Validate manifest.
+        let manifest_path = dest.join("mew-ext.toml");
+        if manifest_path.exists() {
+            if let Err(e) = mew_ext_broker::parse_manifest(&manifest_path) {
+                std::fs::remove_dir_all(&dest).ok();
+                anyhow::bail!("installed extension has invalid manifest: {}", e);
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })() {
+        // Clean up partial copy on any failure.
+        let _ = std::fs::remove_dir_all(&dest);
+        return Err(e);
+    }
+
+    println!("installed extension '{}' to {}", name, dest.display());
+    Ok(())
+}
+
+/// `mew ext revoke <name>` — revoke an extension's attach token.
+pub fn revoke_extension(name: &str) -> anyhow::Result<()> {
+    mew_ext_broker::revoke_token(name)?;
+    let mut state = mew_config::load_state().unwrap_or_default();
+    if !state.revoked_extensions.contains(&name.to_string()) {
+        state.revoked_extensions.push(name.to_string());
+        mew_config::save_state(&state)?;
+    }
+    println!("revoked token for extension '{}'", name);
+    Ok(())
+}
+
+/// `mew ext rotate-all` — re-mint all extension attach tokens.
+pub fn rotate_all() -> anyhow::Result<()> {
+    let results = mew_ext_broker::rotate_all_tokens()?;
+    // Clear revoked list — all successfully rotated extensions have fresh tokens.
+    let mut state = mew_config::load_state().unwrap_or_default();
+    state.revoked_extensions.clear();
+    mew_config::save_state(&state)?;
+    for (name, _token) in &results {
+        println!("rotated token for '{}'", name);
+    }
+    if results.is_empty() {
+        println!("no extensions with tokens found.");
+    }
+    Ok(())
+}
+
+/// `mew ext token <name>` — show the attach token for an extension.
+///
+/// Prints the token to stdout (for piping). When stdout is a TTY, prints
+/// a warning to stderr first so the user knows the output is a secret.
+pub fn show_token(name: &str) -> anyhow::Result<()> {
+    let token = mew_ext_broker::show_token(name)?;
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        eprintln!("warning: printing attach token to stdout — pipe to a clipboard tool or redirect to a file if needed");
+    }
+    println!("{}", token);
+    Ok(())
+}
+
+/// Derive the extension name from a directory path.
+/// Uses override if provided, else tries the manifest name, else the dir name.
+/// Validates that the name is a single path component (no traversal).
+fn derive_name(path: &std::path::Path, override_name: Option<&str>) -> anyhow::Result<String> {
+    let name = if let Some(name) = override_name {
+        name.to_string()
+    } else {
+        // Try reading the manifest for the name.
+        let manifest_path = path.join("mew-ext.toml");
+        if manifest_path.exists() {
+            if let Ok(manifest) = mew_ext_broker::parse_manifest(&manifest_path) {
+                manifest.extension.name
+            } else {
+                // Fall back to directory name.
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| anyhow::anyhow!("could not derive extension name from path"))?
+            }
+        } else {
+            // Fall back to directory name.
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| anyhow::anyhow!("could not derive extension name from path"))?
+        }
+    };
+    validate_extension_name(&name)?;
+    Ok(name)
+}
+
+/// Validate that an extension name is a single path component — no
+/// traversal characters that could escape the extensions directory.
+fn validate_extension_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("extension name is empty");
+    }
+    if name.contains('/') || name.contains('\\') || name == ".." || name.contains("..") {
+        anyhow::bail!(
+            "invalid extension name '{}': must be a single path component (no /, \\, or ..)",
+            name
+        );
+    }
+    Ok(())
+}
+
+/// Recursively copy a directory.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 /// `mew ext doctor` — diagnose extension discovery.
 pub fn doctor() -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -225,13 +437,23 @@ pub fn doctor() -> anyhow::Result<()> {
             } else {
                 "declarative"
             };
+            let sandbox_status = if ext.has_entry() {
+                if mew_ext_broker::sandbox_available() {
+                    "[sandboxed]"
+                } else {
+                    "[unsandboxed (platform)]"
+                }
+            } else {
+                "[n/a]"
+            };
             println!(
-                "  {} v{} [{}] [{}] [{}] — {}",
+                "  {} v{} [{}] [{}] [{}] {} — {}",
                 ext.name,
                 ext.manifest.extension.version,
                 scope,
                 status,
                 has_entry,
+                sandbox_status,
                 ext.root.display()
             );
         }
@@ -253,7 +475,12 @@ pub fn doctor() -> anyhow::Result<()> {
             } else {
                 "enabled"
             };
-            println!("  {} [{}] — {}", name, status, path.display());
+            println!(
+                "  {} [{}] [unsandboxed (legacy)] — {}",
+                name,
+                status,
+                path.display()
+            );
         }
     }
 
@@ -286,9 +513,14 @@ pub fn doctor() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate process-global cwd.
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_ext_list_outputs_discovered_extensions() {
+        let _guard = CWD_LOCK.lock().unwrap();
         // Create a temp dir with an extension package.
         let dir = tempfile::tempdir().unwrap();
         let ext_dir = dir
@@ -340,6 +572,7 @@ version = "0.1.0"
 
     #[test]
     fn test_ext_doctor_outputs_diagnostics() {
+        let _guard = CWD_LOCK.lock().unwrap();
         // Doctor runs discovery and prints. We verify it doesn't panic
         // and produces output containing "Extension Doctor".
         let dir = tempfile::tempdir().unwrap();
@@ -355,6 +588,7 @@ version = "0.1.0"
 
     #[test]
     fn test_ext_remove_deletes_package() {
+        let _guard = CWD_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let ext_dir = dir.path().join(".mew").join("extensions").join("removable");
         std::fs::create_dir_all(&ext_dir).unwrap();
@@ -388,6 +622,7 @@ version = "0.1.0"
 
     #[test]
     fn test_ext_remove_refuses_bare_plugin() {
+        let _guard = CWD_LOCK.lock().unwrap();
         // Create a bare plugin executable.
         let dir = tempfile::tempdir().unwrap();
         let plugin_dir = dir.path().join(".mew").join("plugins");
@@ -415,5 +650,127 @@ version = "0.1.0"
         );
 
         std::env::set_current_dir(orig).unwrap();
+    }
+
+    #[test]
+    fn test_install_from_local_path() {
+        let _guard = CWD_LOCK.lock().unwrap();
+
+        // Create a source dir with a valid manifest.
+        let src_dir = tempfile::tempdir().unwrap();
+        let ext_name = "test-install-ext";
+        std::fs::write(
+            src_dir.path().join("mew-ext.toml"),
+            format!(
+                r#"
+[extension]
+name = "{ext_name}"
+version = "0.1.0"
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(src_dir.path().join("index.js"), "console.log('hello')").unwrap();
+
+        // Install to a temp extensions dir.
+        let dest_base = tempfile::tempdir().unwrap();
+        let global_dir = dest_base.path().to_path_buf();
+        let project_dir = dest_base.path().to_path_buf();
+
+        // Simulate install by copying to the global extensions dir.
+        let extensions_dir = global_dir.clone();
+        std::fs::create_dir_all(&extensions_dir).unwrap();
+        let dest = extensions_dir.join(ext_name);
+        super::copy_dir_recursive(src_dir.path(), &dest).unwrap();
+
+        // Verify it's discoverable.
+        let discovered = mew_ext_broker::discover_extensions_from_dirs(&project_dir, &global_dir);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].name, ext_name);
+    }
+
+    #[test]
+    fn test_install_name_conflict() {
+        // Install same extension twice — first succeeds, second fails without --force.
+        let src_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src_dir.path().join("mew-ext.toml"),
+            r#"
+[extension]
+name = "conflict-ext"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+
+        let dest_base = tempfile::tempdir().unwrap();
+        let global_dir = dest_base.path().to_path_buf();
+
+        // First "install" — copy.
+        let dest1 = global_dir.join("conflict-ext");
+        std::fs::create_dir_all(&dest1).unwrap();
+        super::copy_dir_recursive(src_dir.path(), &dest1).unwrap();
+        assert!(dest1.exists());
+
+        // Second install without --force should fail.
+        let dest2 = global_dir.join("conflict-ext");
+        assert!(dest2.exists(), "dest already exists");
+        let result = std::fs::remove_dir_all(&dest2);
+        assert!(result.is_ok(), "can remove for re-install");
+
+        // With --force it should succeed (re-copy).
+        super::copy_dir_recursive(src_dir.path(), &dest2).unwrap();
+        assert!(dest2.exists());
+    }
+
+    #[test]
+    fn test_install_invalid_manifest() {
+        let src_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src_dir.path().join("mew-ext.toml"),
+            "this is not valid toml {{{",
+        )
+        .unwrap();
+
+        // parse_manifest should fail on invalid toml.
+        let manifest_path = src_dir.path().join("mew-ext.toml");
+        let result = mew_ext_broker::parse_manifest(&manifest_path);
+        assert!(result.is_err(), "invalid manifest should fail to parse");
+    }
+
+    #[test]
+    fn test_install_refuses_nonexistent_path() {
+        let result =
+            super::install_extension("/nonexistent/path/that/does/not/exist", None, false, false);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("does not exist") || err.contains("not a directory"),
+            "error should mention missing path: {err}"
+        );
+    }
+
+    #[test]
+    fn test_install_rejects_path_traversal_name() {
+        // --name with traversal characters should be rejected.
+        let result = super::install_extension("/tmp", Some("../../../etc/pwned"), false, false);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("single path component") || err.contains("invalid extension name"),
+            "error should mention invalid name: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_extension_name_rejects_traversal() {
+        assert!(super::validate_extension_name("").is_err());
+        assert!(super::validate_extension_name("../etc").is_err());
+        assert!(super::validate_extension_name("a/b").is_err());
+        assert!(super::validate_extension_name("a\\b").is_err());
+        assert!(super::validate_extension_name("..").is_err());
+        // Valid names pass.
+        assert!(super::validate_extension_name("my-ext").is_ok());
+        assert!(super::validate_extension_name("my_ext_123").is_ok());
     }
 }

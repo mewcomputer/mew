@@ -168,6 +168,10 @@ pub struct App {
     pub sidebar_rect: Rect,
     /// Available models (id -> description) for the palette.
     pub models: Vec<(String, String)>,
+    /// Per-model thinking/reasoning variant names (model slug → names),
+    /// populated from the catalog at startup so the `/thinking` picker
+    /// shows the model's actual levels instead of a hardcoded list.
+    pub thinking_variants: HashMap<String, Vec<String>>,
     /// Active picker, if any.
     pub picker: Option<PickerState>,
     /// Selected slash command suggestion index.
@@ -604,6 +608,7 @@ impl App {
             sidebar_header_rows: Vec::new(),
             sidebar_rect: Rect::default(),
             models: Vec::new(),
+            thinking_variants: HashMap::new(),
             picker: None,
             slash_selected: 0,
             slash_scroll: 0,
@@ -1009,18 +1014,20 @@ impl App {
             label: "Off".into(),
             description: "Disable thinking/reasoning".into(),
         }];
-        // Variant names come from the model list; we stored them as
-        // "provider/model" → thinking_variants in the models vec.
-        // The models vec stores (id, description) pairs. We need to find
-        // the current model's variants. Since we don't have direct access
-        // to the catalog here, we rely on the daemon/main loop having
-        // populated app.models with variant info encoded in the description.
-        // For now, use common variant names as static options.
-        for name in &["high", "max", "thinking"] {
+        // Variant names come from the catalog (populated into
+        // `thinking_variants` at startup), keyed by model slug. This holds the
+        // model's actual levels — e.g. codex models expose
+        // low/medium/high/xhigh/max/ultra — rather than a hardcoded list.
+        let variant_names = self
+            .thinking_variants
+            .get(&self.status.model)
+            .cloned()
+            .unwrap_or_default();
+        for name in variant_names {
             items.push(PickerItem {
-                id: name.to_string(),
-                label: name.to_string(),
-                description: format!("{} thinking effort", name),
+                id: name.clone(),
+                label: name.clone(),
+                description: format!("{} reasoning effort", name),
             });
         }
         self.mode = Mode::CommandPalette;
@@ -4376,6 +4383,45 @@ mod tests {
         let app = App::new();
         let result = app.handle_slash("/thinking");
         assert!(matches!(result, SlashResult::OpenThinkingVariantPicker));
+    }
+
+    #[test]
+    fn test_thinking_picker_uses_model_variants() {
+        let mut app = App::new();
+        app.status.model = "gpt-5.6-sol".into();
+        app.thinking_variants.insert(
+            "gpt-5.6-sol".into(),
+            vec![
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into(),
+                "max".into(),
+                "ultra".into(),
+            ],
+        );
+        app.open_thinking_variant_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.kind, "thinking_variant");
+        // "Off" + the model's six real variants — not the old hardcoded
+        // ["high", "max", "thinking"].
+        assert_eq!(picker.items.len(), 7);
+        assert_eq!(picker.items[0].id, "off");
+        let names: Vec<&str> = picker.items[1..].iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+    }
+
+    #[test]
+    fn test_thinking_picker_no_variants_shows_only_off() {
+        let mut app = App::new();
+        app.status.model = "unknown-model".into();
+        app.open_thinking_variant_picker();
+        let picker = app.picker.as_ref().unwrap();
+        assert_eq!(picker.items.len(), 1);
+        assert_eq!(picker.items[0].id, "off");
     }
 
     #[test]

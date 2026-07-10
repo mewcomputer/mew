@@ -34,6 +34,16 @@ pub struct Adapter {
     oauth_provider: Option<std::sync::Arc<dyn OAuthProvider>>,
     client: reqwest::Client,
     dump: bool,
+    /// True for Codex models that require the Responses Lite transport
+    /// (e.g. gpt-5.6-sol/terra/luna).
+    use_responses_lite: bool,
+}
+
+impl Adapter {
+    pub fn with_responses_lite(mut self, v: bool) -> Self {
+        self.use_responses_lite = v;
+        self
+    }
 }
 
 /// The auth state held by the adapter. OAuth tokens are wrapped in
@@ -56,6 +66,7 @@ impl Adapter {
             oauth_provider: None,
             client: reqwest::Client::new(),
             dump: false,
+            use_responses_lite: false,
         }
     }
 
@@ -78,6 +89,7 @@ impl Adapter {
             oauth_provider: Some(provider),
             client: reqwest::Client::new(),
             dump: false,
+            use_responses_lite: false,
         }
     }
 
@@ -139,6 +151,10 @@ impl Provider for Adapter {
         for (name, value) in &extra_headers {
             request_builder = request_builder.header(name, value);
         }
+        if self.use_responses_lite {
+            request_builder =
+                request_builder.header("x-openai-internal-codex-responses-lite", "true");
+        }
         let request = request_builder.body(body).build()?;
 
         let policy = RetryPolicy::default();
@@ -192,16 +208,6 @@ impl Provider for Adapter {
     }
 
     async fn list_models(&self) -> Result<Vec<mew_provider::ModelInfo>, ProviderError> {
-        // The ChatGPT backend (OAuth path) does not expose a /models
-        // endpoint. Return an empty list so the model picker falls back
-        // to hardcoded defaults.
-        if self.oauth_provider.is_some() {
-            tracing::debug!(
-                "list_models: skipping for OAuth mode (ChatGPT backend has no /models endpoint)"
-            );
-            return Ok(Vec::new());
-        }
-
         let url = format!("{}/models", self.base_url);
         let (auth_header, extra_headers) = self.build_auth_headers().await?;
         let mut request_builder = self.client.get(&url).header("Authorization", auth_header);
@@ -215,6 +221,25 @@ impl Provider for Adapter {
             let body = resp.text().await.unwrap_or_default();
             let (kind, msg) = classify_error(status, &body);
             return Err(ProviderError::Classified { kind, message: msg });
+        }
+
+        // The ChatGPT (OAuth) backend returns codex's `ModelsResponse` shape
+        // { "models": [...] }; the API-key backend returns OpenAI's
+        // { "data": [...] }. The OAuth path also refreshes the codex catalog
+        // cache with the live, plan-filtered response so the daemon path
+        // (which reads the catalog, not list_models) benefits next launch.
+        if self.oauth_provider.is_some() {
+            let body = resp.text().await.unwrap_or_default();
+            let _ = mew_catalog::write_codex_cache(&body);
+            let models = mew_catalog::parse_codex(body.as_bytes())
+                .map_err(|e| ProviderError::Message(format!("codex models parse failed: {e}")))?;
+            return Ok(models
+                .into_iter()
+                .map(|m| mew_provider::ModelInfo {
+                    id: m.id,
+                    owned_by: "openai".to_string(),
+                })
+                .collect());
         }
 
         #[derive(serde::Deserialize)]
@@ -272,30 +297,62 @@ impl Adapter {
             "model": self.model,
             "input": input,
             "stream": true,
-            "parallel_tool_calls": true,
+            "parallel_tool_calls": !self.use_responses_lite,
         });
 
-        // System prompt → instructions (not in input array).
-        if !req.system.is_empty() {
-            body["instructions"] = json!(req.system);
+        // The ChatGPT (OAuth) subscription backend rejects requests without
+        // store=false (it doesn't persist responses). The API-key backend
+        // (api.openai.com) accepts the default, so this is OAuth-only.
+        if self.oauth_provider.is_some() {
+            body["store"] = json!(false);
         }
 
         // Tools — flat shape with strict: false.
-        if !req.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = req
-                .tools
-                .iter()
-                .map(|t| {
-                    json!({
-                        "type": "function",
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.schema,
-                        "strict": false,
-                    })
+        let tools_json: Vec<serde_json::Value> = req
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.schema,
+                    "strict": false,
                 })
-                .collect();
-            body["tools"] = json!(tools);
+            })
+            .collect();
+
+        if self.use_responses_lite {
+            // Responses Lite moves tools and the system prompt into the input
+            // array and omits the top-level `tools`/`instructions` keys.
+            // Order matches OpenAI's Codex CLI: additional_tools first, then the
+            // developer message with instructions.
+            let mut prefix: Vec<serde_json::Value> = Vec::new();
+            if !tools_json.is_empty() {
+                prefix.push(json!({
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": tools_json,
+                }));
+            }
+            if !req.system.is_empty() {
+                prefix.push(json!({
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": req.system}],
+                }));
+            }
+            input.splice(0..0, prefix);
+            // Re-assign the now-prefixed input back into the body.
+            body["input"] = json!(input);
+        } else {
+            // Standard Responses shape: instructions + top-level tools array.
+            if !req.system.is_empty() {
+                body["instructions"] = json!(req.system);
+            }
+            if !tools_json.is_empty() {
+                body["tools"] = json!(tools_json);
+            }
         }
 
         // Reasoning — restructure from flat params to nested object.
@@ -304,9 +361,19 @@ impl Adapter {
         // {"reasoning": {"effort": "high"}}.
         if let Some(ref reasoning) = req.reasoning {
             if let Some(effort) = reasoning.params.get("reasoning_effort") {
-                body["reasoning"] = json!({"effort": effort});
+                let mut reasoning_obj = json!({"effort": effort});
+                if self.use_responses_lite {
+                    reasoning_obj["context"] = json!("all_turns");
+                    body["include"] = json!(["reasoning.encrypted_content"]);
+                }
+                body["reasoning"] = reasoning_obj;
             } else if let Some(reasoning_obj) = reasoning.params.get("reasoning") {
-                body["reasoning"] = reasoning_obj.clone();
+                let mut reasoning_obj = reasoning_obj.clone();
+                if self.use_responses_lite && reasoning_obj.get("context").is_none() {
+                    reasoning_obj["context"] = json!("all_turns");
+                    body["include"] = json!(["reasoning.encrypted_content"]);
+                }
+                body["reasoning"] = reasoning_obj;
             }
         }
 
@@ -1470,6 +1537,116 @@ mod tests {
         assert_eq!(v["temperature"], 0.7);
     }
 
+    #[tokio::test]
+    async fn test_build_request_body_oauth_sets_store_false() {
+        // The ChatGPT subscription backend rejects requests without store=false.
+        let provider = std::sync::Arc::new(TestOAuthProvider {
+            base_url: "http://unused".into(),
+        });
+        let adapter = Adapter::new_oauth(
+            "test".into(),
+            "gpt-5.6-sol".into(),
+            mew_provider::auth::TokenSet {
+                access_token: "a".into(),
+                refresh_token: "r".into(),
+                expires_at: 9_999_999_999,
+            },
+            vec![],
+            provider,
+        );
+        let req = Request {
+            model: "gpt-5.6-sol".to_string(),
+            messages: vec![make_message(Role::User, "hi")],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: http::HeaderMap::new(),
+        };
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["store"], false, "OAuth path must set store=false");
+    }
+
+    #[tokio::test]
+    async fn test_build_request_body_apikey_omits_store() {
+        // The API-key backend keeps the default; store must not be forced.
+        let adapter = make_adapter();
+        let req = Request {
+            model: "gpt-5-codex".to_string(),
+            messages: vec![make_message(Role::User, "hi")],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: http::HeaderMap::new(),
+        };
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v.get("store").is_none(), "API-key path must not set store");
+    }
+
+    #[tokio::test]
+    async fn test_build_request_body_responses_lite() {
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "gpt-5.6-luna".to_string(),
+            "test-key".to_string(),
+        )
+        .with_responses_lite(true);
+        let req = Request {
+            model: "gpt-5.6-luna".to_string(),
+            messages: vec![make_message(Role::User, "hello")],
+            tools: vec![ToolDef {
+                name: "bash".to_string(),
+                description: "Run a command".to_string(),
+                schema: json!({"type": "object"}),
+            }],
+            system: "You are a helpful coding assistant.".to_string(),
+            reasoning: Some(mew_provider::ReasoningConfig {
+                params: {
+                    let mut m = serde_json::Map::new();
+                    m.insert("reasoning_effort".to_string(), json!("medium"));
+                    m
+                },
+            }),
+            params: None,
+            headers: http::HeaderMap::new(),
+        };
+
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(v["model"], "gpt-5.6-luna");
+        assert_eq!(v["parallel_tool_calls"], false);
+        assert!(
+            v.get("instructions").is_none(),
+            "lite uses developer message, not instructions"
+        );
+        assert!(
+            v.get("tools").is_none(),
+            "lite uses additional_tools input item, not top-level tools"
+        );
+
+        let input = v["input"].as_array().unwrap();
+        assert_eq!(input[0]["type"], "additional_tools");
+        assert_eq!(input[0]["role"], "developer");
+        assert_eq!(input[0]["tools"][0]["name"], "bash");
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[1]["role"], "developer");
+        assert_eq!(
+            input[1]["content"][0]["text"],
+            "You are a helpful coding assistant."
+        );
+        assert_eq!(input[2]["type"], "message");
+        assert_eq!(input[2]["role"], "user");
+
+        assert_eq!(v["reasoning"]["effort"], "medium");
+        assert_eq!(v["reasoning"]["context"], "all_turns");
+        assert_eq!(v["include"], json!(["reasoning.encrypted_content"]));
+    }
+
     // --- Integration tests using wiremock ---
 
     use wiremock::matchers::{header, method, path};
@@ -1559,6 +1736,75 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\
                 ..
             } if usage.input == 10 && usage.output == 5
         ));
+    }
+
+    #[tokio::test]
+    async fn test_stream_responses_lite_header() {
+        let server = MockServer::start().await;
+
+        let sse_body = "\
+event: response.created\n\
+data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\
+\n\
+event: response.output_item.added\n\
+data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\"}}\n\
+\n\
+event: response.content_part.added\n\
+data: {\"type\":\"response.content_part.added\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\
+\n\
+event: response.output_text.delta\n\
+data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"ok\"}\n\
+\n\
+event: response.output_text.done\n\
+data: {\"type\":\"response.output_text.done\",\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"text\":\"ok\"}\n\
+\n\
+event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\
+\n";
+
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .and(header("authorization", "Bearer test-access"))
+            .and(header("x-openai-internal-codex-responses-lite", "true"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = std::sync::Arc::new(TestOAuthProvider {
+            base_url: server.uri(),
+        });
+        let adapter = Adapter::new_oauth(
+            "test".into(),
+            "gpt-5.6-luna".into(),
+            mew_provider::auth::TokenSet {
+                access_token: "test-access".into(),
+                refresh_token: "test-refresh".into(),
+                expires_at: 9_999_999_999,
+            },
+            vec![],
+            provider,
+        )
+        .with_responses_lite(true);
+
+        let req = Request {
+            model: "gpt-5.6-luna".to_string(),
+            messages: vec![make_message(Role::User, "hi")],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: http::HeaderMap::new(),
+        };
+
+        let stream = adapter.stream(req).await.unwrap();
+        let events: Vec<ProviderEvent> = stream.collect().await;
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
     }
 
     #[tokio::test]
@@ -1885,5 +2131,155 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_u\",\"status\
         assert_eq!(models[0].id, "gpt-5-codex");
         assert_eq!(models[0].owned_by, "openai");
         assert_eq!(models[1].id, "gpt-5.5");
+    }
+
+    /// Saves and restores the codex cache file so the best-effort cache
+    /// write inside `list_models` (OAuth path) can't pollute the developer's
+    /// real cache — even if the test panics.
+    struct CodexCacheRestore {
+        path: std::path::PathBuf,
+        original: Option<Vec<u8>>,
+    }
+    impl CodexCacheRestore {
+        fn new(path: std::path::PathBuf) -> Self {
+            let original = std::fs::read(&path).ok();
+            Self { path, original }
+        }
+    }
+    impl Drop for CodexCacheRestore {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(data) => {
+                    let _ = std::fs::write(&self.path, data);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&self.path);
+                }
+            }
+        }
+    }
+
+    /// A minimal `OAuthProvider` whose `oauth_base_url` is the mock server,
+    /// so `Adapter::new_oauth` points at the wiremock instance.
+    struct TestOAuthProvider {
+        base_url: String,
+    }
+    #[async_trait]
+    impl mew_provider::auth::OAuthProvider for TestOAuthProvider {
+        fn display_name(&self) -> &str {
+            "test"
+        }
+        fn slug(&self) -> &str {
+            "test"
+        }
+        fn oauth_base_url(&self) -> &str {
+            &self.base_url
+        }
+        async fn login(&self, _: bool) -> anyhow::Result<mew_provider::auth::OAuthSession> {
+            anyhow::bail!("not used in tests")
+        }
+        fn extra_headers(&self, _: &mew_provider::auth::TokenSet) -> Vec<(String, String)> {
+            vec![]
+        }
+        async fn refresh(&self, _: &str) -> anyhow::Result<mew_provider::auth::TokenSet> {
+            anyhow::bail!("not used in tests")
+        }
+        fn token_file_path(&self) -> std::path::PathBuf {
+            std::path::PathBuf::from("/tmp/mew-test-oauth-not-used")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_models_oauth_parses_codex_response_and_refreshes_cache() {
+        let server = MockServer::start().await;
+
+        // Codex ModelsResponse shape: { "models": [...] }.
+        let codex_body = json!({
+            "models": [
+                {
+                    "slug": "gpt-5.6-sol",
+                    "visibility": "list",
+                    "supported_in_api": true,
+                    "context_window": 372000,
+                    "default_reasoning_level": "low",
+                    "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}],
+                    "input_modalities": ["text", "image"],
+                    "supports_parallel_tool_calls": true
+                },
+                {"slug": "hidden-one", "visibility": "hidden", "supported_in_api": true, "context_window": 1}
+            ]
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .and(header("authorization", "Bearer test-access"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(serde_json::to_string(&codex_body).unwrap()),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = std::sync::Arc::new(TestOAuthProvider {
+            base_url: server.uri(),
+        });
+        let tokens = mew_provider::auth::TokenSet {
+            access_token: "test-access".to_string(),
+            refresh_token: "test-refresh".to_string(),
+            // Far-future expiry so refresh_if_needed is a no-op (no file IO).
+            expires_at: 9_999_999_999,
+        };
+        let adapter = Adapter::new_oauth(
+            "test".to_string(),
+            "gpt-5.6-sol".to_string(),
+            tokens,
+            vec![],
+            provider,
+        );
+
+        let _guard = CodexCacheRestore::new(mew_catalog::codex_cache_path());
+
+        let models = adapter.list_models().await.unwrap();
+        // The hidden model is filtered out; only the visible one returns.
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-5.6-sol");
+        assert_eq!(models[0].owned_by, "openai");
+
+        // The live response refreshed the codex catalog cache. The cache holds
+        // the raw body; filtering happens at parse time (proven above).
+        let cached = std::fs::read_to_string(mew_catalog::codex_cache_path()).unwrap();
+        assert!(cached.contains("gpt-5.6-sol"));
+    }
+
+    #[tokio::test]
+    async fn test_list_models_oauth_non_2xx_returns_err() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .mount(&server)
+            .await;
+
+        let provider = std::sync::Arc::new(TestOAuthProvider {
+            base_url: server.uri(),
+        });
+        let tokens = mew_provider::auth::TokenSet {
+            access_token: "test-access".to_string(),
+            refresh_token: "test-refresh".to_string(),
+            expires_at: 9_999_999_999,
+        };
+        let adapter = Adapter::new_oauth(
+            "test".to_string(),
+            "gpt-5.6-sol".to_string(),
+            tokens,
+            vec![],
+            provider,
+        );
+
+        let _guard = CodexCacheRestore::new(mew_catalog::codex_cache_path());
+        let result = adapter.list_models().await;
+        assert!(result.is_err(), "non-2xx should surface an error");
     }
 }

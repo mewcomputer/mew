@@ -18,6 +18,31 @@ use mew_provider_anthropic::Adapter as AnthropicAdapter;
 use mew_provider_openai::Adapter as OpenAIAdapter;
 use mew_provider_responses::Adapter as ResponsesAdapter;
 
+/// Static fallback for Codex models that require the Responses Lite transport.
+/// The catalog is the authoritative source, but this keeps the known lite
+/// models working when the catalog is stale or offline.
+fn is_known_responses_lite_model(model_id: &str) -> bool {
+    matches!(model_id, "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna")
+}
+
+/// Discover a project-level `catalog_codex.json` override by walking from
+/// `cwd` up to the git root. Returns `None` if no override file exists.
+fn discover_codex_catalog(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        let candidate = d.join("catalog_codex.json");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        // Stop at git root so we don't walk the whole filesystem.
+        if d.join(".git").is_dir() {
+            break;
+        }
+        dir = d.parent();
+    }
+    None
+}
+
 /// Split a `"provider/model"` spec into `(provider_id, model_id)`.
 ///
 /// If no `/` is present, `default_provider` is used as the provider and the
@@ -114,6 +139,7 @@ pub(crate) async fn load_catalog(cfg: &Config) -> Option<Catalog> {
                     params: v.params.clone(),
                 })
                 .collect(),
+            responses_lite: cm.responses_lite,
             ..Default::default()
         })
         .collect();
@@ -135,6 +161,44 @@ pub(crate) async fn load_catalog(cfg: &Config) -> Option<Catalog> {
         }
     } else if cfg.providers.contains_key("umans") {
         tracing::debug!("umans provider configured but no credential set; skipping model fetch");
+    }
+
+    // Codex (ChatGPT-subscription OAuth) publishes its model catalog at the
+    // codex repo's models.json. Merge it in only when the user is logged in
+    // via OAuth — without a token file, every model would be a dead picker
+    // entry. The standalone TUI additionally refreshes this cache from the
+    // live authed /models endpoint (plan-filtered) via list_models.
+    if codex_logged_in() {
+        match mew_catalog::load_codex().await {
+            Ok(codex_models) => {
+                tracing::info!("loaded {} codex model configs", codex_models.len());
+                cat.merge_local(codex_models);
+            }
+            Err(e) => {
+                tracing::warn!(?e, "codex models fetch failed; continuing without");
+            }
+        }
+    }
+
+    // Load a project-level Codex catalog override last so it wins. This gives
+    // API-key users the same model metadata (reasoning levels, responses_lite,
+    // …) as OAuth users and lets repos pin the exact model set they expect even
+    // when the network cache is stale.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if let Some(override_path) = discover_codex_catalog(&cwd) {
+        match mew_catalog::load_codex_from_path(&override_path).await {
+            Ok(codex_models) => {
+                tracing::info!(
+                    path = %override_path.display(),
+                    count = codex_models.len(),
+                    "loaded local codex catalog override"
+                );
+                cat.merge_local(codex_models);
+            }
+            Err(e) => {
+                tracing::warn!(path = %override_path.display(), ?e, "local codex catalog override failed");
+            }
+        }
     }
 
     Some(cat)
@@ -291,11 +355,30 @@ pub(crate) fn provider_has_credential(cfg: &Config, provider_id: &str) -> bool {
     }
 }
 
+/// Whether a provider is usable right now: an API-key credential OR an OAuth
+/// token file (for OAuth-only providers like `codex`, whose
+/// credential is the token file at `auth/codex.json`, not a
+/// `credential_ref` slot). Used to gate which catalog models the picker shows.
+pub(crate) fn provider_available(cfg: &Config, provider_id: &str) -> bool {
+    if provider_has_credential(cfg, provider_id) {
+        return true;
+    }
+    if provider_id == "codex" {
+        return mew_provider_responses::oauth::codex_token_path().exists();
+    }
+    false
+}
+
+/// Whether the OpenAI Responses OAuth user is logged in (token file present).
+fn codex_logged_in() -> bool {
+    mew_provider_responses::oauth::codex_token_path().exists()
+}
+
 pub(crate) fn provider_name_to_shape(pid: &str) -> &'static str {
     match pid {
         "opencode-zen" | "opencode-go" => "openai",
         "z-ai" | "umans" => "anthropic",
-        "openai-responses" => "responses",
+        "codex" => "responses",
         _ => "openai",
     }
 }
@@ -309,7 +392,7 @@ pub(crate) fn build_direct_provider(
     model_override: &str,
     raw: bool,
 ) -> Result<Arc<dyn Provider>> {
-    // Non-fatal: some providers (openai-responses with OAuth) don't
+    // Non-fatal: some providers (codex with OAuth) don't
     // need an API key. Each shape arm handles the Option as needed.
     let creds = mew_config::get_credential(&pc.credential_ref).ok();
 
@@ -337,6 +420,11 @@ pub(crate) fn build_direct_provider(
         base_url = "https://opencode.ai/zen/go/v1".to_string();
     }
 
+    let responses_lite = cat
+        .and_then(|c| c.lookup(&model))
+        .map(|m| m.responses_lite)
+        .unwrap_or_else(|| is_known_responses_lite_model(&model));
+
     match shape.as_str() {
         "openai" => {
             let creds = creds.context("get credential")?;
@@ -358,7 +446,7 @@ pub(crate) fn build_direct_provider(
         "responses" => {
             // Try OAuth first, then fall back to API key.
             let oauth_provider: std::sync::Arc<dyn mew_provider::auth::OAuthProvider> =
-                std::sync::Arc::new(mew_provider_responses::oauth::OpenaiResponsesOAuth);
+                std::sync::Arc::new(mew_provider_responses::oauth::CodexOAuth);
             match mew_provider::auth::resolve(oauth_provider.as_ref(), creds) {
                 Ok(mew_provider::auth::AuthKind::OAuth {
                     tokens,
@@ -370,7 +458,8 @@ pub(crate) fn build_direct_provider(
                         tokens,
                         extra_headers,
                         oauth_provider,
-                    );
+                    )
+                    .with_responses_lite(responses_lite);
                     if raw {
                         adapter.set_dump(true);
                     }
@@ -378,15 +467,16 @@ pub(crate) fn build_direct_provider(
                 }
                 Ok(mew_provider::auth::AuthKind::ApiKey(key)) => {
                     let mut adapter =
-                        ResponsesAdapter::new(provider_id.to_string(), base_url, model, key);
+                        ResponsesAdapter::new(provider_id.to_string(), base_url, model, key)
+                            .with_responses_lite(responses_lite);
                     if raw {
                         adapter.set_dump(true);
                     }
                     Ok(Arc::new(adapter))
                 }
                 Err(e) => Err(anyhow::anyhow!(
-                    "no credentials for openai-responses: {e}. \
-                     Run `mew auth login openai-responses` or set OPENAI_API_KEY."
+                    "no credentials for codex: {e}. \
+                     Run `mew auth login codex` or set OPENAI_API_KEY."
                 )),
             }
         }
@@ -535,6 +625,26 @@ pub(crate) async fn discover_models(
         }
     }
 
+    // Pull codex (ChatGPT OAuth) models from the catalog as a baseline. The
+    // live list_models call above may have already added them (plan-filtered)
+    // — `seen` dedups. This seeds the picker when the live /models endpoint is
+    // unreachable (offline / auth failure) so standalone matches the daemon,
+    // which reads the catalog directly. Gated on OAuth login.
+    if codex_logged_in() {
+        if let Some(c) = cat {
+            for (model_id, model_info) in &c.models {
+                if model_info.provider != "codex" {
+                    continue;
+                }
+                let full_id = format!("codex/{}", model_id);
+                if seen.insert(full_id.clone()) {
+                    let desc = format!("codex · responses · {} ctx", model_info.context_window);
+                    models.push((full_id, desc));
+                }
+            }
+        }
+    }
+
     // Add hardcoded fallbacks if nothing discovered.
     if models.is_empty() {
         tracing::warn!("discovery: no models from any provider, using fallbacks");
@@ -633,6 +743,38 @@ mod tests {
     use super::*;
 
     // --- split_provider_model ---
+
+    #[test]
+    fn discover_codex_catalog_finds_file_in_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let catalog = tmp.path().join("catalog_codex.json");
+        std::fs::write(&catalog, b"{}").unwrap();
+        assert_eq!(discover_codex_catalog(tmp.path()), Some(catalog));
+    }
+
+    #[test]
+    fn discover_codex_catalog_walks_up_to_git_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git_root = tmp.path().join("repo");
+        let subdir = git_root.join("nested");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::create_dir(git_root.join(".git")).unwrap();
+        let catalog = git_root.join("catalog_codex.json");
+        std::fs::write(&catalog, b"{}").unwrap();
+        assert_eq!(discover_codex_catalog(&subdir), Some(catalog));
+    }
+
+    #[test]
+    fn discover_codex_catalog_stops_at_git_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let git_root = tmp.path().join("repo");
+        let subdir = git_root.join("nested");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::create_dir(git_root.join(".git")).unwrap();
+        let outside = tmp.path().join("catalog_codex.json");
+        std::fs::write(&outside, b"{}").unwrap();
+        assert_eq!(discover_codex_catalog(&subdir), None);
+    }
 
     #[test]
     fn split_provider_model_basic() {
@@ -1025,7 +1167,7 @@ mod tests {
         assert_eq!(provider_name_to_shape("opencode-go"), "openai");
         assert_eq!(provider_name_to_shape("z-ai"), "anthropic");
         assert_eq!(provider_name_to_shape("umans"), "anthropic");
-        assert_eq!(provider_name_to_shape("openai-responses"), "responses");
+        assert_eq!(provider_name_to_shape("codex"), "responses");
     }
 
     #[test]

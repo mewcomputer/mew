@@ -289,6 +289,14 @@ pub(crate) async fn run_tui(
         .unwrap_or_default()
         .disabled_plugins;
 
+    // Discover manifest-based extension packages (shared between the broker
+    // and build_session_agent for [provides] paths).
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let discovered = mew_ext_broker::discover_extensions(&cwd);
+    if !discovered.is_empty() {
+        tracing::info!("discovered {} extension package(s)", discovered.len());
+    }
+
     // Shared session info that plugins can query via config_read.
     // Updated when persona/model changes; static values are set once.
     let plugin_info: Arc<std::sync::Mutex<PluginInfo>> =
@@ -343,6 +351,7 @@ pub(crate) async fn run_tui(
         },
         &disabled_plugins,
         cfg.plugins.clone(),
+        &discovered,
     )
     .await;
 
@@ -415,7 +424,7 @@ pub(crate) async fn run_tui(
         None,
         dispatcher.clone(),
         todos_path.clone(),
-        &[],
+        &discovered,
     )?;
 
     // Collect non-MCP tool names for the sidebar (before MCP tools are
@@ -443,7 +452,7 @@ pub(crate) async fn run_tui(
         &provider_id,
         raw,
         dispatcher.clone(),
-        &[],
+        &discovered,
     );
 
     // Load the saved todo list (if any) into the agent.
@@ -527,6 +536,25 @@ pub(crate) async fn run_tui(
 
     // Populate model list by querying providers and merging with catalog.
     app.models = discover_models(cfg, cat, raw).await;
+
+    // Populate per-model thinking-variant names from the catalog so the
+    // `/thinking` picker shows each model's actual levels (e.g. codex
+    // low/medium/high/xhigh/max/ultra) instead of a hardcoded list.
+    if let Some(c) = cat {
+        app.thinking_variants = c
+            .models
+            .values()
+            .map(|m| {
+                (
+                    m.id.clone(),
+                    c.thinking_variants(&m.id)
+                        .into_iter()
+                        .map(|v| v.name)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+    }
 
     // Register dynamic slash commands from plugins.
     let dynamic_cmds = agent.dispatcher.on_register_slash_commands().await;

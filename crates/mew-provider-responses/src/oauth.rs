@@ -1,9 +1,10 @@
-//! OpenAI Responses OAuth provider implementation.
+//! Codex (ChatGPT subscription) OAuth provider implementation.
 //!
-//! Implements the `OAuthProvider` trait for OpenAI's ChatGPT subscription
-//! OAuth flow. The protocol machinery (PKCE, callback server, device flow,
-//! JWT extraction) lives in [`crate::openai_oauth`]; this file wires it to
-//! the generic auth layer and picks between the browser and headless flows.
+//! Implements the `OAuthProvider` trait for the ChatGPT-subscription OAuth
+//! flow used by Codex / GPT-5-codex models. The protocol machinery (PKCE,
+//! callback server, device flow, JWT extraction) lives in
+//! [`crate::openai_oauth`]; this file wires it to the generic auth layer and
+//! picks between the browser and headless flows.
 
 use std::path::PathBuf;
 
@@ -12,9 +13,34 @@ use mew_provider::auth::{OAuthProvider, OAuthSession, TokenSet};
 
 use crate::openai_oauth::{self, OAuthConfig};
 
-pub struct OpenaiResponsesOAuth;
+pub struct CodexOAuth;
 
-impl OpenaiResponsesOAuth {
+/// Path to the stored Codex OAuth token file. Used by the model picker to
+/// gate Codex catalog models on login presence (OAuth credentials live in
+/// this file, not in a `credential_ref` API-key slot).
+///
+/// Migrates the legacy `openai-responses.json` path to `codex.json` once,
+/// so existing logins survive the provider rename.
+pub fn codex_token_path() -> std::path::PathBuf {
+    static MIGRATE: std::sync::Once = std::sync::Once::new();
+    MIGRATE.call_once(|| {
+        let auth_dir = mew_config::config_dir().join("auth");
+        let new_path = auth_dir.join("codex.json");
+        if !new_path.exists() {
+            let old_path = auth_dir.join("openai-responses.json");
+            if old_path.exists() {
+                if let Err(e) = std::fs::rename(&old_path, &new_path) {
+                    tracing::warn!(?e, "failed to migrate openai-responses.json → codex.json");
+                } else {
+                    tracing::info!("migrated oauth token openai-responses.json → codex.json");
+                }
+            }
+        }
+    });
+    mew_config::config_dir().join("auth").join("codex.json")
+}
+
+impl CodexOAuth {
     /// Shared tail for both flows: exchange the code, extract the account id,
     /// and assemble the `OAuthSession`.
     async fn finalize_login(
@@ -37,13 +63,13 @@ impl OpenaiResponsesOAuth {
 }
 
 #[async_trait]
-impl OAuthProvider for OpenaiResponsesOAuth {
+impl OAuthProvider for CodexOAuth {
     fn display_name(&self) -> &str {
-        "OpenAI Responses (ChatGPT)"
+        "Codex (ChatGPT)"
     }
 
     fn slug(&self) -> &str {
-        "openai-responses"
+        "codex"
     }
 
     fn oauth_base_url(&self) -> &str {
@@ -80,13 +106,11 @@ impl OAuthProvider for OpenaiResponsesOAuth {
     }
 
     fn token_file_path(&self) -> PathBuf {
-        mew_config::config_dir()
-            .join("auth")
-            .join("openai-responses.json")
+        codex_token_path()
     }
 }
 
-impl OpenaiResponsesOAuth {
+impl CodexOAuth {
     /// Browser PKCE flow: bind the callback server, open the platform
     /// browser (never `$BROWSER`), wait for the redirect, exchange.
     async fn login_browser(cfg: &OAuthConfig) -> anyhow::Result<OAuthSession> {
@@ -96,12 +120,7 @@ impl OpenaiResponsesOAuth {
         let redirect_uri = openai_oauth::PROD_REDIRECT_URI.to_string();
         let pkce = openai_oauth::generate_pkce();
         let state = openai_oauth::generate_state();
-        let url = openai_oauth::build_authorize_url(
-            cfg,
-            &redirect_uri,
-            &pkce.challenge,
-            &state,
-        )?;
+        let url = openai_oauth::build_authorize_url(cfg, &redirect_uri, &pkce.challenge, &state)?;
 
         eprintln!("Opening browser for OpenAI login...");
         eprintln!("If the browser doesn't open, visit this URL:");
@@ -148,29 +167,28 @@ mod tests {
 
     fn fake_jwt(payload_json: &str) -> String {
         use base64::Engine;
-        let header =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
         let payload =
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         format!("{header}.{payload}.sig")
     }
 
     #[test]
-    fn test_slug_is_openai_responses() {
-        let provider = OpenaiResponsesOAuth;
-        assert_eq!(provider.slug(), "openai-responses");
+    fn test_slug_is_codex() {
+        let provider = CodexOAuth;
+        assert_eq!(provider.slug(), "codex");
     }
 
     #[test]
-    fn test_token_file_path_ends_with_auth_openai_responses_json() {
-        let provider = OpenaiResponsesOAuth;
+    fn test_token_file_path_ends_with_auth_codex_json() {
+        let provider = CodexOAuth;
         let path = provider.token_file_path();
-        assert!(path.ends_with("auth/openai-responses.json"));
+        assert!(path.ends_with("auth/codex.json"));
     }
 
     #[test]
     fn test_oauth_base_url_is_chatgpt_backend() {
-        let provider = OpenaiResponsesOAuth;
+        let provider = CodexOAuth;
         assert_eq!(
             provider.oauth_base_url(),
             "https://chatgpt.com/backend-api/codex"
@@ -179,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_extra_headers_extracts_account_id_from_jwt() {
-        let provider = OpenaiResponsesOAuth;
+        let provider = CodexOAuth;
         let payload = serde_json::json!({
             "https://api.openai.com/auth": { "chatgpt_account_id": "acct_99" }
         })
@@ -190,12 +208,15 @@ mod tests {
             expires_at: 0,
         };
         let headers = provider.extra_headers(&tokens);
-        assert_eq!(headers, vec![("chatgpt-account-id".into(), "acct_99".into())]);
+        assert_eq!(
+            headers,
+            vec![("chatgpt-account-id".into(), "acct_99".into())]
+        );
     }
 
     #[test]
     fn test_extra_headers_empty_on_bad_token() {
-        let provider = OpenaiResponsesOAuth;
+        let provider = CodexOAuth;
         let tokens = TokenSet {
             access_token: "not-a-jwt".into(),
             refresh_token: "r".into(),

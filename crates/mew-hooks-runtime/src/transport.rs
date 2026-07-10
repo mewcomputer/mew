@@ -58,7 +58,15 @@ pub enum SpawnSpec {
     /// Bare executable path (legacy plugins).
     Path(PathBuf),
     /// Command + args (manifest-based extensions, e.g. `["node", "dist/index.js"]`).
-    Command { program: String, args: Vec<String> },
+    Command {
+        program: String,
+        args: Vec<String>,
+        /// Sandbox profile for `sandbox-exec` (macOS only).
+        /// Tuple of (profile_text, params) — kept as plain types so
+        /// mew-hooks-runtime doesn't depend on mew-ext-broker.
+        /// None = no sandbox (bare plugins, non-macOS).
+        sandbox: Option<(String, Vec<(String, String)>)>,
+    },
 }
 
 impl SpawnSpec {
@@ -82,7 +90,23 @@ impl SpawnSpec {
     fn to_command(&self) -> Command {
         match self {
             Self::Path(p) => Command::new(p),
-            Self::Command { program, args } => {
+            Self::Command {
+                program,
+                args,
+                sandbox,
+            } => {
+                if let Some((ref profile, ref params)) = sandbox {
+                    if cfg!(target_os = "macos") {
+                        let mut cmd = Command::new("sandbox-exec");
+                        cmd.args(["-p", profile]);
+                        for (k, v) in params {
+                            cmd.args(["-D", &format!("{}={}", k, v)]);
+                        }
+                        cmd.arg(program);
+                        cmd.args(args);
+                        return cmd;
+                    }
+                }
                 let mut cmd = Command::new(program);
                 cmd.args(args);
                 cmd

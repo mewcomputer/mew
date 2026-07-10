@@ -27,13 +27,14 @@ use mew_hooks::{
 };
 use mew_message::Message;
 
-use mew_hooks_runtime::{call_via_handles, PluginHandles, PluginLoader, PluginSlot};
+use mew_hooks_runtime::{call_via_handles, PluginHandles, PluginLoader, PluginSlot, SpawnSpec};
 
 use sha2::Digest;
 
 use crate::audit::GateOutcome;
 use crate::audit_log::AuditLog;
 use crate::capabilities::{Capability, CapabilitySet};
+use crate::discovery::DiscoveredExtension;
 use crate::principal::Principal;
 
 // ── ExtensionBroker ─────────────────────────────────────────────────
@@ -72,9 +73,15 @@ impl ExtensionBroker {
     }
 
     /// Construct from plugin discovery dirs, host, disabled list, configs, timeout.
-    /// The consent resolver is called for each discovered plugin to determine
-    /// whether to grant `legacy_full()` (approved) or `observe_only()` (restricted).
-    /// Pass `None` to approve all (for tests / backward compat).
+    ///
+    /// The consent resolver is called for each discovered plugin/extension to
+    /// determine capabilities. Pass `None` to approve all (tests / backward compat).
+    ///
+    /// `discovered_extensions` provides manifest-based extension packages that
+    /// should be spawned with `SpawnSpec::Command`. Bare executables in `dirs`
+    /// are handled by `PluginLoader` (legacy path). Declarative-only extensions
+    /// (no `entry.run`) are skipped here — their `[provides]` paths are handled
+    /// by `build_session_agent`.
     pub async fn from_dirs_filtered_with_config(
         dirs: Vec<PathBuf>,
         host: PluginHost,
@@ -82,6 +89,7 @@ impl ExtensionBroker {
         configs: HashMap<String, mew_hooks::PluginHookConfig>,
         global_timeout: Duration,
         consent_resolver: Option<crate::consent::ConsentResolver>,
+        discovered_extensions: &[DiscoveredExtension],
     ) -> anyhow::Result<Self> {
         // Validate plugin configs.
         for (name, cfg) in &configs {
@@ -105,6 +113,7 @@ impl ExtensionBroker {
         let host = Arc::new(host);
         let mut pairs: Vec<(Arc<PluginSlot>, Principal)> = Vec::new();
 
+        // ── Bare-executable plugins (legacy path) ──
         for path in &plugin_paths {
             let name = path
                 .file_stem()
@@ -119,29 +128,103 @@ impl ExtensionBroker {
                 .unwrap_or(global_timeout);
 
             match PluginSlot::spawn(
-                mew_hooks_runtime::SpawnSpec::Path(path.clone()),
+                SpawnSpec::Path(path.clone()),
                 host.as_ref().clone(),
                 plugin_timeout,
             )
             .await
             {
                 Ok(slot) => {
-                    // Determine consent: call resolver if provided, else approve all.
+                    // Determine consent: call resolver with no manifest (bare plugin).
                     let decision = match &consent_resolver {
-                        Some(resolver) => resolver(&name),
+                        Some(resolver) => resolver(&name, None),
                         None => crate::consent::ConsentDecision::Approved,
                     };
-                    let caps = match decision {
-                        crate::consent::ConsentDecision::Approved => CapabilitySet::legacy_full(),
-                        crate::consent::ConsentDecision::Restricted => {
-                            CapabilitySet::observe_only()
-                        }
-                    };
+                    let caps = decision.to_caps(CapabilitySet::legacy_full());
                     let principal = Principal::extension(name.clone(), caps);
                     pairs.push((slot, principal));
                 }
                 Err(e) => {
                     warn!("failed to start plugin {}: {}", path.display(), e);
+                }
+            }
+        }
+
+        // ── Manifest-based extensions (SpawnSpec::Command path) ──
+        for ext in discovered_extensions {
+            // Skip disabled extensions.
+            if disabled.contains(&ext.name) {
+                debug!("extension '{}' is disabled, skipping spawn", ext.name);
+                continue;
+            }
+
+            // Skip declarative-only extensions (no entry.run).
+            // Their [provides] paths are handled by build_session_agent.
+            let run = match ext.run_command() {
+                Some(cmd) if !cmd.is_empty() => cmd,
+                _ => {
+                    debug!(
+                        "extension '{}' has no entry.run, skipping spawn (declarative-only)",
+                        ext.name
+                    );
+                    continue;
+                }
+            };
+
+            let program = &run[0];
+            let args: Vec<String> = run[1..].to_vec();
+
+            // Build sandbox profile for manifest-based extensions.
+            let sandbox = if crate::sandbox::sandbox_available() {
+                let package_dir = &ext.root;
+                let storage_dir = mew_config::config_dir()
+                    .join("extensions")
+                    .join("storage")
+                    .join(&ext.name);
+                std::fs::create_dir_all(&storage_dir).ok();
+                let cfg = crate::sandbox::build_sandbox_profile(
+                    package_dir,
+                    &storage_dir,
+                    &ext.manifest.sandbox,
+                );
+                Some((cfg.profile_text, cfg.params))
+            } else {
+                tracing::warn!("extension '{}' running unsandboxed (platform)", ext.name);
+                None
+            };
+
+            let plugin_timeout = configs
+                .get(&ext.name)
+                .and_then(|c| c.timeout_ms)
+                .map(Duration::from_millis)
+                .unwrap_or(global_timeout);
+
+            match PluginSlot::spawn(
+                SpawnSpec::Command {
+                    program: program.clone(),
+                    args,
+                    sandbox,
+                },
+                host.as_ref().clone(),
+                plugin_timeout,
+            )
+            .await
+            {
+                Ok(slot) => {
+                    // Determine consent: call resolver with the manifest.
+                    let decision = match &consent_resolver {
+                        Some(resolver) => resolver(&ext.name, Some(&ext.manifest)),
+                        None => crate::consent::ConsentDecision::ApprovedWithCaps(
+                            ext.manifest.requested_capabilities(),
+                        ),
+                    };
+                    let caps = decision.to_caps(CapabilitySet::observe_only());
+                    let principal = Principal::extension(ext.name.clone(), caps);
+                    info!("spawned manifest extension '{}'", ext.name);
+                    pairs.push((slot, principal));
+                }
+                Err(e) => {
+                    warn!("failed to start extension '{}': {}", ext.name, e);
                 }
             }
         }
