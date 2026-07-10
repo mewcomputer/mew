@@ -95,22 +95,8 @@ Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
 
 ## Session model
 
-The daemon owns sessions via `SessionManager`. Connections attach to
-sessions. Key fields on `Session`:
-
-```rust
-pub struct Session {
-    pub id: String,
-    pub agent: Mutex<Agent>,
-    pub turn_lock: Mutex<()>,           // serializes turns
-    pub clients: Mutex<Vec<(u64, Sender<ServerMessage>)>>,  // broadcast targets
-    pub pending_permissions: Mutex<HashMap<u64, oneshot::Sender<PermissionDecision>>>,
-    pub pending_ask_user: Mutex<HashMap<u64, oneshot::Sender<Vec<String>>>>,
-    pub current_turn_cancel: Mutex<Option<CancellationToken>>,
-    pub model: Mutex<Option<String>>,
-    pub provider: Mutex<Option<String>>,
-}
-```
+The daemon owns sessions via `SessionManager` (`mew-daemon/src/session.rs`).
+Connections attach to sessions. Key behaviors:
 
 - **Broadcasting**: `session.broadcast(msg)` sends to all attached clients
   and removes any that have disconnected.
@@ -120,6 +106,8 @@ pub struct Session {
   from any client cancels the current turn.
 - **Permission/ask-user requests**: go to all clients. Any client can
   respond. `RequestResolved` dismisses the modal everywhere.
+
+See `mew-daemon/src/session.rs` for the full `Session` struct definition.
 
 ## Connection lifecycle
 

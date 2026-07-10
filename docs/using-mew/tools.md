@@ -102,7 +102,7 @@ These tools only register when their prerequisites are met:
 ## Secret redaction
 
 All tools that return file content or command output run the result
-through `SecretSet::redact()` before returning. This catches:
+through secret redaction before returning. This catches:
 
 - Pattern-based secrets (API keys, tokens, passwords matching common formats)
 - File-based secrets (contents of files listed in `secrets.files`)

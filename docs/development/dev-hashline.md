@@ -242,3 +242,115 @@ cargo test -p mew-hashline
 4. Add a unit test in `block.rs` covering a realistic construct.
 
 No other module needs to change.
+
+## Patch format reference
+
+The hashline patch format is what the `edit_hashline` tool consumes. The
+`read` tool produces hashline-formatted output automatically; the model
+uses the line numbers and hash from `read` output to construct patches.
+
+### Read output format
+
+`read` returns a `[path#hash]` header followed by numbered lines:
+
+```
+[src/lib.rs#A1B2]
+1:pub fn add(a: i32, b: i32) -> i32 {
+2:    a + b
+3:}
+4:
+5:pub fn sub(a: i32, b: i32) -> i32 {
+6:    a - b
+7:}
+```
+
+- The hash (`A1B2`) is the first four hex digits of a stable xxHash32 of
+  the normalized file content.
+- Normalization strips trailing spaces/tabs/`\r` but preserves a
+  trailing newline.
+- Line numbers are 1-indexed.
+
+### Patch structure
+
+A patch is one or more file sections. Each section starts with a header
+and contains operations:
+
+```
+[src/lib.rs#A1B2]
+SWAP 2.=2:
++    a + b + 1
+DEL 5
+INS.POST 4:
++pub fn mul(a: i32, b: i32) -> i32 {
++    a * b
++}
+```
+
+Operations are applied in order within a section. Multiple sections for
+the same path are merged automatically.
+
+### Line operations
+
+| Operation | Syntax | Description |
+|-----------|--------|-------------|
+| SWAP | `SWAP 2.=3:` | Replace lines 2–3 with payload. `2.=2:` replaces one line. Separators: `.=`, `..`, `-`, `…` |
+| DEL | `DEL 5` or `DEL 2.=4` | Delete a line or range. No payload. |
+| INS.PRE | `INS.PRE 3:` | Insert before line 3. |
+| INS.POST | `INS.POST 3:` | Insert after line 3. |
+| INS.HEAD | `INS.HEAD:` | Insert at top of file. |
+| INS.TAIL | `INS.TAIL:` | Insert at end of file. |
+| REM | `REM` | Delete the file. |
+| MV | `MV src/new_name.rs` | Rename the file. |
+
+### Block-aware operations
+
+For Rust, TypeScript/JavaScript/JSX, Python, Go, and Markdown, block
+ops target the syntactic block containing an anchor line:
+
+| Operation | Syntax | Description |
+|-----------|--------|-------------|
+| SWAP.BLK | `SWAP.BLK 5:` | Replace the block containing line 5. |
+| DEL.BLK | `DEL.BLK 5` | Delete the block containing line 5. |
+| INS.BLK.POST | `INS.BLK.POST 5:` | Insert after the block containing line 5. Degrades to `INS.POST` if tree-sitter can't resolve. |
+
+### Payload rules
+
+- Payload lines start with `+`.
+- Blank lines inside a payload count as part of the payload if they
+  appear after the first `+` line.
+- Raw lines (without `+`) are accepted as payload for paste
+  convenience, but `+` is canonical.
+- If a raw payload line accidentally includes a read-output line-number
+  prefix like `12:content`, mew strips it and adds a warning.
+
+### Staleness and recovery
+
+If the live file no longer matches the section hash:
+
+1. **Exact replay**: if the live file matches the snapshot, apply
+   directly.
+2. **3-way merge**: diff snapshot against live file, remap anchors,
+   replay edits.
+3. **Hash mismatch error**: if recovery fails, the patch is rejected and
+   no file is modified.
+
+Recovery only works for in-session drift (snapshots are in-memory). If
+mew is restarted or the file is edited externally, `read` the file again
+for a fresh hash.
+
+### Seen-line validation
+
+When `read` returns a sliced view (`offset`/`limit`), the snapshot
+records which lines were displayed. `edit_hashline` rejects anchors on
+lines that were not shown, preventing edits to content the model never
+saw.
+
+### Common errors
+
+| Error | Meaning |
+|-------|---------|
+| `hash mismatch for path: expected X, found Y` | File changed since `read`. `read` it again. |
+| `line N does not exist` | Anchor line is past end of file. |
+| `invalid range: N.M ends before it starts` | End line < start line. |
+| `block resolver unavailable` | `SWAP.BLK`/`DEL.BLK` couldn't resolve syntax block. |
+| `line N was not shown in the read that minted the tag` | Anchor outside the `offset`/`limit` window. |
