@@ -607,6 +607,26 @@ pub(super) fn draw_picker(
     let filter_para = Paragraph::new(Line::from(vec![prefix, filter_text]));
     f.render_widget(filter_para, filter_area);
 
+    // Show hint when filter is empty and a hint is set.
+    if picker.filter.is_empty() {
+        if let Some(ref hint) = picker.hint {
+            let hint_span = Span::styled(
+                format!("  {}", hint),
+                Style::default().fg(Color::DarkGray).bg(tokens.status_bg),
+            );
+            let hint_para = Paragraph::new(Line::from(vec![hint_span]));
+            let hint_area = Rect::new(
+                filter_area.x + 2 + picker.filter.len() as u16,
+                filter_area.y,
+                filter_area
+                    .width
+                    .saturating_sub(2 + picker.filter.len() as u16),
+                1,
+            );
+            f.render_widget(hint_para, hint_area);
+        }
+    }
+
     let cursor_x = filter_area.x + 2 + (picker.cursor.min(filter_area.width as usize - 2) as u16);
     f.set_cursor_position((cursor_x, filter_area.y));
 

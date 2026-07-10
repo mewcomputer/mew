@@ -164,6 +164,12 @@ pub struct CustomModel {
     /// True for OpenAI Codex models that require the Responses Lite transport.
     #[serde(default)]
     pub responses_lite: bool,
+    /// When true and the model already exists in the catalog, fields left
+    /// unset here keep the catalog's values (pricing, capability flags, …)
+    /// instead of resetting to defaults. When false (default), this entry
+    /// replaces the catalog entry wholesale.
+    #[serde(default)]
+    pub merge: bool,
 }
 
 /// A named thinking variant in config.toml.

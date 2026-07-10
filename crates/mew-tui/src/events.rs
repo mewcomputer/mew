@@ -997,6 +997,18 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             None
         }
         KeyCode::Right => {
+            // In the model picker, Right opens the thinking variant picker
+            // when the filter is empty and the selected model has variants.
+            if let Some(ref picker) = app.picker {
+                if picker.kind == "model" && picker.filter.is_empty() {
+                    if let Some(selected) = picker.selected_item() {
+                        if app.thinking_variants.contains_key(&selected.id) {
+                            app.open_thinking_variant_picker();
+                            return None;
+                        }
+                    }
+                }
+            }
             app.picker_cursor_right();
             None
         }

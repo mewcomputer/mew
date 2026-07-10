@@ -115,6 +115,55 @@ pub(crate) fn is_known_model(cfg: &Config, model_id: &str) -> bool {
     cfg.models.iter().any(|m| m.id == model_id)
 }
 
+/// Converts a `[[models]]` config entry into a catalog `Model`.
+///
+/// When `cm.merge` is set and `existing` (the catalog's current entry for
+/// this id, if any) is present, unset fields on `cm` fall back to the
+/// catalog's values instead of resetting to defaults — pricing and
+/// capability flags survive a config entry that only overrides, say,
+/// `context_window`. Without `merge`, the config entry replaces the catalog
+/// entry wholesale, as before.
+fn build_custom_model(
+    cm: &mew_config::CustomModel,
+    existing: Option<&mew_catalog::Model>,
+) -> mew_catalog::Model {
+    let thinking_variants: Vec<mew_catalog::ThinkingVariant> = cm
+        .thinking_variants
+        .iter()
+        .map(|v| mew_catalog::ThinkingVariant {
+            name: v.name.clone(),
+            params: v.params.clone(),
+        })
+        .collect();
+
+    let base = match (cm.merge, existing) {
+        (true, Some(existing)) => existing.clone(),
+        _ => mew_catalog::Model::default(),
+    };
+
+    mew_catalog::Model {
+        id: cm.id.clone(),
+        provider: cm.provider.clone(),
+        shape: if cm.shape.is_empty() {
+            base.shape
+        } else {
+            cm.shape.clone()
+        },
+        context_window: if cm.context_window != 0 {
+            cm.context_window
+        } else {
+            base.context_window
+        },
+        thinking_variants: if thinking_variants.is_empty() {
+            base.thinking_variants
+        } else {
+            thinking_variants
+        },
+        responses_lite: cm.responses_lite || base.responses_lite,
+        ..base
+    }
+}
+
 pub(crate) async fn load_catalog(cfg: &Config) -> Option<Catalog> {
     let mut cat = match mew_catalog::load().await {
         Ok(c) => c,
@@ -126,22 +175,7 @@ pub(crate) async fn load_catalog(cfg: &Config) -> Option<Catalog> {
     let custom: Vec<mew_catalog::Model> = cfg
         .models
         .iter()
-        .map(|cm| mew_catalog::Model {
-            id: cm.id.clone(),
-            provider: cm.provider.clone(),
-            shape: cm.shape.clone(),
-            context_window: cm.context_window,
-            thinking_variants: cm
-                .thinking_variants
-                .iter()
-                .map(|v| mew_catalog::ThinkingVariant {
-                    name: v.name.clone(),
-                    params: v.params.clone(),
-                })
-                .collect(),
-            responses_lite: cm.responses_lite,
-            ..Default::default()
-        })
+        .map(|cm| build_custom_model(cm, cat.models.get(&cm.id)))
         .collect();
     cat.merge_local(custom);
 
@@ -741,6 +775,104 @@ impl MainModelResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- build_custom_model ---
+
+    fn sample_catalog_model() -> mew_catalog::Model {
+        mew_catalog::Model {
+            id: "glm-5.3".into(),
+            provider: "z-ai".into(),
+            context_window: 128_000,
+            max_output: 8_000,
+            tool_call: true,
+            reasoning: true,
+            vision: true,
+            shape: "openai".into(),
+            pricing: mew_catalog::Pricing {
+                input: 1.0,
+                output: 2.0,
+                cache_read: 0.1,
+                cache_write: 0.2,
+                reasoning: 0.0,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn build_custom_model_replace_without_merge_flag_ignores_existing() {
+        let cm = mew_config::CustomModel {
+            id: "glm-5.3".into(),
+            provider: "z-ai".into(),
+            context_window: 64_000,
+            ..Default::default()
+        };
+        let existing = sample_catalog_model();
+        let built = build_custom_model(&cm, Some(&existing));
+
+        assert_eq!(built.context_window, 64_000);
+        // Fields not carried by CustomModel reset to defaults, losing catalog data.
+        assert_eq!(built.pricing.input, 0.0);
+        assert!(!built.tool_call);
+        assert!(!built.reasoning);
+    }
+
+    #[test]
+    fn build_custom_model_merge_keeps_unset_catalog_fields() {
+        let cm = mew_config::CustomModel {
+            id: "glm-5.3".into(),
+            provider: "z-ai".into(),
+            context_window: 64_000,
+            merge: true,
+            ..Default::default()
+        };
+        let existing = sample_catalog_model();
+        let built = build_custom_model(&cm, Some(&existing));
+
+        // Overridden field wins.
+        assert_eq!(built.context_window, 64_000);
+        // Unset fields fall back to the catalog entry.
+        assert_eq!(built.pricing.input, 1.0);
+        assert_eq!(built.pricing.output, 2.0);
+        assert!(built.tool_call);
+        assert!(built.reasoning);
+        assert!(built.vision);
+        assert_eq!(built.shape, "openai");
+    }
+
+    #[test]
+    fn build_custom_model_merge_overrides_shape_when_set() {
+        let cm = mew_config::CustomModel {
+            id: "glm-5.3".into(),
+            provider: "z-ai".into(),
+            shape: "anthropic".into(),
+            merge: true,
+            ..Default::default()
+        };
+        let existing = sample_catalog_model();
+        let built = build_custom_model(&cm, Some(&existing));
+
+        assert_eq!(built.shape, "anthropic");
+        // Everything else still falls back to the catalog entry.
+        assert_eq!(built.context_window, 128_000);
+        assert!(built.tool_call);
+    }
+
+    #[test]
+    fn build_custom_model_merge_with_no_existing_entry_behaves_like_default() {
+        let cm = mew_config::CustomModel {
+            id: "brand-new-model".into(),
+            provider: "z-ai".into(),
+            context_window: 32_000,
+            merge: true,
+            ..Default::default()
+        };
+        let built = build_custom_model(&cm, None);
+
+        assert_eq!(built.id, "brand-new-model");
+        assert_eq!(built.context_window, 32_000);
+        assert_eq!(built.pricing.input, 0.0);
+    }
 
     // --- split_provider_model ---
 

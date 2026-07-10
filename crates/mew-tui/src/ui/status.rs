@@ -102,6 +102,16 @@ fn build_pills(app: &App) -> Vec<Pill> {
         });
     }
 
+    // thinking variant — appended after the model pill with a separator.
+    // Uses a distinct amber color to differentiate from the model chip.
+    if let Some(ref variant) = app.active_thinking_variant {
+        pills.push(Pill {
+            text: variant.clone(),
+            fg: Color::Rgb(240, 200, 120),
+            bg: Color::Rgb(60, 45, 20),
+        });
+    }
+
     // persona — uses the persona's accent color (explicit or deterministic).
     if let Some(ref name) = app.active_persona {
         let accent = crate::theme::persona_accent(name, app.active_persona_color.as_deref());

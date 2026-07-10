@@ -326,6 +326,10 @@ async fn handle_switch_model<T: CommandTarget>(cx: &mut Ctx<'_, T>, spec: &str) 
         Ok(switched) => {
             cx.app.status.model = switched.model_id.clone();
             cx.app.status.provider = switched.provider_id.clone();
+            // Clear thinking variant display — the new model may not support
+            // the same variants. The agent's reasoning config is rebuilt on
+            // provider swap, so the TUI state should match.
+            cx.app.active_thinking_variant = None;
             // Update context window from catalog
             if let Some(c) = cx.cat {
                 cx.app.status.context_window = c.context_window(&switched.model_id) as u32;
@@ -399,8 +403,10 @@ async fn handle_set_thinking_variant<T: CommandTarget>(cx: &mut Ctx<'_, T>, vari
     match cx.target.set_thinking(variant).await {
         Ok(()) => {
             if variant.is_empty() || variant == "off" || variant == "none" {
+                cx.app.active_thinking_variant = None;
                 cx.app.set_alert("thinking disabled");
             } else {
+                cx.app.active_thinking_variant = Some(variant.to_string());
                 cx.app.set_alert(format!("thinking: {}", variant));
             }
         }
