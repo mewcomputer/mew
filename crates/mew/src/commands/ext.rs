@@ -185,27 +185,17 @@ pub fn install_extension(
     let extensions_dir = mew_config::config_dir().join("extensions");
     std::fs::create_dir_all(&extensions_dir)?;
 
-    let (name, temp_dir) =
-        if source.starts_with("http") || source.starts_with("git@") || source.ends_with(".git") {
-            // Git clone.
-            let tmp = tempfile::tempdir()?;
-            let status = std::process::Command::new("git")
-                .args([
-                    "clone",
-                    "--depth",
-                    "1",
-                    source,
-                    tmp.path().to_str().unwrap(),
-                ])
-                .status()
-                .context("git clone failed")?;
-            if !status.success() {
-                anyhow::bail!("git clone failed for {}", source);
-            }
-            let name = derive_name(tmp.path(), name_override)?;
-            (name, tmp)
+    let is_git =
+        source.starts_with("http") || source.starts_with("git@") || source.ends_with(".git");
+
+    // For --dry-run, derive the name without cloning (git) or reading (local).
+    if dry_run {
+        let name = if let Some(n) = name_override {
+            validate_extension_name(n)?;
+            n.to_string()
+        } else if is_git {
+            derive_repo_name_from_url(source)
         } else {
-            // Local path.
             let src = std::path::Path::new(source);
             if !src.is_dir() {
                 anyhow::bail!(
@@ -213,14 +203,9 @@ pub fn install_extension(
                     source
                 );
             }
-            let name = derive_name(src, name_override)?;
-            (name, tempfile::tempdir()?)
+            derive_name(src, name_override)?
         };
-
-    let dest = extensions_dir.join(&name);
-
-    // --dry-run: show what would happen, don't copy.
-    if dry_run {
+        let dest = extensions_dir.join(&name);
         let conflict = if dest.exists() {
             if force {
                 "would overwrite (--force)"
@@ -237,6 +222,39 @@ pub fn install_extension(
         println!("  status:  {}", conflict);
         return Ok(());
     }
+
+    let (name, temp_dir) = if is_git {
+        // Git clone.
+        let tmp = tempfile::tempdir()?;
+        let status = std::process::Command::new("git")
+            .args([
+                "clone",
+                "--depth",
+                "1",
+                source,
+                tmp.path().to_str().unwrap(),
+            ])
+            .status()
+            .context("git clone failed")?;
+        if !status.success() {
+            anyhow::bail!("git clone failed for {}", source);
+        }
+        let name = derive_name(tmp.path(), name_override)?;
+        (name, tmp)
+    } else {
+        // Local path.
+        let src = std::path::Path::new(source);
+        if !src.is_dir() {
+            anyhow::bail!(
+                "source path does not exist or is not a directory: {}",
+                source
+            );
+        }
+        let name = derive_name(src, name_override)?;
+        (name, tempfile::tempdir()?)
+    };
+
+    let dest = extensions_dir.join(&name);
 
     if dest.exists() {
         if force {
@@ -260,6 +278,15 @@ pub fn install_extension(
                 std::fs::remove_dir_all(&dest).ok();
                 anyhow::bail!("installed extension has invalid manifest: {}", e);
             }
+        } else {
+            // No manifest — the extension won't be discoverable by
+            // `mew ext list` or loaded by the broker. Warn but don't
+            // fail, since the user may be installing a bare plugin
+            // or scaffolding a new extension.
+            eprintln!(
+                "warning: no mew-ext.toml found in '{}' — this extension will not be discoverable by `mew ext list` or loaded by the broker",
+                name
+            );
         }
         Ok::<(), anyhow::Error>(())
     })() {
@@ -274,6 +301,14 @@ pub fn install_extension(
 
 /// `mew ext revoke <name>` — revoke an extension's attach token.
 pub fn revoke_extension(name: &str) -> anyhow::Result<()> {
+    // Check if a token exists first — revoke_token succeeds silently
+    // even if no token was ever minted, which is confusing.
+    if mew_ext_broker::show_token(name).is_err() {
+        anyhow::bail!(
+            "no token found for extension '{}'. Tokens are minted via `mew ext rotate-all`.",
+            name
+        );
+    }
     mew_ext_broker::revoke_token(name)?;
     let mut state = mew_config::load_state().unwrap_or_default();
     if !state.revoked_extensions.contains(&name.to_string()) {
@@ -305,13 +340,31 @@ pub fn rotate_all() -> anyhow::Result<()> {
 /// Prints the token to stdout (for piping). When stdout is a TTY, prints
 /// a warning to stderr first so the user knows the output is a secret.
 pub fn show_token(name: &str) -> anyhow::Result<()> {
-    let token = mew_ext_broker::show_token(name)?;
+    let token = mew_ext_broker::show_token(name).map_err(|_| {
+        anyhow::anyhow!(
+            "no token found for extension '{}'. Tokens are minted via `mew ext rotate-all`.",
+            name
+        )
+    })?;
     use std::io::IsTerminal;
     if std::io::stdout().is_terminal() {
         eprintln!("warning: printing attach token to stdout — pipe to a clipboard tool or redirect to a file if needed");
     }
     println!("{}", token);
     Ok(())
+}
+
+/// Derive the extension name from a git URL for dry-run (no clone needed).
+/// e.g. "https://github.com/user/my-ext.git" → "my-ext"
+fn derive_repo_name_from_url(url: &str) -> String {
+    // Strip trailing .git
+    let url = url.trim_end_matches(".git");
+    // Get the last path segment
+    let last = url.rsplit('/').next().unwrap_or(url);
+    // For git@host:user/repo format, last is already "repo"
+    // For SSH URLs with ":"
+    let last = last.rsplit(':').next().unwrap_or(last);
+    last.to_string()
 }
 
 /// Derive the extension name from a directory path.

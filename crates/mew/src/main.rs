@@ -190,7 +190,18 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
 
     // Heal persisted state if it references providers/models that no longer
     // exist in the active config. Interactive prompt; non-TTY exits 2.
-    startup_state_health_check(&cfg, &state)?;
+    // Skip for subcommands that don't need a provider — state corruption
+    // shouldn't block `mew ext list`, `mew auth status`, `mew config show`, etc.
+    let needs_provider = matches!(
+        cli.command,
+        Some(Commands::Run { .. })
+            | Some(Commands::Chat { .. })
+            | Some(Commands::Daemon { .. })
+            | None
+    );
+    if needs_provider {
+        startup_state_health_check(&cfg, &state)?;
+    }
 
     match cli.command {
         Some(Commands::Run {

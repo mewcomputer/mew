@@ -342,8 +342,19 @@ async fn handle_switch_model<T: CommandTarget>(cx: &mut Ctx<'_, T>, spec: &str) 
                 .push_synthetic_message(format!("switched to {}", switched.display));
         }
         Err(Unsupported(reason)) => {
+            // Include available model IDs in the error so the user knows
+            // what they can switch to.
+            let available: Vec<&str> = cx.app.models.iter().map(|(id, _)| id.as_str()).collect();
+            let hint = if available.is_empty() {
+                "no models available — check your config and provider credentials".to_string()
+            } else {
+                format!(
+                    "available models: {}. Use /model (no arg) to open the picker",
+                    available.join(", ")
+                )
+            };
             cx.app
-                .push_synthetic_message(format!("failed to switch model: {}", reason));
+                .push_synthetic_message(format!("failed to switch model: {} — {hint}", reason));
         }
     }
 }

@@ -41,6 +41,7 @@ pages.
 - [Skills](https://mew.computer/docs/skills/) — Skill authoring, frontmatter, templating, when to use a skill vs context file.
 - [Subagents](https://mew.computer/docs/subagents/) — Subagent definitions, async vs blocking, nesting.
 - [Plugins](https://mew.computer/docs/plugins/) — Plugin authoring, JSON-RPC protocol, host functions.
+- [Extensions](https://mew.computer/docs/extensions/) — Install, manage, sandbox, consent, and attach tokens for extension packages.
 - [MCP Servers](https://mew.computer/docs/mcp-servers/) — MCP server configuration, common servers, troubleshooting.
 - [Web UI](https://mew.computer/docs/web-ui/) — Web UI features, connection lifecycle, reconnection.
 
@@ -50,5 +51,6 @@ pages.
 - [Adding a Provider](https://mew.computer/docs/dev-providers/) — Implementing the Provider trait, adapter shapes.
 - [Adding a Tool](https://mew.computer/docs/dev-tools/) — Tool trait, sensitivity, registration.
 - [Daemon Protocol](https://mew.computer/docs/dev-protocol/) — Wire message types, JSON codec.
+- [Extension System Internals](https://mew.computer/docs/dev-extensions/) — Broker, capability model, sandbox, consent, tokens.
 - [Testing](https://mew.computer/docs/dev-testing/) — Test conventions, CI gate.
 - [Web UI Development](https://mew.computer/docs/dev-web/) — Frontend stack, build, e2e.

@@ -100,6 +100,9 @@ impl<'a> CommandTarget for LocalTarget<'a> {
             }
             Err(e) => {
                 tracing::warn!("failed to switch model: {}", e);
+                // The Unsupported type takes &'static str, so we can't
+                // include dynamic model names. The dispatch handler
+                // appends available models to the error message.
                 Err(Unsupported("failed to build provider for model"))
             }
         }

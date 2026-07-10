@@ -2,7 +2,7 @@
 
 Context: the extension system should clear two bars. Depth: someone can build a zedra-compatible remote host (fs, terminals, git, agent sessions served over iroh/QUIC to mobile clients) as a mew extension, without patching mew. Ergonomics: writing an everyday extension feels like pi (typed SDK, one file, hot reload) or Claude Code (drop a hook command or markdown skill in a directory). References: zedra PROTOCOL_SPECS.md, pi.dev/docs/latest/extensions.
 
-Status: planned, not started. Revised 2026-07-08 after adversarial review (capability scoping, permission routing, event backpressure, threat model, phase ordering).
+Status: Phase 1 + Phase 2 shipped. Phase 3 (SDK + dev loop) not started. Revised 2026-07-10 after Phase 2 completion.
 
 Decisions already made:
 - Runtime model is subprocess + official SDKs. Language-agnostic JSON-RPC processes, DX comes from SDK packages, not from embedding a JS runtime.
@@ -174,6 +174,33 @@ export default function (mew: MewExtension) {
 5. **Later, unscheduled.** Wasm component transport (the plain-data/no-callback hygiene from phase 1 is the enabler; WIT bindings get written then, not now), Python SDK, registry.
 
 Each phase lands independently; bare plugins keep working until the phase-4 deprecation warnings, removal in a future major.
+
+### Phase 1+2 completion summary (2026-07-10)
+
+**Phase 1 (shipped):** Broker + protocol surface. `mew-ext-broker` crate with `ExtensionBroker` (Dispatcher impl), `PluginSlot` restart-capable transport, `CapabilitySet` (~17 variants + risk tiers), `ConsentState` with two-phase consent + delta detection, `Principal` model, gate audit logging, collision-rejecting registration, event queue scaffolding. `mew-protocol` extended with extension handshake (`ExtensionHello`/`ExtensionReady`), hook delivery frames, and UUID `request_id` migration. Legacy plugins bridge through the broker.
+
+**Phase 2 (shipped):** Manifest + CLI + consent + sandbox + tokens.
+- `mew-ext.toml` manifest parser + validator (path traversal prevention)
+- `discover_extensions` + `discover_extensions_from_dirs` (testable)
+- `mew ext install` (git clone + local path, `--name`, `--force`, `--dry-run`)
+- `mew ext list/enable/disable/remove/doctor` (doctor shows sandbox status)
+- macOS Seatbelt sandbox via `sandbox-exec` (default-deny, `file-read-data`/`file-write-data` for pipe I/O, `escape_path` prevents profile injection, ARG_MAX guard)
+- Consent resolver with two-phase prompting (batch non-sensitive, individual sensitive), persisted to `consent.json`, clamped via `intersect`, stale sentinel detection
+- `[provides]` paths feed existing loaders (skills, personas, subagents)
+- Attach token management (`mew ext token/revoke/rotate-all`): keyring + file fallback (0600), `constant_time_eq`, `rotate_all_tokens` partial-failure-safe
+- `revoked_extensions` field on `State`
+- Slash command aliases (`/models`, `/session`, `/permission`)
+- CLI UX: auth selector TTY guard, `mew ext token` secret warning, `install` cleanup-on-failure, no-manifest warning, state.toml corruption doesn't block non-provider subcommands
+
+**Deferred from Phase 2:**
+- Daemon socket-attach path (requires daemon to own a broker — separate plan)
+- `ExtensionHello` token field (not needed until socket-attach ships)
+- Linux Landlock + seccomp sandbox
+- Windows sandbox
+
+**Phase 3 (not started):** TS SDK + dev loop + in-repo examples.
+**Phase 4 (not started):** Hardening + deprecation pass.
+**Phase 5 (unscheduled):** Wasm transport, Python SDK, registry.
 
 ## Phase 1 workstream breakdown
 

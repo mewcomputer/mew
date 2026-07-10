@@ -2302,6 +2302,10 @@ impl App {
                 description: "switch model (e.g. /model deepseek-v4-flash)".into(),
             },
             SlashCommand {
+                name: "/models".into(),
+                description: "alias for /model".into(),
+            },
+            SlashCommand {
                 name: "/thinking".into(),
                 description: "set thinking variant (e.g. /thinking high)".into(),
             },
@@ -2382,7 +2386,7 @@ impl App {
             "/todo" => SlashResult::Todo,
             "/cost" => SlashResult::Message(self.build_cost_report()),
             "/help" => SlashResult::OpenHelp,
-            "/model" => {
+            "/model" | "/models" => {
                 if let Some(id) = arg {
                     SlashResult::SwitchModel(id.to_string())
                 } else {
@@ -2420,7 +2424,7 @@ impl App {
                     SlashResult::OpenPersonaPicker
                 }
             }
-            "/permissions" => {
+            "/permissions" | "/permission" => {
                 // `/permissions`        → open the picker
                 // `/permissions standard|permissive|auto|auto_plus|dangerous` → switch directly
                 if let Some(arg) = arg {
@@ -2435,7 +2439,7 @@ impl App {
                     SlashResult::PermissionModeMenu
                 }
             }
-            "/sessions" => SlashResult::OpenSessionPickerFromDisk,
+            "/sessions" | "/session" => SlashResult::OpenSessionPickerFromDisk,
             "/autotitle" | "/autosummary" => {
                 SlashResult::Message("this command is only available in daemon mode".into())
             }

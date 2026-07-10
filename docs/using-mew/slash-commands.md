@@ -13,7 +13,7 @@ Type any of these in the input box (they autocomplete as you type).
 | `/compact` | Force context compaction on the next turn |
 | `/rewind <n>` | Rewind to keep only the first N messages |
 | `/rewind` | List recent messages with indices |
-| `/sessions` | List previous sessions (up to 20) |
+| `/sessions` | List previous sessions (up to 20) (`/session` also works) |
 | `/resume <id>` | Resume a previous session by ID |
 
 See [Sessions](/docs/getting-started/sessions/) for details on persistence, resume, and rewind.
@@ -23,7 +23,7 @@ See [Sessions](/docs/getting-started/sessions/) for details on persistence, resu
 | Command | Description |
 |---------|-------------|
 | `/model <name>` | Switch to a different model |
-| `/model` | Open the model picker |
+| `/model` | Open the model picker (`/models` also works) |
 | `/thinking <variant>` | Set thinking variant (`high`, `max`, `thinking`, `off`) |
 | `/thinking` | Show usage help |
 
@@ -39,7 +39,7 @@ See [Sessions](/docs/getting-started/sessions/) for details on persistence, resu
 
 | Command | Description |
 |---------|-------------|
-| `/permissions` | Open the permission mode picker |
+| `/permissions` | Open the permission mode picker (`/permission` also works) |
 | `/permissions <mode>` | Switch directly: `standard`, `permissive`, `auto`, `auto_plus`, `dangerous` |
 
 See [Permissions](/docs/using-mew/permissions/) for mode details, rules, and sandboxing.
