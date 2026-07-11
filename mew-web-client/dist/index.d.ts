@@ -34,11 +34,11 @@ export type ClientMessage = {
     type: "cancel";
 } | {
     type: "permission_response";
-    request_id: number;
+    request_id: string;
     decision: PermissionDecision;
 } | {
     type: "ask_user_response";
-    request_id: number;
+    request_id: string;
     answers: string[];
 } | {
     type: "slash_command";
@@ -49,6 +49,11 @@ export type ClientMessage = {
     type: "switch_model";
     provider: string;
     model: string;
+} | {
+    type: "list_personas";
+} | {
+    type: "switch_persona";
+    name: string;
 } | {
     type: "set_thinking_variant";
     variant: string;
@@ -256,6 +261,17 @@ export interface ModelInfo {
     /** Maximum context window in tokens, if known from the catalog. */
     context_window?: number;
 }
+/** Info about an available persona, returned by `list_personas`. */
+export interface PersonaInfo {
+    /** Persona name (unique identifier). */
+    name: string;
+    /** Human-readable description. */
+    description: string;
+    /** Optional color token for UI display. */
+    color?: string;
+    /** Whether this persona is currently active. */
+    active: boolean;
+}
 /** A named thinking/reasoning variant (e.g. "high", "max", "thinking"). */
 export interface ThinkingVariantInfo {
     name: string;
@@ -405,16 +421,16 @@ export type ServerMessage = {
     message: string;
 } | {
     type: "permission_request";
-    request_id: number;
+    request_id: string;
     tool_name: string;
     input: Record<string, unknown>;
 } | {
     type: "workspace_permission_request";
-    request_id: number;
+    request_id: string;
     path: string;
 } | {
     type: "ask_user_request";
-    request_id: number;
+    request_id: string;
     call_id: string;
     questions: Question[];
 } | {
@@ -435,7 +451,7 @@ export type ServerMessage = {
     outcome: SubagentOutcome;
 } | {
     type: "subagent_permission_request";
-    request_id: number;
+    request_id: string;
     parent_call_id: string;
     tool_name: string;
     input: Record<string, unknown>;
@@ -455,7 +471,7 @@ export type ServerMessage = {
     text: string;
 } | {
     type: "request_resolved";
-    request_id: number;
+    request_id: string;
 } | {
     type: "session_cleared";
 } | {
@@ -471,6 +487,12 @@ export type ServerMessage = {
     type: "model_switched";
     provider: string;
     model: string;
+} | {
+    type: "persona_list";
+    personas: PersonaInfo[];
+} | {
+    type: "persona_switched";
+    name: string;
 } | {
     type: "thinking_variant_changed";
     variant?: string;
@@ -604,16 +626,16 @@ export interface MewClientEvents {
         chunk: string;
     }) => void;
     "permission-request": (data: {
-        request_id: number;
+        request_id: string;
         tool_name: string;
         input: Record<string, unknown>;
     }, respond: (decision: PermissionDecision) => void) => void;
     "workspace-permission-request": (data: {
-        request_id: number;
+        request_id: string;
         path: string;
     }, respond: (decision: PermissionDecision) => void) => void;
     "ask-user-request": (data: {
-        request_id: number;
+        request_id: string;
         call_id: string;
         questions: Question[];
     }) => void;
@@ -648,7 +670,7 @@ export interface MewClientEvents {
         text: string;
     }) => void;
     "request-resolved": (data: {
-        request_id: number;
+        request_id: string;
     }) => void;
     "session-cleared": () => void;
     "session-list": (data: {
@@ -663,6 +685,12 @@ export interface MewClientEvents {
     "model-switched": (data: {
         provider: string;
         model: string;
+    }) => void;
+    "persona-list": (data: {
+        personas: PersonaInfo[];
+    }) => void;
+    "persona-switched": (data: {
+        name: string;
     }) => void;
     "thinking-variant-changed": (data: {
         variant: string | null;
@@ -798,10 +826,10 @@ export declare class MewClient {
      */
     slashCommand(command: string): Promise<string | null>;
     /** Respond to a `permission_request`. The callback in `on("permission-request", ...)` calls this. */
-    respondToPermission(request_id: number, decision: PermissionDecision): void;
+    respondToPermission(request_id: string, decision: PermissionDecision): void;
     /** Respond to an `ask_user_request`. The UI calls this after the user
      *  submits answers to the questions. */
-    respondToAskUser(request_id: number, answers: string[]): void;
+    respondToAskUser(request_id: string, answers: string[]): void;
     /** Attach to an existing session (active or idle). If the session is idle,
      *  the daemon loads its persisted history from disk and sends a
      *  `session-history` event. Resolves with the session id. */
@@ -824,6 +852,13 @@ export declare class MewClient {
         provider: string;
         model: string;
     }>;
+    /** List available personas for the active session. Resolves when the
+     *  daemon replies with `persona-list`. */
+    listPersonas(): Promise<PersonaInfo[]>;
+    /** Switch the active session to a different persona. Fire-and-forget:
+     *  the store is updated when the daemon confirms via `persona-switched`
+     *  (handled by the bridge), so the caller doesn't need to await. */
+    switchPersona(name: string): void;
     /** Set or clear the thinking/reasoning variant. Pass empty string or
      *  "none" to disable. Resolves when the daemon confirms via
      *  `thinking-variant-changed`. Returns the resolved variant name, or

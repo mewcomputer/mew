@@ -4,7 +4,7 @@ import { useSessionStore } from "../stores/session";
 export function PermissionToast({
   onResolve,
 }: {
-  onResolve: (requestId: number, decision: "allow_once" | "allow_session" | "deny") => void;
+  onResolve: (requestId: string, decision: "allow_once" | "allow_session" | "deny") => void;
 }) {
   const pending = useSessionStore((s) => s.pendingPermissions);
 

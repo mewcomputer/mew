@@ -31,6 +31,7 @@ export function useMewConnection() {
         reconnectAttemptRef.current = 0;
         setConnected(true);
         client.listModels();
+        client.listPersonas();
         // Best-effort daemon version fetch. The ping/pong wire types are
         // defined in the client; the daemon replies with `pong { version }`
         // once it implements the handler. Until then this is a no-op that

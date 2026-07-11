@@ -42,7 +42,7 @@ function SessionRouteComponent() {
   };
 
   const handlePermission = (
-    requestId: number,
+    requestId: string,
     decision: "allow_once" | "allow_session" | "deny",
   ) => {
     const respond = permissionResponders.get(requestId);

@@ -51,6 +51,8 @@ export type ClientMessage =
   | { type: "slash_command"; command: string }
   | { type: "list_models" }
   | { type: "switch_model"; provider: string; model: string }
+  | { type: "list_personas" }
+  | { type: "switch_persona"; name: string }
   | { type: "set_thinking_variant"; variant: string }
   | { type: "set_permission_mode"; mode: string }
   | { type: "yield_control" }
@@ -212,6 +214,18 @@ export interface ModelInfo {
   thinking_variants?: ThinkingVariantInfo[];
   /** Maximum context window in tokens, if known from the catalog. */
   context_window?: number;
+}
+
+/** Info about an available persona, returned by `list_personas`. */
+export interface PersonaInfo {
+  /** Persona name (unique identifier). */
+  name: string;
+  /** Human-readable description. */
+  description: string;
+  /** Optional color token for UI display. */
+  color?: string;
+  /** Whether this persona is currently active. */
+  active: boolean;
 }
 
 /** A named thinking/reasoning variant (e.g. "high", "max", "thinking"). */
@@ -404,6 +418,8 @@ export type ServerMessage =
   | { type: "session_history"; messages: Message[] }
   | { type: "model_list"; models: ModelInfo[] }
   | { type: "model_switched"; provider: string; model: string }
+  | { type: "persona_list"; personas: PersonaInfo[] }
+  | { type: "persona_switched"; name: string }
   | { type: "thinking_variant_changed"; variant?: string }
   | { type: "permission_mode_changed"; mode: string }
   | { type: "client_attached"; client_id: number; client_kind: string }
@@ -561,6 +577,8 @@ export interface MewClientEvents {
   "session-history": (data: { messages: Message[] }) => void;
   "model-list": (data: { models: ModelInfo[] }) => void;
   "model-switched": (data: { provider: string; model: string }) => void;
+  "persona-list": (data: { personas: PersonaInfo[] }) => void;
+  "persona-switched": (data: { name: string }) => void;
   "thinking-variant-changed": (data: { variant: string | null }) => void;
   "permission-mode-changed": (data: { mode: string }) => void;
   "client-attached": (data: { client_id: number; client_kind: string }) => void;
@@ -845,6 +863,26 @@ export class MewClient {
     });
   }
 
+  /** List available personas for the active session. Resolves when the
+   *  daemon replies with `persona-list`. */
+  listPersonas(): Promise<PersonaInfo[]> {
+    return new Promise<PersonaInfo[]>((resolve) => {
+      const onList = (data: { personas: PersonaInfo[] }) => {
+        this.off("persona-list", onList);
+        resolve(data.personas);
+      };
+      this.on("persona-list", onList);
+      this.send({ type: "list_personas" });
+    });
+  }
+
+  /** Switch the active session to a different persona. Fire-and-forget:
+   *  the store is updated when the daemon confirms via `persona-switched`
+   *  (handled by the bridge), so the caller doesn't need to await. */
+  switchPersona(name: string): void {
+    this.send({ type: "switch_persona", name });
+  }
+
   /** Set or clear the thinking/reasoning variant. Pass empty string or
    *  "none" to disable. Resolves when the daemon confirms via
    *  `thinking-variant-changed`. Returns the resolved variant name, or
@@ -1117,6 +1155,12 @@ export class MewClient {
           provider: msg.provider,
           model: msg.model,
         });
+        break;
+      case "persona_list":
+        this.emit("persona-list", { personas: msg.personas });
+        break;
+      case "persona_switched":
+        this.emit("persona-switched", { name: msg.name });
         break;
       case "thinking_variant_changed":
         this.emit("thinking-variant-changed", {

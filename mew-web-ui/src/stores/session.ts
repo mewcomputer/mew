@@ -19,6 +19,7 @@ import type {
   SessionUsageWire,
   AlertKind,
   ProjectInfo,
+  PersonaInfo,
 } from "@mew/web-client";
 
 // ---------------------------------------------------------------------------
@@ -105,7 +106,7 @@ function wirePartToMessagePart(part: Part): MessagePart | null {
 }
 
 export interface PendingPermission {
-  requestId: number;
+  requestId: string;
   toolName: string;
   input: Record<string, unknown>;
 }
@@ -121,7 +122,7 @@ export interface SubagentInfo {
 }
 
 export interface PendingAskUser {
-  requestId: number;
+  requestId: string;
   callId: string;
   questions: Question[];
 }
@@ -178,6 +179,7 @@ interface SessionState {
 
   // Persona
   currentPersona: string | null;
+  availablePersonas: PersonaInfo[];
 
   // Permission mode
   permissionMode: string;
@@ -248,7 +250,7 @@ interface SessionState {
   onToolProgress: (callId: string, chunk: string) => void;
   onPartUpdated: (partId: string, part: Part) => void;
   onPermissionRequest: (req: PendingPermission) => void;
-  resolvePermission: (requestId: number) => void;
+  resolvePermission: (requestId: string) => void;
   onError: (message: string) => void;
   onSlashResult: (text: string) => void;
 
@@ -256,6 +258,8 @@ interface SessionState {
   setCurrentModel: (provider: string, model: string) => void;
   setCurrentThinkingVariant: (variant: string | null) => void;
   setCurrentPersona: (name: string | null) => void;
+  selectPersona: (name: string) => void;
+  setAvailablePersonas: (personas: PersonaInfo[]) => void;
   setPermissionMode: (mode: string) => void;
   onClientAttached: (clientId: number, clientKind: string) => void;
   onClientDetached: (clientId: number) => void;
@@ -294,8 +298,8 @@ interface SessionState {
   onSubagentEnd: (data: { parent_call_id: string; child_session_id: string; outcome: SubagentOutcome }) => void;
 
   // Ask-user actions
-  onAskUserRequest: (data: { request_id: number; call_id: string; questions: Question[] }) => void;
-  resolveAskUser: (requestId: number) => void;
+  onAskUserRequest: (data: { request_id: string; call_id: string; questions: Question[] }) => void;
+  resolveAskUser: (requestId: string) => void;
 
   // Todo actions
   onTodosUpdated: (todos: WireTodo[]) => void;
@@ -335,6 +339,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   currentProvider: null,
   currentThinkingVariant: null,
   currentPersona: null,
+  availablePersonas: [],
   permissionMode: "standard",
   attachedClients: [],
   yieldedByClient: null,
@@ -707,6 +712,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ currentThinkingVariant: variant }),
 
   setCurrentPersona: (name) => set({ currentPersona: name }),
+  selectPersona: (name) => {
+    const target = name === "default" ? null : name;
+    set({ currentPersona: target });
+    if (target) {
+      getClient()?.switchPersona(target);
+    }
+  },
+  setAvailablePersonas: (personas) => set({ availablePersonas: personas }),
 
   setPermissionMode: (mode) => set({ permissionMode: mode }),
 
@@ -1135,6 +1148,12 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("persona-switch-requested", (data) =>
     store.getState().setCurrentPersona(data.name),
   );
+  client.on("persona-list", (data) =>
+    store.getState().setAvailablePersonas(data.personas),
+  );
+  client.on("persona-switched", (data) =>
+    store.getState().setCurrentPersona(data.name),
+  );
   client.on("session-title-changed", (data) =>
     store.getState().onSessionTitleChanged(data.session_id, data.title),
   );
@@ -1262,9 +1281,9 @@ function showNotification(
 
 /** Side-channel map: request_id → respond callback. The UI reads from this
  * when the user clicks Allow/Deny. */
-export const permissionResponders = new Map<number, (decision: PermissionDecision) => void>();
+export const permissionResponders = new Map<string, (decision: PermissionDecision) => void>();
 
 /** Side-channel map: request_id → respond callback for AskUserRequest.
  * The new protocol sends responses via a separate AskUserResponse message,
  * so the UI calls client.respondToAskUser(request_id, answers) directly. */
-export const askUserResponders = new Map<number, (answers: string[]) => void>();
+export const askUserResponders = new Map<string, (answers: string[]) => void>();

@@ -3,6 +3,8 @@ import {
   useRef,
   useState,
   useImperativeHandle,
+  type ClipboardEvent,
+  type DragEvent,
   type KeyboardEvent,
 } from "react";
 import { Square, Paperclip, X, CornerDownLeft } from "lucide-react";
@@ -11,11 +13,10 @@ import { useSessionStore } from "../stores/session";
 import { useSidebar } from "@/components/ui/sidebar";
 import { ModelPill } from "./model-pill";
 import { PersonaPill } from "./persona-pill";
-
-const PERSONA_OPTIONS = ["default", "code-reviewer", "explainer"];
+import type { Attachment } from "@mew/web-client";
 
 interface InputAreaProps {
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments?: Attachment[]) => void;
   onSlash?: (command: string) => void;
   onCancel: () => void;
   connected: boolean;
@@ -31,6 +32,10 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { command: "/compact", description: "Compact message history" },
   { command: "/help", description: "Show available commands" },
 ];
+
+/** Max file size for data-URL attachments (10 MB). Larger files would
+ *  produce very large WebSocket frames that may exceed daemon limits. */
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
 /** Minimal Claude Code-style composer: a single rounded bar with attach,
  *  textarea, and send/stop. Slash commands and @ personas still surface as
@@ -50,16 +55,21 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
     useImperativeHandle(ref, () => textareaRef.current!, []);
 
     const hasStreaming = useSessionStore((s) => s.streamingPartId !== null);
-    const setPersona = useSessionStore((s) => s.setCurrentPersona);
+    const selectPersona = useSessionStore((s) => s.selectPersona);
+    const availablePersonas = useSessionStore((s) => s.availablePersonas);
     const promptHistory = useSessionStore((s) => s.promptHistory);
     const pushPromptHistory = useSessionStore((s) => s.pushPromptHistory);
+    const [isSending, setIsSending] = useState(false);
+    const [isDragging, setIsDragging] = useState(false);
+    const [attachmentError, setAttachmentError] = useState<string | null>(null);
 
     const filteredSlash = SLASH_COMMANDS.filter(
       (c) =>
         text === "/" || c.command.toLowerCase().startsWith(text.toLowerCase()),
     );
 
-    const filteredPersonas = PERSONA_OPTIONS.filter(
+    const personaNames = ["default", ...availablePersonas.map((p) => p.name)];
+    const filteredPersonas = personaNames.filter(
       (p) =>
         text === "@" || p.toLowerCase().startsWith(text.slice(1).toLowerCase()),
     );
@@ -81,7 +91,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
         if (e.key === "Enter") {
           e.preventDefault();
           if (menuOpen === "slash") selectSlash(filteredSlash[menuIndex]!);
-          else selectPersona(filteredPersonas[menuIndex] ?? "default");
+          else selectPersonaAction(filteredPersonas[menuIndex] ?? "default");
           return;
         }
         if (e.key === "Escape") {
@@ -169,7 +179,9 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
       setMenuIndex(0);
     };
 
-    const handleSubmit = () => {
+    const handleSubmit = async () => {
+      // Guard against double-submit while async file conversion is in flight.
+      if (isSending) return;
       const trimmed = text.trim();
       if (!trimmed || !connected) return;
       if (menuOpen === "slash" && filteredSlash.length > 0) {
@@ -177,16 +189,33 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
         return;
       }
       if (menuOpen === "persona" && filteredPersonas.length > 0) {
-        selectPersona(filteredPersonas[0]!);
+        selectPersonaAction(filteredPersonas[0]!);
         return;
       }
-      onSend(trimmed);
-      pushPromptHistory(trimmed);
-      setText("");
-      setHistoryIndex(null);
-      setFiles([]);
-      closeMenu();
-      if (textareaRef.current) textareaRef.current.style.height = "auto";
+
+      setIsSending(true);
+      try {
+        // Convert File objects to Attachment[] (data URLs for wire protocol).
+        let attachments: Attachment[] | undefined;
+        if (files.length > 0) {
+          attachments = await Promise.all(
+            files.map((f) => fileToAttachment(f)),
+          );
+        }
+
+        onSend(trimmed, attachments);
+        pushPromptHistory(trimmed);
+        setText("");
+        setHistoryIndex(null);
+        setFiles([]);
+        closeMenu();
+        if (textareaRef.current) textareaRef.current.style.height = "auto";
+      } catch (e) {
+        // FileReader error — log and reset, don't crash.
+        console.error("[mew] attachment conversion failed:", e);
+      } finally {
+        setIsSending(false);
+      }
     };
 
     const selectSlash = (cmd: SlashCommand) => {
@@ -198,8 +227,8 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
       if (textareaRef.current) textareaRef.current.style.height = "auto";
     };
 
-    const selectPersona = (name: string) => {
-      setPersona(name === "default" ? null : name);
+    const selectPersonaAction = (name: string) => {
+      selectPersona(name);
       setText("");
       closeMenu();
       if (textareaRef.current) textareaRef.current.style.height = "auto";
@@ -214,13 +243,74 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
       }
     };
 
-    const handleAttach = (next: FileList | null) => {
-      if (!next) return;
-      setFiles((prev) => [...prev, ...Array.from(next)]);
+    const addFiles = (incoming: File[]) => {
+      const oversized = incoming.filter((f) => f.size > MAX_FILE_SIZE);
+      const valid = incoming.filter((f) => f.size <= MAX_FILE_SIZE);
+      if (oversized.length > 0) {
+        const names = oversized.map((f) => f.name).join(", ");
+        setAttachmentError(`File too large (max 10 MB): ${names}`);
+        // Auto-clear error after 4 seconds
+        setTimeout(() => setAttachmentError(null), 4000);
+      }
+      if (valid.length > 0) {
+        setFiles((prev) => [...prev, ...valid]);
+      }
     };
 
-    const removeFile = (name: string) => {
-      setFiles((prev) => prev.filter((f) => f.name !== name));
+    const handleAttach = (next: FileList | null) => {
+      if (!next) return;
+      addFiles(Array.from(next));
+    };
+
+    const removeFile = (file: File) => {
+      setFiles((prev) => prev.filter((f) => f !== file));
+    };
+
+    const handlePaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const pastedFiles: File[] = [];
+      let hasText = false;
+      for (const item of items) {
+        if (item.kind === "file") {
+          const file = item.getAsFile();
+          if (file) pastedFiles.push(file);
+        } else if (item.kind === "string") {
+          hasText = true;
+        }
+      }
+      if (pastedFiles.length > 0 && !hasText) {
+        // Only intercept paste when there are files and no text —
+        // if both are present, let the browser handle text normally
+        // and just add the files.
+        e.preventDefault();
+      }
+      if (pastedFiles.length > 0) {
+        addFiles(pastedFiles);
+      }
+    };
+
+    const handleDrop = (e: DragEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      setIsDragging(false);
+      const dropped = e.dataTransfer?.files;
+      if (dropped && dropped.length > 0) {
+        addFiles(Array.from(dropped));
+      }
+    };
+
+    const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      setIsDragging(true);
+    };
+
+    const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      // Only clear drag state when leaving the container entirely,
+      // not when moving between child elements.
+      const related = e.relatedTarget as Node | null;
+      if (related && e.currentTarget.contains(related)) return;
+      setIsDragging(false);
     };
 
     return (
@@ -232,9 +322,13 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
         <div className="mx-auto max-w-3xl space-y-1">
           <div className="relative">
             <div
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
               className={cn(
                 "flex items-end gap-2 rounded-xl border bg-muted/40 px-3 py-2 transition-colors",
                 focused ? "border-ring bg-muted" : "border-border",
+                isDragging && "border-primary border-2",
               )}
             >
               <button
@@ -251,6 +345,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                 value={text}
                 onChange={(e) => handleChange(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 onFocus={() => setFocused(true)}
                 onBlur={() => setFocused(false)}
                 placeholder={connected ? "Ask mew anything…" : "Connecting…"}
@@ -278,7 +373,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
               ) : (
                 <button
                   onClick={handleSubmit}
-                  disabled={!text.trim() || !connected}
+                  disabled={!text.trim() || !connected || isSending}
                   className={cn(
                     "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50",
                   )}
@@ -309,7 +404,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                   <MenuRow
                     key={p}
                     active={i === menuIndex}
-                    onClick={() => selectPersona(p)}
+                    onClick={() => selectPersonaAction(p)}
                     primary={p}
                   />
                 ))}
@@ -318,27 +413,32 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
           </div>
 
           <div className="flex items-start justify-between gap-3">
-            {files.length > 0 ? (
-              <div className="flex flex-wrap gap-1.5">
-                {files.map((f) => (
-                  <span
-                    key={f.name}
-                    className="flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
-                  >
-                    {f.name}
-                    <button
-                      onClick={() => removeFile(f.name)}
-                      className="rounded-full hover:text-foreground"
-                      title="Remove"
+            <div className="flex flex-col gap-1">
+              {attachmentError && (
+                <span className="text-[10px] text-destructive">
+                  {attachmentError}
+                </span>
+              )}
+              {files.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {files.map((f, i) => (
+                    <span
+                      key={`${f.name}-${i}`}
+                      className="flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
                     >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <div />
-            )}
+                      {f.name}
+                      <button
+                        onClick={() => removeFile(f)}
+                        className="rounded-full hover:text-foreground"
+                        title="Remove"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
           </div>
           <div className="flex gap-2">
             <PersonaPill />
@@ -395,4 +495,20 @@ function MenuRow({
       )}
     </button>
   );
+}
+
+/** Convert a browser File to a wire Attachment using a data URL. */
+function fileToAttachment(file: File): Promise<Attachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      resolve({
+        path: dataUrl,
+        mime: file.type || undefined,
+      });
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }

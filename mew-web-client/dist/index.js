@@ -229,6 +229,24 @@ export class MewClient {
             this.send({ type: "switch_model", provider, model });
         });
     }
+    /** List available personas for the active session. Resolves when the
+     *  daemon replies with `persona-list`. */
+    listPersonas() {
+        return new Promise((resolve) => {
+            const onList = (data) => {
+                this.off("persona-list", onList);
+                resolve(data.personas);
+            };
+            this.on("persona-list", onList);
+            this.send({ type: "list_personas" });
+        });
+    }
+    /** Switch the active session to a different persona. Fire-and-forget:
+     *  the store is updated when the daemon confirms via `persona-switched`
+     *  (handled by the bridge), so the caller doesn't need to await. */
+    switchPersona(name) {
+        this.send({ type: "switch_persona", name });
+    }
     /** Set or clear the thinking/reasoning variant. Pass empty string or
      *  "none" to disable. Resolves when the daemon confirms via
      *  `thinking-variant-changed`. Returns the resolved variant name, or
@@ -402,6 +420,13 @@ export class MewClient {
                     questions: msg.questions,
                 });
                 break;
+            case "subagent_permission_request":
+                this.emit("permission-request", {
+                    request_id: msg.request_id,
+                    tool_name: msg.tool_name,
+                    input: msg.input,
+                }, (decision) => this.respondToPermission(msg.request_id, decision));
+                break;
             case "subagent_start":
                 this.emit("subagent-start", {
                     parent_call_id: msg.parent_call_id,
@@ -460,6 +485,12 @@ export class MewClient {
                     provider: msg.provider,
                     model: msg.model,
                 });
+                break;
+            case "persona_list":
+                this.emit("persona-list", { personas: msg.personas });
+                break;
+            case "persona_switched":
+                this.emit("persona-switched", { name: msg.name });
                 break;
             case "thinking_variant_changed":
                 this.emit("thinking-variant-changed", {
@@ -577,6 +608,12 @@ export class MewClient {
             case "project_list":
                 this.emit("project-list", { projects: msg.projects });
                 break;
+            default: {
+                // Exhaustiveness check: adding a new ServerMessage variant
+                // without handling it here becomes a TypeScript error.
+                const _exhaustive = msg;
+                throw new Error(`unhandled ServerMessage: ${_exhaustive.type}`);
+            }
         }
     }
     send(msg) {

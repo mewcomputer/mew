@@ -9,11 +9,7 @@ import { ChatSurface } from "./chat-surface";
  *  See: https://github.com/tanstack/virtual/blob/main/docs/chat.md */
 export function VirtualChatSurface() {
   const messages = useSessionStore((s) => s.messages);
-  const streamingText = useSessionStore((s) => s.streamingText);
   const sessionId = useSessionStore((s) => s.sessionId);
-  const streamingReasoningText = useSessionStore(
-    (s) => s.streamingReasoningText,
-  );
   const parentRef = useRef<HTMLDivElement>(null);
   const [didInitialScroll, setDidInitialScroll] = useState(false);
 
@@ -41,7 +37,7 @@ export function VirtualChatSurface() {
     setDidInitialScroll(false);
   }, [sessionId]);
 
-  if (messages.length === 0) {s
+  if (messages.length === 0) {
     return <ChatSurface />;
   }
 
@@ -84,8 +80,6 @@ export function VirtualChatSurface() {
                 >
                   <MessageItem
                     message={msg}
-                    streamingText={streamingText}
-                    streamingReasoningText={streamingReasoningText}
                   />
                 </ErrorBoundary>
               </div>
