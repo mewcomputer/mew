@@ -885,6 +885,12 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     func listModels(id: DaemonId) 
     
     /**
+     * List available personas for the active session.
+     * Response arrives as `PersonaList` event.
+     */
+    func listPersonas(id: DaemonId) 
+    
+    /**
      * Request the list of known projects (recent session cwds + workspace.roots).
      * Response arrives as a `CoreEvent::ProjectList` event.
      */
@@ -928,12 +934,22 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     /**
      * Respond to an ask-user request.
      */
-    func respondAskUser(id: DaemonId, requestId: UInt64, answers: [String]) 
+    func respondAskUser(id: DaemonId, requestId: String, answers: [String]) 
     
     /**
      * Respond to a permission request.
      */
-    func respondPermission(id: DaemonId, requestId: UInt64, decision: Decision) 
+    func respondPermission(id: DaemonId, requestId: String, decision: Decision) 
+    
+    /**
+     * Enable or disable idle session summaries.
+     */
+    func setAutoSummary(id: DaemonId, enabled: Bool) 
+    
+    /**
+     * Enable or disable auto-generated session titles.
+     */
+    func setAutoTitle(id: DaemonId, enabled: Bool) 
     
     /**
      * Set the event listener. Events are delivered on the tokio runtime.
@@ -965,6 +981,12 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
      * Switch the active session to a different model.
      */
     func switchModel(id: DaemonId, provider: String, model: String) 
+    
+    /**
+     * Switch the active session to a different persona.
+     * Confirmation arrives as `PersonaSwitched` event.
+     */
+    func switchPersona(id: DaemonId, name: String) 
     
 }
 /**
@@ -1175,6 +1197,19 @@ open func listModels(id: DaemonId)  {try! rustCall() {
 }
     
     /**
+     * List available personas for the active session.
+     * Response arrives as `PersonaList` event.
+     */
+open func listPersonas(id: DaemonId)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_list_personas(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Request the list of known projects (recent session cwds + workspace.roots).
      * Response arrives as a `CoreEvent::ProjectList` event.
      */
@@ -1280,12 +1315,12 @@ open func renameSession(id: DaemonId, sessionId: String, title: String)  {try! r
     /**
      * Respond to an ask-user request.
      */
-open func respondAskUser(id: DaemonId, requestId: UInt64, answers: [String])  {try! rustCall() {
+open func respondAskUser(id: DaemonId, requestId: String, answers: [String])  {try! rustCall() {
         uniffiCallStatus in
     uniffi_mew_mobile_core_fn_method_mobilecore_respond_ask_user(
             self.uniffiCloneHandle(),
         FfiConverterTypeDaemonId_lower(id),
-        FfiConverterUInt64.lower(requestId),
+        FfiConverterString.lower(requestId),
         FfiConverterSequenceString.lower(answers),uniffiCallStatus
     )
 }
@@ -1294,13 +1329,39 @@ open func respondAskUser(id: DaemonId, requestId: UInt64, answers: [String])  {t
     /**
      * Respond to a permission request.
      */
-open func respondPermission(id: DaemonId, requestId: UInt64, decision: Decision)  {try! rustCall() {
+open func respondPermission(id: DaemonId, requestId: String, decision: Decision)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_mew_mobile_core_fn_method_mobilecore_respond_permission(
             self.uniffiCloneHandle(),
         FfiConverterTypeDaemonId_lower(id),
-        FfiConverterUInt64.lower(requestId),
+        FfiConverterString.lower(requestId),
         FfiConverterTypeDecision_lower(decision),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Enable or disable idle session summaries.
+     */
+open func setAutoSummary(id: DaemonId, enabled: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_set_auto_summary(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterBool.lower(enabled),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Enable or disable auto-generated session titles.
+     */
+open func setAutoTitle(id: DaemonId, enabled: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_set_auto_title(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterBool.lower(enabled),uniffiCallStatus
     )
 }
 }
@@ -1380,6 +1441,20 @@ open func switchModel(id: DaemonId, provider: String, model: String)  {try! rust
         FfiConverterTypeDaemonId_lower(id),
         FfiConverterString.lower(provider),
         FfiConverterString.lower(model),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Switch the active session to a different persona.
+     * Confirmation arrives as `PersonaSwitched` event.
+     */
+open func switchPersona(id: DaemonId, name: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_switch_persona(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(name),uniffiCallStatus
     )
 }
 }
@@ -1670,10 +1745,12 @@ public struct DaemonSnapshot: Equatable, Hashable {
     public var currentModel: String?
     public var currentProvider: String?
     public var thinkingVariant: String?
+    public var currentPersona: String?
+    public var availablePersonas: [PersonaInfo]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sessions: [SessionInfo], attachedSession: String?, pendingPermissions: [PendingPermission], pendingAskUser: [PendingAskUser], models: [ModelInfo], daemonVersion: String?, permissionMode: String?, currentModel: String?, currentProvider: String?, thinkingVariant: String?) {
+    public init(sessions: [SessionInfo], attachedSession: String?, pendingPermissions: [PendingPermission], pendingAskUser: [PendingAskUser], models: [ModelInfo], daemonVersion: String?, permissionMode: String?, currentModel: String?, currentProvider: String?, thinkingVariant: String?, currentPersona: String?, availablePersonas: [PersonaInfo]) {
         self.sessions = sessions
         self.attachedSession = attachedSession
         self.pendingPermissions = pendingPermissions
@@ -1684,6 +1761,8 @@ public struct DaemonSnapshot: Equatable, Hashable {
         self.currentModel = currentModel
         self.currentProvider = currentProvider
         self.thinkingVariant = thinkingVariant
+        self.currentPersona = currentPersona
+        self.availablePersonas = availablePersonas
     }
 
     
@@ -1711,7 +1790,9 @@ public struct FfiConverterTypeDaemonSnapshot: FfiConverterRustBuffer {
                 permissionMode: FfiConverterOptionString.read(from: &buf), 
                 currentModel: FfiConverterOptionString.read(from: &buf), 
                 currentProvider: FfiConverterOptionString.read(from: &buf), 
-                thinkingVariant: FfiConverterOptionString.read(from: &buf)
+                thinkingVariant: FfiConverterOptionString.read(from: &buf), 
+                currentPersona: FfiConverterOptionString.read(from: &buf), 
+                availablePersonas: FfiConverterSequenceTypePersonaInfo.read(from: &buf)
         )
     }
 
@@ -1726,6 +1807,8 @@ public struct FfiConverterTypeDaemonSnapshot: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.currentModel, into: &buf)
         FfiConverterOptionString.write(value.currentProvider, into: &buf)
         FfiConverterOptionString.write(value.thinkingVariant, into: &buf)
+        FfiConverterOptionString.write(value.currentPersona, into: &buf)
+        FfiConverterSequenceTypePersonaInfo.write(value.availablePersonas, into: &buf)
     }
 }
 
@@ -2123,14 +2206,14 @@ public func FfiConverterTypeModelSummary_lower(_ value: ModelSummary) -> RustBuf
  * A pending ask-user request.
  */
 public struct PendingAskUser: Equatable, Hashable {
-    public var requestId: UInt64
+    public var requestId: String
     public var sessionId: String
     public var callId: String
     public var questions: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(requestId: UInt64, sessionId: String, callId: String, questions: [String]) {
+    public init(requestId: String, sessionId: String, callId: String, questions: [String]) {
         self.requestId = requestId
         self.sessionId = sessionId
         self.callId = callId
@@ -2153,7 +2236,7 @@ public struct FfiConverterTypePendingAskUser: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingAskUser {
         return
             try PendingAskUser(
-                requestId: FfiConverterUInt64.read(from: &buf), 
+                requestId: FfiConverterString.read(from: &buf), 
                 sessionId: FfiConverterString.read(from: &buf), 
                 callId: FfiConverterString.read(from: &buf), 
                 questions: FfiConverterSequenceString.read(from: &buf)
@@ -2161,7 +2244,7 @@ public struct FfiConverterTypePendingAskUser: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: PendingAskUser, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.requestId, into: &buf)
+        FfiConverterString.write(value.requestId, into: &buf)
         FfiConverterString.write(value.sessionId, into: &buf)
         FfiConverterString.write(value.callId, into: &buf)
         FfiConverterSequenceString.write(value.questions, into: &buf)
@@ -2188,14 +2271,14 @@ public func FfiConverterTypePendingAskUser_lower(_ value: PendingAskUser) -> Rus
  * A pending permission request.
  */
 public struct PendingPermission: Equatable, Hashable {
-    public var requestId: UInt64
+    public var requestId: String
     public var sessionId: String
     public var toolName: String
     public var input: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(requestId: UInt64, sessionId: String, toolName: String, input: String) {
+    public init(requestId: String, sessionId: String, toolName: String, input: String) {
         self.requestId = requestId
         self.sessionId = sessionId
         self.toolName = toolName
@@ -2218,7 +2301,7 @@ public struct FfiConverterTypePendingPermission: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingPermission {
         return
             try PendingPermission(
-                requestId: FfiConverterUInt64.read(from: &buf), 
+                requestId: FfiConverterString.read(from: &buf), 
                 sessionId: FfiConverterString.read(from: &buf), 
                 toolName: FfiConverterString.read(from: &buf), 
                 input: FfiConverterString.read(from: &buf)
@@ -2226,7 +2309,7 @@ public struct FfiConverterTypePendingPermission: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: PendingPermission, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.requestId, into: &buf)
+        FfiConverterString.write(value.requestId, into: &buf)
         FfiConverterString.write(value.sessionId, into: &buf)
         FfiConverterString.write(value.toolName, into: &buf)
         FfiConverterString.write(value.input, into: &buf)
@@ -2246,6 +2329,71 @@ public func FfiConverterTypePendingPermission_lift(_ buf: RustBuffer) throws -> 
 #endif
 public func FfiConverterTypePendingPermission_lower(_ value: PendingPermission) -> RustBuffer {
     return FfiConverterTypePendingPermission.lower(value)
+}
+
+
+/**
+ * Info about an available persona.
+ */
+public struct PersonaInfo: Equatable, Hashable {
+    public var name: String
+    public var description: String
+    public var color: String?
+    public var active: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, description: String, color: String?, active: Bool) {
+        self.name = name
+        self.description = description
+        self.color = color
+        self.active = active
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension PersonaInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePersonaInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PersonaInfo {
+        return
+            try PersonaInfo(
+                name: FfiConverterString.read(from: &buf), 
+                description: FfiConverterString.read(from: &buf), 
+                color: FfiConverterOptionString.read(from: &buf), 
+                active: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PersonaInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.color, into: &buf)
+        FfiConverterBool.write(value.active, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePersonaInfo_lift(_ buf: RustBuffer) throws -> PersonaInfo {
+    return try FfiConverterTypePersonaInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePersonaInfo_lower(_ value: PersonaInfo) -> RustBuffer {
+    return FfiConverterTypePersonaInfo.lower(value)
 }
 
 
@@ -2757,17 +2905,17 @@ public enum CoreEvent: Equatable, Hashable {
     /**
      * A permission request from the agent.
      */
-    case permissionRequested(daemon: String, sessionId: String, requestId: UInt64, toolName: String, input: String
+    case permissionRequested(daemon: String, sessionId: String, requestId: String, toolName: String, input: String
     )
     /**
      * An ask-user request from the agent.
      */
-    case askUserRequested(daemon: String, sessionId: String, requestId: UInt64, callId: String, questions: [String]
+    case askUserRequested(daemon: String, sessionId: String, requestId: String, callId: String, questions: [String]
     )
     /**
      * A request was resolved (by this device or another). Dismiss the sheet.
      */
-    case requestResolved(daemon: String, requestId: UInt64
+    case requestResolved(daemon: String, requestId: String
     )
     /**
      * Cross-session alert from the daemon.
@@ -2814,6 +2962,16 @@ public enum CoreEvent: Equatable, Hashable {
      */
     case daemonVersion(daemon: String, version: String
     )
+    /**
+     * Available personas from the daemon.
+     */
+    case personaList(daemon: String, personas: [PersonaInfo]
+    )
+    /**
+     * Persona was switched (via user action, cross-device, or tool call).
+     */
+    case personaSwitched(daemon: String, name: String
+    )
 
 
 
@@ -2859,13 +3017,13 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
         case 8: return .turnEnded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), inputTokens: try FfiConverterUInt64.read(from: &buf), outputTokens: try FfiConverterUInt64.read(from: &buf), cost: try FfiConverterDouble.read(from: &buf), failed: try FfiConverterBool.read(from: &buf)
         )
         
-        case 9: return .permissionRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterUInt64.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), input: try FfiConverterString.read(from: &buf)
+        case 9: return .permissionRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), input: try FfiConverterString.read(from: &buf)
         )
         
-        case 10: return .askUserRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterUInt64.read(from: &buf), callId: try FfiConverterString.read(from: &buf), questions: try FfiConverterSequenceString.read(from: &buf)
+        case 10: return .askUserRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), questions: try FfiConverterSequenceString.read(from: &buf)
         )
         
-        case 11: return .requestResolved(daemon: try FfiConverterString.read(from: &buf), requestId: try FfiConverterUInt64.read(from: &buf)
+        case 11: return .requestResolved(daemon: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf)
         )
         
         case 12: return .alert(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), kind: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
@@ -2893,6 +3051,12 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
         )
         
         case 20: return .daemonVersion(daemon: try FfiConverterString.read(from: &buf), version: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 21: return .personaList(daemon: try FfiConverterString.read(from: &buf), personas: try FfiConverterSequenceTypePersonaInfo.read(from: &buf)
+        )
+        
+        case 22: return .personaSwitched(daemon: try FfiConverterString.read(from: &buf), name: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -2966,7 +3130,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             writeInt(&buf, Int32(9))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
-            FfiConverterUInt64.write(requestId, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
             FfiConverterString.write(toolName, into: &buf)
             FfiConverterString.write(input, into: &buf)
             
@@ -2975,7 +3139,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             writeInt(&buf, Int32(10))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
-            FfiConverterUInt64.write(requestId, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
             FfiConverterString.write(callId, into: &buf)
             FfiConverterSequenceString.write(questions, into: &buf)
             
@@ -2983,7 +3147,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
         case let .requestResolved(daemon,requestId):
             writeInt(&buf, Int32(11))
             FfiConverterString.write(daemon, into: &buf)
-            FfiConverterUInt64.write(requestId, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
             
         
         case let .alert(daemon,sessionId,kind,title,detail):
@@ -3046,6 +3210,18 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             writeInt(&buf, Int32(20))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(version, into: &buf)
+            
+        
+        case let .personaList(daemon,personas):
+            writeInt(&buf, Int32(21))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterSequenceTypePersonaInfo.write(personas, into: &buf)
+            
+        
+        case let .personaSwitched(daemon,name):
+            writeInt(&buf, Int32(22))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(name, into: &buf)
             
         }
     }
@@ -3679,6 +3855,31 @@ fileprivate struct FfiConverterSequenceTypePendingPermission: FfiConverterRustBu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypePersonaInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [PersonaInfo]
+
+    public static func write(_ value: [PersonaInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePersonaInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PersonaInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PersonaInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePersonaInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeProjectInfo: FfiConverterRustBuffer {
     typealias SwiftType = [ProjectInfo]
 
@@ -3884,6 +4085,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_list_models() != 64841) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_list_personas() != 38879) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_list_projects() != 7466) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3908,10 +4112,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_rename_session() != 2472) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_ask_user() != 41365) {
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_ask_user() != 37321) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_permission() != 15307) {
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_permission() != 29311) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_auto_summary() != 57757) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_auto_title() != 54262) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_listener() != 46926) {
@@ -3930,6 +4140,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_switch_model() != 47420) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_switch_persona() != 3069) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_corelistener_on_event() != 53351) {

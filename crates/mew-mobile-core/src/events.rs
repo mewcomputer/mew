@@ -146,6 +146,15 @@ pub enum CoreEvent {
 
     /// Daemon version from Pong.
     DaemonVersion { daemon: String, version: String },
+
+    /// Available personas from the daemon.
+    PersonaList {
+        daemon: String,
+        personas: Vec<PersonaInfo>,
+    },
+
+    /// Persona was switched (via user action, cross-device, or tool call).
+    PersonaSwitched { daemon: String, name: String },
 }
 
 /// Connection status for a daemon.
@@ -226,6 +235,15 @@ pub struct TodoItem {
     pub content: String,
     pub status: String,
     pub depends_on: Vec<u64>,
+}
+
+/// Info about an available persona.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct PersonaInfo {
+    pub name: String,
+    pub description: String,
+    pub color: Option<String>,
+    pub active: bool,
 }
 
 /// Callback trait implemented by the Swift layer.

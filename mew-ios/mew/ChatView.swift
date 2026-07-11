@@ -65,6 +65,7 @@ struct ChatView: View {
                 try? await Task.sleep(for: .seconds(2))
                 isLoadingSession = false
                 store.listModels()
+                store.listPersonas()
             }
             .onChange(of: store.visibleMessages.isEmpty) { _, isEmpty in
                 if !isEmpty { isLoadingSession = false }
@@ -324,6 +325,10 @@ struct ChatView: View {
             onPickPermissionMode: { mode in store.setPermissionMode(mode) },
             thinkingVariant: store.thinkingVariant[daemonId] ?? nil,
             onPickThinkingVariant: { variant in store.setThinkingVariant(variant) },
+            // Persona
+            currentPersona: store.currentPersona[daemonId],
+            availablePersonas: store.availablePersonas[daemonId] ?? [],
+            onPickPersona: { name in store.switchPersona(name: name) },
             usage: store.sessionUsage[sessionId]
         )
         .padding(.horizontal, 12)
@@ -388,7 +393,24 @@ struct ChatView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
-            EmptyView()
+            Menu {
+                Toggle("Auto-title", isOn: Binding(
+                    get: { UserDefaults.standard.bool(forKey: "autoTitle_\(sessionId)") },
+                    set: { newVal in
+                        UserDefaults.standard.set(newVal, forKey: "autoTitle_\(sessionId)")
+                        store.setAutoTitle(enabled: newVal)
+                    }
+                ))
+                Toggle("Auto-summary", isOn: Binding(
+                    get: { UserDefaults.standard.bool(forKey: "autoSummary_\(sessionId)") },
+                    set: { newVal in
+                        UserDefaults.standard.set(newVal, forKey: "autoSummary_\(sessionId)")
+                        store.setAutoSummary(enabled: newVal)
+                    }
+                ))
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
         }
     }
 
@@ -411,7 +433,7 @@ private struct BottomOffsetKey: PreferenceKey {
 
 private struct PermissionSheetItem: Identifiable {
     let permission: PendingPermission
-    var id: UInt64 { permission.requestId }
+    var id: String { permission.requestId }
 }
 
 private struct PermissionSheet: View {
@@ -485,7 +507,7 @@ private struct PermissionSheet: View {
 
 private struct AskUserSheetItem: Identifiable {
     let ask: PendingAskUser
-    var id: UInt64 { ask.requestId }
+    var id: String { ask.requestId }
 }
 
 private struct AskUserSheet: View {
@@ -577,6 +599,10 @@ struct ChatBar: View {
     // Thinking variant
     let thinkingVariant: String?
     let onPickThinkingVariant: (String) -> Void
+    // Persona
+    let currentPersona: String?
+    let availablePersonas: [PersonaInfo]
+    let onPickPersona: (String) -> Void
     // Usage
     let usage: SessionUsage?
 
@@ -596,6 +622,7 @@ struct ChatBar: View {
             HStack(spacing: 10) {
                 attachmentsButton
                 modelPickerChip
+                personaChip
                 permissionModeChip
                 if let usage, usage.turns > 0 {
                     usageCapsule(usage)
@@ -759,6 +786,48 @@ struct ChatBar: View {
                 )
         }
         .accessibilityLabel("Permission mode")
+    }
+
+    @ViewBuilder
+    private var personaChip: some View {
+        if !availablePersonas.isEmpty {
+            Menu {
+                Button {
+                    onPickPersona("default")
+                } label: {
+                    HStack {
+                        Text("Default")
+                        if currentPersona == nil {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+                ForEach(availablePersonas, id: \.name) { persona in
+                    Button {
+                        onPickPersona(persona.name)
+                    } label: {
+                        HStack {
+                            Text(persona.name)
+                            if !persona.description.isEmpty {
+                                Text(persona.description).font(.caption).foregroundStyle(.secondary)
+                            }
+                            if currentPersona == persona.name {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "person.crop.circle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 36, height: 36)
+                    .background(
+                        Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
+                    )
+            }
+            .accessibilityLabel("Persona")
+        }
     }
 
     @ViewBuilder

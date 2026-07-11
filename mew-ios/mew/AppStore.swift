@@ -129,6 +129,10 @@ final class AppStore: ObservableObject {
     @Published var currentProvider: [String: String] = [:]
     @Published var thinkingVariant: [String: String?] = [:]
 
+    // Personas (per daemon)
+    @Published var availablePersonas: [String: [PersonaInfo]] = [:]
+    @Published var currentPersona: [String: String] = [:]
+
     // Session usage (per sessionId)
     @Published var sessionUsage: [String: SessionUsage] = [:]
 
@@ -313,12 +317,12 @@ final class AppStore: ObservableObject {
         core.cancel(id: daemonId)
     }
 
-    func respondPermission(requestId: UInt64, decision: Decision) {
+    func respondPermission(requestId: String, decision: Decision) {
         guard let daemonId = selectedDaemonId, let core else { return }
         core.respondPermission(id: daemonId, requestId: requestId, decision: decision)
     }
 
-    func respondAskUser(requestId: UInt64, answers: [String]) {
+    func respondAskUser(requestId: String, answers: [String]) {
         guard let daemonId = selectedDaemonId, let core else { return }
         core.respondAskUser(id: daemonId, requestId: requestId, answers: answers)
     }
@@ -346,6 +350,35 @@ final class AppStore: ObservableObject {
     func setThinkingVariant(_ variant: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
         core.setThinkingVariant(id: daemonId, variant: variant)
+    }
+
+    func listPersonas() {
+        guard let daemonId = selectedDaemonId, let core else { return }
+        core.listPersonas(id: daemonId)
+    }
+
+    func switchPersona(name: String) {
+        guard let daemonId = selectedDaemonId, let core else { return }
+        // "default" is a client-side concept meaning "no persona selected."
+        // The daemon has no persona named "default" — sending SwitchPersona
+        // would return an error. Just clear locally.
+        if name == "default" {
+            currentPersona[daemonId.nodeId] = nil
+        } else {
+            // Optimistic update — PersonaSwitched event will confirm.
+            currentPersona[daemonId.nodeId] = name
+            core.switchPersona(id: daemonId, name: name)
+        }
+    }
+
+    func setAutoTitle(enabled: Bool) {
+        guard let daemonId = selectedDaemonId, let core else { return }
+        core.setAutoTitle(id: daemonId, enabled: enabled)
+    }
+
+    func setAutoSummary(enabled: Bool) {
+        guard let daemonId = selectedDaemonId, let core else { return }
+        core.setAutoSummary(id: daemonId, enabled: enabled)
     }
 
     func archiveSession(_ sessionId: String, archived: Bool) {
@@ -415,6 +448,13 @@ final class AppStore: ObservableObject {
             if let snap = core?.snapshot(id: DaemonId(nodeId: daemon)) {
                 applySnapshot(snap)
             }
+            // Re-fetch persona list — it may have changed during disconnection.
+            listPersonas()
+            // Re-send auto-title/summary settings (daemon resets on reconnect).
+            let autoTitle = UserDefaults.standard.bool(forKey: "autoTitle_\(sessionId)")
+            if autoTitle { setAutoTitle(enabled: true) }
+            let autoSummary = UserDefaults.standard.bool(forKey: "autoSummary_\(sessionId)")
+            if autoSummary { setAutoSummary(enabled: true) }
             // If we just created this session via "new chat", navigate into it.
             if pendingNewSessionDaemon == daemon {
                 pendingNewSessionDaemon = nil
@@ -539,6 +579,12 @@ final class AppStore: ObservableObject {
 
         case .thinkingVariantChanged(let daemon, let variant):
             thinkingVariant[daemon] = variant
+
+        case .personaList(let daemon, let personas):
+            availablePersonas[daemon] = personas
+
+        case .personaSwitched(let daemon, let name):
+            currentPersona[daemon] = name
         }
     }
 
@@ -570,6 +616,10 @@ final class AppStore: ObservableObject {
                 currentProvider[daemonId] = provider
             }
             thinkingVariant[daemonId] = snap.thinkingVariant
+            // Unconditionally assign — handles both Some and None/empty,
+            // preventing stale state after daemon-side persona clear.
+            currentPersona[daemonId] = snap.currentPersona
+            availablePersonas[daemonId] = snap.availablePersonas
         }
     }
 

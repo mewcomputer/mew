@@ -165,6 +165,10 @@ struct ConnState {
     current_provider: Mutex<Option<String>>,
     /// Current thinking variant (None = thinking disabled).
     thinking_variant: Mutex<Option<String>>,
+    /// Current persona name (None = default/no persona).
+    current_persona: Mutex<Option<String>>,
+    /// Available personas from last PersonaList.
+    available_personas: Mutex<Vec<crate::events::PersonaInfo>>,
 }
 
 impl ConnState {
@@ -180,6 +184,8 @@ impl ConnState {
             current_model: Mutex::new(None),
             current_provider: Mutex::new(None),
             thinking_variant: Mutex::new(None),
+            current_persona: Mutex::new(None),
+            available_personas: Mutex::new(Vec::new()),
         }
     }
 }
@@ -521,6 +527,40 @@ impl MobileCore {
         }
     }
 
+    /// List available personas for the active session.
+    /// Response arrives as `PersonaList` event.
+    pub fn list_personas(&self, id: DaemonId) {
+        let conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(&id.node_id) {
+            let _ = conn.tx.send(ClientMessage::ListPersonas);
+        }
+    }
+
+    /// Switch the active session to a different persona.
+    /// Confirmation arrives as `PersonaSwitched` event.
+    pub fn switch_persona(&self, id: DaemonId, name: String) {
+        let conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(&id.node_id) {
+            let _ = conn.tx.send(ClientMessage::SwitchPersona { name });
+        }
+    }
+
+    /// Enable or disable auto-generated session titles.
+    pub fn set_auto_title(&self, id: DaemonId, enabled: bool) {
+        let conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(&id.node_id) {
+            let _ = conn.tx.send(ClientMessage::SetAutoTitle { enabled });
+        }
+    }
+
+    /// Enable or disable idle session summaries.
+    pub fn set_auto_summary(&self, id: DaemonId, enabled: bool) {
+        let conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(&id.node_id) {
+            let _ = conn.tx.send(ClientMessage::SetAutoSummary { enabled });
+        }
+    }
+
     /// Rename a session.
     pub fn rename_session(&self, id: DaemonId, session_id: String, title: String) {
         let conns = self.connections.lock().unwrap();
@@ -585,6 +625,8 @@ impl MobileCore {
         let current_model = conn.state.current_model.lock().unwrap().clone();
         let current_provider = conn.state.current_provider.lock().unwrap().clone();
         let thinking_variant = conn.state.thinking_variant.lock().unwrap().clone();
+        let current_persona = conn.state.current_persona.lock().unwrap().clone();
+        let available_personas = conn.state.available_personas.lock().unwrap().clone();
 
         let mut snap = DaemonSnapshot {
             attached_session: attached.clone(),
@@ -594,6 +636,8 @@ impl MobileCore {
             current_model,
             current_provider,
             thinking_variant,
+            current_persona,
+            available_personas,
             ..Default::default()
         };
         if let Some(ss) = session_state.as_ref() {
@@ -1499,6 +1543,45 @@ fn translate_message(
                 detail: Some(message.clone()),
             });
         }
+
+        ServerMessage::PersonaList { personas } => {
+            let mapped: Vec<crate::events::PersonaInfo> = personas
+                .iter()
+                .map(|p| crate::events::PersonaInfo {
+                    name: p.name.clone(),
+                    description: p.description.clone(),
+                    color: p.color.clone(),
+                    active: p.active,
+                })
+                .collect();
+            *conn_state.available_personas.lock().unwrap() = mapped.clone();
+            // Sync current_persona from the server's active flag — the
+            // daemon knows which persona is active, and PersonaList may
+            // arrive before any PersonaSwitched event.
+            let active_persona = mapped.iter().find(|p| p.active).map(|p| p.name.clone());
+            *conn_state.current_persona.lock().unwrap() = active_persona.clone();
+            if let Some(ss) = conn_state.session_state.lock().unwrap().as_mut() {
+                ss.available_personas = mapped.clone();
+                ss.current_persona = active_persona;
+            }
+            events.push(CoreEvent::PersonaList {
+                daemon: d.clone(),
+                personas: mapped,
+            });
+        }
+
+        ServerMessage::PersonaSwitched { name }
+        | ServerMessage::PersonaSwitchRequested { name } => {
+            *conn_state.current_persona.lock().unwrap() = Some(name.clone());
+            if let Some(ss) = conn_state.session_state.lock().unwrap().as_mut() {
+                ss.current_persona = Some(name.clone());
+            }
+            events.push(CoreEvent::PersonaSwitched {
+                daemon: d.clone(),
+                name: name.clone(),
+            });
+        }
+
         // These variants are not yet translated to CoreEvent — they are
         // intentionally no-ops for now. Adding a new ServerMessage variant
         // here forces a compile-time decision.
@@ -1522,10 +1605,7 @@ fn translate_message(
         | ServerMessage::GitStatusResult { .. }
         | ServerMessage::FsChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }
-        | ServerMessage::FlaggedFilesChanged { .. }
-        | ServerMessage::PersonaSwitchRequested { .. }
-        | ServerMessage::PersonaList { .. }
-        | ServerMessage::PersonaSwitched { .. } => {}
+        | ServerMessage::FlaggedFilesChanged { .. } => {}
     }
 
     events
@@ -1665,5 +1745,96 @@ mod tests {
     fn test_parse_dial_info_url_scheme_invalid() {
         let result = parse_dial_info_impl("computer.mew.mew://not-a-valid-key");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_persona_list() {
+        let conn = Arc::new(ConnState::new());
+        let daemon_id = "node-abc".to_string();
+        let mut last_prompt: Option<String> = None;
+
+        let msg = ServerMessage::PersonaList {
+            personas: vec![
+                mew_protocol::PersonaInfo {
+                    name: "code-reviewer".into(),
+                    description: "Reviews code".into(),
+                    color: Some("#ff0000".into()),
+                    active: false,
+                },
+                mew_protocol::PersonaInfo {
+                    name: "explainer".into(),
+                    description: "Explains things".into(),
+                    color: None,
+                    active: true,
+                },
+            ],
+        };
+
+        let events = translate_message(&msg, &conn, &mut last_prompt, &daemon_id);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            CoreEvent::PersonaList { daemon, personas } => {
+                assert_eq!(*daemon, daemon_id);
+                assert_eq!(personas.len(), 2);
+                assert_eq!(personas[0].name, "code-reviewer");
+                assert_eq!(personas[0].color.as_deref(), Some("#ff0000"));
+                assert!(!personas[0].active);
+                assert_eq!(personas[1].name, "explainer");
+                assert!(personas[1].active);
+            }
+            other => panic!("expected PersonaList, got {:?}", other),
+        }
+        // Verify ConnState was updated.
+        let stored = conn.available_personas.lock().unwrap();
+        assert_eq!(stored.len(), 2);
+        // Verify current_persona was synced from the active flag.
+        assert_eq!(
+            conn.current_persona.lock().unwrap().as_deref(),
+            Some("explainer")
+        );
+    }
+
+    #[test]
+    fn test_translate_persona_switched() {
+        let conn = Arc::new(ConnState::new());
+        let daemon_id = "node-abc".to_string();
+        let mut last_prompt: Option<String> = None;
+
+        let msg = ServerMessage::PersonaSwitched {
+            name: "explainer".into(),
+        };
+
+        let events = translate_message(&msg, &conn, &mut last_prompt, &daemon_id);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            CoreEvent::PersonaSwitched { daemon, name } => {
+                assert_eq!(name, "explainer");
+                assert_eq!(*daemon, daemon_id);
+            }
+            other => panic!("expected PersonaSwitched, got {:?}", other),
+        }
+        assert_eq!(
+            conn.current_persona.lock().unwrap().as_deref(),
+            Some("explainer")
+        );
+    }
+
+    #[test]
+    fn test_translate_persona_switch_requested() {
+        let conn = Arc::new(ConnState::new());
+        let daemon_id = "node-abc".to_string();
+        let mut last_prompt: Option<String> = None;
+
+        let msg = ServerMessage::PersonaSwitchRequested {
+            name: "code-reviewer".into(),
+        };
+
+        let events = translate_message(&msg, &conn, &mut last_prompt, &daemon_id);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], CoreEvent::PersonaSwitched { .. }));
+        assert_eq!(
+            conn.current_persona.lock().unwrap().as_deref(),
+            Some("code-reviewer")
+        );
     }
 }

@@ -19,6 +19,8 @@ pub struct DaemonSnapshot {
     pub current_model: Option<String>,
     pub current_provider: Option<String>,
     pub thinking_variant: Option<String>,
+    pub current_persona: Option<String>,
+    pub available_personas: Vec<crate::events::PersonaInfo>,
 }
 
 /// A session in the snapshot.
@@ -120,6 +122,8 @@ pub struct SessionState {
     pub todos: Vec<crate::events::TodoItem>,
     pub permission_mode: Option<String>,
     pub thinking_variant: Option<String>,
+    pub current_persona: Option<String>,
+    pub available_personas: Vec<crate::events::PersonaInfo>,
 }
 
 impl SessionState {
@@ -140,6 +144,8 @@ impl SessionState {
             todos: Vec::new(),
             permission_mode: None,
             thinking_variant: None,
+            current_persona: None,
+            available_personas: Vec::new(),
         }
     }
 
@@ -438,5 +444,24 @@ mod tests {
         assert_eq!(state.todos[0].status, "done");
         assert_eq!(state.todos[1].depends_on, vec![1]);
         assert_eq!(state.todos[2].depends_on, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_persona_state_stored() {
+        let mut state = SessionState::new("sess1".into());
+        assert!(state.current_persona.is_none());
+        assert!(state.available_personas.is_empty());
+
+        state.current_persona = Some("code-reviewer".into());
+        state.available_personas = vec![crate::events::PersonaInfo {
+            name: "code-reviewer".into(),
+            description: "Reviews code".into(),
+            color: None,
+            active: true,
+        }];
+
+        assert_eq!(state.current_persona.as_deref(), Some("code-reviewer"));
+        assert_eq!(state.available_personas.len(), 1);
+        assert!(state.available_personas[0].active);
     }
 }

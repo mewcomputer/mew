@@ -324,6 +324,11 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_list_dir(uint64_t ptr, RustBuff
 void uniffi_mew_mobile_core_fn_method_mobilecore_list_models(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_PERSONAS
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_PERSONAS
+void uniffi_mew_mobile_core_fn_method_mobilecore_list_personas(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_PROJECTS
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_LIST_PROJECTS
 void uniffi_mew_mobile_core_fn_method_mobilecore_list_projects(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
@@ -366,12 +371,22 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_rename_session(uint64_t ptr, Ru
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_ASK_USER
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_ASK_USER
-void uniffi_mew_mobile_core_fn_method_mobilecore_respond_ask_user(uint64_t ptr, RustBuffer id, uint64_t request_id, RustBuffer answers, RustCallStatus *_Nonnull out_status
+void uniffi_mew_mobile_core_fn_method_mobilecore_respond_ask_user(uint64_t ptr, RustBuffer id, RustBuffer request_id, RustBuffer answers, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_PERMISSION
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_PERMISSION
-void uniffi_mew_mobile_core_fn_method_mobilecore_respond_permission(uint64_t ptr, RustBuffer id, uint64_t request_id, RustBuffer decision, RustCallStatus *_Nonnull out_status
+void uniffi_mew_mobile_core_fn_method_mobilecore_respond_permission(uint64_t ptr, RustBuffer id, RustBuffer request_id, RustBuffer decision, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SET_AUTO_SUMMARY
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SET_AUTO_SUMMARY
+void uniffi_mew_mobile_core_fn_method_mobilecore_set_auto_summary(uint64_t ptr, RustBuffer id, int8_t enabled, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SET_AUTO_TITLE
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SET_AUTO_TITLE
+void uniffi_mew_mobile_core_fn_method_mobilecore_set_auto_title(uint64_t ptr, RustBuffer id, int8_t enabled, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SET_LISTENER
@@ -402,6 +417,11 @@ RustBuffer uniffi_mew_mobile_core_fn_method_mobilecore_snapshot(uint64_t ptr, Ru
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SWITCH_MODEL
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SWITCH_MODEL
 void uniffi_mew_mobile_core_fn_method_mobilecore_switch_model(uint64_t ptr, RustBuffer id, RustBuffer provider, RustBuffer model, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SWITCH_PERSONA
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SWITCH_PERSONA
+void uniffi_mew_mobile_core_fn_method_mobilecore_switch_persona(uint64_t ptr, RustBuffer id, RustBuffer name, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_CLONE_CORELISTENER
@@ -755,6 +775,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_models(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_PERSONAS
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_PERSONAS
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_personas(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_PROJECTS
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_LIST_PROJECTS
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_list_projects(void
@@ -815,6 +841,18 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_respond_permission(vo
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SET_AUTO_SUMMARY
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SET_AUTO_SUMMARY
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_set_auto_summary(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SET_AUTO_TITLE
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SET_AUTO_TITLE
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_set_auto_title(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SET_LISTENER
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SET_LISTENER
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_set_listener(void
@@ -848,6 +886,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_snapshot(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SWITCH_MODEL
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SWITCH_MODEL
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_switch_model(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SWITCH_PERSONA
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_SWITCH_PERSONA
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_switch_persona(void
     
 );
 #endif
