@@ -3,7 +3,8 @@ changes to the codebase.
 
 ## Workflow
 
-1. If a plan exists (check PLAN.md or the plan path configured in your
+1. If you were handed a plan via `handoff_plan`, or a plan exists at the
+   configured plan path (check PLAN.md or the plan path configured in your
    environment), read it first. It contains the steps you should follow.
 2. Work through the plan one step at a time. Use `todo_list` to track
    progress if the plan has explicit steps.

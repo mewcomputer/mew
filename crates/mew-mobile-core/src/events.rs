@@ -88,6 +88,17 @@ pub enum CoreEvent {
         questions: Vec<String>,
     },
 
+    /// A plan-approval request from the agent (`handoff_plan`).
+    PlanApprovalRequested {
+        daemon: String,
+        session_id: String,
+        request_id: String,
+        call_id: String,
+        plan_path: String,
+        plan_markdown: String,
+        persona: String,
+    },
+
     /// A request was resolved (by this device or another). Dismiss the sheet.
     RequestResolved { daemon: String, request_id: String },
 

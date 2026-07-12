@@ -206,6 +206,12 @@ impl Agent {
                 continue;
             }
 
+            if tc.tool_name == "handoff_plan" {
+                self.execute_handoff_plan(tc, assistant_msg, ev_tx, &mut result_parts)
+                    .await;
+                continue;
+            }
+
             if matches!(
                 tc.tool_name.as_str(),
                 "shell_background" | "job_status" | "job_block" | "job_cancel"
@@ -1307,6 +1313,160 @@ impl Agent {
                 }
                 Err(_) => (
                     "ask_user_question cancelled (no response received)".to_string(),
+                    false,
+                ),
+            }
+        };
+
+        let final_state = if success {
+            ToolState::Completed(ToolStateCompleted {
+                input: input.clone(),
+                output,
+                metadata: None,
+                diff: None,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        } else {
+            ToolState::Error(ToolStateError {
+                input: input.clone(),
+                error: output,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        };
+
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, final_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: final_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::ToolEnd {
+                call_id: call_id.clone(),
+                success,
+            })
+            .await;
+
+        result_parts.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            call_id: tc.call_id.clone(),
+        }));
+    }
+
+    /// Intercept a `handoff_plan` tool call: read the configured plan file,
+    /// present it to the user for approval (blocking the tool), and on approval
+    /// queue the target persona switch through `pending_persona_switch` so the
+    /// end-of-turn drain emits `PersonaSwitchRequested`. On a change request the
+    /// user's feedback becomes a successful tool result so the planner can
+    /// revise and resubmit.
+    async fn execute_handoff_plan(
+        &self,
+        tc: &ToolCallPart,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        result_parts: &mut Vec<Part>,
+    ) {
+        let call_id = tc.call_id.clone();
+        let part_id = tc.base.id;
+        let input = tc.input().clone();
+
+        let assistant_id = match assistant_msg {
+            Some(ref msg) => msg.id,
+            None => return,
+        };
+
+        let persona = input
+            .get("persona")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("builder")
+            .to_string();
+
+        let (output, success) = 'result: {
+            // Validate the target persona exists.
+            if !self.personas.iter().any(|p| p.name == persona) {
+                let available: Vec<&str> = self.personas.iter().map(|p| p.name.as_str()).collect();
+                break 'result (
+                    format!(
+                        "unknown persona '{persona}'. Available personas: {}",
+                        if available.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            available.join(", ")
+                        }
+                    ),
+                    false,
+                );
+            }
+
+            // Resolve and read the plan file.
+            let plan_path = match self.resolved_plan_path() {
+                Some(p) => p,
+                None => break 'result ("no plan_path configured".to_string(), false),
+            };
+            let plan_markdown = match tokio::fs::read_to_string(&plan_path).await {
+                Ok(text) if !text.trim().is_empty() => text,
+                _ => {
+                    break 'result (
+                        format!(
+                            "plan file {} is missing or empty — write it with write_plan first",
+                            plan_path.display()
+                        ),
+                        false,
+                    )
+                }
+            };
+
+            let (tx, rx) = oneshot::channel();
+            let _ = ev_tx
+                .send(AgentEvent::PlanApprovalRequest {
+                    call_id: call_id.clone(),
+                    plan_path: plan_path.display().to_string(),
+                    plan_markdown,
+                    persona: persona.clone(),
+                    tx,
+                })
+                .await;
+
+            match rx.await {
+                Ok(crate::PlanDecision::Approved) => {
+                    *self.pending_persona_switch.lock().await = Some(persona.clone());
+                    (
+                        format!(
+                            "Plan approved. Queued switch to '{persona}' at end of turn — \
+                             wrap up now."
+                        ),
+                        true,
+                    )
+                }
+                Ok(crate::PlanDecision::ChangesRequested(feedback)) => (
+                    format!(
+                        "The user requested changes to the plan:\n\n{feedback}\n\n\
+                         Revise with edit_plan and call handoff_plan again."
+                    ),
+                    true,
+                ),
+                Err(_) => (
+                    "handoff_plan cancelled (no response received)".to_string(),
                     false,
                 ),
             }

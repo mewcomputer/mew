@@ -92,6 +92,15 @@ pub enum ClientMessage {
         answers: Vec<String>,
     },
 
+    /// Respond to a `PlanApprovalRequest` from the daemon. `approved = false`
+    /// with optional `feedback` requests changes to the plan.
+    PlanApprovalResponse {
+        request_id: String,
+        approved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feedback: Option<String>,
+    },
+
     /// Run a slash command on the daemon (the ones that mutate agent state).
     SlashCommand {
         command: String,
@@ -497,6 +506,16 @@ pub enum ServerMessage {
         request_id: String,
         call_id: String,
         questions: Vec<Question>,
+    },
+
+    /// Present a completed plan for user approval (from `handoff_plan`). The
+    /// frontend responds with `PlanApprovalResponse`.
+    PlanApprovalRequest {
+        request_id: String,
+        call_id: String,
+        plan_path: String,
+        plan_markdown: String,
+        persona: String,
     },
 
     // -- Subagent events --
@@ -965,7 +984,7 @@ pub enum DaemonMessage {
     },
 
     /// An event the extension subscribed to.
-    ExtensionEvent(ExtensionEvent),
+    ExtensionEvent(Box<ExtensionEvent>),
 
     /// Response to `ExtensionListSessions`.
     SessionList { sessions: Vec<SessionInfo> },
@@ -1024,7 +1043,7 @@ pub enum ExtensionEvent {
     /// Full message content (requires `events` with `content: full`).
     MessageEnd {
         session_id: String,
-        message: mew_message::Message,
+        message: Box<mew_message::Message>,
     },
     /// The extension's event queue overflowed — some events were dropped.
     Lagged {
@@ -1091,6 +1110,7 @@ pub fn provider_event_to_wire(e: &mew_provider::ProviderEvent) -> mew_message::P
             finish: *finish,
             usage: *usage,
             cost: *cost,
+            manifest: None,
         },
         mew_provider::ProviderEvent::RetryWait {
             attempt,
@@ -1366,6 +1386,51 @@ mod tests {
     }
 
     #[test]
+    fn client_message_plan_approval_response_approved_roundtrip() {
+        let m = ClientMessage::PlanApprovalResponse {
+            request_id: "uuid-6".into(),
+            approved: true,
+            feedback: None,
+        };
+        // Approved responses omit the feedback field on the wire.
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(!json.contains("feedback"));
+        match round_trip(&m) {
+            ClientMessage::PlanApprovalResponse {
+                request_id,
+                approved,
+                feedback,
+            } => {
+                assert_eq!(request_id, "uuid-6");
+                assert!(approved);
+                assert_eq!(feedback, None);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn client_message_plan_approval_response_changes_roundtrip() {
+        let m = ClientMessage::PlanApprovalResponse {
+            request_id: "uuid-7".into(),
+            approved: false,
+            feedback: Some("add tests".into()),
+        };
+        match round_trip(&m) {
+            ClientMessage::PlanApprovalResponse {
+                request_id,
+                approved,
+                feedback,
+            } => {
+                assert_eq!(request_id, "uuid-7");
+                assert!(!approved);
+                assert_eq!(feedback.as_deref(), Some("add tests"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
     fn client_message_slash_command_roundtrip() {
         let m = ClientMessage::SlashCommand {
             command: "/clear".into(),
@@ -1466,6 +1531,7 @@ mod tests {
                 finish: mew_message::Finish::ToolUse,
                 usage: mew_message::Tokens::default(),
                 cost: 0.0,
+                manifest: None,
             },
         };
         match round_trip(&m) {
@@ -1475,6 +1541,68 @@ mod tests {
                 assert_eq!(finish, mew_message::Finish::ToolUse);
             }
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn message_end_with_manifest_roundtrip() {
+        use mew_message::{Segment, SegmentKind, TurnManifest};
+
+        let manifest = TurnManifest {
+            model: "gpt-4o".into(),
+            context_window: 128000,
+            input_tokens: Some(5000),
+            output_tokens: Some(1200),
+            cache_read_tokens: Some(2000),
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            segments: vec![Segment {
+                label: "scaffold".into(),
+                kind: SegmentKind::Scaffold,
+                source_id: None,
+                tokens: 300,
+                tokens_scaled: 300,
+                children: vec![],
+            }],
+        };
+
+        let m = ServerMessage::Provider {
+            event: mew_message::ProviderEventWire::MessageEnd {
+                finish: mew_message::Finish::Stop,
+                usage: mew_message::Tokens {
+                    input: 5000,
+                    output: 1200,
+                    reasoning: 0,
+                    cache_read: 2000,
+                    cache_write: 0,
+                },
+                cost: 0.05,
+                manifest: Some(manifest.clone()),
+            },
+        };
+
+        match round_trip(&m) {
+            ServerMessage::Provider {
+                event:
+                    mew_message::ProviderEventWire::MessageEnd {
+                        finish,
+                        usage,
+                        cost,
+                        manifest: roundtripped,
+                    },
+            } => {
+                assert_eq!(finish, mew_message::Finish::Stop);
+                assert_eq!(usage.input, 5000);
+                assert_eq!(cost, 0.05);
+                let rt = roundtripped.expect("manifest should survive round-trip");
+                assert_eq!(rt.model, "gpt-4o");
+                assert_eq!(rt.context_window, 128000);
+                assert_eq!(rt.input_tokens, Some(5000));
+                assert_eq!(rt.segments.len(), 1);
+                assert_eq!(rt.segments[0].label, "scaffold");
+                assert_eq!(rt.segments[0].tokens, 300);
+            }
+            _ => panic!("expected MessageEnd"),
         }
     }
 
@@ -1667,6 +1795,33 @@ mod tests {
                 assert_eq!(questions.len(), 2);
                 assert_eq!(questions[0].options.len(), 2);
                 assert_eq!(questions[1].options[0].label, "yes");
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn server_message_plan_approval_request_roundtrip() {
+        let m = ServerMessage::PlanApprovalRequest {
+            request_id: "uuid-8".into(),
+            call_id: "handoff_1".into(),
+            plan_path: "/repo/PLAN.md".into(),
+            plan_markdown: "# Goal\n\n1. do the thing".into(),
+            persona: "builder".into(),
+        };
+        match round_trip(&m) {
+            ServerMessage::PlanApprovalRequest {
+                request_id,
+                call_id,
+                plan_path,
+                plan_markdown,
+                persona,
+            } => {
+                assert_eq!(request_id, "uuid-8");
+                assert_eq!(call_id, "handoff_1");
+                assert_eq!(plan_path, "/repo/PLAN.md");
+                assert!(plan_markdown.contains("do the thing"));
+                assert_eq!(persona, "builder");
             }
             _ => panic!(),
         }
@@ -2909,9 +3064,9 @@ mod tests {
                 hook: "h".into(),
                 params: serde_json::json!({}),
             },
-            DaemonMessage::ExtensionEvent(ExtensionEvent::TurnEnded {
+            DaemonMessage::ExtensionEvent(Box::new(ExtensionEvent::TurnEnded {
                 session_id: "s".into(),
-            }),
+            })),
             DaemonMessage::SessionList { sessions: vec![] },
             DaemonMessage::SessionAttached {
                 session_id: "s".into(),

@@ -154,3 +154,223 @@ describe("session activity + usage", () => {
     expect(s.usage!.turns).toBe(3);
   });
 });
+
+describe("assistant metadata preservation", () => {
+  beforeEach(() => {
+    useSessionStore.setState({
+      messages: [],
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCost: 0,
+    });
+  });
+
+  it("onSessionHistory preserves assistantMeta", () => {
+    const manifest = {
+      model: "gpt-4o",
+      context_window: 128000,
+      input_tokens: 5000,
+      output_tokens: 200,
+      cache_read_tokens: 1000,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      segments: [],
+    };
+
+    store().onSessionHistory([
+      {
+        id: "msg-1",
+        session_id: "sess-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "text",
+            base: {
+              id: "part-1",
+              message_id: "msg-1",
+              session_id: "sess-1",
+            },
+            text: "Hello",
+            synthetic: false,
+          },
+        ],
+        time: { created: 0, completed: undefined },
+        assistant: {
+          provider_id: "openai",
+          model_id: "gpt-4o",
+          cost: 0.01,
+          tokens: {
+            input: 5000,
+            output: 200,
+            reasoning: 0,
+            cache_read: 1000,
+            cache_write: 0,
+          },
+          finish: "stop",
+          manifest,
+        },
+      },
+    ]);
+
+    const messages = useSessionStore.getState().messages;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.assistantMeta).toBeDefined();
+    expect(messages[0]!.assistantMeta!.manifest).toBeDefined();
+    expect(messages[0]!.assistantMeta!.manifest!.model).toBe("gpt-4o");
+  });
+
+  it("message_end attaches assistantMeta to last assistant message", () => {
+    useSessionStore.setState({
+      messages: [
+        {
+          id: "msg-1",
+          role: "assistant" as const,
+          parts: [{ type: "text" as const, text: "Hello" }],
+          timestamp: 0,
+        },
+      ],
+    });
+
+    const manifest = {
+      model: "deepseek-v3",
+      context_window: 64000,
+      input_tokens: 3000,
+      output_tokens: 150,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      segments: [],
+    };
+
+    store().onProviderEvent({
+      type: "message_end",
+      finish: "stop",
+      usage: {
+        input: 3000,
+        output: 150,
+        reasoning: 0,
+        cache_read: 0,
+        cache_write: 0,
+      },
+      cost: 0.02,
+      manifest,
+    });
+
+    const messages = useSessionStore.getState().messages;
+    expect(messages[0]!.assistantMeta).toBeDefined();
+    expect(messages[0]!.assistantMeta!.cost).toBe(0.02);
+    expect(messages[0]!.assistantMeta!.manifest).toBeDefined();
+    expect(messages[0]!.assistantMeta!.manifest!.model).toBe("deepseek-v3");
+    expect(useSessionStore.getState().totalInputTokens).toBe(3000);
+    expect(useSessionStore.getState().totalCost).toBe(0.02);
+  });
+
+  it("message_end attaches assistantMeta even when last message is not assistant", () => {
+    // A user message was appended after the assistant message (e.g. user typed
+    // while streaming was finishing). The handler should search backwards for
+    // the last assistant message, not just check messages[length-1].
+    useSessionStore.setState({
+      messages: [
+        {
+          id: "msg-1",
+          role: "assistant" as const,
+          parts: [{ type: "text" as const, text: "Hello" }],
+          timestamp: 0,
+        },
+        {
+          id: "msg-2",
+          role: "user" as const,
+          parts: [{ type: "text" as const, text: "Follow up" }],
+          timestamp: 1,
+        },
+      ],
+    });
+
+    const manifest = {
+      model: "deepseek-v3",
+      context_window: 64000,
+      input_tokens: 3000,
+      output_tokens: 150,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      segments: [],
+    };
+
+    store().onProviderEvent({
+      type: "message_end",
+      finish: "stop",
+      usage: {
+        input: 3000,
+        output: 150,
+        reasoning: 0,
+        cache_read: 0,
+        cache_write: 0,
+      },
+      cost: 0.02,
+      manifest,
+    });
+
+    const messages = useSessionStore.getState().messages;
+    // The assistant message (index 0) should have assistantMeta, not the user message.
+    expect(messages[0]!.assistantMeta).toBeDefined();
+    expect(messages[0]!.assistantMeta!.manifest).toBeDefined();
+    expect(messages[0]!.assistantMeta!.manifest!.model).toBe("deepseek-v3");
+    // The user message (index 1) should NOT have assistantMeta.
+    expect(messages[1]!.assistantMeta).toBeUndefined();
+  });
+
+  it("onSessionHistory preserves messages with assistantMeta but no visible parts", () => {
+    // An assistant message with only an empty text part (model returned empty)
+    // would normally be filtered out, but it has assistantMeta with a manifest
+    // that should be preserved for the inspector.
+    const manifest = {
+      model: "gpt-4o",
+      context_window: 128000,
+      input_tokens: 5000,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      reasoning_tokens: 0,
+      segments: [],
+    };
+
+    store().onSessionHistory([
+      {
+        id: "msg-empty",
+        session_id: "sess-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "text",
+            base: { id: "part-empty", message_id: "msg-empty", session_id: "sess-1" },
+            text: "",
+            synthetic: false,
+          },
+        ],
+        time: { created: 0, completed: undefined },
+        assistant: {
+          provider_id: "openai",
+          model_id: "gpt-4o",
+          cost: 0.01,
+          tokens: {
+            input: 5000,
+            output: 0,
+            reasoning: 0,
+            cache_read: 0,
+            cache_write: 0,
+          },
+          finish: "stop",
+          manifest,
+        },
+      },
+    ]);
+
+    const messages = useSessionStore.getState().messages;
+    // The message should be preserved despite having no visible parts,
+    // because it carries assistantMeta.
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.assistantMeta).toBeDefined();
+    expect(messages[0]!.assistantMeta!.manifest).toBeDefined();
+  });
+});

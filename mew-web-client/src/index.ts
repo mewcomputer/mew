@@ -95,9 +95,16 @@ export type ProviderEventWire =
   | { type: "part_end"; part_id: string }
   | {
       type: "message_end";
-      finish: "stop" | "tool_use" | "length" | "content_filter" | "error";
-      usage: { input: number; output: number };
+      finish: string;
+      usage: {
+        input: number;
+        output: number;
+        reasoning: number;
+        cache_read: number;
+        cache_write: number;
+      };
       cost: number;
+      manifest?: TurnManifest | null;
     }
   | {
       type: "retry_wait";
@@ -348,6 +355,7 @@ export interface AssistantMeta {
   tokens: Tokens;
   finish?: string | null;
   error?: MessageError | null;
+  manifest?: TurnManifest | null;
 }
 
 /** Token usage breakdown. */
@@ -357,6 +365,28 @@ export interface Tokens {
   reasoning: number;
   cache_read: number;
   cache_write: number;
+}
+
+/** Per-turn context window manifest. Captured at prompt assembly time. */
+export interface TurnManifest {
+  model: string;
+  context_window: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  reasoning_tokens?: number;
+  segments: Segment[];
+}
+
+/** A segment of the assembled prompt (system, tools, history, etc.). */
+export interface Segment {
+  label: string;
+  kind: string;
+  source_id?: string | null;
+  tokens: number;
+  tokens_scaled: number;
+  children: Segment[];
 }
 
 export type ServerMessage =

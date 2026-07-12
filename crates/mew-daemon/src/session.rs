@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use mew_agent::Agent;
+use mew_agent::PlanDecision;
 use mew_hooks::PermissionDecision;
 use mew_protocol::{ServerMessage, SessionInfo, SessionState};
 
@@ -72,6 +73,8 @@ pub struct Session {
     pub pending_permissions: Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>,
     /// Pending ask-user requests.
     pub pending_ask_user: Mutex<HashMap<String, oneshot::Sender<Vec<String>>>>,
+    /// Pending plan-approval requests (from `handoff_plan`).
+    pub pending_plan_approvals: Mutex<HashMap<String, oneshot::Sender<PlanDecision>>>,
     /// Monotonically increasing IDs for both clients and permission requests.
     pub next_id: AtomicU64,
     /// Token for the turn currently in progress, if any.
@@ -102,6 +105,7 @@ impl Session {
             clients: Mutex::new(Vec::new()),
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
+            pending_plan_approvals: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             current_turn_cancel: Mutex::new(None),
             model: Mutex::new(model),
@@ -173,6 +177,15 @@ impl Session {
         self.drain_pending().await;
     }
 
+    /// Count of pending requests that need a user answer: `ask_user_question`
+    /// plus `handoff_plan` approvals. Both surface as "questions" in the
+    /// session attention badge.
+    pub async fn pending_questions_count(&self) -> u32 {
+        let asks = self.pending_ask_user.lock().await.len();
+        let plans = self.pending_plan_approvals.lock().await.len();
+        (asks + plans) as u32
+    }
+
     /// Drop all pending oneshot senders. Call when the last client detaches
     /// mid-turn so the agent loop unblocks.
     pub async fn drain_pending(&self) {
@@ -180,6 +193,8 @@ impl Session {
         perms.clear();
         let mut asks = self.pending_ask_user.lock().await;
         asks.clear();
+        let mut plans = self.pending_plan_approvals.lock().await;
+        plans.clear();
     }
 }
 
@@ -355,7 +370,7 @@ impl SessionManager {
                 change_stats: meta.as_ref().and_then(|m| m.change_stats.clone()),
                 usage: meta.as_ref().and_then(|m| m.usage.as_ref().map(Into::into)),
                 pending_permissions: session.pending_permissions.lock().await.len() as u32,
-                pending_questions: session.pending_ask_user.lock().await.len() as u32,
+                pending_questions: session.pending_questions_count().await,
                 first_message,
             });
         }

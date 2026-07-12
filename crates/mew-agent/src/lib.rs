@@ -18,6 +18,17 @@ pub struct QuestionOption {
     pub description: String,
 }
 
+/// The user's decision on a `handoff_plan` request. Sent back through the
+/// `oneshot` channel carried by `AgentEvent::PlanApprovalRequest`. On
+/// `Approved` the agent queues the target persona switch; on
+/// `ChangesRequested` the feedback becomes the tool's (successful) result so
+/// the planner can revise and resubmit.
+#[derive(Debug, Clone)]
+pub enum PlanDecision {
+    Approved,
+    ChangesRequested(String),
+}
+
 /// One question in an `ask_user_question` request. Carried from the tool
 /// through `AgentEvent::AskUser` to the TUI, which renders the options as
 /// a numbered list and returns the selected answer (label or freeform text).
@@ -92,6 +103,20 @@ pub enum AgentEvent {
         call_id: String,
         questions: Vec<AskUserQuestion>,
         tx: oneshot::Sender<Vec<String>>,
+    },
+    /// The model called `handoff_plan`: present the completed plan to the user
+    /// for approval and block the tool until they respond. On `Approved` the
+    /// session switches to `persona`; on `ChangesRequested` the feedback flows
+    /// back as the tool result so the planner can revise and resubmit.
+    PlanApprovalRequest {
+        call_id: String,
+        /// Resolved plan path, for display.
+        plan_path: String,
+        /// Plan file content captured at submit time.
+        plan_markdown: String,
+        /// Target persona to switch to on approval.
+        persona: String,
+        tx: oneshot::Sender<PlanDecision>,
     },
     /// The session's todo list changed (or is being reported). Carries the
     /// full current snapshot so the TUI can render the sidebar pane without
@@ -219,6 +244,19 @@ impl std::fmt::Debug for AgentEvent {
                 .field("call_id", call_id)
                 .field("questions", questions)
                 .finish(),
+            AgentEvent::PlanApprovalRequest {
+                call_id,
+                plan_path,
+                plan_markdown,
+                persona,
+                ..
+            } => f
+                .debug_struct("PlanApprovalRequest")
+                .field("call_id", call_id)
+                .field("plan_path", plan_path)
+                .field("plan_markdown_len", &plan_markdown.len())
+                .field("persona", persona)
+                .finish(),
             AgentEvent::TodosUpdated { todos } => f
                 .debug_struct("TodosUpdated")
                 .field("count", &todos.len())
@@ -252,6 +290,7 @@ impl std::fmt::Debug for AgentEvent {
 
 mod agent;
 mod events;
+pub mod manifest;
 mod reasoning_truncator;
 pub mod runner;
 mod todos;

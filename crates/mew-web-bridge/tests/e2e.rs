@@ -402,6 +402,7 @@ async fn bridge_handles_tool_use_finish_end_to_end() {
             m,
             ServerMessage::Provider {
                 event: mew_message::ProviderEventWire::MessageEnd {
+                    manifest: None,
                     finish: Finish::ToolUse,
                     ..
                 }

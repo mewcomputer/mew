@@ -5,6 +5,18 @@
 @custom-variant dark (&:is(.dark *));
 @plugin "tailwindcss-animate";
 
+/* Context inspector color palette — shared across all themes. */
+:root {
+  --inspector-scaffold: oklch(0.55 0.02 250);
+  --inspector-context: oklch(0.55 0.12 220);
+  --inspector-skill: oklch(0.55 0.10 190);
+  --inspector-tools: oklch(0.55 0.13 70);
+  --inspector-message: oklch(0.55 0.12 150);
+  --inspector-part: oklch(0.55 0.08 170);
+  --inspector-compaction: oklch(0.55 0.14 50);
+  --inspector-free: oklch(0.35 0.01 250);
+}
+
 /** {
   @apply duration-150 ease-in-out;
 }*/

@@ -20,6 +20,7 @@ import type {
   AlertKind,
   ProjectInfo,
   PersonaInfo,
+  AssistantMeta,
 } from "@mew/web-client";
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,7 @@ export interface ChatMessage {
   role: "user" | "assistant";
   parts: MessagePart[];
   timestamp: number;
+  assistantMeta?: AssistantMeta;
 }
 
 export type MessagePart =
@@ -559,12 +561,43 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         break;
       }
       case "message_end": {
-        // Accumulate cost
-        set((s) => ({
-          totalInputTokens: s.totalInputTokens + ev.usage.input,
-          totalOutputTokens: s.totalOutputTokens + ev.usage.output,
-          totalCost: s.totalCost + ev.cost,
-        }));
+        set((s) => {
+          const totalInputTokens = s.totalInputTokens + ev.usage.input;
+          const totalOutputTokens = s.totalOutputTokens + ev.usage.output;
+          const totalCost = s.totalCost + ev.cost;
+
+          // Find the last assistant message (search backwards, not by
+          // position — an error or tool-result message may have been
+          // appended after the assistant message).
+          const lastAssistantIdx = [...s.messages]
+            .reverse()
+            .findIndex((m) => m.role === "assistant");
+          if (lastAssistantIdx === -1) {
+            return { totalInputTokens, totalOutputTokens, totalCost };
+          }
+          const idx = s.messages.length - 1 - lastAssistantIdx;
+
+          return {
+            totalInputTokens,
+            totalOutputTokens,
+            totalCost,
+            messages: s.messages.map((m, i) =>
+              i === idx
+                ? {
+                    ...m,
+                    assistantMeta: {
+                      provider_id: "",
+                      model_id: ev.manifest?.model ?? "",
+                      cost: ev.cost,
+                      tokens: ev.usage,
+                      finish: ev.finish,
+                      manifest: ev.manifest ?? undefined,
+                    },
+                  }
+                : m,
+            ),
+          };
+        });
         break;
       }
       case "retry_wait": {
@@ -876,8 +909,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             .map(wirePartToMessagePart)
             .filter((p): p is MessagePart => p !== null),
           timestamp: m.time.created,
+          assistantMeta: m.assistant ?? undefined,
         }))
-        .filter((m) => m.parts.length > 0),
+        .filter((m) => m.parts.length > 0 || m.assistantMeta),
       streamingPartId: null,
       streamingText: "",
       streamingReasoningId: null,

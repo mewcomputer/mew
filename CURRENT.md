@@ -1,5 +1,97 @@
 # Current Progress — Consolidate Agent Construction
 
+## 2026-07-12 — Context Window Inspector: Step 6 (Cache-Derived Prior Refinement)
+
+**Status: COMPLETE ✅**
+
+### Summary
+Split the single global scaling factor in `backfill_manifest` into warm-prefix and cold-suffix groups. When `cache_read_tokens` (and optionally `cache_write_tokens`) are nonzero, the first N segments whose cumulative local-token proportion best matches the cache proportion are scaled against `cache_read + cache_write`, and the remaining segments are scaled against `input - (cache_read + cache_write)`. This tightens estimates for the big static segments (scaffold, tools, context files) whose true token total is known from the cache read. Degrades gracefully to global scaling when cache info is absent, the split is degenerate (all-warm/all-cold), or the ratio error exceeds tolerance.
+
+### Changes
+
+**`crates/mew-agent/src/manifest.rs`:**
+- `backfill_manifest` — rewrote scaling logic to attempt prefix/suffix split before falling back to global scaling. `warm_target = cache_read + cache_write`; if 0, uses single global factor. Uses `saturating_add` to avoid overflow.
+- `find_cache_split(segments, warm_target, input_tokens) -> Option<usize>` — new helper. Walks segment boundaries (1..len-1), picks the split index minimizing absolute ratio error between the cumulative local proportion and `warm_target/input_tokens`. Returns `None` when: segments < 2, `warm_target >= input_tokens`, total local tokens == 0, best split would be all-warm/all-cold, or ratio error exceeds tolerance (`max(target_ratio/2, 0.15)`).
+- `apply_split_scaling(segments, split_idx, warm_target, input_tokens)` — new helper. Computes warm/cold local subtotals and their respective scale factors, then applies the correct factor to each segment based on its position relative to the split index. Children scale with their parent's group factor.
+- 12 new tests covering: perfect ratio match, different scale ratios, degradation to global (no cache, all-warm, ratio mismatch), cache_write inclusion, very small cold suffix, sum invariant with messy numbers, multi-segment best-boundary selection, children scaled with parent group, and `find_cache_split` edge cases (single segment, warm exceeds input).
+
+### Verification
+- `cargo build -p mew-agent` ✅
+- `cargo test -p mew-agent` — 122 tests pass (27 manifest tests: 15 existing + 12 new) ✅
+- `cargo clippy -p mew-agent -- -D warnings` ✅
+- `cargo fmt --check -p mew-agent` ✅
+- Pre-existing `mew` binary build failures (unwired `PlanApprovalRequest` variants in daemon/tui) are unrelated WIP.
+
+### Acceptance Criteria — All Met
+- AC.1 ✅ Prefix/suffix split scaling when `cache_read_tokens > 0` and a clean split is found
+- AC.2 ✅ Warm prefix scaled against `cache_read + cache_write`, cold suffix against `input - (cache_read + cache_write)`
+- AC.3 ✅ Graceful degradation to global scaling when cache is absent (0), all-warm, or ratio mismatch
+- AC.4 ✅ Sum invariant: `Σ tokens_scaled == input_tokens` (±2 for rounding) in all paths
+- AC.5 ✅ Children scaled with parent's group factor
+- AC.6 ✅ 12 tests covering split behavior and edge cases
+- AC.7 ✅ Clippy clean, fmt clean, all tests pass
+
+---
+
+## 2026-07-11 — Context Window Inspector: Steps 4-5 (tiktoken + Web UI)
+
+**Status: COMPLETE ✅**
+
+### Summary
+Shipped the context window inspector to the web UI. Integrated `tiktoken` (v3.5.1) for real per-segment token estimates (supports DeepSeek, Qwen, Llama, Mistral encodings). Added `manifest` to `ProviderEventWire::MessageEnd` so the web client gets manifests during live streaming. Built `MessageInspector` component with collapsed summary line, stacked bar, and expandable segment tree. All counts prefixed with `~` (per user request — most models use compatible endpoints but aren't actually OpenAI/Anthropic).
+
+### Changes
+
+**Rust — tiktoken integration (Step 4):**
+- `Cargo.toml` + `crates/mew-agent/Cargo.toml` — added `tiktoken = "3.5"` workspace dep
+- `crates/mew-agent/src/manifest.rs` — added `count_tokens(text, model_id)` using `tiktoken::encoding_for_model()` with `cl100k_base` fallback. Threaded `model_id` through all segment builders (`build_system_segments`, `build_tools_segment`, `build_history_segment`, `build_message_segment`, `build_part_segment`). Each segment now counts the text it segments and stores the result in `tokens`. Tool calls use `state.input()` (not `raw_input`, which is `#[serde(skip)]`). Updated existing tests: `test_manifest_tokens_zero_before_backfill` → `test_manifest_tokens_nonzero_after_build`; `test_backfill_manifest_no_scaling_when_tokens_zero` now manually zeroes tokens. Added `test_count_tokens_returns_nonzero` + `test_count_tokens_unknown_model_falls_back`.
+
+**Rust — wire protocol (Step 3):**
+- `crates/mew-message/src/lib.rs` — added `manifest: Option<TurnManifest>` with `#[serde(default, skip_serializing_if = "Option::is_none")]` to `ProviderEventWire::MessageEnd`
+- `crates/mew-protocol/src/lib.rs` — `provider_event_to_wire` sets `manifest: None`; daemon overrides. Added `message_end_with_manifest_roundtrip` test. Fixed pre-existing clippy `large_enum_variant` warnings (boxed `ExtensionEvent` and `MessageEnd.message`). Updated existing test to include `manifest: None`.
+- `crates/mew-daemon/src/lib.rs` — `translate_event` extracts manifest from last assistant message in `agent.messages` after `MessageEnd` and attaches it to the wire event
+- `crates/mew-daemon/src/client.rs` — `wire_to_provider_event` ignores the manifest field
+- `crates/mew-mobile-core/src/lib.rs` + `state.rs` — added `..` to match arms, `manifest: None` to test constructions
+
+**TypeScript — web client (Step 4):**
+- `mew-web-client/src/index.ts` — added `TurnManifest` + `Segment` types, `manifest?: TurnManifest | null` on `AssistantMeta`, fixed `message_end` usage type to include all 5 fields (`reasoning`, `cache_read`, `cache_write`), added `manifest?` to `message_end`
+
+**TypeScript — web UI store (Step 5):**
+- `mew-web-ui/src/stores/session.ts` — extended `ChatMessage` with `assistantMeta?: AssistantMeta`, preserved `m.assistant` in `onSessionHistory`, attached `assistantMeta` (with manifest) to last assistant message on `message_end`
+
+**TypeScript — MessageInspector component (Steps 7-8):**
+- `mew-web-ui/src/components/message-inspector.tsx` (new) — collapsed summary line (`~9.7k ↓ · ~238 ↑ · 8% (~9.7k/128.0k)` with cache warmth prefix), expandable stacked bar (proportional segment widths, CSS variable colors per `SegmentKind`), segment tree (disclosure triangles, `~tokens_scaled`, label). Uses plain `useState` toggle (not Radix Collapsible — jsdom compatibility). Error case shows "error · structure below".
+- `mew-web-ui/src/components/message-item.tsx` — renders `<MessageInspector>` below assistant messages with a manifest
+- `mew-web-ui/src/index.css` — added `:root` CSS variables for inspector color palette (10 segment kinds)
+- `mew-web-ui/src/components/ui/collapsible.tsx` — installed via shadcn (not used in final implementation)
+
+**Tests:**
+- `mew-web-ui/src/__tests__/message-inspector.test.tsx` (new) — 5 tests: summary line with `~` prefix, error state, expand to segment tree, token counts visible, child segment expansion
+- `mew-web-ui/src/__tests__/store.test.ts` — 2 new tests: `onSessionHistory` preserves `assistantMeta`, `message_end` attaches `assistantMeta`
+
+### Verification
+- `cargo build -p mew` ✅
+- `cargo test -p mew-agent` — 107 tests pass (12 manifest tests) ✅
+- `cargo test -p mew-protocol` — 96 tests pass ✅
+- `cargo clippy` clean across all affected crates ✅
+- `cargo fmt --check` clean ✅
+- `pnpm build` (web-client + web-ui) ✅
+- `pnpm test` — 45 tests pass (5 inspector + 2 store) ✅
+
+### Acceptance Criteria — All Met
+- AC.1 ✅ `count_tokens` returns nonzero, falls back to cl100k_base
+- AC.2 ✅ `build_manifest` produces nonzero token segments
+- AC.3 ✅ `backfill_manifest` scales `tokens_scaled` to sum to `input_tokens`
+- AC.4 ✅ `ProviderEventWire::MessageEnd` includes `manifest` with serde attrs, round-trips
+- AC.5 ✅ Web client exports `TurnManifest`/`Segment` types, `message_end` usage has 5 fields
+- AC.6 ✅ Store preserves `assistantMeta` in `onSessionHistory`, attaches on `message_end`
+- AC.7 ✅ `MessageInspector` renders summary line with `~` prefix
+- AC.8 ✅ `MessageInspector` shows "error · structure below" for `None` input
+- AC.9 ✅ `MessageInspector` expands to show segment tree with token counts
+- AC.10 ✅ Clippy clean, fmt clean, builds clean, tests pass
+
+---
+
 ## 2026-07-10 — Phase 2 Completion: Fix Tests, Install Command, OS Sandbox, Token Management
 
 **Status: COMPLETE ✅**
@@ -589,3 +681,14 @@ so it shows in the UI the user is already looking at.
 - `cargo fmt -p mew-mobile-core -- --check` → clean
 - `just ios-core` → framework + bindings rebuilt
 - `xcodebuild ... build` (iPhone 17 sim) → BUILD SUCCEEDED
+
+## 2026-07-12 — render-rate plan written
+
+Explored the TUI render pipeline (tick generator in mew-tui/src/events.rs, needs_redraw
+gating in both loops in crates/mew/src/commands/tui.rs, chat_dirty cache) and wrote
+notes/render-rate-plan.md: ms turn timer in the status bar, frame-time meter as a
+render-stall detector, configurable tick rate with macOS refresh-rate autodetect
+("auto" via core-graphics), and DEC 2026 synchronized-output brackets. Key decisions:
+timer never lives in the cached chat content; frame meter never forces redraws (idle
+stays at zero draws); spinner must move from tick-count to elapsed-time before the
+tick rate becomes configurable. Implementation not started.

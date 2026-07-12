@@ -369,6 +369,7 @@ mod tests {
         assert_eq!(state.usage_cost, 0.0);
 
         state.apply_provider_event(&mew_message::ProviderEventWire::MessageEnd {
+            manifest: None,
             finish: mew_message::Finish::Stop,
             usage: mew_message::Tokens::default(),
             cost: 0.0042,
@@ -385,6 +386,7 @@ mod tests {
 
         // First turn: 100 input, 50 output tokens.
         state.apply_provider_event(&mew_message::ProviderEventWire::MessageEnd {
+            manifest: None,
             finish: mew_message::Finish::Stop,
             usage: mew_message::Tokens {
                 input: 100,
@@ -399,6 +401,7 @@ mod tests {
 
         // Second turn: 200 input, 75 output tokens — should accumulate.
         state.apply_provider_event(&mew_message::ProviderEventWire::MessageEnd {
+            manifest: None,
             finish: mew_message::Finish::Stop,
             usage: mew_message::Tokens {
                 input: 200,

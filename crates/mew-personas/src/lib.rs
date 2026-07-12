@@ -337,10 +337,12 @@ pub fn builtin_defaults() -> Vec<Persona> {
                     "read".into(),
                     "glob".into(),
                     "grep".into(),
-                    "write".into(),
-                    "edit".into(),
+                    "write_plan".into(),
+                    "edit_plan".into(),
+                    "handoff_plan".into(),
                     "ask_user_question".into(),
                     "flag_important".into(),
+                    "subagent".into(),
                     "todo_create".into(),
                     "todo_update".into(),
                     "todo_complete".into(),
@@ -358,10 +360,12 @@ pub fn builtin_defaults() -> Vec<Persona> {
                 // any mutating or dangerous tool calls, since the planner is
                 // meant to be read-only.
                 autonomous_hint: Some(
-                    "This persona is read-only. Be strict about shell commands, \
-                     file writes, and any tool that modifies state. Deny or \
-                     escalate unless the action is clearly part of writing \
-                     the plan file."
+                    "This persona is read-only. The write_plan, edit_plan, and \
+                     handoff_plan tools only touch the configured plan file and \
+                     are part of the normal planning workflow — allow them. Be \
+                     strict about shell commands, arbitrary file writes, and any \
+                     other tool that modifies state: deny or escalate unless the \
+                     action is clearly part of investigating or writing the plan."
                         .into(),
                 ),
                 ..Default::default()
@@ -611,10 +615,14 @@ mod tests {
             .tools
             .as_ref()
             .expect("planner has tool allowlist");
-        // Planner can investigate and write plans, but can't run shell commands.
+        // Planner can investigate and write plans via the plan-workflow
+        // tools, but can't run shell commands or write arbitrary files.
         assert!(tools.contains(&"read".to_string()));
         assert!(tools.contains(&"grep".to_string()));
-        assert!(tools.contains(&"write".to_string()));
+        assert!(tools.contains(&"write_plan".to_string()));
+        assert!(tools.contains(&"edit_plan".to_string()));
+        assert!(tools.contains(&"handoff_plan".to_string()));
+        assert!(!tools.contains(&"write".to_string()));
         assert!(!tools.contains(&"bash".to_string()));
     }
 

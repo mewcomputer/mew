@@ -252,6 +252,18 @@ pub struct Agent {
     /// `None`, each bash call spawns a fresh process (the existing
     /// behavior). Set via `set_shell_session`.
     pub shell_session: Option<mew_tools::tools::shell_session::SharedShellSession>,
+    /// Per-turn manifest captured at prompt assembly time. Set before
+    /// `provider.stream()` in the turn loop (via `pending_manifest.lock()`),
+    /// consumed by `start_assistant_message` when the first `PartStart`
+    /// creates the assistant `Message`. Backfilled with usage tokens after
+    /// `MessageEnd`. Uses `Arc<Mutex>` because `Agent` derives `Clone`
+    /// and `handle_provider_event`/`start_assistant_message` take `&self`.
+    pub pending_manifest: Arc<std::sync::Mutex<Option<mew_message::TurnManifest>>>,
+    /// Cache of token counts per message ID, to avoid re-tokenizing
+    /// immutable history messages on every turn. Keyed by `MessageId` (Ulid).
+    /// Cleared on compaction (message list replacement).
+    pub token_count_cache:
+        Arc<std::sync::Mutex<std::collections::HashMap<mew_message::MessageId, u32>>>,
 }
 
 /// Builds a new provider for a `provider/model` pair. Used by the turn
@@ -338,6 +350,8 @@ impl Agent {
             plan_path: None,
             provider_builder: None,
             shell_session: None,
+            pending_manifest: Arc::new(std::sync::Mutex::new(None)),
+            token_count_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -837,6 +851,9 @@ impl Agent {
 
     pub async fn load_messages(&self, messages: Vec<Message>) {
         *self.messages.lock().await = messages;
+        // Clear the token count cache — message IDs may have changed
+        // (e.g. on session resume or compaction).
+        self.token_count_cache.lock().unwrap().clear();
     }
 
     /// Return a clone of this agent's persisted session metadata, if any.
@@ -920,6 +937,19 @@ impl Agent {
         (chars / 4) as u32
     }
 
+    /// Resolve the configured plan path against the current working directory.
+    /// Returns `None` when no `plan_path` is configured. Relative paths are
+    /// joined onto `std::env::current_dir()`; absolute paths are used as-is.
+    pub fn resolved_plan_path(&self) -> Option<PathBuf> {
+        self.plan_path.as_ref().map(|plan_path| {
+            if plan_path.is_absolute() {
+                plan_path.clone()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(plan_path)
+            }
+        })
+    }
+
     pub fn run(&self, prompt: String) -> mpsc::Receiver<AgentEvent> {
         self.run_with_parts(prompt, vec![], None)
     }
@@ -936,12 +966,7 @@ impl Agent {
         // Auto-flag the plan file as important if it exists. This guarantees
         // the plan survives context compaction without the model having to
         // remember to call flag_important every turn.
-        if let Some(ref plan_path) = self.plan_path {
-            let path = if plan_path.is_absolute() {
-                plan_path.clone()
-            } else {
-                std::env::current_dir().unwrap_or_default().join(plan_path)
-            };
+        if let Some(path) = self.resolved_plan_path() {
             if path.exists() {
                 let path = path.clone();
                 let flagged = self.flagged_files.clone();

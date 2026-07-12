@@ -295,6 +295,7 @@ async fn tcp_listener_accepts_tool_call_shaped_response() {
             m,
             ServerMessage::Provider {
                 event: mew_message::ProviderEventWire::MessageEnd {
+                    manifest: None,
                     finish: Finish::ToolUse,
                     ..
                 }

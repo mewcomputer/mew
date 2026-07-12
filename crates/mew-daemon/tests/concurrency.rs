@@ -647,6 +647,7 @@ async fn slash_command_during_in_flight_turn_does_not_block_stream() {
             m,
             ServerMessage::Provider {
                 event: mew_message::ProviderEventWire::MessageEnd {
+                    manifest: None,
                     finish: Finish::Stop,
                     ..
                 }

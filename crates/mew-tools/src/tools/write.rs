@@ -77,7 +77,7 @@ impl Tool for Write {
                 old_len,
                 content.len()
             );
-            diff_text.push_str(&make_unified_diff(old, content, &path));
+            diff_text.push_str(&super::make_unified_diff(old, content, &path));
             Some(diff_text)
         } else {
             let preview: String = content
@@ -105,30 +105,6 @@ impl Tool for Write {
             )),
             ..Default::default()
         })
-    }
-}
-
-/// Build a compact unified diff of two file contents.
-fn make_unified_diff(old: &str, new: &str, path: &std::path::Path) -> String {
-    use similar::TextDiff;
-
-    let diff = TextDiff::from_lines(old, new);
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-
-    let mut out = String::new();
-    for hunk in diff
-        .unified_diff()
-        .context_radius(3)
-        .header(file_name, file_name)
-        .iter_hunks()
-    {
-        out.push_str(&hunk.to_string());
-    }
-
-    if out.trim().is_empty() {
-        file_name.to_string()
-    } else {
-        out
     }
 }
 

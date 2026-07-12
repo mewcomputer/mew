@@ -5,6 +5,7 @@ import { ToolCallCard } from "./tool-call-card";
 import { MarkdownBody } from "./markdown-body";
 import { CopyButton } from "./copy-button";
 import { ReasoningBlock } from "./reasoning-block";
+import { MessageInspector } from "./message-inspector";
 import { cn } from "../lib/utils";
 
 /** Group consecutive tool-call parts together so they can be collapsed
@@ -132,6 +133,9 @@ export function MessageItem({
         // Group of consecutive tool calls.
         return <ToolCallGroup key={i} parts={group.parts} />;
       })}
+      {!isUser && message.assistantMeta?.manifest && (
+        <MessageInspector manifest={message.assistantMeta.manifest} />
+      )}
     </div>
   );
 }

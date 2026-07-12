@@ -43,11 +43,13 @@ use mew_tools::tools::ask_user::AskUser;
 use mew_tools::tools::bash::Bash;
 use mew_tools::tools::echo::Echo;
 use mew_tools::tools::edit_hashline::EditHashline;
+use mew_tools::tools::edit_plan::EditPlan;
 use mew_tools::tools::edit_str_replace::EditStrReplace;
 use mew_tools::tools::exit_tool::ExitTool;
 use mew_tools::tools::flag_important::{FlagImportant, FlaggedFile};
 use mew_tools::tools::glob::Glob;
 use mew_tools::tools::grep::Grep;
+use mew_tools::tools::handoff_plan::HandoffPlan;
 use mew_tools::tools::jobs::{JobBlock, JobCancel, JobStatus, ShellBackground, ShellMonitor};
 use mew_tools::tools::progress_update::ProgressUpdate;
 use mew_tools::tools::read::Read;
@@ -56,6 +58,7 @@ use mew_tools::tools::switch_persona::SwitchPersona as SwitchPersonaTool;
 use mew_tools::tools::todo::{TodoComplete, TodoCreate, TodoDelete, TodoListTool, TodoUpdate};
 use mew_tools::tools::web_fetch::WebFetch;
 use mew_tools::tools::write::Write;
+use mew_tools::tools::write_plan::WritePlan;
 use mew_tools::SecretSet;
 
 use crate::setup::providers::{
@@ -72,6 +75,7 @@ pub(crate) fn build_tools(
     pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
     current_persona_name: Arc<tokio::sync::RwLock<Option<String>>>,
     hashline_enabled: bool,
+    plan_path: String,
 ) -> Vec<Arc<dyn mew_tools::Tool>> {
     let mut tools: Vec<Arc<dyn mew_tools::Tool>> = vec![
         Arc::new(Read),
@@ -95,6 +99,11 @@ pub(crate) fn build_tools(
         Arc::new(TodoDelete),
         Arc::new(TodoListTool),
         Arc::new(WebFetch),
+        // Plan-workflow tools. Registered unconditionally; nothing enforces
+        // planner-only use — persona allowlists gate access when set.
+        Arc::new(WritePlan::new(plan_path.clone())),
+        Arc::new(EditPlan::new(plan_path)),
+        Arc::new(HandoffPlan),
     ];
     if hashline_enabled {
         tools.insert(3, Arc::new(EditHashline));
@@ -698,6 +707,7 @@ pub(crate) fn build_session_agent(
         pending_persona_switch.clone(),
         current_persona_name.clone(),
         crate::commands::config::hashline_enabled_for(cfg, provider_id),
+        cfg.plan_path.clone(),
     );
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =

@@ -1158,6 +1158,7 @@ fn translate_message(
                         usage,
                         cost,
                         finish,
+                        ..
                     } => {
                         ss.apply_provider_event(event);
                         let failed = *finish == mew_message::Finish::Error;

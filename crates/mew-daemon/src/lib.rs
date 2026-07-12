@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
-use mew_agent::{Agent, AgentEvent};
+use mew_agent::{Agent, AgentEvent, PlanDecision};
 use mew_protocol::{ClientMessage, Question, QuestionOption, ServerMessage, SessionState};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
@@ -692,7 +692,7 @@ where
                         .await;
                     // Broadcast updated attention count.
                     let perm_count = session.pending_permissions.lock().await.len() as u32;
-                    let q_count = session.pending_ask_user.lock().await.len() as u32;
+                    let q_count = session.pending_questions_count().await;
                     session_manager
                         .broadcast_all(ServerMessage::SessionAttentionChanged {
                             session_id: session.id.clone(),
@@ -716,7 +716,41 @@ where
                         .await;
                     // Broadcast updated attention count.
                     let perm_count = session.pending_permissions.lock().await.len() as u32;
-                    let q_count = session.pending_ask_user.lock().await.len() as u32;
+                    let q_count = session.pending_questions_count().await;
+                    session_manager
+                        .broadcast_all(ServerMessage::SessionAttentionChanged {
+                            session_id: session.id.clone(),
+                            pending_permissions: perm_count,
+                            pending_questions: q_count,
+                        })
+                        .await;
+                }
+            }
+            ClientMessage::PlanApprovalResponse {
+                request_id,
+                approved,
+                feedback,
+            } => {
+                if let Some(session) = &attached_session {
+                    let tx = session
+                        .pending_plan_approvals
+                        .lock()
+                        .await
+                        .remove(&request_id);
+                    if let Some(tx) = tx {
+                        let decision = if approved {
+                            PlanDecision::Approved
+                        } else {
+                            PlanDecision::ChangesRequested(feedback.unwrap_or_default())
+                        };
+                        let _ = tx.send(decision);
+                    }
+                    session
+                        .broadcast(ServerMessage::RequestResolved { request_id })
+                        .await;
+                    // Broadcast updated attention count.
+                    let perm_count = session.pending_permissions.lock().await.len() as u32;
+                    let q_count = session.pending_questions_count().await;
                     session_manager
                         .broadcast_all(ServerMessage::SessionAttentionChanged {
                             session_id: session.id.clone(),
@@ -1727,24 +1761,59 @@ async fn translate_event(
 ) -> Vec<ServerMessage> {
     match event {
         AgentEvent::Provider(pe) => {
-            // Intercept MessageEnd to accumulate usage on Meta.
+            // Intercept MessageEnd to accumulate usage on Meta and extract manifest.
             if let mew_provider::ProviderEvent::MessageEnd { usage, cost, .. } = &pe {
                 let dir = session.session_dir.clone();
-                let agent = session.agent.lock().await;
-                if let Some(mut meta) = agent.session_meta().await {
-                    let u = meta
-                        .usage
-                        .get_or_insert_with(mew_session::SessionUsage::default);
-                    u.add_message(
-                        usage.input as u64,
-                        usage.output as u64,
-                        usage.cache_read as u64,
-                        usage.cache_write as u64,
-                        *cost,
-                    );
-                    let usage_clone = u.clone();
-                    let _ = meta.set_usage(&dir, usage_clone).await;
+
+                // Phase 1: accumulate usage on session meta while holding agent lock.
+                {
+                    let agent = session.agent.lock().await;
+                    if let Some(mut meta) = agent.session_meta().await {
+                        let u = meta
+                            .usage
+                            .get_or_insert_with(mew_session::SessionUsage::default);
+                        u.add_message(
+                            usage.input as u64,
+                            usage.output as u64,
+                            usage.cache_read as u64,
+                            usage.cache_write as u64,
+                            *cost,
+                        );
+                        let usage_clone = u.clone();
+                        let _ = meta.set_usage(&dir, usage_clone).await;
+                    }
+                    // agent guard dropped here — do NOT hold it across messages lock.
                 }
+
+                // Phase 2: extract manifest from the last *assistant* message.
+                // Search backwards instead of relying on .last() being the
+                // assistant message — an ack message may have been appended
+                // between MessageEnd dispatch and translate_event.
+                //
+                // Clone the Arc to the messages mutex and drop the agent guard
+                // before locking messages — avoids nested async locks.
+                let messages_arc = {
+                    let agent = session.agent.lock().await;
+                    agent.messages.clone()
+                };
+                let manifest = {
+                    let messages = messages_arc.lock().await;
+                    messages
+                        .iter()
+                        .rev()
+                        .find_map(|m| m.assistant.as_ref())
+                        .and_then(|meta| meta.manifest.clone())
+                };
+
+                let mut wire = mew_protocol::provider_event_to_wire(&pe);
+                if let mew_message::ProviderEventWire::MessageEnd {
+                    manifest: ref mut m,
+                    ..
+                } = &mut wire
+                {
+                    *m = manifest;
+                }
+                return vec![ServerMessage::Provider { event: wire }];
             }
             vec![ServerMessage::Provider {
                 event: mew_protocol::provider_event_to_wire(&pe),
@@ -1789,7 +1858,7 @@ async fn translate_event(
                 ServerMessage::SessionAttentionChanged {
                     session_id: session.id.clone(),
                     pending_permissions: session.pending_permissions.lock().await.len() as u32,
-                    pending_questions: session.pending_ask_user.lock().await.len() as u32,
+                    pending_questions: session.pending_questions_count().await,
                 },
             ]
         }
@@ -1840,7 +1909,41 @@ async fn translate_event(
                 ServerMessage::SessionAttentionChanged {
                     session_id: session.id.clone(),
                     pending_permissions: session.pending_permissions.lock().await.len() as u32,
-                    pending_questions: session.pending_ask_user.lock().await.len() as u32,
+                    pending_questions: session.pending_questions_count().await,
+                },
+            ]
+        }
+        AgentEvent::PlanApprovalRequest {
+            call_id,
+            plan_path,
+            plan_markdown,
+            persona,
+            tx,
+        } => {
+            let id = session.next_request_id();
+            session
+                .pending_plan_approvals
+                .lock()
+                .await
+                .insert(id.clone(), tx);
+            vec![
+                ServerMessage::PlanApprovalRequest {
+                    request_id: id,
+                    call_id,
+                    plan_path,
+                    plan_markdown,
+                    persona,
+                },
+                ServerMessage::SessionAlert {
+                    session_id: session.id.clone(),
+                    title: session.display_title().await,
+                    kind: mew_protocol::AlertKind::InputNeeded,
+                    detail: None,
+                },
+                ServerMessage::SessionAttentionChanged {
+                    session_id: session.id.clone(),
+                    pending_permissions: session.pending_permissions.lock().await.len() as u32,
+                    pending_questions: session.pending_questions_count().await,
                 },
             ]
         }

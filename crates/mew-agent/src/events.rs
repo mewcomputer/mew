@@ -71,6 +71,11 @@ impl Agent {
                         meta.finish = Some(*finish);
                         meta.tokens = *usage;
                         meta.cost = computed_cost;
+                        // Backfill the manifest with real usage data and
+                        // scale segment token counts.
+                        if let Some(ref mut manifest) = meta.manifest {
+                            crate::manifest::backfill_manifest(manifest, usage);
+                        }
                     }
                     self.append_message(msg.clone()).await;
                 }
@@ -189,6 +194,11 @@ impl Agent {
     }
 
     pub(crate) fn start_assistant_message(&self) -> Message {
+        // Consume the pending manifest captured at prompt assembly time.
+        // If the turn errors before PartStart fires, the manifest stays
+        // in the mutex and is overwritten at the top of the next turn.
+        let manifest = self.pending_manifest.lock().unwrap().take();
+
         Message {
             id: ulid::Ulid::new(),
             session_id: self.session_id,
@@ -205,6 +215,7 @@ impl Agent {
                 tokens: Tokens::default(),
                 finish: None,
                 error: None,
+                manifest,
             }),
         }
     }

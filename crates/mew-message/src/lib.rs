@@ -40,6 +40,8 @@ pub struct AssistantMeta {
     pub finish: Option<Finish>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<MessageError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<TurnManifest>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
@@ -185,6 +187,84 @@ pub struct CompactionPart {
     pub tail_start_id: Option<MessageId>,
 }
 
+// ---------------------------------------------------------------------------
+// Context window inspector — per-turn manifest
+// ---------------------------------------------------------------------------
+
+/// A per-turn snapshot of what was in the model's context window when it
+/// produced a given reply. Captured at prompt assembly time (before the
+/// provider call), with usage backfilled after the response arrives.
+///
+/// On errored turns, `input_tokens`/`output_tokens` remain `None` — the
+/// segment tree is still viewable, which is exactly when you need it most.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TurnManifest {
+    /// Model ID (from Agent.model_id, NOT Request.model which is empty).
+    pub model: String,
+    /// Context window from the catalog (Agent.context_window).
+    pub context_window: u32,
+    /// Input tokens from the API usage response. `None` before the response
+    /// arrives or on errored turns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u32>,
+    /// Output tokens from the API usage response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u32>,
+    /// Cache-read tokens (prompt cache hits). Provider-specific.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u32>,
+    /// Cache-write tokens (prompt cache misses that were written).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u32>,
+    /// Reasoning/thinking tokens (Anthropic counts separately).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
+    /// Top-level segments of the assembled prompt.
+    pub segments: Vec<Segment>,
+}
+
+/// One segment of the assembled prompt (system prompt section, tool schemas,
+/// a message in history, etc.). Segments form a tree via `children`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Segment {
+    /// Human-readable label ("scaffold", "tools", "history", message role, etc.).
+    pub label: String,
+    /// What kind of segment this is — drives UI color/action.
+    pub kind: SegmentKind,
+    /// ULID of the source message/part for content hydration. `None` for
+    /// static segments whose content is reproducible from config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<Ulid>,
+    /// Local tokenizer estimate (tiktoken for OpenAI, approximate for others).
+    /// Zero until the tokenizer is integrated.
+    pub tokens: u32,
+    /// Scaled so siblings sum to `input_tokens`. Zero until backfill.
+    pub tokens_scaled: u32,
+    /// Nested segments (e.g., history → messages → parts).
+    #[serde(default)]
+    pub children: Vec<Segment>,
+}
+
+/// Categorizes a segment for UI rendering and user actionability.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SegmentKind {
+    /// System prompt boilerplate.
+    Scaffold,
+    /// CLAUDE.md / AGENTS.md, per-cwd/git-root.
+    ContextFile,
+    /// Disk-loaded skill injected as tool description.
+    Skill,
+    /// Tool schemas (pre-SDK-transform — known gap).
+    Tools,
+    /// A message in the conversation history.
+    Message,
+    /// A part within a message.
+    Part,
+    /// Compaction summary (synthetic message replacing old history).
+    CompactionSummary,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ToolState {
@@ -294,6 +374,8 @@ pub enum ProviderEventWire {
         finish: Finish,
         usage: Tokens,
         cost: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        manifest: Option<TurnManifest>,
     },
     RetryWait {
         attempt: u32,
@@ -619,6 +701,7 @@ mod tests {
                 },
                 finish: Some(Finish::ToolUse),
                 error: None,
+                manifest: None,
             }),
         };
         roundtrip("msg with tool calls", &m);
@@ -651,6 +734,7 @@ mod tests {
                     kind: ErrorKind::Aborted,
                     message: "cancelled".into(),
                 }),
+                manifest: None,
             }),
         };
         roundtrip("msg with error", &m);

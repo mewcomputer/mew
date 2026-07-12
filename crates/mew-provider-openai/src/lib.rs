@@ -818,6 +818,7 @@ mod tests {
                 tokens: Tokens::default(),
                 finish: None,
                 error: None,
+                manifest: None,
             }),
         };
         let wire = adapter.build_wire_message(&[], &msg).await;
@@ -871,6 +872,7 @@ mod tests {
                 tokens: Tokens::default(),
                 finish: None,
                 error: None,
+                manifest: None,
             }),
         };
         let wire = adapter.build_wire_message(&[], &msg).await;

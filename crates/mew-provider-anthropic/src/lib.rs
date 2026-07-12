@@ -894,6 +894,7 @@ mod tests {
                 tokens: Tokens::default(),
                 finish: None,
                 error: None,
+                manifest: None,
             }),
         };
         let wire = adapter.build_wire_message(&[], &msg).await;
@@ -955,6 +956,7 @@ mod tests {
                 tokens: Tokens::default(),
                 finish: None,
                 error: None,
+                manifest: None,
             }),
         };
         let wire = adapter.build_wire_message(&[], &msg).await.unwrap();
@@ -1011,6 +1013,7 @@ mod tests {
                 tokens: Tokens::default(),
                 finish: None,
                 error: None,
+                manifest: None,
             }),
         };
         let user_msg = Message {

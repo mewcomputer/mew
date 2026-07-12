@@ -297,6 +297,17 @@ impl Agent {
             };
 
             let req_for_fallback = req.clone();
+
+            // Capture the manifest before dispatch — this is the single
+            // best point: Request is fully assembled, all data is still
+            // structured, and we haven't entered the stream loop yet.
+            *self.pending_manifest.lock().unwrap() = Some(crate::manifest::build_manifest(
+                &req,
+                &self.model_id,
+                self.context_window,
+                &self.token_count_cache,
+            ));
+
             let mut stream = match self.provider.stream(req).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -400,6 +411,7 @@ impl Agent {
                                     kind: ErrorKind::Aborted,
                                     message: "aborted".into(),
                                 }),
+                                manifest: None,
                             });
                             self.append_message(msg.clone()).await;
                         }
@@ -504,6 +516,7 @@ impl Agent {
                             kind: ErrorKind::Aborted,
                             message: "aborted".into(),
                         }),
+                        manifest: None,
                     });
                     self.append_message(msg.clone()).await;
                 }
