@@ -450,6 +450,25 @@ impl MobileCore {
         }
     }
 
+    /// Respond to a plan-approval request. `approved = false` with optional
+    /// `feedback` requests changes.
+    pub fn respond_plan_approval(
+        &self,
+        id: DaemonId,
+        request_id: String,
+        approved: bool,
+        feedback: Option<String>,
+    ) {
+        let conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(&id.node_id) {
+            let _ = conn.tx.send(ClientMessage::PlanApprovalResponse {
+                request_id,
+                approved,
+                feedback,
+            });
+        }
+    }
+
     /// List sessions on a daemon.
     pub fn list_sessions(&self, id: DaemonId) {
         let conns = self.connections.lock().unwrap();
@@ -1301,6 +1320,32 @@ fn translate_message(
                 request_id: request_id.clone(),
                 call_id: call_id.clone(),
                 questions: questions.iter().map(|q| q.prompt.clone()).collect(),
+            });
+        }
+
+        ServerMessage::PlanApprovalRequest {
+            request_id,
+            call_id,
+            plan_path,
+            plan_markdown,
+            persona,
+        } => {
+            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            let session_id = ss_lock
+                .as_ref()
+                .map(|s| s.session_id.clone())
+                .unwrap_or_default();
+            if let Some(ss) = ss_lock.as_mut() {
+                ss.pending_questions += 1;
+            }
+            events.push(CoreEvent::PlanApprovalRequested {
+                daemon: d,
+                session_id,
+                request_id: request_id.clone(),
+                call_id: call_id.clone(),
+                plan_path: plan_path.clone(),
+                plan_markdown: plan_markdown.clone(),
+                persona: persona.clone(),
             });
         }
 
