@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use mew_hooks::Dispatcher;
-use mew_message::{SessionId, ToolState};
+use mew_message::{SessionId, ToolState, TurnManifest};
 use mew_provider::Provider;
 use mew_subagents::{
     ModelResolver, SubagentDef, SubagentError, SubagentEvent, SubagentOutcome, SubagentResult,
@@ -21,6 +21,20 @@ fn extract_completed_output(state: &ToolState) -> Option<String> {
         return Some(s.output.clone());
     }
     None
+}
+
+/// Extract per-turn manifests from a child agent's assistant messages.
+/// Each assistant message may carry a `TurnManifest` on its `AssistantMeta`;
+/// we collect all of them in order. Takes `&Agent` (shared reference) —
+/// since `agent.messages` is `Arc<Mutex<...>>`, the borrow is cheap and
+/// the agent remains owned by the caller.
+async fn extract_manifests(agent: &crate::Agent) -> Vec<TurnManifest> {
+    let messages = agent.messages.lock().await;
+    messages
+        .iter()
+        .filter_map(|m| m.assistant.as_ref())
+        .filter_map(|meta| meta.manifest.clone())
+        .collect()
 }
 
 /// Simple subagent runner that spawns a child agent for each invocation.
@@ -240,10 +254,12 @@ impl SubagentRunner for SimpleRunner {
 
         while let Some(event) = rx.recv().await {
             if cancel.is_cancelled() {
+                let manifests = extract_manifests(&agent).await;
                 let _ = event_tx
                     .send(SubagentEvent::Finished {
                         child_session_id: session_id.to_string(),
                         outcome: SubagentOutcome::Cancelled,
+                        manifests,
                     })
                     .await;
                 return Ok(SubagentResult::Cancelled);
@@ -361,12 +377,14 @@ impl SubagentRunner for SimpleRunner {
         }
 
         if let Some(reason) = last_error {
+            let manifests = extract_manifests(&agent).await;
             let _ = event_tx
                 .send(SubagentEvent::Finished {
                     child_session_id: session_id.to_string(),
                     outcome: SubagentOutcome::Failed {
                         reason: reason.clone(),
                     },
+                    manifests,
                 })
                 .await;
             return Ok(SubagentResult::Error { reason });
@@ -377,10 +395,13 @@ impl SubagentRunner for SimpleRunner {
             .map(|limit| turns_used >= limit)
             .unwrap_or(false);
 
+        let child_manifests = extract_manifests(&agent).await;
+
         let _ = event_tx
             .send(SubagentEvent::Finished {
                 child_session_id: session_id.to_string(),
                 outcome: SubagentOutcome::Completed,
+                manifests: child_manifests.clone(),
             })
             .await;
 
@@ -390,6 +411,7 @@ impl SubagentRunner for SimpleRunner {
             hit_turn_limit,
             hit_time_limit,
             session_unavailable,
+            manifests: child_manifests,
         })
     }
 }

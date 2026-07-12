@@ -461,6 +461,7 @@ export class MewClient {
                     parent_call_id: msg.parent_call_id,
                     child_session_id: msg.child_session_id,
                     outcome: msg.outcome,
+                    manifests: msg.manifests ?? [],
                 });
                 break;
             case "todos_updated":

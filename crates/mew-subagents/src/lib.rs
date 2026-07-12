@@ -8,6 +8,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
+use mew_message::TurnManifest;
+
 #[derive(Error, Debug)]
 pub enum SubagentError {
     #[error("io error: {0}")]
@@ -38,6 +40,11 @@ pub enum SubagentResult {
         /// (e.g. read-only FS, parent meta unwritable). The subagent still
         /// ran, but no transcript was recorded for this invocation.
         session_unavailable: bool,
+        /// Per-turn manifests from the child agent's completed turns.
+        /// Empty for cancelled/errored runs — partial manifests are
+        /// available via the `SubagentEvent::Finished` → `AgentEvent::SubagentEnd`
+        /// wire path.
+        manifests: Vec<TurnManifest>,
     },
     /// Subagent was cancelled before completion.
     Cancelled,
@@ -163,6 +170,10 @@ pub enum SubagentEvent {
     Finished {
         child_session_id: String,
         outcome: SubagentOutcome,
+        /// Per-turn manifests from the child agent. Carried on the event
+        /// path (for UI/wire) AND on `SubagentResult::Complete` (for the
+        /// parent's tool state metadata). May be partial for cancelled/errored runs.
+        manifests: Vec<TurnManifest>,
     },
     TextDelta {
         text: String,

@@ -12,6 +12,7 @@ import type {
   Message,
   Question,
   SubagentOutcome,
+  TurnManifest,
   Todo as WireTodo,
   GroupInfo,
   DirEntry,
@@ -121,6 +122,7 @@ export interface SubagentInfo {
   status: "running" | "completed" | "cancelled" | "failed";
   lastProgress: string | null;
   outcome: SubagentOutcome | null;
+  manifests: TurnManifest[];
 }
 
 export interface PendingAskUser {
@@ -308,7 +310,7 @@ interface SessionState {
   // Subagent actions
   onSubagentStart: (data: { parent_call_id: string; name: string; child_session_id: string; display_name: string | null }) => void;
   onSubagentStatus: (data: { parent_call_id: string; tool_name: string; message: string }) => void;
-  onSubagentEnd: (data: { parent_call_id: string; child_session_id: string; outcome: SubagentOutcome }) => void;
+  onSubagentEnd: (data: { parent_call_id: string; child_session_id: string; outcome: SubagentOutcome; manifests?: TurnManifest[] }) => void;
 
   // Ask-user actions
   onAskUserRequest: (data: { request_id: string; call_id: string; questions: Question[] }) => void;
@@ -974,6 +976,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         status: "running",
         lastProgress: null,
         outcome: null,
+        manifests: [],
       });
       return { subagents: subs };
     }),
@@ -1003,6 +1006,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           ...sub,
           status,
           outcome: data.outcome,
+          manifests: data.manifests ?? [],
         });
       }
       return { subagents: subs };

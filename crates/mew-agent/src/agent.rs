@@ -1088,10 +1088,12 @@ impl Agent {
                         mew_subagents::SubagentEvent::Finished {
                             child_session_id,
                             outcome,
+                            manifests,
                         } => AgentEvent::SubagentEnd {
                             parent_call_id: pump_cid.clone(),
                             child_session_id,
                             outcome,
+                            manifests,
                         },
                         mew_subagents::SubagentEvent::TextDelta { text } => {
                             AgentEvent::ToolProgress {

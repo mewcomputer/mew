@@ -444,6 +444,7 @@ export type ServerMessage =
       parent_call_id: string;
       child_session_id: string;
       outcome: SubagentOutcome;
+      manifests?: TurnManifest[];
     }
   | {
       type: "subagent_permission_request";
@@ -614,6 +615,7 @@ export interface MewClientEvents {
     parent_call_id: string;
     child_session_id: string;
     outcome: SubagentOutcome;
+    manifests?: TurnManifest[];
   }) => void;
   "todos-updated": (data: { todos: Todo[] }) => void;
   "persona-switch-requested": (data: { name: string }) => void;
@@ -1188,6 +1190,7 @@ export class MewClient {
           parent_call_id: msg.parent_call_id,
           child_session_id: msg.child_session_id,
           outcome: msg.outcome,
+          manifests: msg.manifests ?? [],
         });
         break;
       case "todos_updated":

@@ -536,6 +536,8 @@ pub enum ServerMessage {
         parent_call_id: String,
         child_session_id: String,
         outcome: SubagentOutcome,
+        #[serde(default)]
+        manifests: Vec<mew_message::TurnManifest>,
     },
 
     /// A permission request from a child subagent.
@@ -1607,6 +1609,73 @@ mod tests {
     }
 
     #[test]
+    fn subagent_end_manifests_roundtrip() {
+        use mew_message::{Segment, SegmentKind, TurnManifest};
+
+        let manifest = TurnManifest {
+            model: "gpt-4o".into(),
+            context_window: 128000,
+            input_tokens: Some(800),
+            output_tokens: Some(200),
+            cache_read_tokens: None,
+            cache_write_tokens: Some(100),
+            reasoning_tokens: None,
+            segments: vec![Segment {
+                label: "subagent: researcher".into(),
+                kind: SegmentKind::Part,
+                source_id: None,
+                tokens: 800,
+                tokens_scaled: 800,
+                children: vec![],
+            }],
+        };
+
+        let m = ServerMessage::SubagentEnd {
+            parent_call_id: "call-1".into(),
+            child_session_id: "01H".into(),
+            outcome: SubagentOutcome::Completed,
+            manifests: vec![manifest.clone()],
+        };
+
+        match round_trip(&m) {
+            ServerMessage::SubagentEnd {
+                parent_call_id,
+                child_session_id,
+                outcome,
+                manifests,
+            } => {
+                assert_eq!(parent_call_id, "call-1");
+                assert_eq!(child_session_id, "01H");
+                assert!(matches!(outcome, SubagentOutcome::Completed));
+                assert_eq!(manifests.len(), 1);
+                assert_eq!(manifests[0].model, "gpt-4o");
+                assert_eq!(manifests[0].input_tokens, Some(800));
+                assert_eq!(manifests[0].segments[0].label, "subagent: researcher");
+            }
+            _ => panic!("expected SubagentEnd"),
+        }
+    }
+
+    #[test]
+    fn subagent_end_no_manifests_roundtrip() {
+        // Verify backward compatibility: a SubagentEnd with empty manifests
+        // round-trips correctly.
+        let m = ServerMessage::SubagentEnd {
+            parent_call_id: "call-2".into(),
+            child_session_id: "02H".into(),
+            outcome: SubagentOutcome::Cancelled,
+            manifests: vec![],
+        };
+
+        match round_trip(&m) {
+            ServerMessage::SubagentEnd { manifests, .. } => {
+                assert!(manifests.is_empty());
+            }
+            _ => panic!("expected SubagentEnd"),
+        }
+    }
+
+    #[test]
     fn server_message_provider_retry_wait_roundtrip() {
         let m = ServerMessage::Provider {
             event: mew_message::ProviderEventWire::RetryWait {
@@ -1844,6 +1913,7 @@ mod tests {
             parent_call_id: "p1".into(),
             child_session_id: "01H".into(),
             outcome: SubagentOutcome::Completed,
+            manifests: vec![],
         };
 
         match round_trip(&start) {
@@ -1872,6 +1942,7 @@ mod tests {
             outcome: SubagentOutcome::Failed {
                 reason: "timed out".into(),
             },
+            manifests: vec![],
         };
         match round_trip(&m) {
             ServerMessage::SubagentEnd {

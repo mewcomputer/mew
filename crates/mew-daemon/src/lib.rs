@@ -1975,11 +1975,13 @@ async fn translate_event(
             parent_call_id,
             child_session_id,
             outcome,
+            manifests,
         } => {
             vec![ServerMessage::SubagentEnd {
                 parent_call_id,
                 child_session_id,
                 outcome: mew_protocol::subagent_outcome_to_wire(&outcome),
+                manifests,
             }]
         }
         AgentEvent::SubagentPermissionRequest {

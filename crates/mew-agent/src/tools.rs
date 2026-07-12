@@ -874,6 +874,7 @@ impl Agent {
                 mew_subagents::SubagentEvent::Finished {
                     child_session_id,
                     outcome,
+                    manifests,
                 } => {
                     let outcome_str = match &outcome {
                         mew_subagents::SubagentOutcome::Completed => "completed",
@@ -895,6 +896,7 @@ impl Agent {
                                     parent_call_id: call_id.clone(),
                                     child_session_id,
                                     outcome,
+                                    manifests,
                                 })
                                 .await;
                             continue;
@@ -909,6 +911,7 @@ impl Agent {
                             parent_call_id: call_id.clone(),
                             child_session_id,
                             outcome,
+                            manifests,
                         })
                         .await;
                 }
@@ -988,13 +991,14 @@ impl Agent {
             }
         }
 
-        let result = match runner_handle.await {
+        let (result, child_manifests) = match runner_handle.await {
             Ok(Ok(mew_subagents::SubagentResult::Complete {
                 text,
                 turns_used,
                 hit_turn_limit,
                 hit_time_limit,
                 session_unavailable,
+                manifests,
             })) => {
                 tracing::info!(subagent = %name, output_len = text.len(), turns_used, hit_turn_limit, hit_time_limit, session_unavailable, "subagent completed");
                 let mut out = text.trim_end_matches('\n').to_string();
@@ -1019,32 +1023,37 @@ impl Agent {
                         "warning: subagent transcript could not be written; result is unrecorded\n\n",
                     );
                 }
-                out
+                (out, manifests)
             }
             Ok(Ok(mew_subagents::SubagentResult::Cancelled)) => {
                 tracing::info!(subagent = %name, "subagent cancelled");
-                format!("subagent '{}' was cancelled before completion", name)
+                (format!("subagent '{}' was cancelled before completion", name), vec![])
             }
             Ok(Ok(mew_subagents::SubagentResult::Error { reason })) => {
                 tracing::warn!(subagent = %name, error = %reason, "subagent failed");
-                format!("subagent '{}' failed: {}", name, reason)
+                (format!("subagent '{}' failed: {}", name, reason), vec![])
             }
             Ok(Err(e)) => {
                 tracing::warn!(subagent = %name, error = %e, "subagent failed");
-                format!("subagent '{}' failed: {}", name, e)
+                (format!("subagent '{}' failed: {}", name, e), vec![])
             }
             Err(e) => {
                 tracing::warn!(subagent = %name, error = %e, "subagent task panicked");
-                format!("subagent '{}' panicked: {}", name, e)
+                (format!("subagent '{}' panicked: {}", name, e), vec![])
             }
         };
 
         let success = is_subagent_success(&result);
+        let metadata = if !child_manifests.is_empty() {
+            Some(serde_json::to_value(&child_manifests).expect("manifests serialize"))
+        } else {
+            None
+        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
                 output: result,
-                metadata: None,
+                metadata,
                 diff: None,
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),
@@ -1124,8 +1133,8 @@ impl Agent {
         // Async mode (async=true): return a task_id; the model calls
         // subagent_wait later. Use this for parallelism.
         let start_result = self.start_subagent(name, prompt, model, ev_tx).await;
-        let (output, success) = match start_result {
-            Ok(task_id) if async_mode => (task_id, true),
+        let (output, success, child_manifests) = match start_result {
+            Ok(task_id) if async_mode => (task_id, true, vec![]),
             Ok(task_id) => {
                 let wait_result = self.wait_subagent(&task_id).await;
                 match wait_result {
@@ -1135,6 +1144,7 @@ impl Agent {
                         hit_turn_limit,
                         hit_time_limit,
                         session_unavailable,
+                        manifests,
                     }) => {
                         let mut out = text.trim_end_matches('\n').to_string();
                         if hit_turn_limit {
@@ -1158,26 +1168,32 @@ impl Agent {
                                 "warning: subagent transcript could not be written; result is unrecorded\n\n",
                             );
                         }
-                        (out, true)
+                        (out, true, manifests)
                     }
                     Ok(mew_subagents::SubagentResult::Cancelled) => (
                         "subagent was cancelled before completion".to_string(),
                         false,
+                        vec![],
                     ),
                     Ok(mew_subagents::SubagentResult::Error { reason }) => {
-                        (format!("subagent failed: {}", reason), false)
+                        (format!("subagent failed: {}", reason), false, vec![])
                     }
-                    Err(e) => (format!("error: {}", e), false),
+                    Err(e) => (format!("error: {}", e), false, vec![]),
                 }
             }
-            Err(e) => (format!("error: {}", e), false),
+            Err(e) => (format!("error: {}", e), false, vec![]),
         };
 
+        let metadata = if !child_manifests.is_empty() {
+            Some(serde_json::to_value(&child_manifests).expect("manifests serialize"))
+        } else {
+            None
+        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
                 output,
-                metadata: None,
+                metadata,
                 diff: None,
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),
@@ -1910,13 +1926,14 @@ impl Agent {
 
         let result = self.wait_subagent(task_id).await;
 
-        let (output, success) = match result {
+        let (output, success, child_manifests) = match result {
             Ok(mew_subagents::SubagentResult::Complete {
                 text,
                 turns_used,
                 hit_turn_limit,
                 hit_time_limit,
                 session_unavailable,
+                manifests,
             }) => {
                 let mut out = text.trim_end_matches('\n').to_string();
                 if hit_turn_limit {
@@ -1940,23 +1957,29 @@ impl Agent {
                         "warning: subagent transcript could not be written; result is unrecorded\n\n",
                     );
                 }
-                (out, true)
+                (out, true, manifests)
             }
             Ok(mew_subagents::SubagentResult::Cancelled) => (
                 "subagent was cancelled before completion".to_string(),
                 false,
+                vec![],
             ),
             Ok(mew_subagents::SubagentResult::Error { reason }) => {
-                (format!("subagent failed: {}", reason), false)
+                (format!("subagent failed: {}", reason), false, vec![])
             }
-            Err(e) => (format!("error: {}", e), false),
+            Err(e) => (format!("error: {}", e), false, vec![]),
         };
 
+        let metadata = if !child_manifests.is_empty() {
+            Some(serde_json::to_value(&child_manifests).expect("manifests serialize"))
+        } else {
+            None
+        };
         let final_state = if success {
             ToolState::Completed(ToolStateCompleted {
                 input: input.clone(),
                 output,
-                metadata: None,
+                metadata,
                 diff: None,
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),

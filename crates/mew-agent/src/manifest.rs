@@ -330,9 +330,26 @@ fn part_label_kind(part: &Part) -> (String, SegmentKind) {
         Part::Text(_) => ("text".to_string(), SegmentKind::Part),
         Part::Reasoning(_) => ("reasoning".to_string(), SegmentKind::Part),
         Part::File(_) => ("file".to_string(), SegmentKind::Part),
-        Part::ToolCall(tc) => (format!("tool: {}", tc.tool_name), SegmentKind::Part),
+        Part::ToolCall(tc) => (tool_call_label(tc), SegmentKind::Part),
         Part::ToolResult(_) => ("tool result".to_string(), SegmentKind::Part),
         Part::Compaction(_) => ("compaction".to_string(), SegmentKind::CompactionSummary),
+    }
+}
+
+/// Build the display label for a tool call. Subagent calls are labeled
+/// `"subagent: {name}"` using the `name` field from the tool input;
+/// all other tools use `"tool: {tool_name}"`.
+fn tool_call_label(tc: &mew_message::ToolCallPart) -> String {
+    if tc.tool_name == "subagent" {
+        let name = tc
+            .state
+            .input()
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("subagent");
+        format!("subagent: {}", name)
+    } else {
+        format!("tool: {}", tc.tool_name)
     }
 }
 
@@ -350,7 +367,7 @@ fn build_part_segment(part: &Part, model_id: &str) -> Segment {
             // Use state.input() (parsed JSON), not raw_input (#[serde(skip)]).
             let input_str = serde_json::to_string(tc.state.input()).unwrap_or_default();
             (
-                format!("tool: {}", tc.tool_name),
+                tool_call_label(tc),
                 SegmentKind::Part,
                 format!("{} {}", tc.tool_name, input_str),
             )
@@ -551,7 +568,10 @@ fn scale_segment_recursive(seg: &mut Segment, scale: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mew_message::{Message, PartBase, Role, TextPart, Time};
+    use mew_message::{
+        Message, PartBase, PartId, Role, TextPart, Time, ToolCallPart, ToolState,
+        ToolStatePending,
+    };
     use mew_provider::{Request, ToolDef};
 
     fn empty_cache() -> TokenCountCache {
@@ -1237,5 +1257,159 @@ Project instructions here.
         ];
         // warm_target = 150 > input = 100.
         assert!(find_cache_split(&segments, 150, 100).is_none());
+    }
+
+    // ── Calibration harness ──────────────────────────────────────────
+    //
+    // These tests verify that `count_tokens` produces counts consistent
+    // with direct `tiktoken::get_encoding(...)` calls for the expected
+    // encoding per model. At least one fixture uses an independently-
+    // verified count ("Hello world" = 2 tokens for cl100k_base, per
+    // OpenAI's published tokenizer) to establish a non-circular baseline.
+    // If tiktoken's encoding tables change (version bump), these tests
+    // will fail and the hardcoded counts must be updated.
+
+    // Fixture: short string. "Hello world" = 2 tokens for cl100k_base
+    // (independently verified via OpenAI's tokenizer web UI).
+    // cl100k and o200k happen to agree on this string, but the JSON
+    // fixture below distinguishes them.
+    const FIXTURE_HELLO: &str = "Hello world";
+    const EXPECTED_CL100K_HELLO: u32 = 2;
+    const EXPECTED_O200K_HELLO: u32 = 2;
+
+    // Fixture: multi-paragraph text (~150 tokens). Tests longer input.
+    const FIXTURE_LONG_TEXT: &str = "\
+The quick brown fox jumps over the lazy dog. Pack my box with five dozen \
+liquor jugs. How vexingly quick daft zebras jump! The five boxing wizards \
+jump quickly. Sphinx of black quartz, judge my vow. Waltz, bad nymph, for \
+quick jigs vex. Glib jocks quiz nymph to vex dwarf. Quick zephyrs blow, \
+vexing daft Jim. Two driven jocks help fax my big quiz. The jay, pig, fox, \
+zebra, and my wolves quack! Blowzy red vixens fight for a quick jump. \
+Joaquin Phoenix was gazed by me for the length of the movie. Crazy \
+Fredrick bought many very exquisite opal jewels.";
+    const EXPECTED_CL100K_LONG: u32 = 146;
+
+    // Fixture: code snippet (structured text with special tokens).
+    const FIXTURE_CODE: &str = "\
+fn main() {
+    let mut v = Vec::new();
+    for i in 0..100 {
+        v.push(i * 2);
+    }
+    println!(\"{:?}\", v);
+}";
+    const EXPECTED_O200K_CODE: u32 = 40;
+
+    // Fixture: JSON schema text (simulates tool schema segment).
+    // This is where cl100k (36) and o200k (38) diverge — useful for
+    // verifying routing.
+    const FIXTURE_JSON: &str = r#"{"type":"object","properties":{"name":{"type":"string","description":"The name of the person"},"age":{"type":"integer","minimum":0}},"required":["name"]}"#;
+    const EXPECTED_CL100K_JSON: u32 = 36;
+    const EXPECTED_O200K_JSON: u32 = 38;
+
+    #[test]
+    fn test_calibration_cl100k_short_string() {
+        // Independently verified: "Hello world" = 2 tokens for cl100k_base.
+        assert_eq!(count_tokens(FIXTURE_HELLO, "gpt-3.5-turbo"), EXPECTED_CL100K_HELLO);
+    }
+
+    #[test]
+    fn test_calibration_cl100k_long_text() {
+        assert_eq!(count_tokens(FIXTURE_LONG_TEXT, "gpt-3.5-turbo"), EXPECTED_CL100K_LONG);
+    }
+
+    #[test]
+    fn test_calibration_o200k_short_string() {
+        assert_eq!(count_tokens(FIXTURE_HELLO, "gpt-4o"), EXPECTED_O200K_HELLO);
+    }
+
+    #[test]
+    fn test_calibration_o200k_code_snippet() {
+        assert_eq!(count_tokens(FIXTURE_CODE, "gpt-4o"), EXPECTED_O200K_CODE);
+    }
+
+    #[test]
+    fn test_calibration_json_schema_text() {
+        // JSON schema text — cl100k and o200k diverge here (36 vs 38).
+        // Verify both encodings produce their expected counts.
+        assert_eq!(count_tokens(FIXTURE_JSON, "gpt-3.5-turbo"), EXPECTED_CL100K_JSON);
+        assert_eq!(count_tokens(FIXTURE_JSON, "gpt-4o"), EXPECTED_O200K_JSON);
+    }
+
+    #[test]
+    fn test_model_encoding_routing() {
+        // Verify model→encoding routing by comparing count_tokens (which
+        // uses encoding_for_model internally) against direct get_encoding
+        // calls. The JSON fixture distinguishes cl100k (36) from o200k (38).
+
+        // gpt-4o → o200k_base
+        let direct_o200k = tiktoken::get_encoding("o200k_base")
+            .expect("o200k_base encoding should exist");
+        assert_eq!(
+            count_tokens(FIXTURE_JSON, "gpt-4o"),
+            direct_o200k.count(FIXTURE_JSON) as u32,
+        );
+
+        // gpt-3.5-turbo → cl100k_base
+        let direct_cl100k = tiktoken::get_encoding("cl100k_base")
+            .expect("cl100k_base encoding should exist");
+        assert_eq!(
+            count_tokens(FIXTURE_JSON, "gpt-3.5-turbo"),
+            direct_cl100k.count(FIXTURE_JSON) as u32,
+        );
+
+        // Unknown model → cl100k_base fallback
+        assert_eq!(
+            count_tokens(FIXTURE_JSON, "totally-unknown-model"),
+            direct_cl100k.count(FIXTURE_JSON) as u32,
+        );
+    }
+
+    // ── Subagent label detection ─────────────────────────────────────
+
+    fn make_tool_call_part(tool_name: &str, input: serde_json::Value) -> ToolCallPart {
+        ToolCallPart {
+            base: PartBase {
+                id: PartId::new(),
+                message_id: mew_message::MessageId::new(),
+                session_id: mew_message::SessionId::new(),
+            },
+            tool_name: tool_name.into(),
+            call_id: "test-call".into(),
+            state: ToolState::Pending(ToolStatePending {
+                input,
+                time: mew_message::ToolTime {
+                    start: 0,
+                    end: None,
+                },
+            }),
+            raw_input: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_manifest_labels_subagent_tool_calls() {
+        // A subagent tool call with a "name" field should be labeled
+        // "subagent: {name}", not "tool: subagent".
+        let tc = make_tool_call_part(
+            "subagent",
+            serde_json::json!({"name": "researcher", "prompt": "find the bug"}),
+        );
+        let label = tool_call_label(&tc);
+        assert_eq!(label, "subagent: researcher");
+
+        // A regular tool call should still use "tool: {name}".
+        let tc2 = make_tool_call_part(
+            "bash",
+            serde_json::json!({"command": "ls"}),
+        );
+        assert_eq!(tool_call_label(&tc2), "tool: bash");
+
+        // A subagent call without a "name" field falls back to "subagent: subagent".
+        let tc3 = make_tool_call_part(
+            "subagent",
+            serde_json::json!({"prompt": "do something"}),
+        );
+        assert_eq!(tool_call_label(&tc3), "subagent: subagent");
     }
 }

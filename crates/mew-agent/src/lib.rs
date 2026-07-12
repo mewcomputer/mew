@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 
 use mew_hooks::{PermissionDecision, ToolCall as HookToolCall};
-use mew_message::{Part, PartId};
+use mew_message::{Part, PartId, TurnManifest};
 use mew_provider::ProviderEvent;
 use mew_session::Writer as SessionWriterInner;
 
@@ -90,6 +90,9 @@ pub enum AgentEvent {
         parent_call_id: String,
         child_session_id: String,
         outcome: mew_subagents::SubagentOutcome,
+        /// Per-turn manifests from the child agent's turns. Carried on the
+        /// event path for the UI/wire. May be partial for cancelled/errored runs.
+        manifests: Vec<TurnManifest>,
     },
     /// A permission request from a child subagent.
     SubagentPermissionRequest {
@@ -212,6 +215,7 @@ impl std::fmt::Debug for AgentEvent {
                 parent_call_id,
                 child_session_id,
                 outcome,
+                ..
             } => f
                 .debug_struct("SubagentEnd")
                 .field("parent_call_id", parent_call_id)

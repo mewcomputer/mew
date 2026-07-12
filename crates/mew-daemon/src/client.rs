@@ -549,6 +549,7 @@ async fn translate_server_message(
             parent_call_id,
             child_session_id,
             outcome,
+            manifests,
         } => {
             let agent_outcome = match outcome {
                 mew_protocol::SubagentOutcome::Completed => {
@@ -567,6 +568,7 @@ async fn translate_server_message(
                 parent_call_id: parent_call_id.clone(),
                 child_session_id: child_session_id.clone(),
                 outcome: agent_outcome,
+                manifests: manifests.clone(),
             }]
         }
 

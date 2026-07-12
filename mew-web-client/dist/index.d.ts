@@ -486,6 +486,7 @@ export type ServerMessage = {
     parent_call_id: string;
     child_session_id: string;
     outcome: SubagentOutcome;
+    manifests?: TurnManifest[];
 } | {
     type: "subagent_permission_request";
     request_id: string;
@@ -698,6 +699,7 @@ export interface MewClientEvents {
         parent_call_id: string;
         child_session_id: string;
         outcome: SubagentOutcome;
+        manifests?: TurnManifest[];
     }) => void;
     "todos-updated": (data: {
         todos: Todo[];
