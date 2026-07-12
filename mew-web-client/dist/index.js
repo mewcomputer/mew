@@ -157,6 +157,11 @@ export class MewClient {
     respondToAskUser(request_id, answers) {
         this.send({ type: "ask_user_response", request_id, answers });
     }
+    /** Respond to a `plan_approval_request`. `approved = false` with optional
+     *  `feedback` requests changes to the plan. */
+    respondToPlanApproval(request_id, approved, feedback) {
+        this.send({ type: "plan_approval_response", request_id, approved, feedback });
+    }
     /** Attach to an existing session (active or idle). If the session is idle,
      *  the daemon loads its persisted history from disk and sends a
      *  `session-history` event. Resolves with the session id. */
@@ -418,6 +423,15 @@ export class MewClient {
                     request_id: msg.request_id,
                     call_id: msg.call_id,
                     questions: msg.questions,
+                });
+                break;
+            case "plan_approval_request":
+                this.emit("plan-approval-request", {
+                    request_id: msg.request_id,
+                    call_id: msg.call_id,
+                    plan_path: msg.plan_path,
+                    plan_markdown: msg.plan_markdown,
+                    persona: msg.persona,
                 });
                 break;
             case "subagent_permission_request":

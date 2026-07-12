@@ -48,6 +48,12 @@ export type ClientMessage =
       decision: PermissionDecision;
     }
   | { type: "ask_user_response"; request_id: string; answers: string[] }
+  | {
+      type: "plan_approval_response";
+      request_id: string;
+      approved: boolean;
+      feedback?: string;
+    }
   | { type: "slash_command"; command: string }
   | { type: "list_models" }
   | { type: "switch_model"; provider: string; model: string }
@@ -413,6 +419,14 @@ export type ServerMessage =
       questions: Question[];
     }
   | {
+      type: "plan_approval_request";
+      request_id: string;
+      call_id: string;
+      plan_path: string;
+      plan_markdown: string;
+      persona: string;
+    }
+  | {
       type: "subagent_start";
       parent_call_id: string;
       name: string;
@@ -575,6 +589,14 @@ export interface MewClientEvents {
     request_id: string;
     call_id: string;
     questions: Question[];
+  }) => void;
+
+  "plan-approval-request": (data: {
+    request_id: string;
+    call_id: string;
+    plan_path: string;
+    plan_markdown: string;
+    persona: string;
   }) => void;
 
   "subagent-start": (data: {
@@ -811,6 +833,16 @@ export class MewClient {
    *  submits answers to the questions. */
   respondToAskUser(request_id: string, answers: string[]): void {
     this.send({ type: "ask_user_response", request_id, answers });
+  }
+
+  /** Respond to a `plan_approval_request`. `approved = false` with optional
+   *  `feedback` requests changes to the plan. */
+  respondToPlanApproval(
+    request_id: string,
+    approved: boolean,
+    feedback?: string,
+  ): void {
+    this.send({ type: "plan_approval_response", request_id, approved, feedback });
   }
 
   /** Attach to an existing session (active or idle). If the session is idle,
@@ -1114,6 +1146,15 @@ export class MewClient {
           request_id: msg.request_id,
           call_id: msg.call_id,
           questions: msg.questions,
+        });
+        break;
+      case "plan_approval_request":
+        this.emit("plan-approval-request", {
+          request_id: msg.request_id,
+          call_id: msg.call_id,
+          plan_path: msg.plan_path,
+          plan_markdown: msg.plan_markdown,
+          persona: msg.persona,
         });
         break;
       case "subagent_permission_request":

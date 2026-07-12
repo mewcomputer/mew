@@ -61,6 +61,7 @@ pub struct App {
     pub status: Status,
     pub permission: Option<PermissionState>,
     pub user_question: Option<UserQuestionState>,
+    pub plan_approval: Option<PlanApprovalState>,
     pub persona_switch_confirm: Option<PersonaSwitchConfirmState>,
     pub pending_persona_switch_apply: Option<String>,
     pub todos: Vec<mew_agent::Todo>,
@@ -226,6 +227,7 @@ pub enum Mode {
     CommandPalette,
     Settings,
     UserQuestion,
+    PlanApproval,
     PersonaSwitchConfirm,
     Help,
     HistorySearch,
@@ -355,6 +357,24 @@ pub struct UserQuestionState {
     pub tx: Option<tokio::sync::oneshot::Sender<Vec<String>>>,
 }
 
+/// A pending `handoff_plan` approval. Shown as a large centered modal with
+/// the full plan rendered as markdown, an approve / request-changes toggle,
+/// and a feedback editor for the request-changes path.
+#[derive(Debug)]
+pub struct PlanApprovalState {
+    pub call_id: String,
+    pub plan_path: String,
+    pub persona: String,
+    pub plan_markdown: String,
+    pub scroll: u16,
+    /// 0 = approve, 1 = request changes.
+    pub selected: usize,
+    /// True while the user is typing feedback for the request-changes path.
+    pub editing_feedback: bool,
+    pub feedback: String,
+    pub tx: Option<tokio::sync::oneshot::Sender<mew_agent::PlanDecision>>,
+}
+
 #[derive(Debug, Clone)]
 pub enum ToolDisplayState {
     Running,
@@ -378,6 +398,7 @@ impl App {
             status: Status::default(),
             permission: None,
             user_question: None,
+            plan_approval: None,
             persona_switch_confirm: None,
             pending_persona_switch_apply: None,
             todos: Vec::new(),
@@ -1484,6 +1505,26 @@ impl App {
                     tx: Some(tx),
                 });
             }
+            AgentEvent::PlanApprovalRequest {
+                call_id,
+                plan_path,
+                plan_markdown,
+                persona,
+                tx,
+            } => {
+                self.mode = Mode::PlanApproval;
+                self.plan_approval = Some(PlanApprovalState {
+                    call_id,
+                    plan_path,
+                    persona,
+                    plan_markdown,
+                    scroll: 0,
+                    selected: 0,
+                    editing_feedback: false,
+                    feedback: String::new(),
+                    tx: Some(tx),
+                });
+            }
             AgentEvent::TodosUpdated { todos } => {
                 self.todos = todos;
             }
@@ -1886,6 +1927,83 @@ impl App {
     /// cancelled tool result.
     pub fn cancel_user_question(&mut self) {
         self.user_question = None;
+        self.mode = Mode::Normal;
+    }
+
+    pub fn plan_approval_scroll_down(&mut self, lines: u16) {
+        if let Some(pa) = self.plan_approval.as_mut() {
+            pa.scroll = pa.scroll.saturating_add(lines);
+        }
+    }
+
+    pub fn plan_approval_scroll_up(&mut self, lines: u16) {
+        if let Some(pa) = self.plan_approval.as_mut() {
+            pa.scroll = pa.scroll.saturating_sub(lines);
+        }
+    }
+
+    /// Toggle between the approve (0) and request-changes (1) options.
+    pub fn plan_approval_toggle(&mut self) {
+        if let Some(pa) = self.plan_approval.as_mut() {
+            if !pa.editing_feedback {
+                pa.selected = if pa.selected == 0 { 1 } else { 0 };
+            }
+        }
+    }
+
+    pub fn plan_approval_type_char(&mut self, c: char) {
+        if let Some(pa) = self.plan_approval.as_mut() {
+            if pa.editing_feedback {
+                pa.feedback.push(c);
+            }
+        }
+    }
+
+    pub fn plan_approval_backspace(&mut self) {
+        if let Some(pa) = self.plan_approval.as_mut() {
+            if pa.editing_feedback {
+                pa.feedback.pop();
+            }
+        }
+    }
+
+    /// Confirm the current selection. Approve sends `Approved`. Request-changes
+    /// enters the feedback editor first; once feedback is present a second
+    /// confirm sends `ChangesRequested`.
+    pub fn plan_approval_confirm(&mut self) {
+        let ready = match self.plan_approval.as_mut() {
+            Some(pa) if pa.selected == 1 && !pa.editing_feedback => {
+                pa.editing_feedback = true;
+                false
+            }
+            Some(pa) if pa.selected == 1 && pa.feedback.trim().is_empty() => {
+                // Stay in the editor until there's something to send.
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if !ready {
+            return;
+        }
+        if let Some(pa) = self.plan_approval.take() {
+            if let Some(tx) = pa.tx {
+                let decision = if pa.selected == 0 {
+                    mew_agent::PlanDecision::Approved
+                } else {
+                    mew_agent::PlanDecision::ChangesRequested(pa.feedback)
+                };
+                let _ = tx.send(decision);
+            }
+        }
+        self.mode = Mode::Normal;
+    }
+
+    /// Cancel the plan approval. Dropping `tx` without sending makes the
+    /// agent's `rx.await` return `Err`, which the handler turns into a
+    /// cancelled tool result.
+    pub fn cancel_plan_approval(&mut self) {
+        self.plan_approval = None;
         self.mode = Mode::Normal;
     }
 }

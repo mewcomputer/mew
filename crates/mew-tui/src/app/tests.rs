@@ -485,6 +485,78 @@ fn test_single_question_picks_option_and_submits() {
     assert_eq!(answers, vec!["dev"]);
 }
 
+fn open_plan_approval(app: &mut App) -> tokio::sync::oneshot::Receiver<mew_agent::PlanDecision> {
+    use mew_agent::AgentEvent;
+    let (tx, rx) = tokio::sync::oneshot::channel::<mew_agent::PlanDecision>();
+    app.handle_agent_event(AgentEvent::PlanApprovalRequest {
+        call_id: "c1".into(),
+        plan_path: "/repo/PLAN.md".into(),
+        plan_markdown: "# Goal\n\n1. do it".into(),
+        persona: "builder".into(),
+        tx,
+    });
+    rx
+}
+
+#[test]
+fn test_plan_approval_event_sets_mode() {
+    let mut app = App::new();
+    let _rx = open_plan_approval(&mut app);
+    assert_eq!(app.mode, Mode::PlanApproval);
+    let pa = app.plan_approval.as_ref().expect("state stored");
+    assert_eq!(pa.persona, "builder");
+    assert!(pa.plan_markdown.contains("do it"));
+}
+
+#[test]
+fn test_plan_approval_approve_sends_decision() {
+    let mut app = App::new();
+    let mut rx = open_plan_approval(&mut app);
+    // selected defaults to 0 (approve).
+    app.plan_approval_confirm();
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.plan_approval.is_none());
+    match rx.try_recv().expect("decision sent") {
+        mew_agent::PlanDecision::Approved => {}
+        other => panic!("expected Approved, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_plan_approval_request_changes_flow() {
+    let mut app = App::new();
+    let mut rx = open_plan_approval(&mut app);
+    // Toggle to "request changes"; first confirm enters the feedback editor.
+    app.plan_approval_toggle();
+    app.plan_approval_confirm();
+    assert_eq!(app.mode, Mode::PlanApproval, "still open, now editing");
+    assert!(app.plan_approval.as_ref().unwrap().editing_feedback);
+    // Empty feedback doesn't submit.
+    app.plan_approval_confirm();
+    assert!(app.plan_approval.is_some());
+    // Type feedback, then confirm.
+    for c in "add tests".chars() {
+        app.plan_approval_type_char(c);
+    }
+    app.plan_approval_confirm();
+    assert_eq!(app.mode, Mode::Normal);
+    match rx.try_recv().expect("decision sent") {
+        mew_agent::PlanDecision::ChangesRequested(f) => assert_eq!(f, "add tests"),
+        other => panic!("expected ChangesRequested, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_plan_approval_cancel_drops_tx() {
+    let mut app = App::new();
+    let mut rx = open_plan_approval(&mut app);
+    app.cancel_plan_approval();
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.plan_approval.is_none());
+    // Dropping tx makes the agent's rx.await return Err.
+    assert!(rx.try_recv().is_err());
+}
+
 #[test]
 fn test_multi_question_goes_to_review_before_submit() {
     use mew_agent::{AgentEvent, AskUserQuestion, QuestionOption};

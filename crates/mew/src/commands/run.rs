@@ -248,6 +248,13 @@ pub(crate) async fn build_and_run(
                 eprintln!("\n[ask_user_question: cancelled — no TUI in non-interactive mode]");
                 drop(tx);
             }
+            mew_agent::AgentEvent::PlanApprovalRequest { tx, .. } => {
+                // Non-interactive mode: no TUI to approve the plan. Dropping
+                // `tx` cancels the call so the model gets a clear "cancelled"
+                // result instead of hanging.
+                eprintln!("\n[handoff_plan: cancelled — no TUI in non-interactive mode]");
+                drop(tx);
+            }
             mew_agent::AgentEvent::TodosUpdated { .. } => {
                 // No sidebar in non-interactive mode; nothing to update.
             }

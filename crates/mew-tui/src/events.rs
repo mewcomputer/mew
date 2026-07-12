@@ -102,6 +102,7 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
     match app.mode {
         crate::app::Mode::PermissionPrompt => handle_permission_key(app, key),
         crate::app::Mode::UserQuestion => handle_user_question_key(app, key),
+        crate::app::Mode::PlanApproval => handle_plan_approval_key(app, key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
         crate::app::Mode::PersonaSwitchConfirm => handle_persona_confirm_key(app, key),
         crate::app::Mode::Help => handle_help_key(app, key),
@@ -531,6 +532,76 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
             if !on_review {
                 app.user_question_type_char(c);
             }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn handle_plan_approval_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    let editing = app
+        .plan_approval
+        .as_ref()
+        .map(|pa| pa.editing_feedback)
+        .unwrap_or(false);
+
+    match key.code {
+        KeyCode::Enter => {
+            app.plan_approval_confirm();
+            None
+        }
+        KeyCode::Esc => {
+            // While editing feedback, Esc backs out of the editor; otherwise
+            // it cancels the whole approval.
+            if editing {
+                if let Some(pa) = app.plan_approval.as_mut() {
+                    pa.editing_feedback = false;
+                }
+            } else {
+                app.cancel_plan_approval();
+            }
+            None
+        }
+        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+            app.plan_approval_toggle();
+            None
+        }
+        KeyCode::Up if !editing => {
+            app.plan_approval_scroll_up(1);
+            None
+        }
+        KeyCode::Down if !editing => {
+            app.plan_approval_scroll_down(1);
+            None
+        }
+        KeyCode::PageUp => {
+            app.plan_approval_scroll_up(10);
+            None
+        }
+        KeyCode::PageDown => {
+            app.plan_approval_scroll_down(10);
+            None
+        }
+        KeyCode::Char('a') if !editing => {
+            if let Some(pa) = app.plan_approval.as_mut() {
+                pa.selected = 0;
+            }
+            app.plan_approval_confirm();
+            None
+        }
+        KeyCode::Char('r') if !editing => {
+            if let Some(pa) = app.plan_approval.as_mut() {
+                pa.selected = 1;
+            }
+            app.plan_approval_confirm();
+            None
+        }
+        KeyCode::Backspace => {
+            app.plan_approval_backspace();
+            None
+        }
+        KeyCode::Char(c) if editing => {
+            app.plan_approval_type_char(c);
             None
         }
         _ => None,

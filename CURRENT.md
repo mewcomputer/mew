@@ -692,3 +692,44 @@ render-stall detector, configurable tick rate with macOS refresh-rate autodetect
 timer never lives in the cached chat content; frame meter never forces redraws (idle
 stays at zero draws); spinner must move from tick-count to elapsed-time before the
 tick rate becomes configurable. Implementation not started.
+
+## 2026-07-12 — plan handoff tools (write_plan / edit_plan / handoff_plan)
+
+Implemented the polytoken-inspired P1 plan/execute handoff. Three tools in mew-tools:
+- `write_plan` / `edit_plan` — pinned to the configured `plan_path` (no path arg); ReadOnly
+  sensitivity (contained mutation, auto-allow like todo tools). `edit_plan` supports
+  `replace_all`. Both resolve absolute paths as-is, else `ctx.cwd.join`.
+- `handoff_plan` — metadata-only (ask_user pattern); intercepted by the agent core.
+Shared `make_unified_diff` moved to tools/mod.rs as `pub(crate)` (write.rs + edit_str_replace.rs
+now reuse it; pure code motion).
+
+Registration (setup/agent.rs): `build_tools` gained a `plan_path: String` arg; the three tools
+are pushed unconditionally. Planner allowlist dropped `write`/`edit` (note: `edit` was a dead
+entry — real tool names are `edit_str_replace`/`edit_hashline`, so the planner never had a
+working edit tool) and gained `write_plan`/`edit_plan`/`handoff_plan` plus `subagent` (so it can
+run the plan-reviewer). autonomous_hint updated so Auto-mode allows the plan tools.
+
+handoff_plan flow: new `PlanDecision` enum + `AgentEvent::PlanApprovalRequest` +
+`Agent::resolved_plan_path()` (extracted from the auto-flag block). On approval the handler sets
+`pending_persona_switch` (default "builder"), so the existing end-of-turn drain emits
+`PersonaSwitchRequested` — deliberately bypassing the planner's empty `transitions.allowed`
+(user approval is the confirmation). Change requests come back as a *successful* tool result
+carrying the feedback.
+
+Wired end-to-end: protocol pair (`plan_approval_request`/`plan_approval_response`), daemon
+relay + `pending_plan_approvals` map + folded into the attention question count via new
+`Session::pending_questions_count()`, TUI `--connect` client translator, mobile-core
+(`PlanApprovalRequested` event + `respond_plan_approval`), TUI overlay (`Mode::PlanApproval`,
+large centered modal with markdown body + approve/request-changes footer), web client
+(`respondToPlanApproval` + typed event) and web UI (`pendingPlanApprovals` store +
+`PlanApprovalCard` mounted above the input). plan-reviewer.md rewritten to plain prose
+(dropped the unwired polytoken frontmatter/jinja), matching the other builtin subagent prompts.
+
+Tests added at every layer (mew-tools in-file, mew-agent FakeProvider handoff cases,
+mew-protocol serde round-trips, mew-personas allowlist, mew-tui app state machine, web store
+push/resolve). Gate: `cargo fmt`, `cargo clippy --all -- -D warnings`, `just arch-check` all green.
+
+Pre-existing failure (NOT from this work): `mew-daemon` concurrency test
+`slash_command_during_in_flight_turn_does_not_block_stream` expects `MessageEnd { manifest: None }`
+but the uncommitted manifest WIP (manifest.rs + mew-message changes) now emits `Some(TurnManifest)`.
+The test matcher needs updating as part of the manifest feature.

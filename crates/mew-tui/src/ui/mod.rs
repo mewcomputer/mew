@@ -212,6 +212,12 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    if app.mode == Mode::PlanApproval {
+        if let Some(ref state) = app.plan_approval {
+            overlays::draw_plan_approval(f, state, area, &app.theme.tokens);
+        }
+    }
+
     if app.mode == Mode::CommandPalette {
         if let Some(ref mut picker) = app.picker {
             overlays::draw_picker(f, picker, area, &app.theme.tokens);

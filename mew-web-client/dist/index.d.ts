@@ -41,6 +41,11 @@ export type ClientMessage = {
     request_id: string;
     answers: string[];
 } | {
+    type: "plan_approval_response";
+    request_id: string;
+    approved: boolean;
+    feedback?: string;
+} | {
     type: "slash_command";
     command: string;
 } | {
@@ -459,6 +464,13 @@ export type ServerMessage = {
     call_id: string;
     questions: Question[];
 } | {
+    type: "plan_approval_request";
+    request_id: string;
+    call_id: string;
+    plan_path: string;
+    plan_markdown: string;
+    persona: string;
+} | {
     type: "subagent_start";
     parent_call_id: string;
     name: string;
@@ -664,6 +676,13 @@ export interface MewClientEvents {
         call_id: string;
         questions: Question[];
     }) => void;
+    "plan-approval-request": (data: {
+        request_id: string;
+        call_id: string;
+        plan_path: string;
+        plan_markdown: string;
+        persona: string;
+    }) => void;
     "subagent-start": (data: {
         parent_call_id: string;
         name: string;
@@ -855,6 +874,9 @@ export declare class MewClient {
     /** Respond to an `ask_user_request`. The UI calls this after the user
      *  submits answers to the questions. */
     respondToAskUser(request_id: string, answers: string[]): void;
+    /** Respond to a `plan_approval_request`. `approved = false` with optional
+     *  `feedback` requests changes to the plan. */
+    respondToPlanApproval(request_id: string, approved: boolean, feedback?: string): void;
     /** Attach to an existing session (active or idle). If the session is idle,
      *  the daemon loads its persisted history from disk and sends a
      *  `session-history` event. Resolves with the session id. */

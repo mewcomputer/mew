@@ -10,8 +10,8 @@ use ratatui::{
 
 use super::display_width;
 use crate::app::{
-    App, PermissionState, PersonaSummary, PersonaSwitchConfirmState, PickerState, SlashCommand,
-    UserQuestionState, PICKER_VISIBLE_ITEMS,
+    App, PermissionState, PersonaSummary, PersonaSwitchConfirmState, PickerState,
+    PlanApprovalState, SlashCommand, UserQuestionState, PICKER_VISIBLE_ITEMS,
 };
 
 pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCommand], area: Rect) {
@@ -850,6 +850,102 @@ pub(super) fn draw_persona_confirm_modal(
         1,
     );
     f.render_widget(Paragraph::new(buttons), buttons_area);
+}
+
+/// Draw the plan-approval modal (`handoff_plan`). A large centered modal with
+/// the plan rendered as markdown, an approve / request-changes footer, and a
+/// feedback input line for the request-changes path.
+pub(super) fn draw_plan_approval(
+    f: &mut Frame,
+    state: &PlanApprovalState,
+    area: Rect,
+    tokens: &crate::theme::ThemeTokens,
+) {
+    let width = 100u16.min(area.width.saturating_sub(4));
+    let height = (area.height * 3 / 4).min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+
+    let title = format!(" Plan approval → {} ", state.persona);
+    let block = Block::bordered()
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(tokens.accent));
+    f.render_widget(block, popup);
+
+    let inner = popup.inner(Margin::new(2, 1));
+    if inner.height < 4 {
+        return;
+    }
+
+    // Reserve the bottom rows for the footer: a blank spacer, the
+    // approve/request-changes line, the (optional) feedback input, and a
+    // key-hint line.
+    let editing = state.editing_feedback;
+    let footer_height: u16 = if editing { 4 } else { 3 };
+    let body_height = inner.height.saturating_sub(footer_height);
+
+    let body_area = Rect::new(inner.x, inner.y, inner.width, body_height);
+    let md_lines = ratatui_mdstream::render_markdown(
+        &state.plan_markdown,
+        inner.width,
+        &ratatui_mdstream::Theme::dark(),
+    );
+    let para = Paragraph::new(md_lines).scroll((state.scroll, 0));
+    f.render_widget(para, body_area);
+
+    // Footer.
+    let footer_y = inner.y + body_height;
+    let approve_selected = state.selected == 0;
+    let approve_style = if approve_selected {
+        Style::default()
+            .bg(Color::Rgb(35, 90, 50))
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let changes_style = if !approve_selected {
+        Style::default()
+            .bg(Color::Rgb(90, 60, 35))
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+
+    let mut footer = Text::default();
+    footer.push_line(Line::from(vec![
+        Span::styled(" [a] Approve ", approve_style),
+        Span::styled("   ", Style::default()),
+        Span::styled(" [r] Request changes ", changes_style),
+    ]));
+    if editing {
+        footer.push_line(Line::from(vec![
+            Span::styled("  feedback: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(state.feedback.clone(), Style::default().fg(Color::White)),
+            Span::styled("▏", Style::default().fg(Color::Gray)),
+        ]));
+    }
+    let hint = if editing {
+        "type feedback · Enter submit · Esc back"
+    } else {
+        "↑/↓ scroll · Tab toggle · Enter confirm · Esc cancel"
+    };
+    footer.push_line(Line::from(Span::styled(
+        format!("  {hint}"),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let footer_area = Rect::new(inner.x, footer_y, inner.width, footer_height);
+    f.render_widget(Paragraph::new(footer), footer_area);
 }
 
 fn format_tools(list: &Option<Vec<String>>) -> String {

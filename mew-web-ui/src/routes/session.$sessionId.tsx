@@ -10,6 +10,7 @@ import { InputArea } from "@/components/input-area";
 import { StatusFooter } from "@/components/status-footer";
 import { PermissionToast } from "@/components/permission-toast";
 import { AskUserCard } from "@/components/ask-user-card";
+import { PlanApprovalCard } from "@/components/plan-approval-card";
 import { useSidebar } from "@/components/ui/sidebar";
 
 export const Route = createFileRoute("/session/$sessionId")({
@@ -58,6 +59,7 @@ function SessionRouteComponent() {
       <FakeHeader />
       <VirtualChatSurface />
       <MobileAskUser />
+      <PlanApprovalCard />
       <InputArea
         ref={inputRef}
         onSend={handleSend}

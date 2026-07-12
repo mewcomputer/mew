@@ -72,6 +72,60 @@ describe("flagged files lifecycle", () => {
   });
 });
 
+describe("plan approval lifecycle", () => {
+  beforeEach(() => {
+    store().reset();
+  });
+
+  it("onPlanApprovalRequest pushes a pending approval", () => {
+    store().onPlanApprovalRequest({
+      request_id: "r1",
+      call_id: "c1",
+      plan_path: "/repo/PLAN.md",
+      plan_markdown: "# Goal\n\n1. do it",
+      persona: "builder",
+    });
+    const pending = useSessionStore.getState().pendingPlanApprovals;
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.requestId).toBe("r1");
+    expect(pending[0]!.persona).toBe("builder");
+    expect(pending[0]!.planMarkdown).toContain("do it");
+  });
+
+  it("resolvePlanApproval removes the matching entry", () => {
+    store().onPlanApprovalRequest({
+      request_id: "r1",
+      call_id: "c1",
+      plan_path: "/repo/PLAN.md",
+      plan_markdown: "plan",
+      persona: "builder",
+    });
+    store().onPlanApprovalRequest({
+      request_id: "r2",
+      call_id: "c2",
+      plan_path: "/repo/PLAN.md",
+      plan_markdown: "plan2",
+      persona: "builder",
+    });
+    store().resolvePlanApproval("r1");
+    const pending = useSessionStore.getState().pendingPlanApprovals;
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.requestId).toBe("r2");
+  });
+
+  it("reset clears pending plan approvals", () => {
+    store().onPlanApprovalRequest({
+      request_id: "r1",
+      call_id: "c1",
+      plan_path: "/repo/PLAN.md",
+      plan_markdown: "plan",
+      persona: "builder",
+    });
+    store().reset();
+    expect(useSessionStore.getState().pendingPlanApprovals).toHaveLength(0);
+  });
+});
+
 describe("session meta changes", () => {
   it("onSessionMetaChanged updates the session in availableSessions", () => {
     useSessionStore.setState({

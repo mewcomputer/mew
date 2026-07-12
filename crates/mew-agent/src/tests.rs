@@ -723,6 +723,207 @@ async fn test_tool_turn_denied() {
     assert!(got_tool_end);
 }
 
+/// Build an agent wired for handoff_plan tests: the real `HandoffPlan` tool,
+/// builtin personas (so "builder" resolves), and a two-script provider
+/// (handoff call, then a text response to close the turn).
+fn handoff_agent(plan_path: std::path::PathBuf, handoff_input: serde_json::Value) -> Agent {
+    let script1 = FakeProvider::tool_call("handoff_plan", "c1", handoff_input);
+    let script2 = FakeProvider::text_response("done");
+    let provider = std::sync::Arc::new(StatefulFakeProvider::new(vec![script1, script2]));
+    let mut agent = Agent::new(
+        provider,
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![std::sync::Arc::new(
+            mew_tools::tools::handoff_plan::HandoffPlan,
+        )],
+        None,
+    );
+    agent.set_plan_path(plan_path);
+    agent.set_personas(mew_personas::builtin_defaults());
+    agent
+}
+
+#[tokio::test]
+async fn test_handoff_plan_approved() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = dir.path().join("PLAN.md");
+    tokio::fs::write(&plan, "# Goal\n\n1. do the thing")
+        .await
+        .unwrap();
+
+    let agent = handoff_agent(plan, serde_json::json!({}));
+    let mut rx = agent.run("handoff".into());
+
+    let mut got_event = false;
+    let mut got_switch = false;
+    let mut tool_success = None;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::PlanApprovalRequest {
+                plan_markdown,
+                persona,
+                tx,
+                ..
+            } => {
+                got_event = true;
+                assert!(plan_markdown.contains("do the thing"));
+                assert_eq!(persona, "builder");
+                let _ = tx.send(crate::PlanDecision::Approved);
+            }
+            AgentEvent::ToolEnd { call_id, success } if call_id == "c1" => {
+                tool_success = Some(success);
+            }
+            AgentEvent::PersonaSwitchRequested { name } => {
+                assert_eq!(name, "builder");
+                got_switch = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(got_event, "PlanApprovalRequest not emitted");
+    assert_eq!(tool_success, Some(true), "tool should report success");
+    assert!(
+        got_switch,
+        "PersonaSwitchRequested should fire at end of turn"
+    );
+
+    // The pending slot was drained by the end-of-turn machinery.
+    assert!(agent.pending_persona_switch.lock().await.is_none());
+    // A tool result was recorded (user, assistant tool-call, tool result, ...).
+    let msgs = agent.messages.lock().await;
+    assert!(msgs
+        .iter()
+        .any(|m| m.parts.iter().any(|p| matches!(p, Part::ToolResult(_)))));
+}
+
+#[tokio::test]
+async fn test_handoff_plan_changes_requested() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = dir.path().join("PLAN.md");
+    tokio::fs::write(&plan, "# Goal\n\n1. do the thing")
+        .await
+        .unwrap();
+
+    let agent = handoff_agent(plan, serde_json::json!({}));
+    let mut rx = agent.run("handoff".into());
+
+    let mut tool_success = None;
+    let mut got_switch = false;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::PlanApprovalRequest { tx, .. } => {
+                let _ = tx.send(crate::PlanDecision::ChangesRequested("add tests".into()));
+            }
+            AgentEvent::ToolEnd { call_id, success } if call_id == "c1" => {
+                tool_success = Some(success);
+            }
+            AgentEvent::PersonaSwitchRequested { .. } => got_switch = true,
+            _ => {}
+        }
+    }
+
+    // A change request is a *successful* tool result (the model revises), not
+    // an error, and no persona switch is queued.
+    assert_eq!(tool_success, Some(true));
+    assert!(!got_switch, "no switch on change request");
+    assert!(agent.pending_persona_switch.lock().await.is_none());
+
+    // The feedback must be in the tool call's completed output.
+    let msgs = agent.messages.lock().await;
+    let output = msgs
+        .iter()
+        .flat_map(|m| &m.parts)
+        .find_map(|p| match p {
+            Part::ToolCall(tc) => tc.state.output(),
+            _ => None,
+        })
+        .expect("tool call output");
+    assert!(output.contains("add tests"), "feedback missing: {output}");
+    assert!(output.contains("edit_plan"));
+}
+
+#[tokio::test]
+async fn test_handoff_plan_missing_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    // Plan path points at a file that doesn't exist.
+    let plan = dir.path().join("PLAN.md");
+
+    let agent = handoff_agent(plan, serde_json::json!({}));
+    let mut rx = agent.run("handoff".into());
+
+    let mut got_event = false;
+    let mut tool_success = None;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::PlanApprovalRequest { tx, .. } => {
+                got_event = true;
+                let _ = tx.send(crate::PlanDecision::Approved);
+            }
+            AgentEvent::ToolEnd { call_id, success } if call_id == "c1" => {
+                tool_success = Some(success);
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        !got_event,
+        "no approval prompt when the plan file is missing"
+    );
+    assert_eq!(tool_success, Some(false), "tool should error");
+    // The tool call state should be an error.
+    let msgs = agent.messages.lock().await;
+    let is_error = msgs
+        .iter()
+        .flat_map(|m| &m.parts)
+        .any(|p| matches!(p, Part::ToolCall(tc) if matches!(tc.state, ToolState::Error(_))));
+    assert!(is_error);
+}
+
+#[tokio::test]
+async fn test_handoff_plan_unknown_persona() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = dir.path().join("PLAN.md");
+    tokio::fs::write(&plan, "# Goal").await.unwrap();
+
+    let agent = handoff_agent(plan, serde_json::json!({"persona": "ghost"}));
+    let mut rx = agent.run("handoff".into());
+
+    let mut got_event = false;
+    let mut tool_success = None;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::PlanApprovalRequest { .. } => got_event = true,
+            AgentEvent::ToolEnd { call_id, success } if call_id == "c1" => {
+                tool_success = Some(success);
+            }
+            _ => {}
+        }
+    }
+
+    assert!(!got_event, "no approval prompt for an unknown persona");
+    assert_eq!(tool_success, Some(false));
+    let msgs = agent.messages.lock().await;
+    let err_text = msgs
+        .iter()
+        .flat_map(|m| &m.parts)
+        .find_map(|p| match p {
+            Part::ToolCall(tc) => match &tc.state {
+                ToolState::Error(e) => Some(e.error.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("error output");
+    assert!(err_text.contains("ghost"));
+    assert!(
+        err_text.contains("builder"),
+        "should list available personas"
+    );
+}
+
 #[tokio::test]
 async fn test_cancellation_during_stream() {
     let script = FakeProvider::text_response("a very long response that takes time");
