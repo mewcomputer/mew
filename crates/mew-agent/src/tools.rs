@@ -1027,7 +1027,10 @@ impl Agent {
             }
             Ok(Ok(mew_subagents::SubagentResult::Cancelled)) => {
                 tracing::info!(subagent = %name, "subagent cancelled");
-                (format!("subagent '{}' was cancelled before completion", name), vec![])
+                (
+                    format!("subagent '{}' was cancelled before completion", name),
+                    vec![],
+                )
             }
             Ok(Ok(mew_subagents::SubagentResult::Error { reason })) => {
                 tracing::warn!(subagent = %name, error = %reason, "subagent failed");

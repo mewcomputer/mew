@@ -392,6 +392,7 @@ impl MobileCore {
                             tool_time_end: None,
                             tool_sensitivity: None,
                         }],
+                        assistant_meta: None,
                     });
                     Some(ss.session_id.clone())
                 } else {
@@ -1126,6 +1127,13 @@ fn translate_message(
                         id: ulid::Ulid::new().to_string(),
                         role: format!("{:?}", msg.role).to_lowercase(),
                         parts,
+                        assistant_meta: msg.assistant.as_ref().map(|a| {
+                            state::MobileAssistantMeta {
+                                model_id: a.model_id.clone(),
+                                cost: a.cost,
+                                manifest: a.manifest.as_ref().map(state::to_mobile_manifest),
+                            }
+                        }),
                     });
                 }
             }
@@ -1177,10 +1185,12 @@ fn translate_message(
                         usage,
                         cost,
                         finish,
+                        manifest: _,
                         ..
                     } => {
                         ss.apply_provider_event(event);
                         let failed = *finish == mew_message::Finish::Error;
+                        let manifest = ss.last_manifest.take();
                         events.push(CoreEvent::TurnEnded {
                             daemon: d,
                             session_id: ss.session_id.clone(),
@@ -1188,6 +1198,7 @@ fn translate_message(
                             output_tokens: usage.output as u64,
                             cost: *cost,
                             failed,
+                            manifest,
                         });
                     }
                     _ => {
@@ -1274,6 +1285,7 @@ fn translate_message(
                         tool_time_end: None,
                         tool_sensitivity: None,
                     }],
+                    assistant_meta: None,
                 });
             }
         }
@@ -1631,12 +1643,34 @@ fn translate_message(
         // These variants are not yet translated to CoreEvent — they are
         // intentionally no-ops for now. Adding a new ServerMessage variant
         // here forces a compile-time decision.
+        ServerMessage::SubagentEnd {
+            parent_call_id,
+            child_session_id,
+            outcome,
+            manifests,
+        } => {
+            let outcome_str = match outcome {
+                mew_protocol::SubagentOutcome::Completed => "completed",
+                mew_protocol::SubagentOutcome::Cancelled => "cancelled",
+                mew_protocol::SubagentOutcome::Failed { .. } => "failed",
+            };
+            let mobile_manifests = manifests
+                .iter()
+                .map(crate::state::to_mobile_manifest)
+                .collect();
+            events.push(CoreEvent::SubagentEnd {
+                daemon: d,
+                parent_call_id: parent_call_id.clone(),
+                child_session_id: child_session_id.clone(),
+                outcome: outcome_str.to_string(),
+                manifests: mobile_manifests,
+            });
+        }
         ServerMessage::ToolStart { .. }
         | ServerMessage::ToolEnd { .. }
         | ServerMessage::ToolProgress { .. }
         | ServerMessage::SubagentStart { .. }
         | ServerMessage::SubagentStatus { .. }
-        | ServerMessage::SubagentEnd { .. }
         | ServerMessage::JobUpdate { .. }
         | ServerMessage::ClientAttached { .. }
         | ServerMessage::ClientDetached { .. }

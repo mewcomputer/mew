@@ -569,8 +569,7 @@ fn scale_segment_recursive(seg: &mut Segment, scale: f64) {
 mod tests {
     use super::*;
     use mew_message::{
-        Message, PartBase, PartId, Role, TextPart, Time, ToolCallPart, ToolState,
-        ToolStatePending,
+        Message, PartBase, PartId, Role, TextPart, Time, ToolCallPart, ToolState, ToolStatePending,
     };
     use mew_provider::{Request, ToolDef};
 
@@ -1310,12 +1309,18 @@ fn main() {
     #[test]
     fn test_calibration_cl100k_short_string() {
         // Independently verified: "Hello world" = 2 tokens for cl100k_base.
-        assert_eq!(count_tokens(FIXTURE_HELLO, "gpt-3.5-turbo"), EXPECTED_CL100K_HELLO);
+        assert_eq!(
+            count_tokens(FIXTURE_HELLO, "gpt-3.5-turbo"),
+            EXPECTED_CL100K_HELLO
+        );
     }
 
     #[test]
     fn test_calibration_cl100k_long_text() {
-        assert_eq!(count_tokens(FIXTURE_LONG_TEXT, "gpt-3.5-turbo"), EXPECTED_CL100K_LONG);
+        assert_eq!(
+            count_tokens(FIXTURE_LONG_TEXT, "gpt-3.5-turbo"),
+            EXPECTED_CL100K_LONG
+        );
     }
 
     #[test]
@@ -1332,7 +1337,10 @@ fn main() {
     fn test_calibration_json_schema_text() {
         // JSON schema text — cl100k and o200k diverge here (36 vs 38).
         // Verify both encodings produce their expected counts.
-        assert_eq!(count_tokens(FIXTURE_JSON, "gpt-3.5-turbo"), EXPECTED_CL100K_JSON);
+        assert_eq!(
+            count_tokens(FIXTURE_JSON, "gpt-3.5-turbo"),
+            EXPECTED_CL100K_JSON
+        );
         assert_eq!(count_tokens(FIXTURE_JSON, "gpt-4o"), EXPECTED_O200K_JSON);
     }
 
@@ -1343,16 +1351,16 @@ fn main() {
         // calls. The JSON fixture distinguishes cl100k (36) from o200k (38).
 
         // gpt-4o → o200k_base
-        let direct_o200k = tiktoken::get_encoding("o200k_base")
-            .expect("o200k_base encoding should exist");
+        let direct_o200k =
+            tiktoken::get_encoding("o200k_base").expect("o200k_base encoding should exist");
         assert_eq!(
             count_tokens(FIXTURE_JSON, "gpt-4o"),
             direct_o200k.count(FIXTURE_JSON) as u32,
         );
 
         // gpt-3.5-turbo → cl100k_base
-        let direct_cl100k = tiktoken::get_encoding("cl100k_base")
-            .expect("cl100k_base encoding should exist");
+        let direct_cl100k =
+            tiktoken::get_encoding("cl100k_base").expect("cl100k_base encoding should exist");
         assert_eq!(
             count_tokens(FIXTURE_JSON, "gpt-3.5-turbo"),
             direct_cl100k.count(FIXTURE_JSON) as u32,
@@ -1399,17 +1407,11 @@ fn main() {
         assert_eq!(label, "subagent: researcher");
 
         // A regular tool call should still use "tool: {name}".
-        let tc2 = make_tool_call_part(
-            "bash",
-            serde_json::json!({"command": "ls"}),
-        );
+        let tc2 = make_tool_call_part("bash", serde_json::json!({"command": "ls"}));
         assert_eq!(tool_call_label(&tc2), "tool: bash");
 
         // A subagent call without a "name" field falls back to "subagent: subagent".
-        let tc3 = make_tool_call_part(
-            "subagent",
-            serde_json::json!({"prompt": "do something"}),
-        );
+        let tc3 = make_tool_call_part("subagent", serde_json::json!({"prompt": "do something"}));
         assert_eq!(tool_call_label(&tc3), "subagent: subagent");
     }
 }

@@ -45,6 +45,7 @@ pub struct ChatMessage {
     pub id: String,
     pub role: String,
     pub parts: Vec<MessagePart>,
+    pub assistant_meta: Option<MobileAssistantMeta>,
 }
 
 /// A part of a message.
@@ -73,6 +74,94 @@ pub enum PartKind {
     Reasoning,
     ToolCall,
     Error,
+}
+
+// ── Manifest mirror types (UniFFI) ────────────────────────────────
+
+/// Mirror of `mew_message::TurnManifest` for the mobile client.
+/// Drops `source_id` (ULID) — the mobile client renders the tree
+/// structure only; it doesn't hydrate by source ID.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MobileTurnManifest {
+    pub model: String,
+    pub context_window: u32,
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
+    pub cache_read_tokens: Option<u32>,
+    pub cache_write_tokens: Option<u32>,
+    pub reasoning_tokens: Option<u32>,
+    pub segments: Vec<MobileSegment>,
+}
+
+/// Mirror of `mew_message::Segment` (without `source_id`).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MobileSegment {
+    pub label: String,
+    pub kind: MobileSegmentKind,
+    pub tokens: u32,
+    pub tokens_scaled: u32,
+    pub children: Vec<MobileSegment>,
+}
+
+/// Mirror of `mew_message::SegmentKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum MobileSegmentKind {
+    Scaffold,
+    ContextFile,
+    Skill,
+    Tools,
+    Message,
+    Part,
+    CompactionSummary,
+}
+
+/// Assistant metadata for a `ChatMessage`. Carries the model, cost,
+/// and optional turn manifest. Intentionally omits `provider_id`,
+/// `tokens`, `finish`, and `error` from the canonical `AssistantMeta`
+/// for v1 — the `TurnManifest` itself carries the token breakdown.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct MobileAssistantMeta {
+    pub model_id: String,
+    pub cost: f64,
+    pub manifest: Option<MobileTurnManifest>,
+}
+
+/// Convert a canonical `TurnManifest` to the mobile mirror type.
+/// Recursively maps segments, dropping `source_id`.
+pub fn to_mobile_manifest(m: &mew_message::TurnManifest) -> MobileTurnManifest {
+    MobileTurnManifest {
+        model: m.model.clone(),
+        context_window: m.context_window,
+        input_tokens: m.input_tokens,
+        output_tokens: m.output_tokens,
+        cache_read_tokens: m.cache_read_tokens,
+        cache_write_tokens: m.cache_write_tokens,
+        reasoning_tokens: m.reasoning_tokens,
+        segments: m.segments.iter().map(to_mobile_segment).collect(),
+    }
+}
+
+fn to_mobile_segment(s: &mew_message::Segment) -> MobileSegment {
+    MobileSegment {
+        label: s.label.clone(),
+        kind: to_mobile_segment_kind(&s.kind),
+        tokens: s.tokens,
+        tokens_scaled: s.tokens_scaled,
+        children: s.children.iter().map(to_mobile_segment).collect(),
+    }
+}
+
+fn to_mobile_segment_kind(k: &mew_message::SegmentKind) -> MobileSegmentKind {
+    use mew_message::SegmentKind;
+    match k {
+        SegmentKind::Scaffold => MobileSegmentKind::Scaffold,
+        SegmentKind::ContextFile => MobileSegmentKind::ContextFile,
+        SegmentKind::Skill => MobileSegmentKind::Skill,
+        SegmentKind::Tools => MobileSegmentKind::Tools,
+        SegmentKind::Message => MobileSegmentKind::Message,
+        SegmentKind::Part => MobileSegmentKind::Part,
+        SegmentKind::CompactionSummary => MobileSegmentKind::CompactionSummary,
+    }
 }
 
 /// A pending permission request.
@@ -124,6 +213,9 @@ pub struct SessionState {
     pub thinking_variant: Option<String>,
     pub current_persona: Option<String>,
     pub available_personas: Vec<crate::events::PersonaInfo>,
+    /// Last turn manifest extracted from MessageEnd. Used by lib.rs
+    /// to populate CoreEvent::TurnEnded.
+    pub last_manifest: Option<MobileTurnManifest>,
 }
 
 impl SessionState {
@@ -146,6 +238,7 @@ impl SessionState {
             thinking_variant: None,
             current_persona: None,
             available_personas: Vec::new(),
+            last_manifest: None,
         }
     }
 
@@ -229,6 +322,7 @@ impl SessionState {
                         id: simple_uuid(),
                         role: "assistant".into(),
                         parts: vec![],
+                        assistant_meta: None,
                     });
                 }
                 self.messages.last_mut().unwrap().parts.push(msg_part);
@@ -257,7 +351,12 @@ impl SessionState {
                 }
                 true
             }
-            ProviderEventWire::MessageEnd { cost, usage, .. } => {
+            ProviderEventWire::MessageEnd {
+                cost,
+                usage,
+                manifest,
+                ..
+            } => {
                 self.running = false;
                 self.usage_cost += cost;
                 self.input_tokens += usage.input as u64;
@@ -265,6 +364,24 @@ impl SessionState {
                 self.turns += 1;
                 self.streaming_part_id = None;
                 self.streaming_text.clear();
+                if let Some(m) = manifest {
+                    self.last_manifest = Some(crate::state::to_mobile_manifest(m));
+                    // Attach to the last assistant message.
+                    if let Some(last) = self.messages.last_mut() {
+                        // Only attach to assistant messages.
+                        if last.role == "assistant" {
+                            let meta = last.assistant_meta.get_or_insert(
+                                crate::state::MobileAssistantMeta {
+                                    model_id: m.model.clone(),
+                                    cost: 0.0,
+                                    manifest: None,
+                                },
+                            );
+                            meta.manifest = Some(crate::state::to_mobile_manifest(m));
+                            meta.cost += cost;
+                        }
+                    }
+                }
                 true
             }
             _ => false,
@@ -466,5 +583,144 @@ mod tests {
         assert_eq!(state.current_persona.as_deref(), Some("code-reviewer"));
         assert_eq!(state.available_personas.len(), 1);
         assert!(state.available_personas[0].active);
+    }
+
+    // ── Manifest tests ──────────────────────────────────────────────
+
+    use mew_message::{Segment, SegmentKind, TurnManifest};
+
+    fn make_test_manifest() -> TurnManifest {
+        TurnManifest {
+            model: "gpt-4o".into(),
+            context_window: 128000,
+            input_tokens: Some(5000),
+            output_tokens: Some(1200),
+            cache_read_tokens: Some(2000),
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            segments: vec![
+                Segment {
+                    label: "scaffold".into(),
+                    kind: SegmentKind::Scaffold,
+                    source_id: Some(Ulid::new()),
+                    tokens: 300,
+                    tokens_scaled: 300,
+                    children: vec![],
+                },
+                Segment {
+                    label: "history".into(),
+                    kind: SegmentKind::Message,
+                    source_id: None,
+                    tokens: 4700,
+                    tokens_scaled: 4700,
+                    children: vec![],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_to_mobile_manifest_preserves_fields() {
+        let manifest = make_test_manifest();
+        let mobile = to_mobile_manifest(&manifest);
+
+        assert_eq!(mobile.model, "gpt-4o");
+        assert_eq!(mobile.context_window, 128000);
+        assert_eq!(mobile.input_tokens, Some(5000));
+        assert_eq!(mobile.output_tokens, Some(1200));
+        assert_eq!(mobile.cache_read_tokens, Some(2000));
+        assert_eq!(mobile.cache_write_tokens, None);
+        assert_eq!(mobile.reasoning_tokens, None);
+        assert_eq!(mobile.segments.len(), 2);
+        assert_eq!(mobile.segments[0].label, "scaffold");
+        assert_eq!(mobile.segments[0].kind, MobileSegmentKind::Scaffold);
+        assert_eq!(mobile.segments[0].tokens, 300);
+        assert_eq!(mobile.segments[1].label, "history");
+        assert_eq!(mobile.segments[1].kind, MobileSegmentKind::Message);
+    }
+
+    #[test]
+    fn test_message_end_extracts_manifest() {
+        let mut state = SessionState::new("sess1".into());
+
+        // Start a text part to create an assistant message.
+        let part_id = Ulid::new();
+        let text_part = TextPart {
+            base: PartBase {
+                id: part_id,
+                message_id: Ulid::new(),
+                session_id: Ulid::new(),
+            },
+            text: "Hello".into(),
+            synthetic: false,
+        };
+        state.apply_provider_event(&mew_message::ProviderEventWire::PartStart {
+            part: mew_message::Part::Text(text_part),
+        });
+
+        // Send MessageEnd with a manifest.
+        let manifest = make_test_manifest();
+        state.apply_provider_event(&mew_message::ProviderEventWire::MessageEnd {
+            finish: mew_message::Finish::Stop,
+            usage: mew_message::Tokens::default(),
+            cost: 0.05,
+            manifest: Some(manifest.clone()),
+        });
+
+        // last_manifest should be populated.
+        assert!(state.last_manifest.is_some());
+        let lm = state.last_manifest.as_ref().unwrap();
+        assert_eq!(lm.model, "gpt-4o");
+
+        // The last assistant message should have assistant_meta with the manifest.
+        let last_msg = state.messages.last().unwrap();
+        assert_eq!(last_msg.role, "assistant");
+        let meta = last_msg
+            .assistant_meta
+            .as_ref()
+            .expect("should have assistant_meta");
+        assert_eq!(meta.model_id, "gpt-4o");
+        assert_eq!(meta.cost, 0.05);
+        assert!(meta.manifest.is_some());
+        assert_eq!(meta.manifest.as_ref().unwrap().input_tokens, Some(5000));
+    }
+
+    #[test]
+    fn test_chat_message_has_assistant_meta() {
+        let msg = ChatMessage {
+            id: "test".into(),
+            role: "assistant".into(),
+            parts: vec![],
+            assistant_meta: Some(MobileAssistantMeta {
+                model_id: "gpt-4o".into(),
+                cost: 0.01,
+                manifest: None,
+            }),
+        };
+        assert!(msg.assistant_meta.is_some());
+        assert_eq!(msg.assistant_meta.as_ref().unwrap().model_id, "gpt-4o");
+
+        let msg2 = ChatMessage {
+            id: "test2".into(),
+            role: "user".into(),
+            parts: vec![],
+            assistant_meta: None,
+        };
+        assert!(msg2.assistant_meta.is_none());
+    }
+
+    #[test]
+    fn test_message_end_no_manifest() {
+        let mut state = SessionState::new("sess1".into());
+
+        state.apply_provider_event(&mew_message::ProviderEventWire::MessageEnd {
+            finish: mew_message::Finish::Stop,
+            usage: mew_message::Tokens::default(),
+            cost: 0.01,
+            manifest: None,
+        });
+
+        // No manifest → last_manifest stays None.
+        assert!(state.last_manifest.is_none());
     }
 }

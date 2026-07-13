@@ -68,6 +68,17 @@ pub enum CoreEvent {
         output_tokens: u64,
         cost: f64,
         failed: bool,
+        manifest: Option<crate::state::MobileTurnManifest>,
+    },
+
+    /// A subagent finished executing. Carries manifests from the child
+    /// agent's turns so the UI can show context usage.
+    SubagentEnd {
+        daemon: String,
+        parent_call_id: String,
+        child_session_id: String,
+        outcome: String,
+        manifests: Vec<crate::state::MobileTurnManifest>,
     },
 
     /// A permission request from the agent.
