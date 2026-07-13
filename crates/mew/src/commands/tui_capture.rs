@@ -279,7 +279,8 @@ impl DaemonBackend {
     }
 
     /// Block until the current daemon turn finishes streaming.
-    /// While streaming, capture at 60fps
+    /// While streaming, capture at 60fps. Captures one final frame after
+    /// streaming ends so subsequent `pause` verbs hold the completed response.
     pub(crate) async fn wait_turn(&mut self, timeout_ms: u64) -> Result<()> {
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let mut last_frame = Instant::now();
@@ -296,6 +297,16 @@ impl DaemonBackend {
                 bail!("wait_turn timed out after {timeout_ms}ms");
             }
             tokio::time::sleep(Duration::from_millis(4)).await;
+        }
+        // Ensure the final completed frame is captured before returning, so a
+        // following `pause` duplicates the finished response rather than a
+        // mid-stream frame.
+        self.poll_events();
+        self.terminal
+            .draw(|f| mew_tui::ui::draw(f, &mut self.app))
+            .ok();
+        if self.recording {
+            self.capture_frame();
         }
         Ok(())
     }
