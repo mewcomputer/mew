@@ -28,6 +28,7 @@ members = [
     "crates/mew-hooks-runtime",
     "crates/mew-ext-broker",
     "crates/mew-tui",
+    "crates/mew-raster",
     "crates/ratatui-mdstream",
     "crates/mew-mobile-core",
 ]

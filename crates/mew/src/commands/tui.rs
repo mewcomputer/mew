@@ -126,7 +126,6 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
                         app: &mut app,
                         target: &mut target,
                         event_loop: &event_loop,
-                        settings_editor: &mut None,
                         should_break: &mut should_break,
                         cat: None,
                         loaded_personas: &[],
@@ -203,7 +202,6 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
                 app: &mut app,
                 target: &mut target,
                 event_loop: &event_loop,
-                settings_editor: &mut None,
                 should_break: &mut should_break,
                 cat: None,
                 loaded_personas: &[],
@@ -585,7 +583,6 @@ pub(crate) async fn run_tui(
     let event_loop = Arc::new(event_loop);
 
     // Main loop.
-    let mut settings_editor: Option<crate::config_editor::ConfigEditor> = None;
     // Tracks whether the most recently received event was a pure tick.
     // Used by the idle-aware render skip: if the event was a tick and
     // `app.needs_redraw()` is false, we skip the draw to save CPU.
@@ -606,9 +603,6 @@ pub(crate) async fn run_tui(
         if !last_event_was_tick || app.needs_redraw() {
             if let Err(e) = terminal.draw(|f| {
                 mew_tui::ui::draw(f, &mut app);
-                if let Some(ref editor) = settings_editor {
-                    editor.draw(f);
-                }
             }) {
                 break Err(anyhow::anyhow!("draw error: {}", e));
             }
@@ -629,23 +623,6 @@ pub(crate) async fn run_tui(
         let mut should_break = false;
         match event {
             mew_tui::Event::Input(crossterm_event) => {
-                // Settings mode: delegate to ConfigEditor
-                if app.mode == mew_tui::app::Mode::Settings {
-                    if let crossterm::event::Event::Key(key) = crossterm_event {
-                        if let Some(ref mut editor) = settings_editor {
-                            if !editor.handle_key(key) {
-                                // Closing settings
-                                if editor.is_dirty() {
-                                    app.set_alert("Settings closed (unsaved changes discarded)");
-                                }
-                                settings_editor = None;
-                                app.mode = mew_tui::app::Mode::Normal;
-                            }
-                        }
-                    }
-                    continue;
-                }
-
                 if let Some(action) = mew_tui::events::handle_input_event(&mut app, crossterm_event)
                 {
                     let mut target = crate::runtime::local::LocalTarget::new(
@@ -659,7 +636,6 @@ pub(crate) async fn run_tui(
                         app: &mut app,
                         target: &mut target,
                         event_loop: &event_loop,
-                        settings_editor: &mut settings_editor,
                         should_break: &mut should_break,
                         cat,
                         loaded_personas: &loaded_personas,
@@ -708,24 +684,6 @@ pub(crate) async fn run_tui(
             }
             match event {
                 mew_tui::Event::Input(crossterm_event) => {
-                    // Settings mode: delegate to ConfigEditor
-                    if app.mode == mew_tui::app::Mode::Settings {
-                        if let crossterm::event::Event::Key(key) = crossterm_event {
-                            if let Some(ref mut editor) = settings_editor {
-                                if !editor.handle_key(key) {
-                                    if editor.is_dirty() {
-                                        app.set_alert(
-                                            "Settings closed (unsaved changes discarded)",
-                                        );
-                                    }
-                                    settings_editor = None;
-                                    app.mode = mew_tui::app::Mode::Normal;
-                                }
-                            }
-                        }
-                        continue;
-                    }
-
                     if let crossterm::event::Event::Mouse(ref mouse) = crossterm_event {
                         match mouse.kind {
                             crossterm::event::MouseEventKind::ScrollUp => {
@@ -790,7 +748,6 @@ pub(crate) async fn run_tui(
                 app: &mut app,
                 target: &mut target,
                 event_loop: &event_loop,
-                settings_editor: &mut settings_editor,
                 should_break: &mut should_break,
                 cat,
                 loaded_personas: &loaded_personas,

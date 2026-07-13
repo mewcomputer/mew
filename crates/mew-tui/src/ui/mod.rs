@@ -10,7 +10,7 @@ use crate::app::{App, Mode, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH};
 pub(crate) mod chat;
 mod companion;
 mod input;
-mod overlays;
+pub(crate) mod overlays;
 mod sidebar;
 mod spinner;
 mod status;
@@ -196,6 +196,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 /// directly by the layout that hosts it (it occupies the input slot, not a
 /// centered popup), so it's not dispatched here.
 fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.mode == Mode::Settings {
+        if let Some(ref settings) = app.settings {
+            crate::settings::draw_settings(f, settings, area, &app.theme.tokens);
+        }
+    }
+
     if app.alert.is_some() {
         overlays::draw_alert(f, app, area);
     }

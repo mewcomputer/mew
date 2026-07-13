@@ -224,6 +224,46 @@ pub enum Commands {
         #[command(subcommand)]
         command: ExtCommands,
     },
+    /// Capture the TUI as PNG screenshots or MP4 video using the headless
+    /// harness. Runs a `.tape`-style script against a FakeProvider-backed
+    /// app — no network, no credentials, fully deterministic.
+    TuiCapture {
+        /// Path to the script file. Uses the same verbs as the harness:
+        /// `type`, `key`, `submit`, `say`, `snapshot`, `screenshot`,
+        /// `start_recording`, `stop_recording`, `pause <ms>`, `record <path>`.
+        #[arg(long, short = 's')]
+        script: Option<std::path::PathBuf>,
+
+        /// Interactive REPL mode: read verbs from stdin one line at a time,
+        /// print the frame after each. Enables agent-driven puppet mode via
+        /// bash pipes.
+        #[arg(long, short = 'i')]
+        interactive: bool,
+
+        /// In interactive mode, write a PNG screenshot after each verb to
+        /// this directory (numbered frame_0001.png, frame_0002.png, ...).
+        /// The path to the latest screenshot is printed as a line on stdout
+        /// so the agent can read it and inspect the image.
+        #[arg(long)]
+        screenshot_dir: Option<std::path::PathBuf>,
+
+        /// In interactive mode, encode all captured frames to this MP4 path
+        /// when the session ends (quit or EOF).
+        #[arg(long)]
+        mp4: Option<String>,
+
+        /// Framerate for the output video (default: 30).
+        #[arg(long, default_value = "30")]
+        fps: u32,
+
+        /// Terminal width in columns (default: 80).
+        #[arg(long, default_value = "80")]
+        width: u16,
+
+        /// Terminal height in rows (default: 24).
+        #[arg(long, default_value = "24")]
+        height: u16,
+    },
 }
 
 #[derive(Subcommand)]

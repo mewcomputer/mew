@@ -6,3 +6,4 @@ pub mod ext;
 pub mod run;
 pub mod theme;
 pub mod tui;
+pub mod tui_capture;

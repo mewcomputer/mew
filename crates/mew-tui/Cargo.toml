@@ -12,6 +12,8 @@ mew-provider = { workspace = true }
 mew-session = { workspace = true }
 mew-hooks = { workspace = true }
 mew-protocol = { workspace = true }
+mew-raster = { path = "../mew-raster" }
+tiny-skia = "0.12"
 tokio = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
@@ -28,3 +30,8 @@ ignore = { workspace = true }
 unicode-width = "0.2"
 rand.workspace = true
 strum = { version = "0.26", features = ["derive"] }
+png = "0.18"
+mew-config = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+tempfile = "3"

@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use ratatui::{
-    layout::{Margin, Rect},
+    layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
@@ -1141,4 +1141,23 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
 
     let para = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
     f.render_widget(para, inner);
+}
+
+/// Compute a centered rectangle of the given size inside `area`.
+pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    let popup_layout = Layout::vertical([
+        Constraint::Length(area.height.saturating_sub(h) / 2),
+        Constraint::Length(h),
+        Constraint::Length(area.height.saturating_sub(h) / 2),
+    ])
+    .split(area);
+
+    Layout::horizontal([
+        Constraint::Length(area.width.saturating_sub(w) / 2),
+        Constraint::Length(w),
+        Constraint::Length(area.width.saturating_sub(w) / 2),
+    ])
+    .split(popup_layout[1])[1]
 }

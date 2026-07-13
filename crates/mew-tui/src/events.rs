@@ -109,8 +109,22 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
         crate::app::Mode::HistorySearch => handle_history_search_key(app, key),
         crate::app::Mode::PasteConfirm => handle_paste_confirm_key(app, key),
         crate::app::Mode::Normal | crate::app::Mode::SlashCommand => handle_normal_key(app, key),
-        // Settings mode key handling is done by ConfigEditor in main.rs
-        crate::app::Mode::Settings => None,
+        // Settings mode is handled by the in-app SettingsState.
+        crate::app::Mode::Settings => {
+            if let Some(settings) = app.settings.as_mut() {
+                if !settings.handle_key(key) {
+                    // Closing settings.
+                    if settings.is_dirty() {
+                        app.set_alert("Settings closed (unsaved changes discarded)");
+                    }
+                    app.mode = crate::app::Mode::Normal;
+                    app.settings = None;
+                }
+            } else {
+                app.mode = crate::app::Mode::Normal;
+            }
+            None
+        }
     }
 }
 
@@ -1112,12 +1126,6 @@ pub enum Action {
     ToggleSidebarContext,
     ToggleSidebarTools,
     ToggleSidebarMcp,
-    /// Save settings from the settings page.
-    SaveSettings,
-    /// Start editing a field in the settings page.
-    SettingsEditStart,
-    /// Complete editing a field in the settings page.
-    SettingsEditComplete,
     /// Open the settings page (populate plugins).
     OpenSettings,
     /// Cancel the most recently started running subagent. Carries the

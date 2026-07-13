@@ -18,7 +18,12 @@
 //! - `submit` — shorthand for `key enter`
 //! - `say <text>` — inject a complete assistant text turn (start → deltas → end)
 //! - `error <text>` — inject a terminal `AgentEvent::Error`
-//! - `snapshot [label]` — render the current frame into the output
+//! - `snapshot [label]` — render the current frame into the output as text
+//! - `screenshot <path>` — render the current frame to a PNG file at `<path>`
+//! - `start_recording` — begin capturing frames after each verb
+//! - `stop_recording` — stop capturing; returns frame count
+//! - `pause <ms>` — duplicate the last frame to simulate elapsed time (30fps)
+//! - `record <path> [fps]` — encode recorded frames to mp4 via ffmpeg
 //!
 //! ```no_run
 //! let out = mew_tui::harness::run_script("type hello\nsubmit\nsay hi there\nsnapshot", 80, 24);
@@ -45,6 +50,10 @@ pub struct Harness {
     /// Actions returned by key handling, in order — useful for assertions.
     pub actions: Vec<Action>,
     terminal: Terminal<TestBackend>,
+    /// Recorded frames when video recording is enabled.
+    frames: Vec<tiny_skia::Pixmap>,
+    /// When true, a frame is captured after each verb.
+    recording: bool,
 }
 
 impl Harness {
@@ -55,6 +64,8 @@ impl Harness {
             app: App::new(),
             actions: Vec::new(),
             terminal,
+            frames: Vec::new(),
+            recording: false,
         }
     }
 
@@ -65,10 +76,12 @@ impl Harness {
 
     /// Send one key event, applying the harness-visible effect of any returned
     /// action (echoing the user message on submit, quitting, clearing).
+    /// When recording, captures a frame after the key is processed.
     pub fn key(&mut self, key: KeyEvent) {
         if let Some(action) = handle_key_event(&mut self.app, key) {
             self.apply_action(action);
         }
+        self.capture_frame();
     }
 
     fn apply_action(&mut self, action: Action) {
@@ -85,6 +98,8 @@ impl Harness {
     }
 
     /// Type literal text into the composer, one character at a time.
+    /// When recording, captures a frame after each keystroke for a natural
+    /// typing animation.
     pub fn type_str(&mut self, text: &str) {
         for ch in text.chars() {
             self.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
@@ -93,6 +108,8 @@ impl Harness {
 
     /// Inject a complete assistant text turn: `PartStart` → `PartDelta`s →
     /// `PartEnd` → `MessageEnd`, mirroring how a real provider streams text.
+    /// When recording, captures a frame after each delta chunk for a streaming
+    /// animation effect.
     pub fn say(&mut self, text: &str) {
         let part_id = PartId::new();
         let base = PartBase {
@@ -113,6 +130,8 @@ impl Harness {
                 field: "text",
                 delta: chunk.iter().collect(),
             }));
+            // Capture a frame after each delta to show streaming text
+            self.capture_frame();
         }
         self.agent(AgentEvent::Provider(ProviderEvent::PartEnd { part_id }));
         self.agent(AgentEvent::Provider(ProviderEvent::MessageEnd {
@@ -121,6 +140,7 @@ impl Harness {
             cost: 0.0,
         }));
         self.app.streaming = false;
+        self.capture_frame();
     }
 
     /// Inject a terminal error event.
@@ -259,6 +279,247 @@ impl Harness {
         buffer_to_string(self.terminal.backend().buffer())
     }
 
+    /// Render the current frame to a PNG file at `path`.
+    ///
+    /// Uses [`mew_raster`] to rasterize the ratatui buffer into a pixel-accurate
+    /// image. The PNG is written to disk; the method returns `Ok(())` on success
+    /// or an error if the file can't be written.
+    pub fn screenshot(&mut self, path: &str) -> std::io::Result<()> {
+        let app = &mut self.app;
+        self.terminal.draw(|f| ui::draw(f, app)).expect("draw");
+        let buf = self.terminal.backend().buffer();
+        let png_bytes = mew_raster::to_png(buf, &mew_raster::RasterOptions::default());
+        std::fs::write(path, png_bytes)
+    }
+
+    // -----------------------------------------------------------------------
+    // Video recording
+    // -----------------------------------------------------------------------
+
+    /// Start recording frames. After each subsequent verb (type, key, say,
+    /// etc.), a frame is captured into the internal frame buffer.
+    pub fn start_recording(&mut self) {
+        self.recording = true;
+        self.frames.clear();
+        // Capture the initial frame
+        self.capture_frame();
+    }
+
+    /// Stop recording. Frames remain accessible via [`frame_count`] and
+    /// [`encode_mp4`].
+    pub fn stop_recording(&mut self) {
+        // Capture a final frame before flipping the flag off
+        let was_recording = self.recording;
+        self.recording = false;
+        if was_recording {
+            self.capture_frame_raw();
+        }
+    }
+
+    /// Capture a frame unconditionally (ignores the recording flag).
+    fn capture_frame_raw(&mut self) {
+        let app = &mut self.app;
+        self.terminal.draw(|f| ui::draw(f, app)).expect("draw");
+        let buf = self.terminal.backend().buffer();
+        let pixmap = mew_raster::rasterize(buf, &mew_raster::RasterOptions::default());
+        self.frames.push(pixmap);
+    }
+
+    /// Capture the current frame into the recording buffer. No-op if not recording.
+    pub fn capture_frame(&mut self) {
+        if !self.recording {
+            return;
+        }
+        let app = &mut self.app;
+        self.terminal.draw(|f| ui::draw(f, app)).expect("draw");
+        let buf = self.terminal.backend().buffer();
+        let pixmap = mew_raster::rasterize(buf, &mew_raster::RasterOptions::default());
+        self.frames.push(pixmap);
+    }
+
+    /// Duplicate the last frame `count` times to simulate a pause.
+    /// Used by the `pause` verb to add timing to recordings.
+    pub fn duplicate_last_frame(&mut self, count: usize) {
+        if let Some(last) = self.frames.last().cloned() {
+            for _ in 0..count {
+                self.frames.push(last.clone());
+            }
+        }
+    }
+
+    /// Get the number of recorded frames.
+    pub fn frame_count(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// Encode the recorded frames to an MP4 video via ffmpeg.
+    ///
+    /// Writes numbered PNGs to a temp directory, then invokes
+    /// `ffmpeg -framerate <fps> -i frame_%04d.png -pix_fmt yuv420p <output>`.
+    /// Returns the ffmpeg stdout/stderr on success, or an error message.
+    pub fn encode_mp4(&self, output_path: &str, fps: u32) -> std::io::Result<String> {
+        if self.frames.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no frames recorded",
+            ));
+        }
+
+        let dir = tempfile::tempdir()?;
+        for (i, pixmap) in self.frames.iter().enumerate() {
+            let png_path = dir.path().join(format!("frame_{:04}.png", i));
+            let png_bytes = pixmap_to_png_bytes(pixmap);
+            std::fs::write(&png_path, png_bytes)?;
+        }
+
+        let frame_pattern = dir.path().join("frame_%04d.png");
+        let output = std::process::Command::new("ffmpeg")
+            .arg("-framerate")
+            .arg(fps.to_string())
+            .arg("-i")
+            .arg(&frame_pattern)
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-y")
+            .arg(output_path)
+            .output()?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stderr).to_string())
+        } else {
+            Err(std::io::Error::other(format!(
+                "ffmpeg failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )))
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Single-verb execution (used by run_script and the interactive REPL)
+    // -----------------------------------------------------------------------
+
+    /// Execute a single script verb against this harness.
+    ///
+    /// Returns any text output (snapshots, error messages, status lines).
+    /// This is the shared logic between `run_script` and the interactive
+    /// `mew tui-capture --interactive` REPL.
+    pub fn exec_verb(&mut self, line: &str) -> String {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return String::new();
+        }
+
+        let (verb, rest) = match line.split_once(char::is_whitespace) {
+            Some((v, r)) => (v, r.trim()),
+            None => (line, ""),
+        };
+
+        let mut out = String::new();
+        match verb {
+            "size" | "resize" => match parse_size(rest) {
+                Some((w, hh)) => self.resize(w, hh),
+                None => out.push_str(&format!("!! bad size '{rest}'\n")),
+            },
+            "type" => self.type_str(rest),
+            "key" => match parse_key(rest) {
+                Some(key) => self.key(key),
+                None => out.push_str(&format!("!! unknown key '{rest}'\n")),
+            },
+            "submit" => self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            "say" => self.say(rest),
+            "error" => self.error(rest),
+            "settings" => {
+                let cfg = mew_config::Config::default();
+                self.app.settings = Some(crate::settings::SettingsState::new(cfg, Vec::new()));
+                self.app.mode = crate::app::Mode::Settings;
+            }
+            "settings_config" => {
+                let path = rest.trim().trim_matches('"');
+                if path.is_empty() {
+                    out.push_str("!! settings_config requires a file path\n");
+                } else {
+                    match std::fs::read_to_string(path) {
+                        Ok(text) => match toml::from_str::<mew_config::Config>(&text) {
+                            Ok(cfg) => {
+                                self.app.settings =
+                                    Some(crate::settings::SettingsState::new(cfg, Vec::new()));
+                                self.app.mode = crate::app::Mode::Settings;
+                            }
+                            Err(e) => out.push_str(&format!("!! bad config toml: {e}\n")),
+                        },
+                        Err(e) => out.push_str(&format!("!! cannot read config: {e}\n")),
+                    }
+                }
+            }
+            "snapshot" => {
+                let label = if rest.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {rest}")
+                };
+                out.push_str(&format!("--- snapshot{label} ---\n"));
+                out.push_str(&self.render());
+                out.push_str("---\n");
+            }
+            "screenshot" => {
+                if rest.is_empty() {
+                    out.push_str("!! screenshot requires a file path\n");
+                } else {
+                    match self.screenshot(rest.trim_matches('"')) {
+                        Ok(()) => out.push_str(&format!("--- screenshot saved to {rest} ---\n")),
+                        Err(e) => out.push_str(&format!("!! screenshot failed: {e}\n")),
+                    }
+                }
+            }
+            "start_recording" => {
+                self.start_recording();
+                out.push_str("--- recording started ---\n");
+            }
+            "stop_recording" => {
+                self.stop_recording();
+                out.push_str(&format!(
+                    "--- recording stopped ({} frames) ---\n",
+                    self.frame_count()
+                ));
+            }
+            "pause" => {
+                let fps: u32 = 30;
+                match rest.trim_end_matches("ms").parse::<u32>() {
+                    Ok(ms) => {
+                        let frames = (ms as f32 / (1000.0 / fps as f32)).round() as usize;
+                        self.duplicate_last_frame(frames);
+                    }
+                    Err(_) => {
+                        out.push_str(&format!("!! bad pause duration '{rest}'\n"));
+                    }
+                }
+            }
+            "record" => {
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                if parts.is_empty() {
+                    out.push_str("!! record requires an output path\n");
+                } else {
+                    let path = parts[0].trim_matches('"');
+                    let fps: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(30);
+                    match self.encode_mp4(path, fps) {
+                        Ok(_) => out.push_str(&format!("--- video saved to {path} ---\n")),
+                        Err(e) => out.push_str(&format!("!! record failed: {e}\n")),
+                    }
+                }
+            }
+            "help" | "?" => {
+                out.push_str("verbs: type, key, submit, say, error, ");
+                out.push_str("settings, settings_config, snapshot, screenshot, ");
+                out.push_str("start_recording, stop_recording, pause, record, size, quit\n");
+            }
+            "quit" | "exit" => {
+                out.push_str("--- bye ---\n");
+            }
+            other => out.push_str(&format!("!! unknown verb '{other}'\n")),
+        }
+        out
+    }
+
     fn push_user_message(&mut self, text: String) {
         let msg_id = MessageId::new();
         let session_id = SessionId::new();
@@ -303,6 +564,20 @@ fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
     out
 }
 
+/// Encode a `tiny_skia::Pixmap` to PNG bytes.
+fn pixmap_to_png_bytes(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
+    use png::{BitDepth, ColorType, Encoder};
+    let mut out = Vec::new();
+    {
+        let mut encoder = Encoder::new(&mut out, pixmap.width(), pixmap.height());
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(pixmap.data()).expect("png write");
+    }
+    out
+}
+
 /// Run a line-based script against a fresh harness and return the accumulated
 /// snapshots as text. See the module docs for the verb list.
 pub fn run_script(script: &str, width: u16, height: u16) -> String {
@@ -314,34 +589,12 @@ pub fn run_script(script: &str, width: u16, height: u16) -> String {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (verb, rest) = match line.split_once(char::is_whitespace) {
-            Some((v, r)) => (v, r.trim()),
-            None => (line, ""),
-        };
-        match verb {
-            "size" | "resize" => match parse_size(rest) {
-                Some((w, hh)) => h.resize(w, hh),
-                None => out.push_str(&format!("!! line {}: bad size '{rest}'\n", i + 1)),
-            },
-            "type" => h.type_str(rest),
-            "key" => match parse_key(rest) {
-                Some(key) => h.key(key),
-                None => out.push_str(&format!("!! line {}: unknown key '{rest}'\n", i + 1)),
-            },
-            "submit" => h.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            "say" => h.say(rest),
-            "error" => h.error(rest),
-            "snapshot" => {
-                let label = if rest.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {rest}")
-                };
-                out.push_str(&format!("--- snapshot{label} ---\n"));
-                out.push_str(&h.render());
-                out.push_str("---\n");
-            }
-            other => out.push_str(&format!("!! line {}: unknown verb '{other}'\n", i + 1)),
+        // Prefix error messages with line number for script mode
+        let result = h.exec_verb(line);
+        if result.starts_with("!!") {
+            out.push_str(&format!("line {}: {}", i + 1, result));
+        } else {
+            out.push_str(&result);
         }
     }
     out
@@ -447,5 +700,146 @@ mod tests {
             Some(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
         );
         assert_eq!(parse_key("nope-not-a-key"), None);
+    }
+
+    #[test]
+    fn screenshot_verb_writes_png_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let png_path = dir.path().join("frame.png");
+        let png_str = png_path.to_str().unwrap();
+
+        let script = format!("type hello\nsubmit\nsay hello back\nscreenshot {png_str}");
+        let out = run_script(&script, 80, 24);
+
+        // The script should report success
+        assert!(out.contains("screenshot saved"), "output was: {out}");
+
+        // The file should exist and be a valid PNG
+        assert!(png_path.exists(), "PNG file should exist");
+        let bytes = std::fs::read(&png_path).expect("read png");
+        assert!(bytes.len() > 100, "PNG should have content");
+        // PNG magic bytes
+        assert_eq!(
+            &bytes[..8],
+            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        );
+    }
+
+    #[test]
+    fn screenshot_verb_requires_path() {
+        let out = run_script("screenshot", 80, 24);
+        assert!(out.contains("requires a file path"));
+    }
+
+    #[test]
+    fn recording_captures_frames_per_verb() {
+        let mut h = Harness::new(40, 10);
+        h.start_recording();
+        // start_recording captures 1 initial frame
+        assert_eq!(h.frame_count(), 1);
+
+        // type_str: "hi" = 2 keystrokes = 2 frames
+        h.type_str("hi");
+        assert_eq!(h.frame_count(), 3);
+
+        // key: enter = 1 frame
+        h.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(h.frame_count(), 4);
+
+        // say: "hello" has 5 chars, chunked by 8 = 1 delta + 1 final = 2 frames
+        h.say("hello");
+        assert_eq!(h.frame_count(), 6);
+
+        h.stop_recording();
+        // stop_recording captures 1 final frame
+        assert_eq!(h.frame_count(), 7);
+    }
+
+    #[test]
+    fn pause_duplicates_frames() {
+        let mut h = Harness::new(40, 10);
+        h.start_recording();
+        assert_eq!(h.frame_count(), 1);
+        h.duplicate_last_frame(15); // ~500ms at 30fps
+        assert_eq!(h.frame_count(), 16);
+        h.stop_recording();
+        assert_eq!(h.frame_count(), 17);
+    }
+
+    #[test]
+    fn pause_verb_in_script() {
+        let out = run_script("start_recording\npause 1000\nstop_recording", 40, 10);
+        // 1000ms at 30fps = 30 frames duplicated
+        // start_recording: 1 frame + 30 pause + stop_recording: 1 = 32
+        assert!(out.contains("32 frames"));
+    }
+
+    #[test]
+    fn record_verb_produces_mp4() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mp4_path = dir.path().join("test.mp4");
+        let mp4_str = mp4_path.to_str().unwrap();
+
+        let script = format!(
+            "start_recording\ntype hello\nsubmit\nsay hi there\npause 500\nstop_recording\nrecord {mp4_str} 30"
+        );
+        let out = run_script(&script, 60, 12);
+
+        if !out.contains("video saved") {
+            // ffmpeg might not be available in CI — skip gracefully
+            eprintln!("record_verb_produces_mp4 skipped (ffmpeg unavailable?): {out}");
+            return;
+        }
+
+        assert!(mp4_path.exists(), "MP4 file should exist");
+        let bytes = std::fs::read(&mp4_path).expect("read mp4");
+        assert!(bytes.len() > 100, "MP4 should have content");
+    }
+
+    #[test]
+    fn settings_verb_opens_overlay() {
+        let mut h = Harness::new(80, 24);
+        h.exec_verb("settings");
+        assert!(matches!(h.app.mode, crate::app::Mode::Settings));
+        assert!(h.app.settings.is_some());
+        assert!(h.render().contains("mew settings"));
+    }
+
+    #[test]
+    fn settings_config_verb_opens_overlay_with_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg_path = dir.path().join("cfg.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+[providers.z-ai]
+shape = "openai"
+base_url = "https://api.z.ai/api/coding/paas/v4"
+credential_ref = "z-ai"
+"#,
+        )
+        .unwrap();
+        let cfg_str = cfg_path.to_str().unwrap();
+
+        std::env::set_var("MEW_CRED_Z_AI", "fake-key");
+        let mut h = Harness::new(80, 24);
+        h.exec_verb(&format!("settings_config \"{cfg_str}\""));
+        let rendered = h.render();
+        std::env::remove_var("MEW_CRED_Z_AI");
+        assert!(rendered.contains("mew settings"));
+        assert!(rendered.contains("z-ai"));
+    }
+
+    #[test]
+    fn settings_config_verb_reports_missing_path() {
+        let out = run_script("settings_config", 80, 24);
+        assert!(out.contains("requires a file path"));
+    }
+
+    #[test]
+    fn help_includes_settings_verbs() {
+        let out = run_script("help", 80, 24);
+        assert!(out.contains("settings"));
+        assert!(out.contains("settings_config"));
     }
 }

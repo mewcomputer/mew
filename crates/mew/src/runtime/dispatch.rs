@@ -15,7 +15,6 @@ use mew_tui::events::Action;
 use mew_tui::SlashResult;
 
 use crate::commands::tui::copy_to_clipboard;
-use crate::config_editor::{self, ConfigEditor};
 use crate::runtime::mentions::process_mentions;
 use crate::runtime::target::{CommandTarget, Unsupported};
 use crate::setup::personas::persona_summary;
@@ -35,7 +34,6 @@ pub struct Ctx<'a, T: CommandTarget> {
     pub app: &'a mut mew_tui::App,
     pub target: &'a mut T,
     pub event_loop: &'a mew_tui::EventLoop,
-    pub settings_editor: &'a mut Option<ConfigEditor>,
     pub should_break: &'a mut bool,
     pub cat: Option<&'a Catalog>,
     pub loaded_personas: &'a [mew_personas::Persona],
@@ -103,10 +101,6 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
         }
         Action::ToggleSidebarMcp => {
             cx.app.toggle_sidebar_section("mcp");
-            Flow::Continue
-        }
-        Action::SaveSettings | Action::SettingsEditStart | Action::SettingsEditComplete => {
-            // Handled by ConfigEditor in settings mode — ignore here
             Flow::Continue
         }
         Action::OpenSettings => {
@@ -531,7 +525,7 @@ fn open_settings<T: CommandTarget>(cx: &mut Ctx<'_, T>) {
     let loader =
         mew_hooks_runtime::PluginLoader::new(mew_hooks_runtime::PluginLoader::default_dirs());
     let state = mew_config::load_state().unwrap_or_default();
-    let plugins: Vec<config_editor::PluginEntry> = loader
+    let plugins: Vec<mew_tui::settings::PluginEntry> = loader
         .discover_executables()
         .into_iter()
         .map(|path| {
@@ -541,7 +535,7 @@ fn open_settings<T: CommandTarget>(cx: &mut Ctx<'_, T>) {
                 .to_string_lossy()
                 .to_string();
             let enabled = !state.disabled_plugins.contains(&name);
-            config_editor::PluginEntry {
+            mew_tui::settings::PluginEntry {
                 name,
                 path: path.display().to_string(),
                 enabled,
@@ -549,6 +543,6 @@ fn open_settings<T: CommandTarget>(cx: &mut Ctx<'_, T>) {
         })
         .collect();
     let cfg = mew_config::load().unwrap_or_default();
-    *cx.settings_editor = Some(ConfigEditor::new(cfg, plugins));
+    cx.app.settings = Some(mew_tui::settings::SettingsState::new(cfg, plugins));
     cx.app.mode = TuiMode::Settings;
 }

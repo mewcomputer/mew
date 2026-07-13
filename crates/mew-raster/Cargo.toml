@@ -1,0 +1,17 @@
+[package]
+name = "mew-raster"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Rasterize ratatui Buffer to PNG — for agent-facing TUI screenshots."
+
+[dependencies]
+ratatui = { workspace = true }
+cosmic-text = "0.19"
+fontdb = "0.23"
+tiny-skia = "0.12"
+png = "0.18"
+
+[lib]
+path = "src/lib.rs"

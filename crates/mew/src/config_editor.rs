@@ -290,11 +290,6 @@ impl ConfigEditor {
         }
     }
 
-    /// Whether the config has unsaved changes.
-    pub fn is_dirty(&self) -> bool {
-        self.dirty
-    }
-
     fn run(&mut self) -> Result<()> {
         enable_raw_mode().context("enable raw mode")?;
         let mut stdout = io::stdout();

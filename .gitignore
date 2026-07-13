@@ -37,5 +37,8 @@ mew-web-ui/tsconfig.tsbuildinfo
 # Session logs (requests.log, etc.)
 *.log
 
+# Generated capture artifacts
+notes/capture/
+
 # Accidental clone of OpenAI Codex repo (583MB)
 sourc/

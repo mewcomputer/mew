@@ -1,4 +1,3 @@
-use crate::config_editor;
 use crate::runtime;
 use crate::PluginInfo;
 use mew_agent::AgentEvent;
@@ -160,13 +159,7 @@ async fn test_action_variant_table() {
 
     for action in Action::iter() {
         // Skip actions that need external resources not available in tests.
-        if matches!(
-            action,
-            Action::CopySelection(_)
-                | Action::SaveSettings
-                | Action::SettingsEditStart
-                | Action::SettingsEditComplete
-        ) {
+        if matches!(action, Action::CopySelection(_)) {
             continue; // clipboard / settings editor handles these
         }
         // Provide meaningful test data for actions that carry payloads.
@@ -198,7 +191,6 @@ async fn test_action_variant_table() {
             workspace: String::new(),
             active_persona: None,
         }));
-        let mut settings_editor: Option<config_editor::ConfigEditor> = None;
         let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
         let chat_dirty_before = app.chat_dirty;
@@ -210,7 +202,6 @@ async fn test_action_variant_table() {
             app: &mut app,
             target: &mut target,
             event_loop: &event_loop,
-            settings_editor: &mut settings_editor,
             should_break: &mut should_break,
             cat: None,
             loaded_personas: &[],
@@ -259,7 +250,6 @@ async fn test_synthetic_message_renders_immediately() {
         workspace: String::new(),
         active_persona: None,
     }));
-    let mut settings_editor: Option<config_editor::ConfigEditor> = None;
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     // /cost returns SlashResult::Message which pushes a synthetic message.
@@ -268,7 +258,6 @@ async fn test_synthetic_message_renders_immediately() {
         app: &mut app,
         target: &mut target,
         event_loop: &event_loop,
-        settings_editor: &mut settings_editor,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -303,14 +292,12 @@ async fn test_unknown_slash_falls_through() {
         workspace: String::new(),
         active_persona: None,
     }));
-    let mut settings_editor: Option<config_editor::ConfigEditor> = None;
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
         event_loop: &event_loop,
-        settings_editor: &mut settings_editor,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -343,14 +330,12 @@ async fn test_daemon_quit() {
         workspace: String::new(),
         active_persona: None,
     }));
-    let mut settings_editor: Option<config_editor::ConfigEditor> = None;
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     let mut cx = runtime::Ctx {
         app: &mut app,
         target: &mut target,
         event_loop: &event_loop,
-        settings_editor: &mut settings_editor,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -467,7 +452,6 @@ async fn test_unsupported_ops_render_alerts() {
         workspace: String::new(),
         active_persona: None,
     }));
-    let mut settings_editor: Option<config_editor::ConfigEditor> = None;
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     // Clear with a failing target should set an alert, not clear messages.
@@ -476,7 +460,6 @@ async fn test_unsupported_ops_render_alerts() {
         app: &mut app,
         target: &mut target,
         event_loop: &event_loop,
-        settings_editor: &mut settings_editor,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
@@ -510,7 +493,6 @@ async fn test_set_permission_mode_not_dropped() {
         workspace: String::new(),
         active_persona: None,
     }));
-    let mut settings_editor: Option<config_editor::ConfigEditor> = None;
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
 
     let original_mode = app.permission_mode;
@@ -521,7 +503,6 @@ async fn test_set_permission_mode_not_dropped() {
         app: &mut app,
         target: &mut target,
         event_loop: &event_loop,
-        settings_editor: &mut settings_editor,
         should_break: &mut should_break,
         cat: None,
         loaded_personas: &[],
