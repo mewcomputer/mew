@@ -5,16 +5,17 @@ description: Record mew's TUI as mp4, gif, or png. Two paths: (1) mew tui-captur
 
 # TUI Capture
 
-Two capture paths, each with different tradeoffs:
+Two capture paths, each with different tradeoffs. `mew tui-capture` now also
+has a daemon-connected mode that sits between them:
 
-| | `mew tui-capture` | `vhs` |
-|---|---|---|
-| **Determinism** | Fully deterministic (FakeProvider in-process) | Non-deterministic (real pty, real provider) |
-| **Dependencies** | ffmpeg (for video only) | vhs, ttyd, ffmpeg, Chrome |
-| **Terminal chrome** | None — raw rasterized buffer | Full — window decorations, fonts, themes |
-| **Network** | Never | Required (LLM or fake-provider daemon) |
-| **CI-runnable** | Yes | No (needs Chrome + display) |
-| **Best for** | Agent self-inspection, regression tests, fast iteration | Demo videos, README gifs, social media |
+| | `mew tui-capture` | `mew tui-capture --connect` | `vhs` |
+|---|---|---|---|
+| **Determinism** | Fully deterministic (FakeProvider in-process) | Non-deterministic (real daemon turn) | Non-deterministic (real pty, real provider) |
+| **Dependencies** | ffmpeg (for video only) | running mew daemon + ffmpeg | vhs, ttyd, ffmpeg, Chrome |
+| **Terminal chrome** | None — raw rasterized buffer | None — raw rasterized buffer | Full — window decorations, fonts, themes |
+| **Network** | Never | Local WebSocket to daemon | Required (LLM or fake-provider daemon) |
+| **CI-runnable** | Yes | Yes (if daemon is fake-provider) | No (needs Chrome + display) |
+| **Best for** | Agent self-inspection, regression tests, fast iteration | Real chat/turn behavior: streaming, tool calls, subagents | Demo videos, README gifs, social media |
 
 ## Method 1: `mew tui-capture` (deterministic, recommended)
 
@@ -143,6 +144,70 @@ pause 1000
 ```bash
 mew tui-capture --script demo.txt --mp4 demo.mp4 --width 80 --height 24
 ```
+
+---
+
+## Method 1b: `mew tui-capture --connect` (real daemon turn)
+
+Connect `mew tui-capture` to a running mew daemon (e.g.
+`mew daemon --fake-provider`) to exercise the real chat/turn pipeline:
+streaming, tool calls, subagents, and session rail. The rendering is still
+done headlessly through the rasterizer, so the result is deterministic in
+layout but not in timing.
+
+### Usage
+
+```bash
+# Start a daemon (fake-provider is great for offline captures)
+mew daemon --fake-provider --port 127.0.0.1:9847 --background --log /tmp/mew-capture.log
+sleep 1
+
+# Run a capture script against the daemon
+mew tui-capture --script capture.txt --connect ws://127.0.0.1:9847
+
+# Stop the daemon when done
+mew daemon --stop
+```
+
+### Daemon-mode verbs
+
+These verbs are only meaningful when `--connect` is used:
+
+| Verb | Description |
+|---|---|
+| `send "<text>"` | Submit a user message to the daemon and wait for the turn to start streaming |
+| `wait_turn [timeout_ms]` | Block until the daemon's response stream finishes (default timeout: 30s) |
+| `expect "<text>"` | Fail the script if the current text frame does not contain `<text>` |
+| `screenshot_dir "<path>"` | Enable numbered PNG screenshots after every subsequent verb |
+
+Harness-only verbs (`say`, `error`, `settings`, `settings_config`) are not
+available in daemon mode because the daemon drives the assistant response
+instead of scripted injection.
+
+### Example daemon capture script
+
+```
+# Connect to the daemon, send a prompt, and wait for the response
+send "hello"
+wait_turn
+expect "hello from fake provider"
+
+# Take a snapshot + a named screenshot of the final frame
+snapshot response
+screenshot response.png
+```
+
+```bash
+mew tui-capture --script daemon-capture.txt --connect ws://127.0.0.1:9847
+```
+
+### Important: timing is non-deterministic
+
+In daemon mode, the daemon controls when text arrives. Always use `wait_turn`
+after `send` before asserting or screenshotting. Add `pause <ms>` between
+actions if you want to record intermediate frames.
+
+---
 
 ### Full procedure
 

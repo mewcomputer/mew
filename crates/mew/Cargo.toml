@@ -49,6 +49,9 @@ tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 nix = { workspace = true }
 tempfile = "3"
+mew-raster = { path = "../mew-raster" }
+tiny-skia = "0.12"
+png = "0.18"
 
 iroh = { workspace = true, optional = true }
 qrcode = { workspace = true }

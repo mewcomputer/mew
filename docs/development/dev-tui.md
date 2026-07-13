@@ -12,7 +12,8 @@ The mew TUI is a ratatui application that can run in two modes:
 
 This doc covers the TUI's event loop, display state, streaming markdown, and
 how a keystroke becomes a provider stream. For the daemon and session model,
-see [Architecture](/docs/development/dev-architecture/).
+see [Architecture](/docs/development/dev-architecture/). For recording captures
+against a live daemon, see [Recording real-provider TUI captures](/docs/development/dev-tui-capture/).
 
 ## The pipeline
 

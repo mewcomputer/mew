@@ -351,15 +351,20 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             fps,
             width,
             height,
-        }) => commands::tui_capture::run(
-            script.as_deref(),
-            interactive,
-            screenshot_dir.as_deref(),
-            mp4.as_deref(),
-            fps,
-            width,
-            height,
-        ),
+            connect,
+        }) => {
+            commands::tui_capture::run(
+                script.as_deref(),
+                interactive,
+                screenshot_dir.as_deref(),
+                mp4.as_deref(),
+                fps,
+                width,
+                height,
+                connect.as_deref(),
+            )
+            .await
+        }
     }
 }
 

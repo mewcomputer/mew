@@ -1,4 +1,132 @@
-# 2026-07-13 — TUI Self-Capture (Phases 0–4 + cosmic-text upgrade)
+# 2026-07-13 — Daemon-connected `mew tui-capture --connect`
+
+## Summary
+
+Added a real-daemon capture path to `mew tui-capture`. Scripts can now drive
+a live mew daemon (e.g. `mew daemon --fake-provider`) headlessly, capturing
+true chat/turn behavior — streaming, tool calls, subagents, session rail —
+with the same rasterized PNG/text output pipeline.
+
+## Changes
+
+- `crates/mew-tui/src/harness.rs`:
+  - New `Backend` trait so the verb interpreter can drive pluggable backends.
+  - Existing behavior moved into `LocalBackend`.
+  - `Harness` is now generic over `Backend`, defaulting to `LocalBackend`; the
+    public API (`h.app`, `h.actions`, `run_script`, etc.) is preserved.
+  - Local-only verbs (`say`, `error`, `settings`, `settings_config`) now
+    produce a clear error when used with a non-local backend.
+  - `parse_key` made public for reuse by the daemon interpreter.
+
+- `crates/mew/src/commands/tui_capture.rs`:
+  - New `DaemonBackend` that connects to a mew daemon via `DaemonClient`,
+    creates a session, and pumps `AgentEvent`s / `ServerMessage`s into a
+    headless `App` + `TestBackend`.
+  - New async-aware script verbs for daemon mode: `send`, `wait_turn`, `expect`,
+    `screenshot_dir`.
+  - New `run_script_daemon` / `run_interactive_daemon` paths.
+  - Screenshot/MP4 encoding work in daemon mode the same way as harness mode.
+
+- `crates/mew/src/cli.rs` and `crates/mew/src/main.rs`:
+  - Added `--connect <url>` to `TuiCapture`.
+  - Made `tui_capture::run` async and wired `.await`.
+
+- `crates/mew/Cargo.toml`:
+  - Added `mew-raster`, `tiny-skia`, `png` dependencies for the daemon backend.
+
+- `.mew/skills/tui-capture/SKILL.md`:
+  - Documented `--connect` and the daemon-mode verbs.
+  - Added a daemon capture example and updated the comparison table.
+
+## Tests
+
+- `test_daemon_capture_fake_provider_end_to_end` — starts an in-process daemon
+  with `FakeProvider`, runs `send` / `wait_turn` / `expect`, and verifies the
+  response appears in the output.
+- `test_daemon_capture_expect_fails_when_missing` — verifies `expect` reports a
+  clear error when the expected text is absent.
+- `test_daemon_capture_screenshot_dir_writes_png` — verifies numbered PNGs are
+  written when `screenshot_dir` is set in daemon mode.
+
+## CI Gate
+
+- `cargo clippy -p mew -p mew-tui -p mew-daemon -- -D warnings` — clean
+- `cargo test -p mew -p mew-tui` — 154+ tests pass (mew-tui harness tests +
+  new daemon capture tests)
+- `cargo test --all` — one pre-existing `mew-daemon` concurrency test
+  (`slash_command_during_in_flight_turn_does_not_block_stream`) is failing
+  independently of these changes; all other tests pass.
+
+---
+
+
+# 2026-07-13 — Real-provider `mew tui-capture --connect` improvements
+
+## Summary
+
+Improved daemon-connected `mew tui-capture` while recording a real `umans`
+demo: streaming frames are now captured during `wait_turn`, the TUI status bar
+shows the real model/provider, and a dev doc was added.
+
+## Changes
+
+- `crates/mew/src/commands/tui_capture.rs`:
+  - `DaemonBackend::wait_turn` now draws and captures a frame roughly every
+    100 ms while `app.streaming` is true, so recorded MP4s show the response
+    appearing progressively instead of jumping straight to the final frame.
+  - `DaemonBackend::connect` reads `model`/`provider` from
+    `ServerMessage::SessionReady` and sets `app.status.model`/`provider`, so the
+    status bar shows the real backend (e.g. `umans/umans-coder`) instead of
+    `mewd/daemon`.
+  - Replaced `wait_for_session_id` with `wait_for_session_ready`.
+
+- `crates/mew-daemon/src/client.rs`:
+  - `SessionReady` is now forwarded to `notify_tx` so callers can read the
+    active model/provider from it.
+
+- `docs/development/dev-tui-capture.md`:
+  - New dev doc explaining how to record real-provider captures with
+    `mew tui-capture --connect`, including daemon setup, script verbs, tips,
+    and troubleshooting.
+
+- `docs/development/dev-tui.md`:
+  - Added a cross-reference to the new dev-tui-capture doc.
+
+## Captures produced
+
+- `notes/capture/umans-optimized-reverse-binary-string-demo.mp4`
+- `notes/capture/umans-optimized-reverse-binary-string-final.png`
+
+Script used:
+
+```text
+send "What's the optimised way of reversing a binary string in Rust?"
+wait_turn 120000
+expect "reverse"
+pause 4000
+screenshot /tmp/umans-optimized-final.png
+```
+
+Command:
+
+```bash
+export MEW_CRED_UMANS=$(grep MEW_CRED_UMANS .env | cut -d= -f2-)
+./target/debug/mew daemon --provider umans --model umans/umans-coder \
+  --port 127.0.0.1:0 --background --log /tmp/mew-capture.log
+./target/debug/mew tui-capture \
+  --script /tmp/capture-umans-optimized.txt \
+  --connect ws://127.0.0.1:<port> \
+  --mp4 notes/capture/umans-optimized-reverse-binary-string-demo.mp4 \
+  --width 100 --height 30
+./target/debug/mew daemon --stop
+```
+
+## CI Gate
+
+- `cargo clippy -p mew -p mew-daemon -- -D warnings` — clean
+- `cargo test -p mew tui_capture` — 5 tests pass
+
+---
 
 # 2026-07-13 — Settings overlay capture verb
 

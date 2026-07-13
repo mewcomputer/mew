@@ -252,6 +252,10 @@ pub enum Commands {
         #[arg(long)]
         mp4: Option<String>,
 
+        /// Connect to a mew daemon for real chat/turn captures.
+        #[arg(long)]
+        connect: Option<String>,
+
         /// Framerate for the output video (default: 30).
         #[arg(long, default_value = "30")]
         fps: u32,

@@ -129,9 +129,11 @@ impl DaemonClient {
 
                 // SessionReady is not an AgentEvent — the caller handles it
                 // via new_session(). Skip forwarding for those. But we do
-                // capture the session ID for later use.
+                // capture the session ID for later use, and still push the
+                // message to notify_tx so callers can read model/provider.
                 if let ServerMessage::SessionReady { ref session_id, .. } = server_msg {
                     *state_clone.session_id.lock().await = Some(session_id.clone());
+                    let _ = state_clone.notify_tx.send(server_msg.clone()).await;
                     continue;
                 }
 

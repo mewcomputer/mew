@@ -30,6 +30,8 @@
 //! print!("{out}");
 //! ```
 
+use std::io;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use mew_agent::AgentEvent;
 use mew_message::{
@@ -43,8 +45,54 @@ use crate::app::App;
 use crate::events::{handle_key_event, Action};
 use crate::ui;
 
-/// A headless TUI driven programmatically.
-pub struct Harness {
+/// Pluggable backend for the headless verb interpreter.
+///
+/// The `mew-tui` crate intentionally cannot depend on `mew-daemon`, so this
+/// trait only uses types already available here. Async-aware verbs such as
+/// `send` and `wait_turn` for daemon-capture mode are implemented by the
+/// daemon backend inside the `mew` binary crate; the interpreter dispatches
+/// those directly and only uses the sync methods below for rendering,
+/// screenshots, key injection, and local-only simulation.
+pub trait Backend {
+    /// Render the current frame as text.
+    fn render(&mut self) -> String;
+    /// Render the current frame to a PNG file at `path`.
+    fn screenshot(&mut self, path: &str) -> io::Result<()>;
+    /// Send one key event.
+    fn send_key(&mut self, key: KeyEvent);
+    /// Type literal text into the composer, one character at a time.
+    fn type_str(&mut self, text: &str);
+    /// Push text into the composer and submit it (local-only).
+    fn send_text(&mut self, text: &str);
+    /// Wait until the current turn finishes (local-only; no-op here).
+    fn wait_turn(&mut self, _timeout_ms: u64) -> Result<(), String>;
+    /// Return whether the app is currently streaming a response.
+    fn is_streaming(&self) -> bool;
+    /// Non-blocking poll for async events. Local backend is a no-op.
+    fn poll_events(&mut self) {}
+    /// Start recording frames.
+    fn start_recording(&mut self);
+    /// Stop recording frames.
+    fn stop_recording(&mut self);
+    /// Number of recorded frames.
+    fn frame_count(&self) -> usize;
+    /// Encode recorded frames to an MP4 file.
+    fn encode_mp4(&self, path: &str, fps: u32) -> io::Result<String>;
+    /// Duplicate the last recorded frame `count` times.
+    fn duplicate_last_frame(&mut self, count: usize);
+    /// Capture a frame if recording is enabled.
+    fn capture_frame(&mut self);
+    /// Access the local backend if this is one.
+    fn as_local_backend_mut(&mut self) -> Option<&mut LocalBackend> {
+        None
+    }
+    fn as_local_backend_ref(&self) -> Option<&LocalBackend> {
+        None
+    }
+}
+
+/// The default headless backend: an [`App`] backed by ratatui's `TestBackend`.
+pub struct LocalBackend {
     /// The app under test. Public so tests can inspect or seed state directly.
     pub app: App,
     /// Actions returned by key handling, in order — useful for assertions.
@@ -56,8 +104,8 @@ pub struct Harness {
     recording: bool,
 }
 
-impl Harness {
-    /// Build a harness with a virtual terminal of the given size.
+impl LocalBackend {
+    /// Build a local backend with a virtual terminal of the given size.
     pub fn new(width: u16, height: u16) -> Self {
         let terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         Self {
@@ -74,14 +122,9 @@ impl Harness {
         self.terminal.backend_mut().resize(width, height);
     }
 
-    /// Send one key event, applying the harness-visible effect of any returned
-    /// action (echoing the user message on submit, quitting, clearing).
-    /// When recording, captures a frame after the key is processed.
-    pub fn key(&mut self, key: KeyEvent) {
-        if let Some(action) = handle_key_event(&mut self.app, key) {
-            self.apply_action(action);
-        }
-        self.capture_frame();
+    /// Feed a raw `AgentEvent` to the app, exactly as the real event loop does.
+    pub fn agent(&mut self, event: AgentEvent) {
+        self.app.handle_agent_event(event);
     }
 
     fn apply_action(&mut self, action: Action) {
@@ -97,13 +140,36 @@ impl Harness {
         self.actions.push(action);
     }
 
-    /// Type literal text into the composer, one character at a time.
-    /// When recording, captures a frame after each keystroke for a natural
-    /// typing animation.
-    pub fn type_str(&mut self, text: &str) {
-        for ch in text.chars() {
-            self.key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
-        }
+    fn push_user_message(&mut self, text: String) {
+        let msg_id = MessageId::new();
+        let session_id = SessionId::new();
+        self.app.push_message(Message {
+            id: msg_id,
+            session_id,
+            role: Role::User,
+            parts: vec![Part::Text(TextPart {
+                base: PartBase {
+                    id: PartId::new(),
+                    message_id: msg_id,
+                    session_id,
+                },
+                text,
+                synthetic: false,
+            })],
+            time: Time {
+                created: chrono::Utc::now().timestamp_millis(),
+                completed: None,
+            },
+            assistant: None,
+        });
+    }
+
+    fn capture_frame_raw(&mut self) {
+        let app = &mut self.app;
+        self.terminal.draw(|f| ui::draw(f, app)).expect("draw");
+        let buf = self.terminal.backend().buffer();
+        let pixmap = mew_raster::rasterize(buf, &mew_raster::RasterOptions::default());
+        self.frames.push(pixmap);
     }
 
     /// Inject a complete assistant text turn: `PartStart` → `PartDelta`s →
@@ -153,7 +219,7 @@ impl Harness {
     /// ToolEnd → PartUpdated(Completed). The resulting `ToolDisplayState`
     /// carries the output + diff that the chat renderer reads.
     pub fn say_tool_call(&mut self, tool_name: &str, output: &str, diff: Option<&str>) {
-        use mew_message::{PartBase, ToolCallPart, ToolState, ToolStateCompleted, ToolTime};
+        use mew_message::{ToolCallPart, ToolState, ToolStateCompleted, ToolTime};
         let part_id = PartId::new();
         let msg_id = MessageId::new();
         let session_id = SessionId::new();
@@ -230,7 +296,7 @@ impl Harness {
     /// Inject a reasoning/thinking part with `text`. The block renders
     /// collapsed by default (header line only) unless expanded.
     pub fn say_reasoning(&mut self, text: &str) {
-        use mew_message::{PartBase, ReasoningPart};
+        use mew_message::ReasoningPart;
         let part_id = PartId::new();
         let msg_id = MessageId::new();
         let session_id = SessionId::new();
@@ -265,26 +331,16 @@ impl Harness {
         }));
         self.agent(AgentEvent::Provider(ProviderEvent::PartEnd { part_id }));
     }
+}
 
-    /// Feed a raw `AgentEvent` to the app, exactly as the real event loop does.
-    pub fn agent(&mut self, event: AgentEvent) {
-        self.app.handle_agent_event(event);
-    }
-
-    /// Render the current state and return the frame as text, with trailing
-    /// whitespace trimmed from each row.
-    pub fn render(&mut self) -> String {
+impl Backend for LocalBackend {
+    fn render(&mut self) -> String {
         let app = &mut self.app;
         self.terminal.draw(|f| ui::draw(f, app)).expect("draw");
         buffer_to_string(self.terminal.backend().buffer())
     }
 
-    /// Render the current frame to a PNG file at `path`.
-    ///
-    /// Uses [`mew_raster`] to rasterize the ratatui buffer into a pixel-accurate
-    /// image. The PNG is written to disk; the method returns `Ok(())` on success
-    /// or an error if the file can't be written.
-    pub fn screenshot(&mut self, path: &str) -> std::io::Result<()> {
+    fn screenshot(&mut self, path: &str) -> io::Result<()> {
         let app = &mut self.app;
         self.terminal.draw(|f| ui::draw(f, app)).expect("draw");
         let buf = self.terminal.backend().buffer();
@@ -292,22 +348,41 @@ impl Harness {
         std::fs::write(path, png_bytes)
     }
 
-    // -----------------------------------------------------------------------
-    // Video recording
-    // -----------------------------------------------------------------------
+    fn send_key(&mut self, key: KeyEvent) {
+        if let Some(action) = handle_key_event(&mut self.app, key) {
+            self.apply_action(action);
+        }
+        self.capture_frame();
+    }
 
-    /// Start recording frames. After each subsequent verb (type, key, say,
-    /// etc.), a frame is captured into the internal frame buffer.
-    pub fn start_recording(&mut self) {
+    fn type_str(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.send_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+    }
+
+    fn send_text(&mut self, text: &str) {
+        self.type_str(text);
+        self.send_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    fn wait_turn(&mut self, _timeout_ms: u64) -> Result<(), String> {
+        // In local mode the turn is always finished synchronously.
+        Ok(())
+    }
+
+    fn is_streaming(&self) -> bool {
+        self.app.streaming
+    }
+
+    fn start_recording(&mut self) {
         self.recording = true;
         self.frames.clear();
         // Capture the initial frame
         self.capture_frame();
     }
 
-    /// Stop recording. Frames remain accessible via [`frame_count`] and
-    /// [`encode_mp4`].
-    pub fn stop_recording(&mut self) {
+    fn stop_recording(&mut self) {
         // Capture a final frame before flipping the flag off
         let was_recording = self.recording;
         self.recording = false;
@@ -316,51 +391,14 @@ impl Harness {
         }
     }
 
-    /// Capture a frame unconditionally (ignores the recording flag).
-    fn capture_frame_raw(&mut self) {
-        let app = &mut self.app;
-        self.terminal.draw(|f| ui::draw(f, app)).expect("draw");
-        let buf = self.terminal.backend().buffer();
-        let pixmap = mew_raster::rasterize(buf, &mew_raster::RasterOptions::default());
-        self.frames.push(pixmap);
-    }
-
-    /// Capture the current frame into the recording buffer. No-op if not recording.
-    pub fn capture_frame(&mut self) {
-        if !self.recording {
-            return;
-        }
-        let app = &mut self.app;
-        self.terminal.draw(|f| ui::draw(f, app)).expect("draw");
-        let buf = self.terminal.backend().buffer();
-        let pixmap = mew_raster::rasterize(buf, &mew_raster::RasterOptions::default());
-        self.frames.push(pixmap);
-    }
-
-    /// Duplicate the last frame `count` times to simulate a pause.
-    /// Used by the `pause` verb to add timing to recordings.
-    pub fn duplicate_last_frame(&mut self, count: usize) {
-        if let Some(last) = self.frames.last().cloned() {
-            for _ in 0..count {
-                self.frames.push(last.clone());
-            }
-        }
-    }
-
-    /// Get the number of recorded frames.
-    pub fn frame_count(&self) -> usize {
+    fn frame_count(&self) -> usize {
         self.frames.len()
     }
 
-    /// Encode the recorded frames to an MP4 video via ffmpeg.
-    ///
-    /// Writes numbered PNGs to a temp directory, then invokes
-    /// `ffmpeg -framerate <fps> -i frame_%04d.png -pix_fmt yuv420p <output>`.
-    /// Returns the ffmpeg stdout/stderr on success, or an error message.
-    pub fn encode_mp4(&self, output_path: &str, fps: u32) -> std::io::Result<String> {
+    fn encode_mp4(&self, output_path: &str, fps: u32) -> io::Result<String> {
         if self.frames.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
                 "no frames recorded",
             ));
         }
@@ -387,16 +425,156 @@ impl Harness {
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stderr).to_string())
         } else {
-            Err(std::io::Error::other(format!(
+            Err(io::Error::other(format!(
                 "ffmpeg failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             )))
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Single-verb execution (used by run_script and the interactive REPL)
-    // -----------------------------------------------------------------------
+    fn duplicate_last_frame(&mut self, count: usize) {
+        if let Some(last) = self.frames.last().cloned() {
+            for _ in 0..count {
+                self.frames.push(last.clone());
+            }
+        }
+    }
+
+    fn capture_frame(&mut self) {
+        if !self.recording {
+            return;
+        }
+        self.capture_frame_raw();
+    }
+
+    fn as_local_backend_mut(&mut self) -> Option<&mut LocalBackend> {
+        Some(self)
+    }
+
+    fn as_local_backend_ref(&self) -> Option<&LocalBackend> {
+        Some(self)
+    }
+}
+
+/// A headless TUI driven programmatically.
+///
+/// The harness owns a [`Backend`] and interprets script verbs against it. The
+/// default backend is [`LocalBackend`], preserving the original deterministic
+/// behavior and field-level API (`h.app`, `h.actions`).
+pub struct Harness<B: Backend = LocalBackend> {
+    backend: B,
+}
+
+impl Harness<LocalBackend> {
+    /// Build a harness with the default local backend.
+    pub fn new(width: u16, height: u16) -> Self {
+        Self {
+            backend: LocalBackend::new(width, height),
+        }
+    }
+}
+
+impl<B: Backend> Harness<B> {
+    /// Build a harness with a custom backend.
+    pub fn with_backend(backend: B) -> Self {
+        Self { backend }
+    }
+
+    /// Resize the virtual terminal.
+    pub fn resize(&mut self, width: u16, height: u16) {
+        if let Some(l) = self.backend.as_local_backend_mut() {
+            l.resize(width, height);
+        }
+    }
+
+    /// Send one key event, applying the harness-visible effect of any returned
+    /// action (echoing the user message on submit, quitting, clearing).
+    /// When recording, captures a frame after the key is processed.
+    pub fn key(&mut self, key: KeyEvent) {
+        self.backend.send_key(key);
+    }
+
+    /// Type literal text into the composer, one character at a time.
+    /// When recording, captures a frame after each keystroke for a natural
+    /// typing animation.
+    pub fn type_str(&mut self, text: &str) {
+        self.backend.type_str(text);
+    }
+
+    /// Inject a complete assistant text turn.
+    pub fn say(&mut self, text: &str) {
+        self.backend
+            .as_local_backend_mut()
+            .expect("say() only supported on LocalBackend")
+            .say(text);
+    }
+
+    /// Inject a terminal error event.
+    pub fn error(&mut self, message: &str) {
+        self.backend
+            .as_local_backend_mut()
+            .expect("error() only supported on LocalBackend")
+            .error(message);
+    }
+
+    /// Inject a completed tool call.
+    pub fn say_tool_call(&mut self, tool_name: &str, output: &str, diff: Option<&str>) {
+        self.backend
+            .as_local_backend_mut()
+            .expect("say_tool_call() only supported on LocalBackend")
+            .say_tool_call(tool_name, output, diff);
+    }
+
+    /// Inject a reasoning/thinking part.
+    pub fn say_reasoning(&mut self, text: &str) {
+        self.backend
+            .as_local_backend_mut()
+            .expect("say_reasoning() only supported on LocalBackend")
+            .say_reasoning(text);
+    }
+
+    /// Feed a raw `AgentEvent` to the app.
+    pub fn agent(&mut self, event: AgentEvent) {
+        self.backend
+            .as_local_backend_mut()
+            .expect("agent() only supported on LocalBackend")
+            .agent(event);
+    }
+
+    /// Render the current state and return the frame as text.
+    pub fn render(&mut self) -> String {
+        self.backend.render()
+    }
+
+    /// Render the current frame to a PNG file at `path`.
+    pub fn screenshot(&mut self, path: &str) -> io::Result<()> {
+        self.backend.screenshot(path)
+    }
+
+    /// Start recording frames.
+    pub fn start_recording(&mut self) {
+        self.backend.start_recording();
+    }
+
+    /// Stop recording frames.
+    pub fn stop_recording(&mut self) {
+        self.backend.stop_recording();
+    }
+
+    /// Number of recorded frames.
+    pub fn frame_count(&self) -> usize {
+        self.backend.frame_count()
+    }
+
+    /// Encode recorded frames to an MP4 file.
+    pub fn encode_mp4(&self, path: &str, fps: u32) -> io::Result<String> {
+        self.backend.encode_mp4(path, fps)
+    }
+
+    /// Duplicate the last recorded frame.
+    pub fn duplicate_last_frame(&mut self, count: usize) {
+        self.backend.duplicate_last_frame(count);
+    }
 
     /// Execute a single script verb against this harness.
     ///
@@ -426,28 +604,58 @@ impl Harness {
                 None => out.push_str(&format!("!! unknown key '{rest}'\n")),
             },
             "submit" => self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            "say" => self.say(rest),
-            "error" => self.error(rest),
+            "say" => {
+                if self.backend.as_local_backend_mut().is_none() {
+                    out.push_str("!! 'say' is not available in daemon-capture mode\n");
+                } else {
+                    self.say(rest);
+                }
+            }
+            "error" => {
+                if self.backend.as_local_backend_mut().is_none() {
+                    out.push_str("!! 'error' is not available in daemon-capture mode\n");
+                } else {
+                    self.error(rest);
+                }
+            }
             "settings" => {
-                let cfg = mew_config::Config::default();
-                self.app.settings = Some(crate::settings::SettingsState::new(cfg, Vec::new()));
-                self.app.mode = crate::app::Mode::Settings;
+                if self.backend.as_local_backend_mut().is_none() {
+                    out.push_str("!! 'settings' is not available in daemon-capture mode\n");
+                } else {
+                    let cfg = mew_config::Config::default();
+                    let app = &mut self
+                        .backend
+                        .as_local_backend_mut()
+                        .expect("settings only supported on LocalBackend")
+                        .app;
+                    app.settings = Some(crate::settings::SettingsState::new(cfg, Vec::new()));
+                    app.mode = crate::app::Mode::Settings;
+                }
             }
             "settings_config" => {
-                let path = rest.trim().trim_matches('"');
-                if path.is_empty() {
-                    out.push_str("!! settings_config requires a file path\n");
+                if self.backend.as_local_backend_mut().is_none() {
+                    out.push_str("!! 'settings_config' is not available in daemon-capture mode\n");
                 } else {
-                    match std::fs::read_to_string(path) {
-                        Ok(text) => match toml::from_str::<mew_config::Config>(&text) {
-                            Ok(cfg) => {
-                                self.app.settings =
-                                    Some(crate::settings::SettingsState::new(cfg, Vec::new()));
-                                self.app.mode = crate::app::Mode::Settings;
-                            }
-                            Err(e) => out.push_str(&format!("!! bad config toml: {e}\n")),
-                        },
-                        Err(e) => out.push_str(&format!("!! cannot read config: {e}\n")),
+                    let path = rest.trim().trim_matches('"');
+                    if path.is_empty() {
+                        out.push_str("!! settings_config requires a file path\n");
+                    } else {
+                        match std::fs::read_to_string(path) {
+                            Ok(text) => match toml::from_str::<mew_config::Config>(&text) {
+                                Ok(cfg) => {
+                                    let app = &mut self
+                                        .backend
+                                        .as_local_backend_mut()
+                                        .expect("settings_config only supported on LocalBackend")
+                                        .app;
+                                    app.settings =
+                                        Some(crate::settings::SettingsState::new(cfg, Vec::new()));
+                                    app.mode = crate::app::Mode::Settings;
+                                }
+                                Err(e) => out.push_str(&format!("!! bad config toml: {e}\n")),
+                            },
+                            Err(e) => out.push_str(&format!("!! cannot read config: {e}\n")),
+                        }
                     }
                 }
             }
@@ -519,29 +727,19 @@ impl Harness {
         }
         out
     }
+}
 
-    fn push_user_message(&mut self, text: String) {
-        let msg_id = MessageId::new();
-        let session_id = SessionId::new();
-        self.app.push_message(Message {
-            id: msg_id,
-            session_id,
-            role: Role::User,
-            parts: vec![Part::Text(TextPart {
-                base: PartBase {
-                    id: PartId::new(),
-                    message_id: msg_id,
-                    session_id,
-                },
-                text,
-                synthetic: false,
-            })],
-            time: Time {
-                created: chrono::Utc::now().timestamp_millis(),
-                completed: None,
-            },
-            assistant: None,
-        });
+impl std::ops::Deref for Harness<LocalBackend> {
+    type Target = LocalBackend;
+
+    fn deref(&self) -> &Self::Target {
+        &self.backend
+    }
+}
+
+impl std::ops::DerefMut for Harness<LocalBackend> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.backend
     }
 }
 
@@ -611,7 +809,7 @@ fn parse_size(s: &str) -> Option<(u16, u16)> {
 
 /// Parse a key name into a `KeyEvent`. Supports named keys, `ctrl+`/`alt+`
 /// modifier prefixes, and single characters.
-fn parse_key(name: &str) -> Option<KeyEvent> {
+pub fn parse_key(name: &str) -> Option<KeyEvent> {
     let name = name.trim();
     let (mods, key) = if let Some(rest) = name.strip_prefix("ctrl+") {
         (KeyModifiers::CONTROL, rest)
