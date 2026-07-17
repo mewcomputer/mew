@@ -146,6 +146,12 @@ pub struct ReasoningPart {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// Opaque encrypted reasoning content returned by the OpenAI Responses
+    /// API when `include: ["reasoning.encrypted_content"]` is set (Responses
+    /// Lite models). Must be round-tripped back to the API verbatim in
+    /// subsequent turns so the model retains its reasoning context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -471,6 +477,7 @@ mod tests {
             base: base(sid, mid),
             text: "let me think...".into(),
             signature: Some("sig123".into()),
+            encrypted_content: None,
         });
         roundtrip("reasoning with sig", &p);
     }
@@ -483,6 +490,7 @@ mod tests {
             base: base(sid, mid),
             text: "thinking".into(),
             signature: None,
+            encrypted_content: None,
         });
         roundtrip("reasoning no sig", &p);
     }
@@ -661,6 +669,7 @@ mod tests {
                     base: base(sid, mid),
                     text: "need to read the file".into(),
                     signature: Some("sig_xyz".into()),
+                    encrypted_content: None,
                 }),
                 Part::Text(TextPart {
                     base: base(sid, mid),

@@ -200,8 +200,9 @@ impl Provider for Adapter {
             ProviderError::Message("retry loop exited without response".to_string())
         })?;
         let dump = self.dump;
+        let use_responses_lite = self.use_responses_lite;
         tokio::spawn(async move {
-            Self::read_stream(dump, resp, tx).await;
+            Self::read_stream(dump, resp, tx, use_responses_lite).await;
         });
 
         Ok(Box::pin(rx))
@@ -359,6 +360,12 @@ impl Adapter {
         // The catalog stores params in chat/completions format
         // ({"reasoning_effort": "high"}). The Responses API needs
         // {"reasoning": {"effort": "high"}}.
+        //
+        // Responses Lite models always require reasoning.context = "all_turns"
+        // (and the matching `include` array), even when reasoning is None or
+        // explicitly disabled. Codex's build_reasoning always returns
+        // Some(Reasoning { context: AllTurns }) when the model supports
+        // reasoning — we mirror that here.
         if let Some(ref reasoning) = req.reasoning {
             if let Some(effort) = reasoning.params.get("reasoning_effort") {
                 let mut reasoning_obj = json!({"effort": effort});
@@ -374,7 +381,18 @@ impl Adapter {
                     body["include"] = json!(["reasoning.encrypted_content"]);
                 }
                 body["reasoning"] = reasoning_obj;
+            } else if self.use_responses_lite {
+                // Reasoning is configured but didn't match the two shapes above
+                // (e.g. {"type": "disabled"} for title generation). Lite still
+                // requires the context field.
+                body["reasoning"] = json!({"context": "all_turns"});
+                body["include"] = json!(["reasoning.encrypted_content"]);
             }
+        } else if self.use_responses_lite {
+            // No reasoning configured at all. Lite models still require
+            // reasoning.context = "all_turns".
+            body["reasoning"] = json!({"context": "all_turns"});
+            body["include"] = json!(["reasoning.encrypted_content"]);
         }
 
         // Sampling params. Note: max_output_tokens (not max_tokens).
@@ -491,9 +509,18 @@ impl Adapter {
                                 "arguments": args,
                             }));
                         }
-                        Part::Reasoning(_) => {
-                            // Reasoning is output-only; we don't send it
-                            // back as input.
+                        Part::Reasoning(rp) => {
+                            // Round-trip encrypted reasoning content so the
+                            // model retains its reasoning context across turns.
+                            // Only send back if we have encrypted_content —
+                            // the API rejects reasoning items without it.
+                            if let Some(ref encrypted) = rp.encrypted_content {
+                                input.push(json!({
+                                    "type": "reasoning",
+                                    "id": format!("rs_{}", ulid::Ulid::new()),
+                                    "encrypted_content": encrypted,
+                                }));
+                            }
                         }
                         _ => {}
                     }
@@ -509,10 +536,15 @@ impl Adapter {
 
 /// Tracks per-item state during SSE streaming.
 struct StreamState {
+    /// Whether this is a responses-lite stream (affects reasoning handling).
+    use_responses_lite: bool,
     /// item_id → (PartId, text buffer)
     text_parts: std::collections::HashMap<String, TextPart>,
     /// item_id → (PartId, reasoning buffer)
     reasoning_parts: std::collections::HashMap<String, ReasoningPart>,
+    /// item_id → PartId for reasoning items, kept even after the part is
+    /// finalized so we can attach encrypted_content from output_item.done.
+    reasoning_part_ids: std::collections::HashMap<String, ulid::Ulid>,
     /// item_id → (PartId, tool_name, call_id, args buffer)
     tool_calls: std::collections::HashMap<String, ToolCallAccumulator>,
     /// Track which PartIds have been finalized (PartEnd emitted).
@@ -524,8 +556,10 @@ struct StreamState {
 impl StreamState {
     fn new() -> Self {
         Self {
+            use_responses_lite: false,
             text_parts: std::collections::HashMap::new(),
             reasoning_parts: std::collections::HashMap::new(),
+            reasoning_part_ids: std::collections::HashMap::new(),
             tool_calls: std::collections::HashMap::new(),
             finalized_parts: std::collections::HashSet::new(),
             message_end_emitted: false,
@@ -586,7 +620,12 @@ impl ToolCallAccumulator {
 }
 
 impl Adapter {
-    async fn read_stream(dump: bool, resp: reqwest::Response, mut tx: mpsc::Sender<ProviderEvent>) {
+    async fn read_stream(
+        dump: bool,
+        resp: reqwest::Response,
+        mut tx: mpsc::Sender<ProviderEvent>,
+        use_responses_lite: bool,
+    ) {
         let stream = resp
             .bytes_stream()
             .map(|res| res.map_err(std::io::Error::other));
@@ -595,6 +634,7 @@ impl Adapter {
 
         let mut current_event = String::new();
         let mut state = StreamState::new();
+        state.use_responses_lite = use_responses_lite;
 
         loop {
             let line: String = match lines.next_line().await {
@@ -668,7 +708,7 @@ impl Adapter {
                 }
 
                 "response.output_item.done" => {
-                    // Item already handled by its sub-events.
+                    Self::handle_output_item_done(data, &mut tx, &mut state).await;
                 }
 
                 "response.content_part.done" | "response.reasoning_summary_part.done" => {
@@ -768,9 +808,71 @@ impl Adapter {
                 })
                 .await;
             state.tool_calls.insert(event.item.id, acc);
+        } else if event.item.typ == "reasoning" {
+            // For responses-lite, create the reasoning part now so we can
+            // attach encrypted_content from the later output_item.done event.
+            // For non-lite, reasoning summary text arrives via
+            // reasoning_summary_text events handled separately, and there's
+            // no encrypted_content to capture.
+            if state.use_responses_lite {
+                let part = new_reasoning_part();
+                state
+                    .reasoning_part_ids
+                    .insert(event.item.id.clone(), part.base.id);
+                let _ = tx
+                    .send(ProviderEvent::PartStart {
+                        part: Part::Reasoning(part.clone()),
+                    })
+                    .await;
+                state.reasoning_parts.insert(event.item.id, part);
+            }
         }
-        // Message and reasoning items are handled when their content
-        // parts arrive (content_part.added / reasoning_summary).
+        // Message items are handled when their content
+        // parts arrive (content_part.added).
+    }
+
+    /// Handle `response.output_item.done` — primarily to capture
+    /// `encrypted_content` on reasoning items. The Responses API delivers the
+    /// full item (including encrypted reasoning) here, after the
+    /// reasoning_summary_text sub-events have already finalized the PartEnd.
+    /// We send the encrypted_content as a late PartDelta so the agent can
+    /// store it on the ReasoningPart for round-tripping in subsequent turns.
+    async fn handle_output_item_done(
+        data: &str,
+        tx: &mut mpsc::Sender<ProviderEvent>,
+        state: &mut StreamState,
+    ) {
+        #[derive(serde::Deserialize)]
+        struct Event {
+            item: ItemRef,
+        }
+        #[derive(serde::Deserialize)]
+        struct ItemRef {
+            id: String,
+            #[serde(rename = "type")]
+            typ: String,
+            encrypted_content: Option<String>,
+        }
+
+        let event: Event = match serde_json::from_str(data) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        if event.item.typ == "reasoning" {
+            if let (Some(encrypted), Some(&part_id)) = (
+                event.item.encrypted_content,
+                state.reasoning_part_ids.get(&event.item.id),
+            ) {
+                let _ = tx
+                    .send(ProviderEvent::PartDelta {
+                        part_id,
+                        field: "encrypted_content",
+                        delta: encrypted,
+                    })
+                    .await;
+            }
+        }
     }
 
     async fn handle_content_part_added(
@@ -806,6 +908,9 @@ impl Adapter {
             }
             "reasoning_text" => {
                 let part = new_reasoning_part();
+                state
+                    .reasoning_part_ids
+                    .insert(event.item_id.clone(), part.base.id);
                 let _ = tx
                     .send(ProviderEvent::PartStart {
                         part: Part::Reasoning(part.clone()),
@@ -1145,6 +1250,7 @@ fn new_reasoning_part() -> ReasoningPart {
         },
         text: String::new(),
         signature: None,
+        encrypted_content: None,
     }
 }
 
@@ -1647,7 +1753,93 @@ mod tests {
         assert_eq!(v["include"], json!(["reasoning.encrypted_content"]));
     }
 
-    // --- Integration tests using wiremock ---
+    #[tokio::test]
+    async fn test_build_request_body_responses_lite_no_reasoning() {
+        // Lite models require reasoning.context = "all_turns" even when
+        // reasoning is None (no thinking variants configured for the model).
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "gpt-5.6-luna".to_string(),
+            "test-key".to_string(),
+        )
+        .with_responses_lite(true);
+        let req = Request {
+            model: "gpt-5.6-luna".to_string(),
+            messages: vec![make_message(Role::User, "hello")],
+            tools: vec![],
+            system: "You are a helpful assistant.".to_string(),
+            reasoning: None,
+            params: None,
+            headers: http::HeaderMap::new(),
+        };
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(v["reasoning"]["context"], "all_turns");
+        assert_eq!(v["include"], json!(["reasoning.encrypted_content"]));
+        // No effort should be set.
+        assert!(v["reasoning"].get("effort").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_build_request_body_responses_lite_disabled_reasoning() {
+        // Lite models require reasoning.context = "all_turns" even when
+        // reasoning is explicitly disabled (e.g. daemon title generation).
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "gpt-5.6-luna".to_string(),
+            "test-key".to_string(),
+        )
+        .with_responses_lite(true);
+        let req = Request {
+            model: "gpt-5.6-luna".to_string(),
+            messages: vec![make_message(Role::User, "hello")],
+            tools: vec![],
+            system: "Summarize.".to_string(),
+            reasoning: Some(mew_provider::ReasoningConfig {
+                params: {
+                    let mut m = serde_json::Map::new();
+                    m.insert("type".to_string(), json!("disabled"));
+                    m
+                },
+            }),
+            params: None,
+            headers: http::HeaderMap::new(),
+        };
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(v["reasoning"]["context"], "all_turns");
+        assert_eq!(v["include"], json!(["reasoning.encrypted_content"]));
+    }
+
+    #[tokio::test]
+    async fn test_build_request_body_non_lite_no_reasoning() {
+        // Non-lite models must NOT set reasoning.context when reasoning is
+        // None — only lite requires it.
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "gpt-4o".to_string(),
+            "test-key".to_string(),
+        );
+        let req = Request {
+            model: "gpt-4o".to_string(),
+            messages: vec![make_message(Role::User, "hello")],
+            tools: vec![],
+            system: "You are a helpful assistant.".to_string(),
+            reasoning: None,
+            params: None,
+            headers: http::HeaderMap::new(),
+        };
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert!(v.get("reasoning").is_none());
+        assert!(v.get("include").is_none());
+    }
 
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1951,6 +2143,249 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_3\",\"status\
             )
         });
         assert!(has_msg_end);
+    }
+
+    #[tokio::test]
+    async fn test_stream_reasoning_encrypted_content_lite() {
+        // Responses Lite: reasoning items arrive via output_item.added (type
+        // "reasoning") followed by reasoning_summary_text deltas, then
+        // output_item.done carries the encrypted_content. We should emit
+        // PartStart → PartDelta(text) → PartEnd → PartDelta(encrypted_content).
+        let server = MockServer::start().await;
+
+        let sse_body = "\
+event: response.output_item.added\n\
+data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"in_progress\"}}\n\
+\n\
+event: response.reasoning_summary_text.delta\n\
+data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"delta\":\"Thinking...\"}\n\
+\n\
+event: response.reasoning_summary_text.done\n\
+data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"text\":\"Thinking...\"}\n\
+\n\
+event: response.output_item.done\n\
+data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"encrypted_content\":\"ENC_BLOB_123\"}}\n\
+\n\
+event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_4\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\
+\n";
+
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let adapter = Adapter::new(
+            "test".to_string(),
+            server.uri() + "/v1",
+            "gpt-5.6-luna".to_string(),
+            "test-key".to_string(),
+        )
+        .with_responses_lite(true);
+
+        let req = Request {
+            model: "gpt-5.6-luna".to_string(),
+            messages: vec![make_message(Role::User, "hi")],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: http::HeaderMap::new(),
+        };
+
+        let stream = adapter.stream(req).await.unwrap();
+        let events: Vec<ProviderEvent> = stream.collect().await;
+
+        // Should have PartStart(Reasoning)
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ProviderEvent::PartStart {
+                    part: Part::Reasoning(_),
+                }
+            )),
+            "expected PartStart for reasoning"
+        );
+
+        // Should have PartDelta with encrypted_content
+        let has_encrypted = events.iter().any(|e| {
+            matches!(
+                e,
+                ProviderEvent::PartDelta {
+                    field: "encrypted_content",
+                    delta: ref d,
+                    ..
+                } if d == "ENC_BLOB_123"
+            )
+        });
+        assert!(has_encrypted, "expected PartDelta with encrypted_content");
+
+        // Should have PartEnd for the reasoning part
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::PartEnd { .. })),
+            "expected PartEnd"
+        );
+
+        // Should have MessageEnd
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::MessageEnd { .. })),
+            "expected MessageEnd"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_reasoning_round_trip() {
+        // When an assistant message has a ReasoningPart with encrypted_content,
+        // build_request_body should emit it as a reasoning input item.
+        use mew_message::PartBase;
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "gpt-5.6-luna".to_string(),
+            "test-key".to_string(),
+        )
+        .with_responses_lite(true);
+
+        let reasoning_part = ReasoningPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+            },
+            text: "Thinking about this...".to_string(),
+            signature: None,
+            encrypted_content: Some("ENC_BLOB_456".to_string()),
+        };
+
+        let assistant_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![
+                Part::Reasoning(reasoning_part),
+                Part::Text(TextPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: "Here's my answer.".into(),
+                    synthetic: false,
+                }),
+            ],
+            time: mew_message::Time {
+                created: 0,
+                completed: Some(0),
+            },
+            assistant: None,
+        };
+
+        let req = Request {
+            model: "gpt-5.6-luna".to_string(),
+            messages: vec![assistant_msg],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: http::HeaderMap::new(),
+        };
+
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let input = v["input"].as_array().unwrap();
+        // Find the reasoning item in the input array.
+        let reasoning_item = input
+            .iter()
+            .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("reasoning"));
+        assert!(
+            reasoning_item.is_some(),
+            "expected a reasoning item in the input array"
+        );
+        let reasoning_item = reasoning_item.unwrap();
+        assert_eq!(
+            reasoning_item["encrypted_content"], "ENC_BLOB_456",
+            "encrypted_content should be round-tripped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_reasoning_without_encrypted_skipped() {
+        // Reasoning parts without encrypted_content should NOT be sent back
+        // (the API rejects reasoning items without encrypted_content).
+        use mew_message::PartBase;
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "gpt-5.6-luna".to_string(),
+            "test-key".to_string(),
+        )
+        .with_responses_lite(true);
+
+        let reasoning_part = ReasoningPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+            },
+            text: "Thinking...".to_string(),
+            signature: None,
+            encrypted_content: None,
+        };
+
+        let assistant_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![
+                Part::Reasoning(reasoning_part),
+                Part::Text(TextPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: "Answer.".into(),
+                    synthetic: false,
+                }),
+            ],
+            time: mew_message::Time {
+                created: 0,
+                completed: Some(0),
+            },
+            assistant: None,
+        };
+
+        let req = Request {
+            model: "gpt-5.6-luna".to_string(),
+            messages: vec![assistant_msg],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: http::HeaderMap::new(),
+        };
+
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        let input = v["input"].as_array().unwrap();
+        let has_reasoning = input
+            .iter()
+            .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("reasoning"));
+        assert!(
+            !has_reasoning,
+            "reasoning without encrypted_content should not be sent back"
+        );
     }
 
     #[tokio::test]

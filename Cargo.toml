@@ -33,6 +33,7 @@ members = [
     "crates/mew-mobile-core",
 ]
 resolver = "2"
+exclude = ["mew-web-ui/src-tauri"]
 
 [workspace.package]
 version = "0.2.0"

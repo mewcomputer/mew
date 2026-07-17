@@ -13,7 +13,7 @@ export function PermissionToast({
   const latest = pending[pending.length - 1]!;
 
   return (
-    <div className="fixed bottom-24 right-4 z-50 w-96 rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-4 shadow-lg backdrop-blur-sm">
+    <div className="fixed bottom-24 left-3 right-3 z-50 w-auto rounded-lg border border-yellow-500/50 bg-yellow-500/10 p-3 shadow-lg backdrop-blur-sm sm:bottom-4 sm:left-auto sm:right-4 sm:w-96 sm:p-4">
       <div className="flex items-start gap-3">
         <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-yellow-500" />
         <div className="flex-1">
@@ -23,7 +23,7 @@ export function PermissionToast({
           <pre className="mt-2 max-h-32 overflow-auto rounded bg-muted/50 p-2 text-xs">
             {JSON.stringify(latest.input, null, 2)}
           </pre>
-          <div className="mt-3 flex gap-2">
+          <div className="mt-3 flex flex-wrap gap-2">
             <button
               onClick={() => onResolve(latest.requestId, "allow_once")}
               className="flex items-center gap-1 rounded-md border border-green-500/50 bg-green-500/10 px-3 py-1 text-xs font-medium text-green-500 hover:bg-green-500/20"

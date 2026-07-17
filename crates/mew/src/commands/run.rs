@@ -111,6 +111,7 @@ pub(crate) async fn build_and_run(
         mode,
         Some(session_writer),
         None,
+        None,
         dispatcher.clone(),
         todos_path.clone(),
         &discovered,

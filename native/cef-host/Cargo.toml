@@ -1,0 +1,41 @@
+[package]
+name = "mew-cef-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "mew-cef-host"
+path = "src/main.rs"
+
+[[bin]]
+name = "mew-cef-host-helper"
+path = "src/helper.rs"
+
+[lib]
+name = "mew_cef_host"
+path = "src/lib.rs"
+
+[features]
+default = ["sandbox"]
+sandbox = ["cef/sandbox"]
+
+[dependencies]
+cef = { version = "150.0", features = ["build-util"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = [
+  "NSApplication",
+  "NSEvent",
+  "NSResponder",
+  "NSUserInterfaceValidation",
+  "NSView",
+  "NSWindow",
+] }
+objc2-foundation = "0.3.2"
+
+[package.metadata.cef.bundle]
+helper_name = "mew-cef-host-helper"

@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use ratatui::style::{Color, Modifier, Style};
 use syntect::{
     highlighting::{
-        HighlightIterator, HighlightState, Highlighter as SyntectHighlighterInner, ThemeSet,
+        HighlightIterator, HighlightState, Highlighter as SyntectHighlighterInner, Theme,
     },
     parsing::{ParseState, ScopeStack, SyntaxSet},
 };
@@ -11,35 +11,39 @@ use syntect::{
 use crate::highlight::{Highlighter, StyledRun};
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
-static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
 fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(two_face::syntax::extra_newlines)
-}
-
-fn theme_set() -> &'static ThemeSet {
-    THEME_SET.get_or_init(ThemeSet::load_defaults)
 }
 
 /// Syntax highlighter backed by syntect.
 pub struct SyntectHighlighter {
     parse_state: Option<ParseState>,
     highlight_state: Option<HighlightState>,
+    theme: Theme,
 }
 
 impl SyntectHighlighter {
-    pub fn new() -> Self {
+    pub fn new(theme: Theme) -> Self {
         Self {
             parse_state: None,
             highlight_state: None,
+            theme,
         }
     }
 }
 
 impl Default for SyntectHighlighter {
     fn default() -> Self {
-        Self::new()
+        Self::new(default_theme())
     }
+}
+
+fn default_theme() -> Theme {
+    let bytes = include_bytes!("../../resources/theme.tmTheme");
+    let mut cursor = std::io::Cursor::new(bytes.as_slice());
+    syntect::highlighting::ThemeSet::load_from_reader(&mut cursor)
+        .expect("embedded theme.tmTheme should be valid")
 }
 
 impl Highlighter for SyntectHighlighter {
@@ -51,8 +55,7 @@ impl Highlighter for SyntectHighlighter {
 
         self.parse_state = Some(ParseState::new(syntax));
 
-        let theme = &theme_set().themes["base16-ocean.dark"];
-        let highlighter = SyntectHighlighterInner::new(theme);
+        let highlighter = SyntectHighlighterInner::new(&self.theme);
         self.highlight_state = Some(HighlightState::new(&highlighter, ScopeStack::new()));
     }
 
@@ -75,8 +78,7 @@ impl Highlighter for SyntectHighlighter {
             Err(_) => return vec![(line.to_string(), Style::default())],
         };
 
-        let theme = &theme_set().themes["base16-ocean.dark"];
-        let highlighter = SyntectHighlighterInner::new(theme);
+        let highlighter = SyntectHighlighterInner::new(&self.theme);
 
         let iter = HighlightIterator::new(highlight_state, &ops[..], line, &highlighter);
         iter.map(|(style, text)| {
@@ -145,7 +147,7 @@ mod tests {
 
     #[test]
     fn test_wgsl_highlighting_produces_styles() {
-        let mut highlighter = SyntectHighlighter::new();
+        let mut highlighter = SyntectHighlighter::default();
         highlighter.begin_block(Some("wgsl"));
 
         let line = "@vertex\n";

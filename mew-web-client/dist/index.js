@@ -40,6 +40,8 @@ export class MewClient {
     openPromise = null;
     /** Session id returned by `newSession`. */
     sessionId = null;
+    /** Session lifecycle requests share uncorrelated daemon errors. */
+    sessionCommandTail = Promise.resolve();
     constructor(url, opts = {}) {
         this.url = url;
         this.socketFactory = opts.socketFactory ?? defaultSocketFactory;
@@ -74,6 +76,10 @@ export class MewClient {
             ws.addEventListener("close", (ev) => {
                 if (this.debug)
                     console.debug("[mew] close", ev);
+                if (this.ws === ws) {
+                    this.ws = null;
+                    this.openPromise = null;
+                }
                 if (!settled) {
                     settled = true;
                     reject(new Error(`ws closed before open: ${ev.code} ${ev.reason}`));
@@ -83,6 +89,10 @@ export class MewClient {
             ws.addEventListener("error", (ev) => {
                 if (this.debug)
                     console.debug("[mew] error", ev);
+                if (this.ws === ws) {
+                    this.ws = null;
+                    this.openPromise = null;
+                }
                 if (!settled) {
                     settled = true;
                     reject(ev);
@@ -101,23 +111,31 @@ export class MewClient {
     isConnected() {
         return this.ws !== null;
     }
+    /** Serialize lifecycle requests because daemon errors have no request id. */
+    enqueueSessionCommand(command) {
+        const run = this.sessionCommandTail.then(command, command);
+        this.sessionCommandTail = run.then(() => undefined, () => undefined);
+        return run;
+    }
     /** Send `new_session`. Resolves with the daemon-assigned session id. */
-    async newSession(cwd = null) {
-        await this.connect();
-        return new Promise((resolve, reject) => {
-            const onReady = (data) => {
-                this.sessionId = data.session_id;
-                this.off("session-ready", onReady);
-                resolve(data.session_id);
-            };
-            const onError = (msg) => {
-                this.off("session-ready", onReady);
-                this.off("errorMessage", onError);
-                reject(new Error(msg.message));
-            };
-            this.on("session-ready", onReady);
-            this.on("errorMessage", onError);
-            this.send({ type: "new_session", cwd, client_kind: "web" });
+    newSession(cwd = null) {
+        return this.enqueueSessionCommand(async () => {
+            await this.connect();
+            return new Promise((resolve, reject) => {
+                const onReady = (data) => {
+                    this.sessionId = data.session_id;
+                    this.off("session-ready", onReady);
+                    resolve(data.session_id);
+                };
+                const onError = (msg) => {
+                    this.off("session-ready", onReady);
+                    this.off("errorMessage", onError);
+                    reject(new Error(msg.message));
+                };
+                this.on("session-ready", onReady);
+                this.on("errorMessage", onError);
+                this.send({ type: "new_session", cwd, client_kind: "web" });
+            });
         });
     }
     /** Send `prompt`. Streaming events are emitted via the registered handlers. */
@@ -165,23 +183,25 @@ export class MewClient {
     /** Attach to an existing session (active or idle). If the session is idle,
      *  the daemon loads its persisted history from disk and sends a
      *  `session-history` event. Resolves with the session id. */
-    async attachSession(session_id) {
-        await this.connect();
-        return new Promise((resolve, reject) => {
-            const onReady = (data) => {
-                this.sessionId = data.session_id;
-                this.off("session-ready", onReady);
-                this.off("errorMessage", onError);
-                resolve(data.session_id);
-            };
-            const onError = (msg) => {
-                this.off("session-ready", onReady);
-                this.off("errorMessage", onError);
-                reject(new Error(msg.message));
-            };
-            this.on("session-ready", onReady);
-            this.on("errorMessage", onError);
-            this.send({ type: "attach_session", session_id, client_kind: "web" });
+    attachSession(session_id) {
+        return this.enqueueSessionCommand(async () => {
+            await this.connect();
+            return new Promise((resolve, reject) => {
+                const onReady = (data) => {
+                    this.sessionId = data.session_id;
+                    this.off("session-ready", onReady);
+                    this.off("errorMessage", onError);
+                    resolve(data.session_id);
+                };
+                const onError = (msg) => {
+                    this.off("session-ready", onReady);
+                    this.off("errorMessage", onError);
+                    reject(new Error(msg.message));
+                };
+                this.on("session-ready", onReady);
+                this.on("errorMessage", onError);
+                this.send({ type: "attach_session", session_id, client_kind: "web" });
+            });
         });
     }
     /** List all sessions known to the daemon (active + persisted idle).
@@ -346,6 +366,13 @@ export class MewClient {
     listProjects() {
         this.send({ type: "list_projects" });
     }
+    browserOpen(url) { this.send({ type: "browser_open", url }); }
+    browserSnapshot() { this.send({ type: "browser_snapshot" }); }
+    browserScreenshot(annotate = false) { this.send({ type: "browser_screenshot", annotate }); }
+    browserClick(selector) { this.send({ type: "browser_click", selector }); }
+    browserFill(selector, text) { this.send({ type: "browser_fill", selector, text }); }
+    browserPress(key) { this.send({ type: "browser_press", key }); }
+    browserClose() { this.send({ type: "browser_close" }); }
     // -------------------------------------------------------------------------
     // Event registration
     // -------------------------------------------------------------------------
@@ -383,8 +410,10 @@ export class MewClient {
                 this.sessionId = msg.session_id;
                 this.emit("session-ready", {
                     session_id: msg.session_id,
+                    cwd: msg.cwd,
                     model: msg.model,
                     provider: msg.provider,
+                    permission_mode: msg.permission_mode,
                 });
                 break;
             case "provider":
@@ -622,6 +651,15 @@ export class MewClient {
                 break;
             case "project_list":
                 this.emit("project-list", { projects: msg.projects });
+                break;
+            case "browser_snapshot":
+                this.emit("browser-snapshot", { snapshot: msg.snapshot, url: msg.url, title: msg.title });
+                break;
+            case "browser_screenshot":
+                this.emit("browser-screenshot", { data: msg.data, url: msg.url });
+                break;
+            case "browser_state":
+                this.emit("browser-state", { open: msg.open, url: msg.url, title: msg.title });
                 break;
             default: {
                 // Exhaustiveness check: adding a new ServerMessage variant

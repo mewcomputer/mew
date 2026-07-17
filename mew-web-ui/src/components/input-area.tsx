@@ -315,18 +315,16 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
 
     return (
       <div
-        // -mb-6 to line up with the status footer
-        className="shrink-0 p-3 pt-0 sm:p-4 sm:pt-0 -mb-6"
-        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+        className="shrink-0 border-t border-border/60 bg-background/95 px-3 pb-2 pt-2 sm:px-4 sm:pb-3"
       >
-        <div className="mx-auto max-w-3xl space-y-1">
+        <div className="mx-auto max-w-3xl space-y-2">
           <div className="relative">
             <div
               onDrop={handleDrop}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               className={cn(
-                "flex items-end gap-2 rounded-xl border bg-muted/40 px-3 py-2 transition-colors",
+                "flex items-end gap-2 rounded-xl border bg-muted/40 px-3 py-2 transition-[background-color,border-color] duration-150 ease-out",
                 focused ? "border-ring bg-muted" : "border-border",
                 isDragging && "border-primary border-2",
               )}
@@ -336,6 +334,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                 disabled={!connected}
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
                 title="Attach file"
+                aria-label="Attach file"
               >
                 <Paperclip className="h-4 w-4" />
               </button>
@@ -349,6 +348,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                 onFocus={() => setFocused(true)}
                 onBlur={() => setFocused(false)}
                 placeholder={connected ? "Ask mew anything…" : "Connecting…"}
+                aria-label="Message prompt"
                 disabled={!connected}
                 rows={1}
                 className="flex-1 resize-none bg-transparent py-1.5 text-sm leading-5 text-foreground placeholder:text-muted-foreground focus:outline-hidden"
@@ -367,6 +367,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                   onClick={onCancel}
                   className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-destructive/50 text-destructive transition-colors hover:bg-destructive/10"
                   title="Cancel"
+                  aria-label="Cancel response"
                 >
                   <Square className="h-4 w-4" />
                 </button>
@@ -378,6 +379,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                     "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50",
                   )}
                   title="Send"
+                  aria-label="Send prompt"
                 >
                   <CornerDownLeft className="h-4 w-4" />
                 </button>
@@ -431,6 +433,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                         onClick={() => removeFile(f)}
                         className="rounded-full hover:text-foreground"
                         title="Remove"
+                        aria-label={"Remove " + f.name}
                       >
                         <X className="h-3 w-3" />
                       </button>

@@ -40,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tungstenite::Message;
 
+pub mod browser;
 pub mod client;
 pub mod files;
 pub mod groups;
@@ -371,23 +372,31 @@ where
 
         match client_msg {
             ClientMessage::NewSession { cwd, client_kind } => {
+                // A web client may not know the host's filesystem cwd. Keep
+                // the session useful for workspace tools by binding it to the
+                // daemon's launch directory in that case.
+                let cwd = cwd
+                    .map(PathBuf::from)
+                    .or_else(|| std::env::current_dir().ok());
                 // Validate cwd if provided: must exist and be a directory.
                 if let Some(ref cwd_str) = cwd {
-                    let cwd_path = PathBuf::from(cwd_str);
-                    if !cwd_path.exists() {
+                    if !cwd_str.exists() {
                         reply(ServerMessage::Error {
-                            message: format!("session cwd does not exist: {cwd_str}"),
+                            message: format!("session cwd does not exist: {}", cwd_str.display()),
                         });
                         continue;
                     }
-                    if !cwd_path.is_dir() {
+                    if !cwd_str.is_dir() {
                         reply(ServerMessage::Error {
-                            message: format!("session cwd is not a directory: {cwd_str}"),
+                            message: format!(
+                                "session cwd is not a directory: {}",
+                                cwd_str.display()
+                            ),
                         });
                         continue;
                     }
                 }
-                match session_manager.create(cwd.clone().map(PathBuf::from)).await {
+                match session_manager.create(cwd.clone()).await {
                     Ok(session) => {
                         let (cid, was_first) =
                             session.attach_client(client_tx.clone(), client_kind).await;
@@ -403,15 +412,20 @@ where
                             )
                         };
                         // Persist cwd on the session meta.
-                        if let Some(cwd_str) = &cwd {
+                        if let Some(cwd_path) = &cwd {
                             let dir = session_manager.session_dir.clone();
                             let agent = session.agent.lock().await;
-                            if let Some(mut meta) = agent.session_meta().await {
-                                let _ = meta.set_cwd(&dir, cwd_str.clone()).await;
+                            if let Some(writer) = &agent.session {
+                                let _ = writer
+                                    .lock()
+                                    .await
+                                    .set_cwd(&dir, cwd_path.to_string_lossy().into_owned())
+                                    .await;
                             }
                         }
                         reply(ServerMessage::SessionReady {
                             session_id,
+                            cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
                             model,
                             provider,
                             permission_mode,
@@ -452,8 +466,13 @@ where
                                 Some(agent.permission_mode().id().to_string()),
                             )
                         };
+                        let cwd = session_manager
+                            .session_cwd(&session_id)
+                            .await
+                            .map(|path| path.to_string_lossy().into_owned());
                         reply(ServerMessage::SessionReady {
                             session_id: session_id.clone(),
+                            cwd,
                             model,
                             provider,
                             permission_mode,
@@ -1118,6 +1137,130 @@ where
             }
             ClientMessage::WatchWorkspace { .. } => {
                 // Watcher not implemented in v1; acknowledge silently.
+            }
+
+            // -- Browser --
+            ClientMessage::BrowserOpen { url } => {
+                let Some(session) = attached_session.as_ref() else {
+                    reply(ServerMessage::Error {
+                        message: "attach a session before opening a browser".into(),
+                    });
+                    continue;
+                };
+                match crate::browser::open(&session.id, &url).await {
+                    Ok((url, title, _)) => reply(ServerMessage::BrowserState {
+                        open: true,
+                        url: Some(url),
+                        title: Some(title),
+                    }),
+                    Err(e) => reply(ServerMessage::Error {
+                        message: format!("browser open: {e}"),
+                    }),
+                }
+            }
+            ClientMessage::BrowserSnapshot => {
+                let Some(session) = attached_session.as_ref() else {
+                    reply(ServerMessage::Error {
+                        message: "attach a session before using the browser".into(),
+                    });
+                    continue;
+                };
+                match crate::browser::snapshot(&session.id).await {
+                    Ok((snapshot, url, title)) => reply(ServerMessage::BrowserSnapshot {
+                        snapshot,
+                        url,
+                        title,
+                    }),
+                    Err(e) => reply(ServerMessage::Error {
+                        message: format!("browser snapshot: {e}"),
+                    }),
+                }
+            }
+            ClientMessage::BrowserScreenshot { annotate } => {
+                let Some(session) = attached_session.as_ref() else {
+                    reply(ServerMessage::Error {
+                        message: "attach a session before using the browser".into(),
+                    });
+                    continue;
+                };
+                match crate::browser::screenshot(&session.id, annotate).await {
+                    Ok((data, url)) => reply(ServerMessage::BrowserScreenshot { data, url }),
+                    Err(e) => reply(ServerMessage::Error {
+                        message: format!("browser screenshot: {e}"),
+                    }),
+                }
+            }
+            ClientMessage::BrowserClick { selector } => {
+                let Some(session) = attached_session.as_ref() else {
+                    reply(ServerMessage::Error {
+                        message: "attach a session before using the browser".into(),
+                    });
+                    continue;
+                };
+                match crate::browser::click(&session.id, &selector).await {
+                    Ok((url, title, _)) => reply(ServerMessage::BrowserState {
+                        open: true,
+                        url: Some(url),
+                        title: Some(title),
+                    }),
+                    Err(e) => reply(ServerMessage::Error {
+                        message: format!("browser click: {e}"),
+                    }),
+                }
+            }
+            ClientMessage::BrowserFill { selector, text } => {
+                let Some(session) = attached_session.as_ref() else {
+                    reply(ServerMessage::Error {
+                        message: "attach a session before using the browser".into(),
+                    });
+                    continue;
+                };
+                match crate::browser::fill(&session.id, &selector, &text).await {
+                    Ok((url, title, _)) => reply(ServerMessage::BrowserState {
+                        open: true,
+                        url: Some(url),
+                        title: Some(title),
+                    }),
+                    Err(e) => reply(ServerMessage::Error {
+                        message: format!("browser fill: {e}"),
+                    }),
+                }
+            }
+            ClientMessage::BrowserPress { key } => {
+                let Some(session) = attached_session.as_ref() else {
+                    reply(ServerMessage::Error {
+                        message: "attach a session before using the browser".into(),
+                    });
+                    continue;
+                };
+                match crate::browser::press(&session.id, &key).await {
+                    Ok((url, title, _)) => reply(ServerMessage::BrowserState {
+                        open: true,
+                        url: Some(url),
+                        title: Some(title),
+                    }),
+                    Err(e) => reply(ServerMessage::Error {
+                        message: format!("browser press: {e}"),
+                    }),
+                }
+            }
+            ClientMessage::BrowserClose => {
+                let Some(session) = attached_session.as_ref() else {
+                    reply(ServerMessage::Error {
+                        message: "attach a session before using the browser".into(),
+                    });
+                    continue;
+                };
+                match crate::browser::close(&session.id).await {
+                    Ok(()) => reply(ServerMessage::BrowserState {
+                        open: false,
+                        url: None,
+                        title: None,
+                    }),
+                    Err(e) => reply(ServerMessage::Error {
+                        message: format!("browser close: {e}"),
+                    }),
+                }
             }
             ClientMessage::OpenPath { session_id, path } => {
                 match crate::files::handle_open_path(&session_manager, &session_id, &path).await {

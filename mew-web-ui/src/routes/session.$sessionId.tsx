@@ -3,7 +3,7 @@ import { useRef } from "react";
 import type { Attachment } from "@mew/web-client";
 import { useSessionStore, permissionResponders } from "@/stores/session";
 import { getClient } from "@/lib/client";
-import { useMewConnection, useComposerFocusShortcut, useSessionAttach } from "@/lib/hooks";
+import { useComposerFocusShortcut, useSessionAttach } from "@/lib/hooks";
 import { FakeHeader } from "@/components/fake-header";
 import { VirtualChatSurface } from "@/components/virtual-chat-surface";
 import { InputArea } from "@/components/input-area";
@@ -20,7 +20,7 @@ export const Route = createFileRoute("/session/$sessionId")({
 function SessionRouteComponent() {
   const { sessionId } = Route.useParams();
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  const connected = useMewConnection();
+  const connected = useSessionStore((s) => s.connectionState === "connected");
 
   useSessionAttach(sessionId);
   useComposerFocusShortcut(inputRef);
@@ -60,14 +60,16 @@ function SessionRouteComponent() {
       <VirtualChatSurface />
       <MobileAskUser />
       <PlanApprovalCard />
-      <InputArea
-        ref={inputRef}
-        onSend={handleSend}
-        onSlash={handleSlash}
-        onCancel={handleCancel}
-        connected={connected}
-      />
-      <StatusFooter />
+      <div className="shrink-0">
+        <InputArea
+          ref={inputRef}
+          onSend={handleSend}
+          onSlash={handleSlash}
+          onCancel={handleCancel}
+          connected={connected}
+        />
+        <StatusFooter />
+      </div>
       <PermissionToast onResolve={handlePermission} />
     </>
   );

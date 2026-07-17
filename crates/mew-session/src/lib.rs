@@ -488,6 +488,16 @@ impl Writer {
     pub fn meta(&self) -> &Meta {
         &self.meta
     }
+
+    /// Set and persist the session workspace while keeping the writer's
+    /// in-memory metadata in sync with the on-disk record.
+    pub async fn set_cwd(
+        &mut self,
+        dir: &Path,
+        cwd: impl Into<String>,
+    ) -> Result<(), SessionError> {
+        self.meta.set_cwd(dir, cwd).await
+    }
 }
 
 impl Meta {
@@ -648,6 +658,28 @@ mod tests {
         assert_eq!(meta.depth, 0);
         assert!(meta.children_session_ids.is_empty());
 
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn test_writer_set_cwd_updates_memory_and_disk() {
+        let root = tmp_root();
+        let session_id = format!("test-{}", Ulid::new());
+        let mut writer = Writer::open_at(&root, &session_id).await.expect("open");
+
+        writer
+            .set_cwd(&root, "/tmp/project")
+            .await
+            .expect("set cwd");
+
+        assert_eq!(writer.meta().cwd.as_deref(), Some("/tmp/project"));
+        let meta = Reader::load_meta_from(&root, &session_id)
+            .await
+            .expect("meta")
+            .expect("present");
+        assert_eq!(meta.cwd.as_deref(), Some("/tmp/project"));
+
+        writer.close().await.expect("close");
         let _ = tokio::fs::remove_dir_all(&root).await;
     }
 

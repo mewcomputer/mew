@@ -60,8 +60,9 @@ function NavButton({
   return (
     <button
       onClick={onClick}
+      aria-label={label}
       className={cn(
-        "flex flex-1 flex-col items-center gap-0.5 py-2 transition-colors",
+        "flex min-h-12 flex-1 flex-col items-center gap-0.5 py-2 transition-colors",
         isActive ? "text-primary" : "text-muted-foreground",
       )}
     >

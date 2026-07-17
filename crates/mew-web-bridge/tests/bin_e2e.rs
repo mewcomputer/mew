@@ -66,15 +66,20 @@ impl Drop for ChildGuard {
 
 /// Spawn `mew daemon` with `--fake-provider` listening on a Unix socket.
 /// Returns the guard, the socket path, and the tempdir that holds it.
-fn spawn_fake_daemon(mew_bin: &PathBuf, socket_path: &std::path::Path) -> Result<ChildGuard> {
+fn spawn_fake_daemon(
+    mew_bin: &PathBuf,
+    socket_path: &std::path::Path,
+    home_dir: &std::path::Path,
+) -> Result<ChildGuard> {
     let child = Command::new(mew_bin)
         .arg("daemon")
         .arg("--fake-provider")
         .arg("--socket")
         .arg(socket_path)
-        // Make sure the daemon doesn't try to read the user's real
-        // config — empty env is enough; with no MEW_* env and a missing
-        // config file, load() returns defaults.
+        // Use an isolated home directory so the daemon doesn't read the
+        // user's real state.toml (on macOS, directories uses
+        // ~/Library/Application Support/computer.mew.mew).
+        .env("HOME", home_dir)
         .env_remove("MEW_CONFIG")
         .env_remove("MEW_DEFAULT_MODEL")
         .stdout(Stdio::null())
@@ -176,15 +181,18 @@ async fn bin_e2e_daemon_plus_bridge_full_round_trip() -> Result<()> {
     };
 
     // Pick a free TCP port for the bridge, set up a tempdir for the
-    // daemon's Unix socket.
+    // daemon's Unix socket and an isolated home directory so the
+    // daemon doesn't inherit the user's real state.toml.
     let bridge_port = free_port().await?;
     let bridge_addr: SocketAddr = format!("127.0.0.1:{bridge_port}").parse()?;
     let tmp = TempDir::new()?;
     let socket_path = tmp.path().join("mew.sock");
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir)?;
 
     // Spawn the daemon first. It must bind the socket before the
     // bridge can connect.
-    let _daemon = spawn_fake_daemon(&mew_bin, &socket_path)?;
+    let _daemon = spawn_fake_daemon(&mew_bin, &socket_path, &home_dir)?;
     wait_for_unix_socket(&socket_path, Duration::from_secs(5)).await?;
 
     // Spawn the bridge. `--spawn false` skips the bridge's own

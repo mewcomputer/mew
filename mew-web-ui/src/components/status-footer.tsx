@@ -66,7 +66,7 @@ export function StatusFooter() {
 
       <footer className="mx-auto flex w-full items-center justify-between px-3 pb-2 pt-1 text-[10px] text-muted-foreground tabular-nums sm:px-4">
         {/* Left: connection dot + metrics */}
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <div className="flex items-center gap-1.5">
             <span className={cn("h-1.5 w-1.5 rounded-full", dotColor)} />
             <span className="capitalize">{connectionState}</span>
@@ -77,7 +77,7 @@ export function StatusFooter() {
             <Metric label="cost" value={`$${cost.toFixed(4)}`} />
           </div>
           {runningSubs > 0 && (
-            <span className="flex items-center gap-1 text-blue-500">
+            <span className="hidden items-center gap-1 text-blue-500 sm:flex">
               <span className="uppercase tracking-wide opacity-60">subs</span>
               <span className="font-medium">{runningSubs}</span>
             </span>
@@ -92,7 +92,7 @@ export function StatusFooter() {
         {/* Right: presence chips + yield + version */}
         <div className="flex items-center gap-2">
           {attachedClients.length > 0 && (
-            <div className="flex items-center gap-1">
+            <div className="hidden items-center gap-1 sm:flex">
               <Users className="h-3 w-3 opacity-50" />
               <div className="flex items-center gap-1">
                 {attachedClients.map((c) => (
@@ -104,15 +104,16 @@ export function StatusFooter() {
           {yieldedByClient === null && (
             <button
               onClick={handleYield}
-              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
+              className="hidden items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground/80 transition-colors hover:bg-accent hover:text-foreground sm:flex"
               title="Let another attached client drive the session (advisory)."
+              aria-label="Yield control to another client"
             >
               <Hand className="h-3 w-3" />
               Yield
             </button>
           )}
           {daemonVersion && (
-            <span className="text-muted-foreground/60">v{daemonVersion}</span>
+            <span className="hidden text-muted-foreground/60 sm:inline">v{daemonVersion}</span>
           )}
         </div>
       </footer>

@@ -684,6 +684,13 @@ async fn translate_server_message(
             Vec::new()
         }
 
+        ServerMessage::BrowserSnapshot { .. }
+        | ServerMessage::BrowserScreenshot { .. }
+        | ServerMessage::BrowserState { .. } => {
+            let _ = state.notify_tx.send(msg.clone()).await;
+            Vec::new()
+        }
+
         // These carry data the TUI needs (session list, history, titles,
         // alerts, flagged files). Forward to notify AND produce no
         // AgentEvent — the TUI handles them via the reducer.

@@ -1,74 +1,81 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, type RefObject } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { useSessionStore } from "../stores/session";
 import { getClient, SESSION_ID_KEY } from "./client";
 
 /** Connection hook — manages WebSocket lifecycle. */
 export function useMewConnection() {
-  const [connected, setConnected] = useState(false);
-  const reconnectAttemptRef = useRef(0);
-  const intentionalDisconnectRef = useRef(false);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connected = useSessionStore((s) => s.connectionState === "connected");
+  const retryToken = useSessionStore((s) => s.connectionRetryToken);
 
   useEffect(() => {
     const client = getClient();
-    intentionalDisconnectRef.current = false;
+    let cancelled = false;
+    let attempt = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const scheduleRetry = () => {
+      if (cancelled || reconnectTimer) return;
+      const delay = Math.min(1000 * 2 ** Math.min(attempt, 5), 30000);
+      useSessionStore.getState().setConnectionState("reconnecting");
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void doConnect();
+      }, delay);
+    };
 
     const doConnect = async () => {
-      const attempt = reconnectAttemptRef.current;
-      if (attempt > 0) {
-        const delay = Math.min(1000 * 2 ** attempt, 30000);
-        useSessionStore.getState().setConnectionState("reconnecting");
-        await new Promise((r) => {
-          reconnectTimerRef.current = setTimeout(r, delay);
-        });
-      } else {
-        useSessionStore.getState().setConnectionState("connecting");
-      }
+      if (cancelled) return;
+      useSessionStore
+        .getState()
+        .setConnectionState(attempt === 0 ? "connecting" : "reconnecting");
 
       try {
         await client.connect();
-        reconnectAttemptRef.current = 0;
-        setConnected(true);
-        client.listModels();
-        client.listPersonas();
-        // Best-effort daemon version fetch. The ping/pong wire types are
-        // defined in the client; the daemon replies with `pong { version }`
-        // once it implements the handler. Until then this is a no-op that
-        // never resolves — harmless.
+        if (cancelled) return;
+        attempt = 0;
+        useSessionStore.getState().setConnectionState("connected");
+        useSessionStore.getState().setConnectionError(null);
         client
           .ping()
           .then((version) => useSessionStore.getState().setDaemonVersion(version))
           .catch(() => {
             /* daemon may not support ping yet — ignore */
           });
-      } catch (e) {
-        console.error("[mew] connect failed:", e);
-        if (!intentionalDisconnectRef.current) {
-          reconnectAttemptRef.current += 1;
-          doConnect();
-        }
+      } catch (error) {
+        console.error("[mew] connect failed:", error);
+        if (cancelled) return;
+        attempt += 1;
+        useSessionStore.getState().setConnectionError(connectionErrorMessage(error));
+        scheduleRetry();
       }
     };
 
-    doConnect();
+    const handleClose = () => {
+      if (cancelled) return;
+      attempt = Math.max(attempt + 1, 1);
+      useSessionStore.getState().setConnectionError("The daemon connection closed.");
+      scheduleRetry();
+    };
 
-    client.on("close", () => {
-      setConnected(false);
-      if (!intentionalDisconnectRef.current) {
-        reconnectAttemptRef.current += 1;
-        doConnect();
-      }
-    });
+    client.on("close", handleClose);
+    void doConnect();
 
     return () => {
-      intentionalDisconnectRef.current = true;
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      client.off("close", handleClose);
       client.disconnect();
     };
-  }, []);
+  }, [retryToken]);
 
   return connected;
+}
+
+function connectionErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === "string" && error) return error;
+  return "The local daemon could not be reached.";
 }
 
 /** Trap Cmd/Ctrl+L to focus the composer. */
@@ -111,7 +118,14 @@ export function useSessionAttach(sessionId: string) {
     const client = getClient();
     const store = useSessionStore.getState();
 
-    if (store.sessionId === sessionId) return;
+    // New-session flows receive SessionReady before navigation. The client
+    // is already attached in that case, even if React has not observed the
+    // store update yet; attaching again races the daemon and can surface a
+    // misleading "session not found" error.
+    if (store.sessionId === sessionId || client.getSessionId() === sessionId) {
+      if (store.sessionId !== sessionId) store.setSessionId(sessionId);
+      return;
+    }
 
     store.reset();
     localStorage.setItem(SESSION_ID_KEY, sessionId);

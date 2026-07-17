@@ -239,7 +239,6 @@ async fn prompt_streams_text_response_events() {
             m,
             ServerMessage::Provider {
                 event: mew_message::ProviderEventWire::MessageEnd {
-                    manifest: None,
                     finish: Finish::Stop,
                     ..
                 }
@@ -466,7 +465,6 @@ async fn tool_call_response_emits_tool_use_finish() {
             m,
             ServerMessage::Provider {
                 event: mew_message::ProviderEventWire::MessageEnd {
-                    manifest: None,
                     finish: Finish::ToolUse,
                     ..
                 }

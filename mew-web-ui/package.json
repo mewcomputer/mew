@@ -8,10 +8,19 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "tauri": "tauri",
+    "desktop:prepare": "node scripts/build-sidecar.mjs --release",
+    "desktop:prepare:dev": "node scripts/build-sidecar.mjs --debug",
+    "desktop:prepare:cef": "node scripts/prepare-cef.mjs --required && node scripts/build-cef-helper.mjs --release",
+    "desktop:prepare:cef:helper": "node scripts/build-cef-helper.mjs --release",
+    "desktop:prepare:cef:dev": "node scripts/prepare-cef.mjs --link && node scripts/build-cef-helper.mjs --debug",
+    "desktop:dev": "pnpm desktop:prepare:dev && pnpm desktop:prepare:cef:dev && tauri dev",
+    "desktop:build": "pnpm desktop:prepare && pnpm desktop:prepare:cef && tauri build"
   },
   "dependencies": {
     "@mew/web-client": "workspace:*",
+    "@tauri-apps/api": "^2.11.1",
     "@radix-ui/react-alert-dialog": "^1.1.17",
     "@radix-ui/react-avatar": "^1.2.0",
     "@radix-ui/react-collapsible": "^1.1.16",
@@ -51,6 +60,7 @@
     "@testing-library/jest-dom": "^6.6",
     "@testing-library/react": "^16.1",
     "@testing-library/user-event": "^14.6.1",
+    "@tauri-apps/cli": "2.11.4",
     "@types/react": "^19.1",
     "@types/react-dom": "^19.1",
     "@vitejs/plugin-react": "^4.3",

@@ -9,14 +9,6 @@ use ratatui::{
 use super::display_width;
 use crate::app::{current_git_branch, App};
 
-pub(super) fn draw_divider(f: &mut Frame, area: Rect, tokens: &crate::theme::ThemeTokens) {
-    let line = Line::from(Span::styled(
-        "─".repeat(area.width as usize),
-        Style::default().fg(tokens.divider),
-    ));
-    f.render_widget(Paragraph::new(line), area);
-}
-
 fn fmt_tokens(n: u32) -> String {
     if n >= 1_000 {
         format!("{:.1}k", n as f32 / 1_000.0)
@@ -45,15 +37,15 @@ struct PillSegment {
     bg: Color,
 }
 
-fn gap_segment(width: usize, tokens: &crate::theme::ThemeTokens) -> PillSegment {
+fn gap_segment(width: usize, tokens: &crate::theme::Theme) -> PillSegment {
     PillSegment {
         text: " ".repeat(width),
         fg: Color::Reset,
-        bg: tokens.status_bg,
+        bg: tokens.resolve("status_bar.background"),
     }
 }
 
-fn build_pills(app: &App) -> Vec<Pill> {
+fn build_pills(app: &App, theme: &crate::theme::Theme) -> Vec<Pill> {
     let mut pills = Vec::new();
 
     // permission mode — prepended so it's the first thing the user sees.
@@ -66,23 +58,23 @@ fn build_pills(app: &App) -> Vec<Pill> {
         mew_hooks::PermissionMode::Standard => {}
         mew_hooks::PermissionMode::Permissive => pills.push(Pill {
             text: "Permissive".into(),
-            fg: Color::Rgb(40, 25, 5),
-            bg: Color::Rgb(245, 200, 80),
+            fg: theme.resolve("pill.permissive.fg"),
+            bg: theme.resolve("pill.permissive.bg"),
         }),
         mew_hooks::PermissionMode::Auto => pills.push(Pill {
             text: "Auto".into(),
-            fg: Color::Rgb(240, 230, 250),
-            bg: Color::Rgb(95, 50, 130),
+            fg: theme.resolve("pill.auto.fg"),
+            bg: theme.resolve("pill.auto.bg"),
         }),
         mew_hooks::PermissionMode::AutoPlus => pills.push(Pill {
             text: "Auto+".into(),
-            fg: Color::Rgb(250, 235, 255),
-            bg: Color::Rgb(70, 25, 110),
+            fg: theme.resolve("pill.auto.fg"),
+            bg: theme.resolve("pill.auto.bg"),
         }),
         mew_hooks::PermissionMode::Dangerous => pills.push(Pill {
             text: "⚠ Dangerous!".into(),
-            fg: Color::Rgb(255, 240, 240),
-            bg: Color::Rgb(140, 30, 30),
+            fg: theme.resolve("pill.dangerous.fg"),
+            bg: theme.resolve("pill.dangerous.bg"),
         }),
     }
 
@@ -97,8 +89,8 @@ fn build_pills(app: &App) -> Vec<Pill> {
     if !model_label.is_empty() {
         pills.push(Pill {
             text: model_label,
-            fg: Color::Rgb(150, 230, 160),
-            bg: Color::Rgb(25, 70, 35),
+            fg: theme.resolve("pill.model.fg"),
+            bg: theme.resolve("pill.model.bg"),
         });
     }
 
@@ -107,18 +99,17 @@ fn build_pills(app: &App) -> Vec<Pill> {
     if let Some(ref variant) = app.active_thinking_variant {
         pills.push(Pill {
             text: variant.clone(),
-            fg: Color::Rgb(240, 200, 120),
-            bg: Color::Rgb(60, 45, 20),
+            fg: theme.resolve("pill.thinking.fg"),
+            bg: theme.resolve("pill.thinking.bg"),
         });
     }
 
     // persona — uses the persona's accent color (explicit or deterministic).
     if let Some(ref name) = app.active_persona {
-        let accent = crate::theme::persona_accent(name, app.active_persona_color.as_deref());
         pills.push(Pill {
             text: name.clone(),
-            fg: accent.fg,
-            bg: accent.bg,
+            fg: theme.resolve("pill.persona.fg"),
+            bg: theme.resolve("pill.persona.bg"),
         });
     }
 
@@ -126,8 +117,8 @@ fn build_pills(app: &App) -> Vec<Pill> {
     if !app.short_cwd.is_empty() {
         pills.push(Pill {
             text: app.short_cwd.clone(),
-            fg: Color::Rgb(150, 190, 240),
-            bg: Color::Rgb(30, 55, 90),
+            fg: theme.resolve("pill.cwd.fg"),
+            bg: theme.resolve("pill.cwd.bg"),
         });
     }
 
@@ -135,8 +126,8 @@ fn build_pills(app: &App) -> Vec<Pill> {
     if let Some(ref branch) = app.git_branch {
         pills.push(Pill {
             text: format!("git: {}", branch),
-            fg: Color::Rgb(245, 210, 110),
-            bg: Color::Rgb(75, 60, 20),
+            fg: theme.resolve("pill.git.fg"),
+            bg: theme.resolve("pill.git.bg"),
         });
     }
 
@@ -152,8 +143,8 @@ fn build_pills(app: &App) -> Vec<Pill> {
         if total_attention > 0 {
             pills.push(Pill {
                 text: format!("{} need you", total_attention),
-                fg: Color::Rgb(60, 35, 5),
-                bg: Color::Rgb(245, 200, 80),
+                fg: theme.resolve("pill.attention.fg"),
+                bg: theme.resolve("pill.attention.bg"),
             });
         }
     }
@@ -166,8 +157,8 @@ fn build_pills(app: &App) -> Vec<Pill> {
             if !title.is_empty() {
                 pills.push(Pill {
                     text: title.clone(),
-                    fg: Color::Rgb(200, 200, 220),
-                    bg: Color::Rgb(40, 40, 60),
+                    fg: theme.resolve("pill.custom.fg"),
+                    bg: theme.resolve("pill.custom.bg"),
                 });
             }
         }
@@ -182,7 +173,7 @@ fn build_pills(app: &App) -> Vec<Pill> {
 fn build_segments(
     pills: &[Pill],
     trailing_gap: usize,
-    tokens: &crate::theme::ThemeTokens,
+    tokens: &crate::theme::Theme,
 ) -> Vec<PillSegment> {
     let mut segs: Vec<PillSegment> = Vec::with_capacity(pills.len() * 2 + 1);
     for (i, p) in pills.iter().enumerate() {
@@ -272,7 +263,8 @@ fn segments_window(segs: &[PillSegment], width: usize, offset: usize) -> Line<'s
 }
 
 pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
-    let bg = Block::default().style(Style::default().bg(app.theme.tokens.status_bg));
+    let status_bg = app.theme.resolve("status_bar.background");
+    let bg = Block::default().style(Style::default().bg(status_bg));
     f.render_widget(bg, area);
 
     // Resolve git branch once, lazily (avoids per-frame and per-test fs reads).
@@ -280,6 +272,14 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
         app.git_branch = current_git_branch();
         app.git_branch_resolved = true;
     }
+
+    // Build a persona-accented theme clone for pill rendering.
+    let pill_theme = if let Some(ref name) = app.active_persona {
+        app.theme
+            .with_persona_accent(name, app.active_persona_color.as_deref())
+    } else {
+        app.theme.clone()
+    };
 
     let status = &app.status;
     let total = status.input_tokens + status.output_tokens;
@@ -306,8 +306,8 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     let right_span = Span::styled(
         right,
         Style::default()
-            .fg(Color::Gray)
-            .bg(app.theme.tokens.status_bg),
+            .fg(app.theme.resolve("text.muted"))
+            .bg(status_bg),
     );
     f.render_widget(
         Paragraph::new(Line::from(right_span)).alignment(Alignment::Right),
@@ -319,38 +319,38 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
         Line::from(Span::styled(
             "esc again to stop agent",
             Style::default()
-                .fg(Color::Yellow)
-                .bg(app.theme.tokens.status_bg),
+                .fg(app.theme.resolve("text.warning"))
+                .bg(status_bg),
         ))
     } else if app.ctrl_c_quit_pending.is_some() {
         Line::from(Span::styled(
             "ctrl-c again to quit",
             Style::default()
-                .fg(Color::Red)
-                .bg(app.theme.tokens.status_bg),
+                .fg(app.theme.resolve("text.error"))
+                .bg(status_bg),
         ))
     } else if let Some(ref retry) = app.retry_status {
         Line::from(Span::styled(
             retry.clone(),
             Style::default()
-                .fg(Color::LightBlue)
-                .bg(app.theme.tokens.status_bg),
+                .fg(app.theme.resolve("text.accent"))
+                .bg(status_bg),
         ))
     } else {
-        let pills = build_pills(app);
+        let pills = build_pills(app, &pill_theme);
         let pwidth = display_width(&pill_string(&pills)) as u16;
         if pwidth <= left_area.width {
             // Fits: render the pill row, reset the ticker.
             app.status_ticker_offset = 0;
             app.status_ticker_at = None;
-            segments_line(&build_segments(&pills, 0, &app.theme.tokens))
+            segments_line(&build_segments(&pills, 0, &app.theme))
         } else {
             // Overflow: color-preserving marquee with a trailing cycle gap.
             // Activate the ticker so `tick()` knows to advance it.
             if app.status_ticker_at.is_none() {
                 app.status_ticker_at = Some(std::time::Instant::now());
             }
-            let marquee_segs = build_segments(&pills, 3, &app.theme.tokens);
+            let marquee_segs = build_segments(&pills, 3, &app.theme);
             segments_window(
                 &marquee_segs,
                 left_area.width as usize,
@@ -401,12 +401,12 @@ mod tests {
             pill("a", Color::White, Color::Rgb(0, 0, 0)),
             pill("b", Color::Cyan, Color::Rgb(0, 0, 0)),
         ];
-        let segs = build_segments(&pills, 0, &app.theme.tokens);
+        let segs = build_segments(&pills, 0, &app.theme);
         assert_eq!(segs.len(), 3);
         // Pills now have a leading/trailing space for visual padding.
         assert_eq!(segs[0].text, " a ");
         assert_eq!(segs[1].text, " ");
-        assert_eq!(segs[1].bg, app.theme.tokens.status_bg);
+        assert_eq!(segs[1].bg, app.theme.resolve("status_bar.background"));
         assert_eq!(segs[2].text, " b ");
     }
 
@@ -414,11 +414,11 @@ mod tests {
     fn test_build_segments_trailing_gap_for_marquee() {
         let app = crate::app::App::new();
         let pills = vec![pill("ab", Color::White, Color::Rgb(0, 0, 0))];
-        let segs = build_segments(&pills, 3, &app.theme.tokens);
+        let segs = build_segments(&pills, 3, &app.theme);
         assert_eq!(segs.len(), 2);
         assert_eq!(segs[0].text, " ab ");
         assert_eq!(segs[1].text, "   ");
-        assert_eq!(segs[1].bg, app.theme.tokens.status_bg);
+        assert_eq!(segs[1].bg, app.theme.resolve("status_bar.background"));
     }
 
     #[test]
@@ -428,7 +428,7 @@ mod tests {
             pill("a", Color::White, Color::Rgb(10, 0, 0)),
             pill("b", Color::Cyan, Color::Rgb(0, 10, 0)),
         ];
-        let segs = build_segments(&pills, 0, &app.theme.tokens);
+        let segs = build_segments(&pills, 0, &app.theme);
         let line = segments_line(&segs);
         // 3 spans: pill_a, gap, pill_b
         assert_eq!(line.spans.len(), 3);
@@ -444,15 +444,18 @@ mod tests {
             pill("BB", Color::Cyan, Color::Rgb(0, 10, 0)),
         ];
         // full sequence: " AA " + " " + " BB " + "   " = " AA  BB    " (12 chars).
-        let segs = build_segments(&pills, 3, &app.theme.tokens);
+        let segs = build_segments(&pills, 3, &app.theme);
         // offset 0, width 10 → first 10 chars = " AA  BB  ".
         let line = segments_window(&segs, 10, 0);
         let total_text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert_eq!(total_text, " AA   BB  ");
         // The first span carries the first pill's bg, the gap carries
-        // app.theme.tokens.status_bg, the second pill carries its own bg.
+        // app.theme.resolve("status_bar.background"), the second pill carries its own bg.
         assert_eq!(line.spans[0].style.bg, Some(Color::Rgb(10, 0, 0)));
-        assert_eq!(line.spans[1].style.bg, Some(app.theme.tokens.status_bg));
+        assert_eq!(
+            line.spans[1].style.bg,
+            Some(app.theme.resolve("status_bar.background"))
+        );
         assert_eq!(line.spans[2].style.bg, Some(Color::Rgb(0, 10, 0)));
     }
 
@@ -460,7 +463,7 @@ mod tests {
     fn test_segments_window_wraps_with_offset() {
         let app = crate::app::App::new();
         let pills = vec![pill("abc", Color::White, Color::Rgb(0, 0, 0))];
-        let segs = build_segments(&pills, 3, &app.theme.tokens);
+        let segs = build_segments(&pills, 3, &app.theme);
         // full text: " abc " + "   " = " abc    " (8 chars).
         // offset 0, width 3 → " ab".
         assert_eq!(text_of(&segments_window(&segs, 3, 0)), " ab");
@@ -477,7 +480,7 @@ mod tests {
         let app = crate::app::App::new();
         // offset equal to the total char count must wrap to offset 0.
         let pills = vec![pill("ab", Color::White, Color::Rgb(0, 0, 0))];
-        let segs = build_segments(&pills, 3, &app.theme.tokens);
+        let segs = build_segments(&pills, 3, &app.theme);
         // full text = "ab" + "   " = 5 chars.
         let total: usize = segs.iter().map(|s| s.text.chars().count()).sum();
         let a = segments_window(&segs, 2, 0);
@@ -496,7 +499,7 @@ mod tests {
         let mut app = crate::app::App::new();
         app.permission_mode = mew_hooks::PermissionMode::Standard;
         app.status.model = "test-model".into();
-        let pills = build_pills(&app);
+        let pills = build_pills(&app, &app.theme);
         // No pill should contain the "Dangerous" warning text.
         assert!(
             pills.iter().all(|p| !p.text.contains("Dangerous")),
@@ -510,7 +513,7 @@ mod tests {
         let mut app = crate::app::App::new();
         app.permission_mode = mew_hooks::PermissionMode::Dangerous;
         app.status.model = "test-model".into();
-        let pills = build_pills(&app);
+        let pills = build_pills(&app, &app.theme);
         assert!(!pills.is_empty(), "expected at least one pill");
         assert!(
             pills[0].text.contains("Dangerous"),
@@ -524,7 +527,7 @@ mod tests {
         let mut app = crate::app::App::new();
         app.permission_mode = mew_hooks::PermissionMode::Permissive;
         app.status.model = "test-model".into();
-        let pills = build_pills(&app);
+        let pills = build_pills(&app, &app.theme);
         assert!(!pills.is_empty(), "expected at least one pill");
         assert_eq!(
             pills[0].text, "Permissive",
@@ -543,22 +546,25 @@ mod tests {
         let mut app = crate::app::App::new();
         app.permission_mode = mew_hooks::PermissionMode::Auto;
         app.status.model = "test-model".into();
-        let pills = build_pills(&app);
+        let pills = build_pills(&app, &app.theme);
         assert!(!pills.is_empty(), "expected at least one pill");
         assert_eq!(
             pills[0].text, "Auto",
             "Auto pill should be first (prepended), got first: {:?}",
             pills[0].text
         );
-        // Auto's purple pill is distinct from amber Permissive and red
-        // Dangerous — the visual cue should communicate "LLM is the gate."
+        // Auto resolves to pill.auto tokens, distinct from amber Permissive and red Dangerous.
+        let auto_bg = app.theme.resolve("pill.auto.bg");
+        let permissive_bg = app.theme.resolve("pill.permissive.bg");
+        let dangerous_bg = app.theme.resolve("pill.dangerous.bg");
+        assert_eq!(pills[0].bg, auto_bg, "Auto must use pill.auto.bg");
         assert!(
-            pills[0].bg != Color::Rgb(245, 200, 80),
-            "Auto must not be amber"
+            pills[0].bg != permissive_bg,
+            "Auto must not be amber (permissive bg)"
         );
         assert!(
-            pills[0].bg != Color::Rgb(140, 30, 30),
-            "Auto must not be red"
+            pills[0].bg != dangerous_bg,
+            "Auto must not be red (dangerous bg)"
         );
     }
 
@@ -567,29 +573,15 @@ mod tests {
         let mut app = crate::app::App::new();
         app.permission_mode = mew_hooks::PermissionMode::AutoPlus;
         app.status.model = "test-model".into();
-        let pills = build_pills(&app);
+        let pills = build_pills(&app, &app.theme);
         assert!(!pills.is_empty(), "expected at least one pill");
         assert_eq!(
             pills[0].text, "Auto+",
             "Auto+ pill should be first (prepended), got first: {:?}",
             pills[0].text
         );
-        // Auto+ is in the same purple family as Auto but distinct from it
-        // (different color) and from amber Permissive / red Dangerous.
-        assert_ne!(
-            pills[0].bg,
-            Color::Rgb(95, 50, 130),
-            "Auto+ must not be the same shade as Auto — should be deeper"
-        );
-        assert_ne!(
-            pills[0].bg,
-            Color::Rgb(245, 200, 80),
-            "Auto+ must not be amber"
-        );
-        assert_ne!(
-            pills[0].bg,
-            Color::Rgb(140, 30, 30),
-            "Auto+ must not be red"
-        );
+        // Auto+ also resolves to pill.auto tokens.
+        let auto_bg = app.theme.resolve("pill.auto.bg");
+        assert_eq!(pills[0].bg, auto_bg, "Auto+ must use pill.auto.bg");
     }
 }

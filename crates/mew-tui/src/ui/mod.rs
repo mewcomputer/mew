@@ -48,7 +48,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 Constraint::Length(SIDEBAR_WIDTH),
             ])
             .split(area);
-        let sidebar_bg = Block::default().style(Style::default().bg(app.theme.tokens.sidebar));
+        let sidebar_bg =
+            Block::default().style(Style::default().bg(app.theme.resolve("sidebar.background")));
         f.render_widget(sidebar_bg, chunks[1]);
         sidebar::draw_sidebar(f, app, chunks[1]);
         chunks.to_vec()
@@ -93,7 +94,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let input_rect = welcome::draw_landing(f, app, hero_area, slash_height);
         if app.mode == Mode::UserQuestion {
             if let Some(ref uq) = app.user_question {
-                overlays::draw_user_question(f, uq, input_rect, &app.theme.tokens);
+                overlays::draw_user_question(f, uq, input_rect, &app.theme);
             }
         } else {
             input::draw_input(f, app, input_rect);
@@ -155,37 +156,43 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
-            Constraint::Length(1),            // divider
             Constraint::Length(slash_height), // slash autocomplete
             Constraint::Length(question_height),
             Constraint::Length(1), // status
         ])
         .split(main_area);
 
+    // Optional chat surface background. The chat widget itself is transparent
+    // so this block fills the area behind the conversation.
+    {
+        let chat_bg = Block::default()
+            .style(Style::default().bg(app.theme.resolve("chat.surface.background")));
+        f.render_widget(chat_bg, vert[0]);
+    }
+
     chat::draw_chat(f, app, vert[0]);
 
     // If chat content would sit behind the companion, shrink to input bar.
     if companion::should_use_compact(app, vert[0]) {
-        input::draw_companion_compact(f, app, vert[3]);
+        input::draw_companion_compact(f, app, vert[2]);
     } else {
         companion::draw_companion_float(f, app, vert[0]);
     }
 
-    status::draw_divider(f, vert[1], &app.theme.tokens);
     if show_slash {
-        overlays::draw_slash_autocomplete(f, app, &slash_cmds, vert[2]);
+        overlays::draw_slash_autocomplete(f, app, &slash_cmds, vert[1]);
     }
     if app.mode == Mode::UserQuestion {
         if let Some(ref uq) = app.user_question {
-            overlays::draw_user_question(f, uq, vert[3], &app.theme.tokens);
+            overlays::draw_user_question(f, uq, vert[2], &app.theme);
         }
     } else {
-        input::draw_input(f, app, vert[3]);
+        input::draw_input(f, app, vert[2]);
     }
-    status::draw_status(f, app, vert[4]);
+    status::draw_status(f, app, vert[3]);
 
     app.chat_area = vert[0];
-    app.input_area = vert[3];
+    app.input_area = vert[2];
 
     app.clear_expired_alerts();
     draw_overlays(f, app, main_area);
@@ -198,7 +205,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
     if app.mode == Mode::Settings {
         if let Some(ref settings) = app.settings {
-            crate::settings::draw_settings(f, settings, area, &app.theme.tokens);
+            crate::settings::draw_settings(f, settings, area, &app.theme);
         }
     }
 
@@ -208,29 +215,29 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.mode == Mode::PermissionPrompt {
         if let Some(ref perm) = app.permission {
-            overlays::draw_permission_modal(f, perm, area, &app.theme.tokens);
+            overlays::draw_permission_modal(f, perm, area, &app.theme);
         }
     }
 
     if app.mode == Mode::PersonaSwitchConfirm {
         if let Some(ref state) = app.persona_switch_confirm {
-            overlays::draw_persona_confirm_modal(f, state, area, &app.theme.tokens);
+            overlays::draw_persona_confirm_modal(f, state, area, &app.theme);
         }
     }
 
     if app.mode == Mode::PlanApproval {
         if let Some(ref state) = app.plan_approval {
-            overlays::draw_plan_approval(f, state, area, &app.theme.tokens);
+            overlays::draw_plan_approval(f, state, area, &app.theme);
         }
     }
 
     if app.mode == Mode::CommandPalette {
         if let Some(ref mut picker) = app.picker {
-            overlays::draw_picker(f, picker, area, &app.theme.tokens);
+            overlays::draw_picker(f, picker, area, &app.theme);
         }
     }
 
     if app.mode == Mode::Help {
-        overlays::draw_help_overlay(f, area);
+        overlays::draw_help_overlay(f, area, &app.theme);
     }
 }

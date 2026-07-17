@@ -283,6 +283,7 @@ impl SessionManager {
             return Err(AttachError::NotTopLevel);
         }
 
+        let cwd = meta.cwd.clone().map(PathBuf::from);
         let writer = mew_session::Writer::open_at_with_meta(&self.session_dir, session_id, meta)
             .await
             .context("open session writer for resume")
@@ -291,7 +292,7 @@ impl SessionManager {
         let (agent, model, provider) = (self.builder)(AgentBuildParams {
             session_id: session_id.to_string(),
             writer,
-            cwd: None,
+            cwd,
         })
         .context("build agent for resume")
         .map_err(AttachError::BuildAgent)?;

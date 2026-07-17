@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
@@ -15,8 +15,8 @@ use crate::app::{
 };
 
 pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCommand], area: Rect) {
-    let tokens = &app.theme.tokens;
-    let bg = Block::default().style(Style::default().bg(tokens.status_bg));
+    let tokens = &app.theme;
+    let bg = Block::default().style(Style::default().bg(tokens.resolve("status_bar.background")));
     f.render_widget(bg, area);
 
     let inner = Rect::new(
@@ -33,16 +33,22 @@ pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCom
         let is_selected = i == app.slash_selected;
         let name_style = if is_selected {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::White)
+                .fg(tokens.resolve("selection.foreground"))
+                .bg(tokens.resolve("selection.background"))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White).bg(tokens.status_bg)
+            Style::default()
+                .fg(tokens.resolve("text.body"))
+                .bg(tokens.resolve("status_bar.background"))
         };
         let desc_style = if is_selected {
-            Style::default().fg(Color::Black).bg(Color::White)
+            Style::default()
+                .fg(tokens.resolve("selection.foreground"))
+                .bg(tokens.resolve("selection.background"))
         } else {
-            Style::default().fg(Color::DarkGray).bg(tokens.status_bg)
+            Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("status_bar.background"))
         };
         text.push_line(Line::from(vec![
             Span::raw("  "),
@@ -69,6 +75,7 @@ pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCom
 }
 
 pub(super) fn draw_alert(f: &mut Frame, app: &App, area: Rect) {
+    let tokens = &app.theme;
     // Render toasts (bottom-right, stacking upward).
     if !app.toasts.is_empty() {
         draw_toasts(f, app, area);
@@ -82,8 +89,8 @@ pub(super) fn draw_alert(f: &mut Frame, app: &App, area: Rect) {
         let popup = Rect::new(x, y, width, 1);
 
         let style = Style::default()
-            .fg(Color::Black)
-            .bg(Color::Green)
+            .fg(tokens.resolve("text.inverse"))
+            .bg(tokens.resolve("text.success"))
             .add_modifier(Modifier::BOLD);
         let para = Paragraph::new(Line::from(Span::styled(format!(" {} ", text), style)));
         f.render_widget(Clear, popup);
@@ -94,6 +101,7 @@ pub(super) fn draw_alert(f: &mut Frame, app: &App, area: Rect) {
 /// Render toast notifications in the bottom-right corner, stacking upward.
 /// Each toast is a small green-on-black pill with the message text.
 fn draw_toasts(f: &mut Frame, app: &App, area: Rect) {
+    let tokens = &app.theme;
     let max_width: u16 = 50;
     let visible: Vec<&(String, Instant)> = app.toasts.iter().rev().take(3).collect();
     for (i, (text, born)) in visible.into_iter().cloned().enumerate() {
@@ -107,11 +115,13 @@ fn draw_toasts(f: &mut Frame, app: &App, area: Rect) {
         let popup = Rect::new(x, y, width, 1);
 
         let style = if fading {
-            Style::default().fg(Color::DarkGray).bg(Color::Black)
+            Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("background"))
         } else {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Green)
+                .fg(tokens.resolve("text.inverse"))
+                .bg(tokens.resolve("text.success"))
                 .add_modifier(Modifier::BOLD)
         };
         let para = Paragraph::new(Line::from(Span::styled(format!(" {} ", text), style)));
@@ -124,7 +134,7 @@ pub(super) fn draw_permission_modal(
     f: &mut Frame,
     perm: &PermissionState,
     area: Rect,
-    tokens: &crate::theme::ThemeTokens,
+    tokens: &crate::theme::Theme,
 ) {
     let width = 60u16.min(area.width.saturating_sub(4));
     let height = 14u16.min(area.height.saturating_sub(4));
@@ -134,7 +144,7 @@ pub(super) fn draw_permission_modal(
 
     f.render_widget(Clear, popup);
 
-    let bg = Block::default().style(Style::default().bg(tokens.status_bg));
+    let bg = Block::default().style(Style::default().bg(tokens.resolve("status_bar.background")));
     f.render_widget(bg, popup);
 
     let inner = Rect::new(
@@ -149,29 +159,37 @@ pub(super) fn draw_permission_modal(
         Line::from(vec![
             Span::styled(
                 "tool  ",
-                Style::default().fg(Color::DarkGray).bg(tokens.status_bg),
+                Style::default()
+                    .fg(tokens.resolve("text.muted"))
+                    .bg(tokens.resolve("status_bar.background")),
             ),
             Span::styled(
                 &perm.tool_name,
                 Style::default()
-                    .fg(Color::White)
-                    .bg(tokens.status_bg)
+                    .fg(tokens.resolve("foreground"))
+                    .bg(tokens.resolve("status_bar.background"))
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(""),
         Line::from(vec![Span::styled(
             "input",
-            Style::default().fg(Color::DarkGray).bg(tokens.status_bg),
+            Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("status_bar.background")),
         )]),
         Line::from(Span::styled(
             tool_input,
-            Style::default().fg(Color::Gray).bg(tokens.status_bg),
+            Style::default()
+                .fg(tokens.resolve("text.placeholder"))
+                .bg(tokens.resolve("status_bar.background")),
         )),
         Line::from(""),
         Line::from(Span::styled(
             "choose:",
-            Style::default().fg(Color::DarkGray).bg(tokens.status_bg),
+            Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("status_bar.background")),
         )),
     ]);
 
@@ -184,11 +202,13 @@ pub(super) fn draw_permission_modal(
         let is_selected = i == perm.selected;
         let style = if is_selected {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::White)
+                .fg(tokens.resolve("selection.foreground"))
+                .bg(tokens.resolve("selection.background"))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray).bg(tokens.status_bg)
+            Style::default()
+                .fg(tokens.resolve("text.placeholder"))
+                .bg(tokens.resolve("status_bar.background"))
         };
         option_lines.push(Span::styled(format!(" [{}] {}  ", key, label), style));
     }
@@ -204,12 +224,12 @@ pub(super) fn draw_permission_modal(
 
 /// Render the ask_user overlay into the input slot. The caller passes a rect
 /// large enough to fit the current page; the slot is already painted with
-/// tokens.status_bg, so this function only emits the text content.
+/// tokens.resolve("status_bar.background"), so this function only emits the text content.
 pub(super) fn draw_user_question(
     f: &mut Frame,
     uq: &UserQuestionState,
     area: Rect,
-    tokens: &crate::theme::ThemeTokens,
+    tokens: &crate::theme::Theme,
 ) {
     // Re-derive the rect exactly like draw_input does: 1-cell padding on every
     // side. Matches the visual weight of the regular input box.
@@ -234,7 +254,7 @@ fn draw_user_question_page(
     f: &mut Frame,
     uq: &UserQuestionState,
     area: Rect,
-    tokens: &crate::theme::ThemeTokens,
+    tokens: &crate::theme::Theme,
 ) {
     let question = match uq.questions.get(uq.page) {
         Some(q) => q,
@@ -249,10 +269,12 @@ fn draw_user_question_page(
 
     // Line 0+: prompt (cyan, bold), wrapped + optional page label on the right.
     let prompt_style = Style::default()
-        .fg(Color::Cyan)
-        .bg(tokens.status_bg)
+        .fg(tokens.resolve("text.accent"))
+        .bg(tokens.resolve("status_bar.background"))
         .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(Color::DarkGray).bg(tokens.status_bg);
+    let label_style = Style::default()
+        .fg(tokens.resolve("text.muted"))
+        .bg(tokens.resolve("status_bar.background"));
     let label_w = display_width(&page_label) as u16;
     let label_reserve = if n > 1 { label_w + 1 } else { 0 };
     let prompt_max = area.width.saturating_sub(label_reserve) as usize;
@@ -297,19 +319,23 @@ fn draw_user_question_page(
         let number = format!("{}. ", i + 1);
         let number_style = if selected {
             Style::default()
-                .fg(Color::Cyan)
-                .bg(tokens.status_bg)
+                .fg(tokens.resolve("text.accent"))
+                .bg(tokens.resolve("status_bar.background"))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray).bg(tokens.status_bg)
+            Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("status_bar.background"))
         };
         let label_style = if selected {
             Style::default()
-                .fg(Color::White)
-                .bg(tokens.status_bg)
+                .fg(tokens.resolve("foreground"))
+                .bg(tokens.resolve("status_bar.background"))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray).bg(tokens.status_bg)
+            Style::default()
+                .fg(tokens.resolve("text.placeholder"))
+                .bg(tokens.resolve("status_bar.background"))
         };
 
         // Wrap the label to the available width (minus number prefix).
@@ -338,7 +364,9 @@ fn draw_user_question_page(
         }
         // Wrap description if present.
         if !opt.description.is_empty() {
-            let desc_style = Style::default().fg(Color::DarkGray).bg(tokens.status_bg);
+            let desc_style = Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("status_bar.background"));
             let indent = "    ";
             let desc_max = area.width.saturating_sub(indent.len() as u16) as usize;
             let desc_lines = wrap_text(&opt.description, desc_max);
@@ -363,20 +391,24 @@ fn draw_user_question_page(
         let number = format!("{}. ", freeform_index + 1);
         let number_style = if selected {
             Style::default()
-                .fg(Color::Cyan)
-                .bg(tokens.status_bg)
+                .fg(tokens.resolve("text.accent"))
+                .bg(tokens.resolve("status_bar.background"))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray).bg(tokens.status_bg)
+            Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("status_bar.background"))
         };
         let prefix = "Type your own answer";
         let prefix_style = if selected {
             Style::default()
-                .fg(Color::White)
-                .bg(tokens.status_bg)
+                .fg(tokens.resolve("foreground"))
+                .bg(tokens.resolve("status_bar.background"))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Gray).bg(tokens.status_bg)
+            Style::default()
+                .fg(tokens.resolve("text.placeholder"))
+                .bg(tokens.resolve("status_bar.background"))
         };
         let line = if selected {
             let text_max = area
@@ -412,7 +444,9 @@ fn draw_user_question_page(
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 hint,
-                Style::default().fg(Color::DarkGray).bg(tokens.status_bg),
+                Style::default()
+                    .fg(tokens.resolve("text.muted"))
+                    .bg(tokens.resolve("status_bar.background")),
             ))),
             Rect::new(area.x, hint_y, area.width, 1),
         );
@@ -427,11 +461,11 @@ fn draw_user_question_review(
     f: &mut Frame,
     uq: &UserQuestionState,
     area: Rect,
-    tokens: &crate::theme::ThemeTokens,
+    tokens: &crate::theme::Theme,
 ) {
     let header_style = Style::default()
-        .fg(Color::Cyan)
-        .bg(tokens.status_bg)
+        .fg(tokens.resolve("text.accent"))
+        .bg(tokens.resolve("status_bar.background"))
         .add_modifier(Modifier::BOLD);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -447,10 +481,12 @@ fn draw_user_question_review(
         if y + 1 >= max_y {
             break;
         }
-        let prompt_style = Style::default().fg(Color::DarkGray).bg(tokens.status_bg);
+        let prompt_style = Style::default()
+            .fg(tokens.resolve("text.muted"))
+            .bg(tokens.resolve("status_bar.background"));
         let answer_style = Style::default()
-            .fg(Color::White)
-            .bg(tokens.status_bg)
+            .fg(tokens.resolve("foreground"))
+            .bg(tokens.resolve("status_bar.background"))
             .add_modifier(Modifier::BOLD);
         let prompt_max = area.width.saturating_sub(2) as usize;
         for pl in wrap_text(&q.prompt, prompt_max) {
@@ -470,7 +506,9 @@ fn draw_user_question_review(
                 Paragraph::new(Line::from(vec![
                     Span::styled(
                         "  ▸ ",
-                        Style::default().fg(Color::Cyan).bg(tokens.status_bg),
+                        Style::default()
+                            .fg(tokens.resolve("text.accent"))
+                            .bg(tokens.resolve("status_bar.background")),
                     ),
                     Span::styled(al, answer_style),
                 ])),
@@ -496,19 +534,23 @@ fn draw_user_question_review(
         let start_x = area.x + area.width.saturating_sub(total) / 2;
         let submit_style = if uq.review_selected == 0 {
             Style::default()
-                .fg(Color::White)
-                .bg(tokens.status_bg)
+                .fg(tokens.resolve("foreground"))
+                .bg(tokens.resolve("status_bar.background"))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray).bg(tokens.status_bg)
+            Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("status_bar.background"))
         };
         let cancel_style = if uq.review_selected == 1 {
             Style::default()
-                .fg(Color::White)
-                .bg(tokens.status_bg)
+                .fg(tokens.resolve("foreground"))
+                .bg(tokens.resolve("status_bar.background"))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray).bg(tokens.status_bg)
+            Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("status_bar.background"))
         };
         let mut line = Line::default();
         line.spans
@@ -523,7 +565,9 @@ fn draw_user_question_review(
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "← → switch   y/n shortcut   enter confirm   esc cancel",
-            Style::default().fg(Color::DarkGray).bg(tokens.status_bg),
+            Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("status_bar.background")),
         ))),
         Rect::new(area.x, hint_y, area.width, 1),
     );
@@ -561,7 +605,7 @@ pub(super) fn draw_picker(
     f: &mut Frame,
     picker: &mut PickerState,
     area: Rect,
-    tokens: &crate::theme::ThemeTokens,
+    tokens: &crate::theme::Theme,
 ) {
     let width = 60u16.min(area.width.saturating_sub(4));
 
@@ -588,7 +632,7 @@ pub(super) fn draw_picker(
 
     f.render_widget(Clear, popup);
 
-    let bg = Block::default().style(Style::default().bg(tokens.status_bg));
+    let bg = Block::default().style(Style::default().bg(tokens.resolve("status_bar.background")));
     f.render_widget(bg, popup);
 
     let inner = Rect::new(
@@ -599,10 +643,17 @@ pub(super) fn draw_picker(
     );
 
     let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    let prefix = Span::styled("> ", Style::default().fg(Color::Cyan).bg(tokens.status_bg));
+    let prefix = Span::styled(
+        "> ",
+        Style::default()
+            .fg(tokens.resolve("text.accent"))
+            .bg(tokens.resolve("status_bar.background")),
+    );
     let filter_text = Span::styled(
         &picker.filter,
-        Style::default().fg(Color::White).bg(tokens.status_bg),
+        Style::default()
+            .fg(tokens.resolve("text.body"))
+            .bg(tokens.resolve("status_bar.background")),
     );
     let filter_para = Paragraph::new(Line::from(vec![prefix, filter_text]));
     f.render_widget(filter_para, filter_area);
@@ -612,7 +663,9 @@ pub(super) fn draw_picker(
         if let Some(ref hint) = picker.hint {
             let hint_span = Span::styled(
                 format!("  {}", hint),
-                Style::default().fg(Color::DarkGray).bg(tokens.status_bg),
+                Style::default()
+                    .fg(tokens.resolve("text.muted"))
+                    .bg(tokens.resolve("status_bar.background")),
             );
             let hint_para = Paragraph::new(Line::from(vec![hint_span]));
             let hint_area = Rect::new(
@@ -633,7 +686,7 @@ pub(super) fn draw_picker(
     let div_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
     let div_line = Line::from(Span::styled(
         "─".repeat(inner.width as usize),
-        Style::default().fg(tokens.divider),
+        Style::default().fg(tokens.resolve("divider")),
     ));
     f.render_widget(Paragraph::new(div_line), div_area);
 
@@ -651,16 +704,22 @@ pub(super) fn draw_picker(
         let is_selected = i == picker.selected;
         let label_style = if is_selected {
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::White)
+                .fg(tokens.resolve("selection.foreground"))
+                .bg(tokens.resolve("selection.background"))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White).bg(tokens.status_bg)
+            Style::default()
+                .fg(tokens.resolve("text.body"))
+                .bg(tokens.resolve("status_bar.background"))
         };
         let desc_style = if is_selected {
-            Style::default().fg(Color::Black).bg(Color::White)
+            Style::default()
+                .fg(tokens.resolve("selection.foreground"))
+                .bg(tokens.resolve("selection.background"))
         } else {
-            Style::default().fg(Color::DarkGray).bg(tokens.status_bg)
+            Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("status_bar.background"))
         };
 
         list_text.push_line(Line::from(vec![Span::styled(&item.label, label_style)]));
@@ -675,7 +734,9 @@ pub(super) fn draw_picker(
     if filtered.is_empty() {
         list_text.push_line(Line::from(Span::styled(
             "no results",
-            Style::default().fg(Color::DarkGray).bg(tokens.status_bg),
+            Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("status_bar.background")),
         )));
     }
 
@@ -707,7 +768,7 @@ pub(super) fn draw_persona_confirm_modal(
     f: &mut Frame,
     state: &PersonaSwitchConfirmState,
     area: Rect,
-    _tokens: &crate::theme::ThemeTokens,
+    tokens: &crate::theme::Theme,
 ) {
     let width = 64u16.min(area.width.saturating_sub(4));
     let height = 18u16.min(area.height.saturating_sub(4));
@@ -724,7 +785,7 @@ pub(super) fn draw_persona_confirm_modal(
         .title(Span::styled(
             " Switch persona ",
             Style::default()
-                .fg(Color::White)
+                .fg(tokens.resolve("foreground"))
                 .add_modifier(Modifier::BOLD),
         ))
         .border_style(Style::default().fg(accent.bg));
@@ -740,9 +801,15 @@ pub(super) fn draw_persona_confirm_modal(
         .map(|p| p.name.as_str())
         .unwrap_or("(none)");
     text.push_line(Line::from(vec![
-        Span::styled("  from  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(from, Style::default().fg(Color::Gray)),
-        Span::styled(" → ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "  from  ",
+            Style::default().fg(tokens.resolve("text.muted")),
+        ),
+        Span::styled(
+            from,
+            Style::default().fg(tokens.resolve("text.placeholder")),
+        ),
+        Span::styled(" → ", Style::default().fg(tokens.resolve("text.muted"))),
         Span::styled(
             state.target.name.clone(),
             Style::default().fg(accent.fg).add_modifier(Modifier::BOLD),
@@ -756,9 +823,12 @@ pub(super) fn draw_persona_confirm_modal(
             text.push_line(Line::from(vec![
                 Span::styled(
                     if di == 0 { "  desc  " } else { "        " },
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(tokens.resolve("text.muted")),
                 ),
-                Span::styled(dl.clone(), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    dl.clone(),
+                    Style::default().fg(tokens.resolve("text.placeholder")),
+                ),
             ]));
         }
     }
@@ -774,42 +844,54 @@ pub(super) fn draw_persona_confirm_modal(
     let model_changed =
         state.current.as_ref().and_then(|c| c.model.as_ref()) != state.target.model.as_ref();
     text.push_line(Line::from(vec![
-        Span::styled("  model ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "  model ",
+            Style::default().fg(tokens.resolve("text.muted")),
+        ),
         Span::styled(
             model_str,
             if model_changed {
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(tokens.resolve("text.warning"))
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(tokens.resolve("text.placeholder"))
             },
         ),
     ]));
 
     // Tools
     text.push_line(Line::from(vec![
-        Span::styled("  tools ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "  tools ",
+            Style::default().fg(tokens.resolve("text.muted")),
+        ),
         Span::styled(
             format_tools(&state.target.tools),
-            tools_style(&state.target, &state.current, false),
+            tools_style(&state.target, &state.current, false, tokens),
         ),
     ]));
     text.push_line(Line::from(vec![
-        Span::styled("  deny  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "  deny  ",
+            Style::default().fg(tokens.resolve("text.muted")),
+        ),
         Span::styled(
             format_tools(&state.target.tools_deny),
-            tools_style(&state.target, &state.current, true),
+            tools_style(&state.target, &state.current, true, tokens),
         ),
     ]));
 
     // Skills
     text.push_line(Line::from(vec![
-        Span::styled("  skills", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "  skills",
+            Style::default().fg(tokens.resolve("text.muted")),
+        ),
         Span::styled(" ".to_string(), Style::default()),
         Span::styled(
             format_tools(&state.target.skills),
-            skills_style(&state.target, &state.current),
+            skills_style(&state.target, &state.current, tokens),
         ),
     ]));
 
@@ -820,19 +902,19 @@ pub(super) fn draw_persona_confirm_modal(
     let cancel_label = "[ Cancel ]";
     let confirm_style = if state.selected == 0 {
         Style::default()
-            .bg(Color::Rgb(35, 90, 50))
-            .fg(Color::White)
+            .bg(tokens.resolve("surface.success"))
+            .fg(tokens.resolve("text.inverse"))
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(tokens.resolve("text.placeholder"))
     };
     let cancel_style = if state.selected == 1 {
         Style::default()
-            .bg(Color::Rgb(90, 35, 35))
-            .fg(Color::White)
+            .bg(tokens.resolve("surface.error"))
+            .fg(tokens.resolve("text.inverse"))
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(tokens.resolve("text.placeholder"))
     };
     let mut buttons = Text::default();
     buttons.push_line(Line::from(vec![
@@ -859,7 +941,7 @@ pub(super) fn draw_plan_approval(
     f: &mut Frame,
     state: &PlanApprovalState,
     area: Rect,
-    tokens: &crate::theme::ThemeTokens,
+    tokens: &crate::theme::Theme,
 ) {
     let width = 100u16.min(area.width.saturating_sub(4));
     let height = (area.height * 3 / 4).min(area.height.saturating_sub(2));
@@ -874,10 +956,10 @@ pub(super) fn draw_plan_approval(
         .title(Span::styled(
             title,
             Style::default()
-                .fg(Color::White)
+                .fg(tokens.resolve("foreground"))
                 .add_modifier(Modifier::BOLD),
         ))
-        .border_style(Style::default().fg(tokens.accent));
+        .border_style(Style::default().fg(tokens.resolve("accent")));
     f.render_widget(block, popup);
 
     let inner = popup.inner(Margin::new(2, 1));
@@ -893,11 +975,8 @@ pub(super) fn draw_plan_approval(
     let body_height = inner.height.saturating_sub(footer_height);
 
     let body_area = Rect::new(inner.x, inner.y, inner.width, body_height);
-    let md_lines = ratatui_mdstream::render_markdown(
-        &state.plan_markdown,
-        inner.width,
-        &ratatui_mdstream::Theme::dark(),
-    );
+    let md_lines =
+        ratatui_mdstream::render_markdown(&state.plan_markdown, inner.width, &tokens.md_theme());
     let para = Paragraph::new(md_lines).scroll((state.scroll, 0));
     f.render_widget(para, body_area);
 
@@ -906,19 +985,19 @@ pub(super) fn draw_plan_approval(
     let approve_selected = state.selected == 0;
     let approve_style = if approve_selected {
         Style::default()
-            .bg(Color::Rgb(35, 90, 50))
-            .fg(Color::White)
+            .bg(tokens.resolve("surface.success"))
+            .fg(tokens.resolve("text.inverse"))
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(tokens.resolve("text.placeholder"))
     };
     let changes_style = if !approve_selected {
         Style::default()
-            .bg(Color::Rgb(90, 60, 35))
-            .fg(Color::White)
+            .bg(tokens.resolve("pill.attention.bg"))
+            .fg(tokens.resolve("text.inverse"))
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(tokens.resolve("text.placeholder"))
     };
 
     let mut footer = Text::default();
@@ -929,9 +1008,15 @@ pub(super) fn draw_plan_approval(
     ]));
     if editing {
         footer.push_line(Line::from(vec![
-            Span::styled("  feedback: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(state.feedback.clone(), Style::default().fg(Color::White)),
-            Span::styled("▏", Style::default().fg(Color::Gray)),
+            Span::styled(
+                "  feedback: ",
+                Style::default().fg(tokens.resolve("text.muted")),
+            ),
+            Span::styled(
+                state.feedback.clone(),
+                Style::default().fg(tokens.resolve("foreground")),
+            ),
+            Span::styled("▏", Style::default().fg(tokens.resolve("text.placeholder"))),
         ]));
     }
     let hint = if editing {
@@ -941,7 +1026,7 @@ pub(super) fn draw_plan_approval(
     };
     footer.push_line(Line::from(Span::styled(
         format!("  {hint}"),
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(tokens.resolve("text.muted")),
     )));
 
     let footer_area = Rect::new(inner.x, footer_y, inner.width, footer_height);
@@ -956,7 +1041,12 @@ fn format_tools(list: &Option<Vec<String>>) -> String {
     }
 }
 
-fn tools_style(target: &PersonaSummary, current: &Option<PersonaSummary>, deny: bool) -> Style {
+fn tools_style(
+    target: &PersonaSummary,
+    current: &Option<PersonaSummary>,
+    deny: bool,
+    tokens: &crate::theme::Theme,
+) -> Style {
     let target_v = if deny {
         target.tools_deny.as_ref()
     } else {
@@ -971,26 +1061,30 @@ fn tools_style(target: &PersonaSummary, current: &Option<PersonaSummary>, deny: 
     });
     if target_v != current_v {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(tokens.resolve("text.warning"))
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(tokens.resolve("text.placeholder"))
     }
 }
 
-fn skills_style(target: &PersonaSummary, current: &Option<PersonaSummary>) -> Style {
+fn skills_style(
+    target: &PersonaSummary,
+    current: &Option<PersonaSummary>,
+    tokens: &crate::theme::Theme,
+) -> Style {
     if target.skills != current.as_ref().and_then(|c| c.skills.clone()) {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(tokens.resolve("text.warning"))
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::Gray)
+        Style::default().fg(tokens.resolve("text.placeholder"))
     }
 }
 
 /// Draw the keyboard shortcuts overlay. A centered modal showing all
 /// available shortcuts grouped by category.
-pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
+pub fn draw_help_overlay(f: &mut Frame, area: Rect, tokens: &crate::theme::Theme) {
     let width = 64.min(area.width.saturating_sub(4));
     let height = 30.min(area.height.saturating_sub(4));
     let x = area.x + (area.width - width) / 2;
@@ -1002,14 +1096,18 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
     let block = Block::default()
         .title(" Keyboard Shortcuts ")
         .borders(ratatui::widgets::Borders::ALL)
-        .style(Style::default().bg(Color::Black).fg(Color::White));
+        .style(
+            Style::default()
+                .bg(tokens.resolve("background"))
+                .fg(tokens.resolve("foreground")),
+        );
     let inner = block.inner(modal_area);
     f.render_widget(block, modal_area);
 
-    let key_style = Style::default().fg(Color::Cyan);
-    let desc_style = Style::default().fg(Color::Gray);
+    let key_style = Style::default().fg(tokens.resolve("text.accent"));
+    let desc_style = Style::default().fg(tokens.resolve("text.placeholder"));
     let header_style = Style::default()
-        .fg(Color::Yellow)
+        .fg(tokens.resolve("text.warning"))
         .add_modifier(Modifier::BOLD);
 
     let lines = vec![
@@ -1135,7 +1233,7 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled(
             "Press ? or Esc to close",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(tokens.resolve("text.muted")),
         )),
     ];
 

@@ -200,6 +200,8 @@ impl SubagentRunner for SimpleRunner {
                         .unwrap_or_default(),
                     current_date: mew_prompts::template::TemplateContext::today(),
                     tools: tool_names,
+                    supports_vision: agent.supports_vision,
+                    skills: agent.skills.iter().map(|s| s.name.clone()).collect(),
                     ..Default::default()
                 };
                 mew_prompts::template::render(&def.body, &ctx)

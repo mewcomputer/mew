@@ -48,5 +48,15 @@ pub(crate) fn theme_cmd(command: ThemeCommands) -> Result<()> {
             println!("installed theme '{}' to {}", theme.name, dest.display());
             Ok(())
         }
+        ThemeCommands::ExportCss { name } => {
+            let theme = mew_tui::theme::Theme::load(&name);
+            println!(
+                "[data-theme=\"{}\"] {{
+{}}}",
+                theme.name,
+                theme.css_variables()
+            );
+            Ok(())
+        }
     }
 }

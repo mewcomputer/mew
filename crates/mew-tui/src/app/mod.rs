@@ -1245,7 +1245,7 @@ impl App {
         // during render). When not overflowing, `status_ticker_at` stays
         // `None` and this is a no-op.
         if let Some(last) = self.status_ticker_at {
-            if last.elapsed() > Duration::from_millis(300) {
+            if last.elapsed() > Duration::from_millis(150) {
                 self.status_ticker_offset = self.status_ticker_offset.wrapping_add(1);
                 self.status_ticker_at = Some(Instant::now());
             }

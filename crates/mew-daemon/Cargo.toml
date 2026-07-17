@@ -11,6 +11,7 @@ tokio-tungstenite = { workspace = true }
 tungstenite = "0.24"
 serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }

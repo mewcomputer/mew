@@ -664,13 +664,14 @@ pub(crate) fn build_session_agent(
     mode: mew_hooks::PermissionMode,
     writer: Option<SessionWriter>,
     session_id: Option<SessionId>,
+    session_cwd: Option<std::path::PathBuf>,
     dispatcher: Arc<dyn Dispatcher>,
     todos_path: Option<std::path::PathBuf>,
     discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
 ) -> Result<Agent> {
     let provider =
         build_provider(cfg, cat, provider_id, model_id, raw).context("build provider")?;
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = session_cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     // Collect [provides] paths from discovered extensions.
     let skills_extra: Vec<std::path::PathBuf> = discovered_extensions
@@ -774,10 +775,65 @@ pub(crate) fn build_session_agent(
     let ctx_files = ctx_loader.load().unwrap_or_default();
     let project_vars = mew_context::load_project_vars(&cwd);
     agent.project_vars = project_vars;
+
+    // Build the base system prompt by rendering base.md through minijinja
+    // with the agent's current state. This includes model-variant bases,
+    // tool-library partials, subagent/skill/MCP sections, and conversational
+    // depth guidance.
+    let base_prompt = {
+        let tool_names: Vec<String> = agent.tools.keys().cloned().collect();
+        let mcp_names: Vec<String> = agent
+            .tools
+            .values()
+            .filter_map(|t| {
+                let name = t.name();
+                if name.starts_with("mcp__") {
+                    Some(
+                        name.strip_prefix("mcp__")
+                            .and_then(|s| s.split("__").next())
+                            .unwrap_or(name)
+                            .to_string(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let subagent_infos: Vec<mew_prompts::template::SubagentInfo> = agent
+            .subagent_defs
+            .iter()
+            .map(|d| mew_prompts::template::SubagentInfo {
+                name: d.name.clone(),
+                description: d.description.clone(),
+            })
+            .collect();
+        let ctx = mew_prompts::template::TemplateContext {
+            supports_vision: agent.supports_vision,
+            model_id: agent.model_id.clone(),
+            provider_id: agent.provider_id.clone(),
+            session_id: agent.session_id.to_string(),
+            cwd: std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            current_date: mew_prompts::template::TemplateContext::today(),
+            tools: tool_names,
+            skills: agent.skills.iter().map(|s| s.name.clone()).collect(),
+            mcp_servers: mcp_names,
+            project_vars: agent.project_vars.clone(),
+            available_subagents: subagent_infos,
+            ..Default::default()
+        };
+        let base_body = mew_prompts::vfs::read_builtin("system_prompts/base").unwrap_or("");
+        mew_prompts::template::render(base_body, &ctx)
+    };
+
+    // Assemble: base prompt → context files → (skills added by rebuild_system)
+    let mut system = base_prompt;
     if !ctx_files.is_empty() {
         let rendered_ctx = render_templated_context_files(&ctx_files, &agent);
-        agent.set_system(mew_context::build_system_prompt(&rendered_ctx));
+        system.push_str(&mew_context::build_system_prompt(&rendered_ctx));
     }
+    agent.set_system(system);
     if !skills.is_empty() {
         agent.set_skills((*skills).clone());
     }

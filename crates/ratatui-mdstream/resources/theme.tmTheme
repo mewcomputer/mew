@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist SYSTEM "file://localhost/System/Library/DTDs/PropertyList.dtd">
+<plist version="1.0">
+<dict>
+  <key>name</key>
+  <string>mew generated</string>
+  <key>settings</key>
+  <array>
+    <dict>
+      <key>settings</key>
+      <dict>
+        <key>background</key><string>#1e1e21</string>
+        <key>foreground</key><string>#ffffff</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>syntax.comment</string>
+      <key>scope</key><string>comment</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#a9a9a9</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>syntax.string</string>
+      <key>scope</key><string>string</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#96e6a0</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>syntax.keyword</string>
+      <key>scope</key><string>keyword</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#fff0f0</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>syntax.function</string>
+      <key>scope</key><string>entity.name.function, support.function</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#96bef0</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>syntax.number</string>
+      <key>scope</key><string>constant.numeric</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#f0e6fa</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>syntax.type</string>
+      <key>scope</key><string>entity.name.type, storage.type</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#f5d26e</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>syntax.variable</string>
+      <key>scope</key><string>variable</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#ffffff</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>syntax.operator</string>
+      <key>scope</key><string>keyword.operator</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#ffffff</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>name</key><string>syntax.constant</string>
+      <key>scope</key><string>constant</string>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#f0e6fa</string>
+      </dict>
+    </dict>
+  </array>
+</dict>
+</plist>

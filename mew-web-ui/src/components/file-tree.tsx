@@ -7,6 +7,7 @@ import {
   ExternalLink,
   Loader2,
   FileText,
+  GitBranch,
 } from "lucide-react";
 import { useSessionStore } from "../stores/session";
 import { getClient } from "../lib/client-ref";
@@ -21,7 +22,7 @@ import type { DirEntry, GitEntry } from "@mew/web-client";
  * `readFilePreview` and renders the returned content (highlighted via the
  * existing CodeBlock + shiki path using `filePreview.language`).
  */
-export function FileTreePanel() {
+export function FileTreePanel({ hasWorkspace }: { hasWorkspace: boolean }) {
   const sessionId = useSessionStore((s) => s.sessionId);
   const dirListing = useSessionStore((s) => s.dirListing);
   const dirListingPath = useSessionStore((s) => s.dirListingPath);
@@ -31,14 +32,14 @@ export function FileTreePanel() {
   // Fetch the root listing on mount / when session changes.
   useEffect(() => {
     const client = getClient();
-    if (!client || !sessionId) return;
+    if (!client || !sessionId || !hasWorkspace) return;
     setLoading(true);
     client.listDir(sessionId);
     // The dir-listing wire event clears loading indirectly; we use a short
     // timer fallback so the spinner doesn't stick if no response arrives.
     const t = setTimeout(() => setLoading(false), 4000);
     return () => clearTimeout(t);
-  }, [sessionId]);
+  }, [sessionId, hasWorkspace]);
 
   // Clear loading once a listing actually arrives.
   useEffect(() => {
@@ -74,6 +75,10 @@ export function FileTreePanel() {
   };
 
   const entries = dirListing ?? [];
+
+  if (!hasWorkspace) {
+    return <WorkspaceEmptyState kind="files" />;
+  }
 
   return (
     <div className="space-y-2">
@@ -186,7 +191,17 @@ function FileTreeRow({
 }
 
 /** The Changes tab: live git status entries from the daemon. */
-export function ChangesPanel({ gitStatus }: { gitStatus: GitEntry[] }) {
+export function ChangesPanel({
+  gitStatus,
+  hasWorkspace,
+}: {
+  gitStatus: GitEntry[];
+  hasWorkspace: boolean;
+}) {
+  if (!hasWorkspace) {
+    return <WorkspaceEmptyState kind="changes" />;
+  }
+
   if (gitStatus.length === 0) {
     return (
       <div className="py-8 text-center text-[11px] text-muted-foreground">
@@ -203,6 +218,25 @@ export function ChangesPanel({ gitStatus }: { gitStatus: GitEntry[] }) {
       {gitStatus.map((entry) => (
         <GitStatusRow key={entry.path} entry={entry} />
       ))}
+    </div>
+  );
+}
+
+function WorkspaceEmptyState({ kind }: { kind: "files" | "changes" }) {
+  const files = kind === "files";
+  return (
+    <div className="rounded-lg border border-dashed border-border bg-muted/20 px-4 py-8 text-center">
+      <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
+        {files ? <FolderIcon className="h-4 w-4" /> : <GitBranch className="h-4 w-4" />}
+      </div>
+      <p className="mt-3 text-xs font-medium text-foreground">
+        {files ? "No workspace selected" : "No workspace for changes"}
+      </p>
+      <p className="mx-auto mt-1 max-w-[14rem] text-[11px] leading-relaxed text-muted-foreground">
+        {files
+          ? "Choose a project when starting a session to browse its files."
+          : "Choose a project when starting a session to see its working tree."}
+      </p>
     </div>
   );
 }

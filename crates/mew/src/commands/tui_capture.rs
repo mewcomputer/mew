@@ -18,6 +18,7 @@ use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::{debug, info, trace, warn};
 
 use mew_protocol::ServerMessage;
 use mew_tui::harness::{Backend, Harness};
@@ -34,15 +35,30 @@ pub(crate) async fn run(
     height: u16,
     connect: Option<&str>,
 ) -> Result<()> {
-    if let Some(url) = connect {
+    let mode = if connect.is_some() {
+        "daemon"
+    } else {
+        "harness"
+    };
+    let submode = if interactive { "interactive" } else { "script" };
+    info!(
+        mode,
+        submode,
+        width,
+        height,
+        fps,
+        ?screenshot_dir,
+        ?mp4,
+        "starting tui-capture"
+    );
+
+    let result = if let Some(url) = connect {
         if interactive {
             run_interactive_daemon(width, height, screenshot_dir, mp4, fps, url).await
         } else {
             let script_path = script.context("either --script or --interactive is required")?;
-            let output =
-                run_script_daemon_file(script_path, screenshot_dir, mp4, fps, width, height, url)
-                    .await?;
-            print!("{output}");
+            run_script_daemon_file(script_path, screenshot_dir, mp4, fps, width, height, url)
+                .await?;
             Ok(())
         }
     } else if interactive {
@@ -50,7 +66,13 @@ pub(crate) async fn run(
     } else {
         let script_path = script.context("either --script or --interactive is required")?;
         run_script_file(script_path, mp4, fps, width, height)
+    };
+
+    match &result {
+        Ok(()) => info!(mode, submode, "tui-capture finished"),
+        Err(e) => warn!(mode, submode, error = %e, "tui-capture failed"),
     }
+    result
 }
 
 /// Script mode (harness): read a file and run it all at once.
@@ -61,11 +83,14 @@ fn run_script_file(
     width: u16,
     height: u16,
 ) -> Result<()> {
+    info!(script = %script_path.display(), "running harness script");
     let script = std::fs::read_to_string(script_path)
         .with_context(|| format!("failed to read script file: {}", script_path.display()))?;
 
     let output = run_script_harness(&script, mp4, fps, width, height)?;
     print!("{output}");
+    io::stdout().flush().ok();
+    info!(script = %script_path.display(), "harness script finished");
     Ok(())
 }
 
@@ -77,6 +102,7 @@ fn run_script_harness(
     width: u16,
     height: u16,
 ) -> Result<String> {
+    debug!(mp4, fps, width, height, "preparing harness script");
     // If --mp4 is given and the script doesn't already handle recording,
     // wrap it automatically.
     let script = if let Some(mp4_path) = mp4 {
@@ -89,7 +115,9 @@ fn run_script_harness(
         script.to_string()
     };
 
-    Ok(mew_tui::harness::run_script(&script, width, height))
+    let output = mew_tui::harness::run_script(&script, width, height);
+    debug!(output_len = output.len(), "harness script produced output");
+    Ok(output)
 }
 
 /// Interactive REPL mode (harness): read verbs from stdin, print frames.
@@ -100,15 +128,25 @@ fn run_interactive(
     mp4: Option<&str>,
     fps: u32,
 ) -> Result<()> {
+    info!(
+        width,
+        height,
+        ?screenshot_dir,
+        ?mp4,
+        fps,
+        "starting interactive harness capture"
+    );
     let mut harness = Harness::new(width, height);
 
     // Start recording if --mp4 is set
     if mp4.is_some() {
+        info!("starting mp4 recording");
         harness.start_recording();
     }
 
     // Create screenshot dir if needed
     if let Some(dir) = screenshot_dir {
+        info!(dir = %dir.display(), "creating screenshot directory");
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create screenshot dir: {}", dir.display()))?;
     }
@@ -147,13 +185,21 @@ fn run_interactive(
 
     // Stop recording and encode video if --mp4 was set
     if let Some(mp4_path) = mp4 {
+        info!("stopping mp4 recording");
         harness.stop_recording();
         match harness.encode_mp4(mp4_path, fps) {
-            Ok(_) => eprintln!("--- video saved to {mp4_path} ---"),
-            Err(e) => eprintln!("!! video encoding failed: {e}"),
+            Ok(_) => {
+                info!(path = %mp4_path, "video saved");
+                eprintln!("--- video saved to {mp4_path} ---");
+            }
+            Err(e) => {
+                warn!(path = %mp4_path, error = %e, "video encoding failed");
+                eprintln!("!! video encoding failed: {e}");
+            }
         }
     }
 
+    info!("interactive harness capture finished");
     println!("--- bye ---");
     Ok(())
 }
@@ -170,9 +216,11 @@ fn print_frame_harness(harness: &mut Harness, screenshot_dir: Option<&Path>, fra
         let png_path = dir.join(&filename);
         match harness.screenshot(png_path.to_str().unwrap()) {
             Ok(()) => {
+                trace!(path = %png_path.display(), "harness screenshot saved");
                 println!("--- screenshot: {} ---", png_path.display());
             }
             Err(e) => {
+                warn!(path = %png_path.display(), error = %e, "harness screenshot failed");
                 eprintln!("!! screenshot failed: {e}");
             }
         }
@@ -195,19 +243,24 @@ pub(crate) struct DaemonBackend {
     notify_rx: tokio::sync::mpsc::Receiver<ServerMessage>,
     frames: Vec<tiny_skia::Pixmap>,
     recording: bool,
+    rasterizer: mew_raster::Rasterizer,
 }
 
 impl DaemonBackend {
     /// Connect to a daemon, create a session, and prepare a headless TUI.
     pub(crate) async fn connect(url: &str, width: u16, height: u16) -> Result<Self> {
+        info!(url, width, height, "connecting to daemon");
         let (client, mut notify_rx) = mew_daemon::DaemonClient::connect(url).await?;
         let client = Arc::new(client);
+        info!("creating daemon session");
         client.new_session().await?;
 
         // Wait for the daemon to assign a session ID and report the active
         // model/provider so the status bar reflects the real backend.
+        info!("waiting for SessionReady");
         let (session_id, model, provider) =
             wait_for_session_ready(&mut notify_rx, Duration::from_secs(5)).await?;
+        info!(%session_id, ?model, ?provider, "session ready");
 
         let mut app = mew_tui::App::new();
         app.daemon_mode = true;
@@ -223,12 +276,14 @@ impl DaemonBackend {
             &cfg.tui.theme
         };
         app.theme = mew_tui::theme::Theme::load(theme_name);
+        debug!(theme = %app.theme.name, "loaded theme");
 
         // Populate the sidebar session rail.
         client.list_sessions().await;
 
         let terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         let (event_loop, event_rx) = mew_tui::EventLoop::new();
+        info!("daemon backend ready");
 
         Ok(Self {
             client,
@@ -239,13 +294,17 @@ impl DaemonBackend {
             notify_rx,
             frames: Vec::new(),
             recording: false,
+            rasterizer: mew_raster::Rasterizer::new(),
         })
     }
 
     /// Type text into the composer and submit it to the daemon, then wait until
     /// the turn begins streaming.
     pub(crate) async fn send_text(&mut self, text: &str) -> Result<()> {
-        // Type the text into the composer.
+        info!(text_len = text.len(), "send_text: typing prompt");
+        let type_start = Instant::now();
+        // Type the text into the composer without capturing every keystroke;
+        // rasterizing per-character makes long prompts prohibitively slow.
         for ch in text.chars() {
             let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
             let event = crossterm::event::Event::Key(key);
@@ -254,10 +313,16 @@ impl DaemonBackend {
                 // dispatch them anyway.
                 self.dispatch_action(action).await;
             }
-            self.capture_frame();
         }
+        self.capture_frame();
+        info!(
+            text_len = text.len(),
+            elapsed_ms = type_start.elapsed().as_millis(),
+            "send_text: finished typing"
+        );
 
         // Submit with Enter.
+        info!("send_text: submitting prompt");
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let event = crossterm::event::Event::Key(key);
         let action = mew_tui::events::handle_input_event(&mut self.app, event);
@@ -268,13 +333,21 @@ impl DaemonBackend {
 
         // Wait until the daemon marks the app as streaming, with a short timeout.
         let deadline = Instant::now() + Duration::from_secs(5);
+        let wait_start = Instant::now();
         while !self.app.streaming {
             self.poll_events();
             if Instant::now() > deadline {
+                warn!("send_text: turn did not start streaming within 5s");
                 bail!("send: turn did not start streaming within 5s");
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            if !self.app.streaming {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
         }
+        debug!(
+            elapsed_ms = wait_start.elapsed().as_millis(),
+            "send_text: streaming started"
+        );
         Ok(())
     }
 
@@ -282,22 +355,104 @@ impl DaemonBackend {
     /// While streaming, capture at 60fps. Captures one final frame after
     /// streaming ends so subsequent `pause` verbs hold the completed response.
     pub(crate) async fn wait_turn(&mut self, timeout_ms: u64) -> Result<()> {
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        // Match the real TUI's streaming drain limit: process agent events in
+        // small batches so text/reasoning appears incrementally instead of
+        // jumping straight to the final state when a burst of deltas arrives.
+        const STREAMING_DRAIN_LIMIT: u32 = 4;
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(timeout_ms);
+        let initial_frame_count = self.frames.len();
+        info!(timeout_ms, "wait_turn: waiting for turn to finish");
         let mut last_frame = Instant::now();
+        // The headless backend has no tick generator task (the real TUI's
+        // EventLoop spawns one), so drive app.tick() on the same 16ms cadence
+        // here — it advances the spinner and other time-based UI state.
+        let mut last_tick = Instant::now();
+        let mut total_agent_events = 0u32;
         while self.app.streaming {
-            self.poll_events();
-            self.terminal
-                .draw(|f| mew_tui::ui::draw(f, &mut self.app))
-                .ok();
-            if self.recording && Instant::now().duration_since(last_frame).as_millis() >= 16 {
-                self.capture_frame();
-                last_frame = Instant::now();
+            let mut had_event = false;
+            let mut agent_count = 0u32;
+            loop {
+                match self.event_rx.try_recv() {
+                    Ok(mew_tui::Event::Agent(ev)) => {
+                        trace!(
+                            variant = agent_event_name(&ev),
+                            "wait_turn: received agent event"
+                        );
+                        self.app.handle_agent_event(ev);
+                        had_event = true;
+                        agent_count += 1;
+                        total_agent_events += 1;
+                        if self.app.streaming && agent_count >= STREAMING_DRAIN_LIMIT {
+                            break;
+                        }
+                    }
+                    Ok(mew_tui::Event::Tick) => {
+                        self.app.tick();
+                        self.app.clear_expired_alerts();
+                        had_event = true;
+                    }
+                    Ok(mew_tui::Event::Input(_) | mew_tui::Event::Quit) => {}
+                    Err(_) => break,
+                }
+                while let Ok(msg) = self.notify_rx.try_recv() {
+                    trace!(
+                        msg_type = server_message_type(&msg),
+                        "wait_turn: received server message"
+                    );
+                    self.app.apply_daemon_notification(&msg);
+                    had_event = true;
+                }
             }
-            if Instant::now() > deadline {
+
+            let now = Instant::now();
+            if now.duration_since(last_tick).as_millis() >= 16 {
+                self.app.tick();
+                last_tick = now;
+            }
+            let frame_due = now.duration_since(last_frame).as_millis() >= 16;
+            if frame_due {
+                let draw_start = Instant::now();
+                self.terminal
+                    .draw(|f| mew_tui::ui::draw(f, &mut self.app))
+                    .ok();
+                let draw_ms = draw_start.elapsed().as_millis();
+                if self.recording {
+                    let rasterize_start = Instant::now();
+                    self.capture_frame();
+                    let rasterize_ms = rasterize_start.elapsed().as_millis();
+                    info!(
+                        frame = self.frames.len(),
+                        draw_ms,
+                        rasterize_ms,
+                        ms_since_last_frame = now.duration_since(last_frame).as_millis(),
+                        "captured frame"
+                    );
+                    last_frame = Instant::now();
+                }
+            }
+            if now > deadline {
+                warn!(
+                    timeout_ms,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    total_agent_events,
+                    frames_captured = self.frames.len() - initial_frame_count,
+                    "wait_turn timed out"
+                );
                 bail!("wait_turn timed out after {timeout_ms}ms");
             }
-            tokio::time::sleep(Duration::from_millis(4)).await;
+            // Only sleep when no events are ready; otherwise keep pace with the
+            // actual stream instead of adding artificial delay.
+            if !had_event {
+                tokio::time::sleep(Duration::from_millis(4)).await;
+            }
         }
+        info!(
+            elapsed_ms = start.elapsed().as_millis(),
+            total_agent_events,
+            frames_captured = self.frames.len() - initial_frame_count,
+            "wait_turn: turn finished"
+        );
         // Ensure the final completed frame is captured before returning, so a
         // following `pause` duplicates the finished response rather than a
         // mid-stream frame.
@@ -328,6 +483,7 @@ impl DaemonBackend {
     }
 
     async fn dispatch_action(&mut self, action: mew_tui::events::Action) {
+        debug!(?action, "dispatching action");
         let mut target = crate::runtime::daemon::DaemonTarget::new(self.client.clone());
         let mut should_break = false;
         let plugin_info = Arc::new(std::sync::Mutex::new(crate::PluginInfo {
@@ -357,7 +513,10 @@ impl DaemonBackend {
             .draw(|f| mew_tui::ui::draw(f, app))
             .expect("draw");
         let buf = self.terminal.backend().buffer();
-        let pixmap = mew_raster::rasterize(buf, &mew_raster::RasterOptions::default());
+        let pixmap = self
+            .rasterizer
+            .rasterize(buf, &mew_raster::RasterOptions::default());
+        trace!(frame = self.frames.len(), "captured frame");
         self.frames.push(pixmap);
     }
 }
@@ -367,6 +526,7 @@ async fn wait_for_session_ready(
     timeout: Duration,
 ) -> Result<(String, Option<String>, Option<String>)> {
     let deadline = Instant::now() + timeout;
+    debug!(?timeout, "waiting for SessionReady");
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match tokio::time::timeout(remaining, notify_rx.recv()).await {
@@ -375,8 +535,14 @@ async fn wait_for_session_ready(
                 model,
                 provider,
                 ..
-            })) => return Ok((session_id, model, provider)),
-            Ok(Some(_)) => continue,
+            })) => {
+                debug!(%session_id, ?model, ?provider, "received SessionReady");
+                return Ok((session_id, model, provider));
+            }
+            Ok(Some(other)) => {
+                trace!(?other, "ignoring non-SessionReady message while waiting");
+                continue;
+            }
             Ok(None) => bail!("daemon notification channel closed before SessionReady"),
             Err(_) => bail!("daemon did not send SessionReady within {:?}", timeout),
         }
@@ -398,7 +564,9 @@ impl Backend for DaemonBackend {
             .draw(|f| mew_tui::ui::draw(f, app))
             .expect("draw");
         let buf = self.terminal.backend().buffer();
-        let png_bytes = mew_raster::to_png(buf, &mew_raster::RasterOptions::default());
+        let png_bytes = self
+            .rasterizer
+            .to_png(buf, &mew_raster::RasterOptions::default());
         std::fs::write(path, png_bytes)
     }
 
@@ -413,14 +581,16 @@ impl Backend for DaemonBackend {
     }
 
     fn type_str(&mut self, text: &str) {
+        // Type without per-character captures; rasterizing every keystroke is
+        // too slow for long strings.
         for ch in text.chars() {
             let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
             let event = crossterm::event::Event::Key(key);
             if let Some(_action) = mew_tui::events::handle_input_event(&mut self.app, event) {
                 // Character keys do not produce actions in normal mode.
             }
-            self.capture_frame();
         }
+        self.capture_frame();
     }
 
     fn send_text(&mut self, text: &str) {
@@ -469,40 +639,7 @@ impl Backend for DaemonBackend {
     }
 
     fn encode_mp4(&self, output_path: &str, fps: u32) -> io::Result<String> {
-        if self.frames.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no frames recorded",
-            ));
-        }
-
-        let dir = tempfile::tempdir()?;
-        for (i, pixmap) in self.frames.iter().enumerate() {
-            let png_path = dir.path().join(format!("frame_{:04}.png", i));
-            let png_bytes = pixmap_to_png_bytes(pixmap);
-            std::fs::write(&png_path, png_bytes)?;
-        }
-
-        let frame_pattern = dir.path().join("frame_%04d.png");
-        let output = std::process::Command::new("ffmpeg")
-            .arg("-framerate")
-            .arg(fps.to_string())
-            .arg("-i")
-            .arg(&frame_pattern)
-            .arg("-pix_fmt")
-            .arg("yuv420p")
-            .arg("-y")
-            .arg(output_path)
-            .output()?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stderr).to_string())
-        } else {
-            Err(io::Error::other(format!(
-                "ffmpeg failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )))
-        }
+        mew_raster::encode_frames_mp4(&self.frames, output_path, fps)
     }
 
     fn duplicate_last_frame(&mut self, count: usize) {
@@ -547,19 +684,6 @@ fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
     out
 }
 
-fn pixmap_to_png_bytes(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
-    use png::{BitDepth, ColorType, Encoder};
-    let mut out = Vec::new();
-    {
-        let mut encoder = Encoder::new(&mut out, pixmap.width(), pixmap.height());
-        encoder.set_color(ColorType::Rgba);
-        encoder.set_depth(BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(pixmap.data()).expect("png write");
-    }
-    out
-}
-
 // ---------------------------------------------------------------------------
 // Daemon script interpreter
 // ---------------------------------------------------------------------------
@@ -588,6 +712,15 @@ async fn run_script_daemon(
     height: u16,
     url: &str,
 ) -> Result<String> {
+    info!(
+        url,
+        width,
+        height,
+        ?screenshot_dir,
+        ?mp4,
+        fps,
+        "starting daemon script"
+    );
     let mut backend = DaemonBackend::connect(url, width, height).await?;
     let mut out = String::new();
     let mut frame_num: u32 = 0;
@@ -595,12 +728,14 @@ async fn run_script_daemon(
         screenshot_dir.map(std::path::Path::to_path_buf);
 
     if let Some(dir) = screenshot_dir {
+        info!(dir = %dir.display(), "creating screenshot directory");
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create screenshot dir: {}", dir.display()))?;
     }
 
     // If --mp4 is given, record every frame.
     if mp4.is_some() {
+        info!("starting mp4 recording");
         backend.start_recording();
     }
 
@@ -609,6 +744,7 @@ async fn run_script_daemon(
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        info!(line_no = i + 1, verb = %line, "executing script line");
         let result = exec_verb_daemon(
             &mut backend,
             line,
@@ -619,23 +755,44 @@ async fn run_script_daemon(
         match result {
             Ok(text) => {
                 if !text.is_empty() {
+                    print!("{text}");
                     out.push_str(&text);
                 }
             }
             Err(e) => {
-                out.push_str(&format!("line {}: !! {}\n", i + 1, e));
+                let err = format!("line {}: !! {}\n", i + 1, e);
+                print!("{err}");
+                out.push_str(&err);
             }
         }
+        io::stdout().flush().ok();
     }
 
     if let Some(mp4_path) = mp4 {
+        info!("stopping mp4 recording");
         backend.stop_recording();
         match backend.encode_mp4(mp4_path, fps) {
-            Ok(_) => out.push_str(&format!("--- video saved to {mp4_path} ---\n")),
-            Err(e) => out.push_str(&format!("!! video encoding failed: {e}\n")),
+            Ok(_) => {
+                let msg = format!("--- video saved to {mp4_path} ---\n");
+                info!(path = %mp4_path, "video saved");
+                print!("{msg}");
+                out.push_str(&msg);
+            }
+            Err(e) => {
+                let msg = format!("!! video encoding failed: {e}\n");
+                warn!(path = %mp4_path, error = %e, "video encoding failed");
+                print!("{msg}");
+                out.push_str(&msg);
+            }
         }
+        io::stdout().flush().ok();
     }
 
+    info!(
+        output_len = out.len(),
+        total_frames = backend.frames.len(),
+        "daemon script finished"
+    );
     Ok(out)
 }
 
@@ -647,16 +804,27 @@ async fn run_interactive_daemon(
     fps: u32,
     url: &str,
 ) -> Result<()> {
+    info!(
+        url,
+        width,
+        height,
+        ?screenshot_dir,
+        ?mp4,
+        fps,
+        "starting interactive daemon capture"
+    );
     let mut backend = DaemonBackend::connect(url, width, height).await?;
     let mut frame_num: u32 = 0;
     let mut active_screenshot_dir = screenshot_dir.map(std::path::PathBuf::from);
 
     if let Some(dir) = screenshot_dir {
+        info!(dir = %dir.display(), "creating screenshot directory");
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create screenshot dir: {}", dir.display()))?;
     }
 
     if mp4.is_some() {
+        info!("starting mp4 recording");
         backend.start_recording();
     }
 
@@ -676,8 +844,10 @@ async fn run_interactive_daemon(
             continue;
         }
         if matches!(trimmed, "quit" | "exit") {
+            info!(verb = %trimmed, "quitting interactive daemon capture");
             break;
         }
+        info!(verb = %trimmed, "executing interactive verb");
         match exec_verb_daemon(
             &mut backend,
             trimmed,
@@ -693,6 +863,7 @@ async fn run_interactive_daemon(
                 }
             }
             Err(e) => {
+                warn!(error = %e, "interactive verb failed");
                 eprintln!("!! {e}");
             }
         }
@@ -704,13 +875,21 @@ async fn run_interactive_daemon(
     }
 
     if let Some(mp4_path) = mp4 {
+        info!("stopping mp4 recording");
         backend.stop_recording();
         match backend.encode_mp4(mp4_path, fps) {
-            Ok(_) => eprintln!("--- video saved to {mp4_path} ---"),
-            Err(e) => eprintln!("!! video encoding failed: {e}"),
+            Ok(_) => {
+                info!(path = %mp4_path, "video saved");
+                eprintln!("--- video saved to {mp4_path} ---");
+            }
+            Err(e) => {
+                warn!(path = %mp4_path, error = %e, "video encoding failed");
+                eprintln!("!! video encoding failed: {e}");
+            }
         }
     }
 
+    info!("interactive daemon capture finished");
     println!("--- bye ---");
     Ok(())
 }
@@ -726,6 +905,7 @@ async fn exec_verb_daemon(
         Some((v, r)) => (v, r.trim()),
         None => (line, ""),
     };
+    debug!(%verb, rest, "dispatching daemon verb");
 
     let mut out = String::new();
     match verb {
@@ -753,11 +933,13 @@ async fn exec_verb_daemon(
         }
         "send" => {
             let text = parse_quoted(rest).unwrap_or(rest);
+            info!(text_len = text.len(), "send verb");
             backend.send_text(text).await?;
             out.push_str(&format!("--- sent \"{text}\" ---\n"));
         }
         "wait_turn" => {
             let timeout_ms: u64 = rest.trim_end_matches("ms").parse().unwrap_or(30_000);
+            info!(timeout_ms, "wait_turn verb");
             backend.wait_turn(timeout_ms).await?;
             out.push_str("--- turn finished ---\n");
         }
@@ -789,9 +971,13 @@ async fn exec_verb_daemon(
                 out.push_str("!! screenshot requires a file path\n");
             } else {
                 let path = rest.trim_matches('"');
+                info!(path, "screenshot verb");
                 match backend.screenshot(path) {
                     Ok(()) => out.push_str(&format!("--- screenshot saved to {rest} ---\n")),
-                    Err(e) => out.push_str(&format!("!! screenshot failed: {e}\n")),
+                    Err(e) => {
+                        warn!(path, error = %e, "screenshot failed");
+                        out.push_str(&format!("!! screenshot failed: {e}\n"));
+                    }
                 }
             }
         }
@@ -800,16 +986,19 @@ async fn exec_verb_daemon(
             if path.is_empty() {
                 out.push_str("!! screenshot_dir requires a directory path\n");
             } else {
+                info!(path, "screenshot_dir verb");
                 std::fs::create_dir_all(path)?;
                 *screenshot_dir = Some(path.into());
                 out.push_str(&format!("--- screenshot dir set to {path} ---\n"));
             }
         }
         "start_recording" => {
+            info!("start_recording verb");
             backend.start_recording();
             out.push_str("--- recording started ---\n");
         }
         "stop_recording" => {
+            info!("stop_recording verb");
             backend.stop_recording();
             out.push_str(&format!(
                 "--- recording stopped ({} frames) ---\n",
@@ -821,6 +1010,7 @@ async fn exec_verb_daemon(
             match rest.trim_end_matches("ms").parse::<u32>() {
                 Ok(ms) => {
                     let frames = (ms as f32 / (1000.0 / fps as f32)).round() as usize;
+                    info!(ms, frames, "pause verb: duplicating frames");
                     backend.duplicate_last_frame(frames);
                 }
                 Err(_) => {
@@ -835,9 +1025,13 @@ async fn exec_verb_daemon(
             } else {
                 let path = parts[0].trim_matches('"');
                 let fps: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(30);
+                info!(path, fps, "record verb");
                 match backend.encode_mp4(path, fps) {
                     Ok(_) => out.push_str(&format!("--- video saved to {path} ---\n")),
-                    Err(e) => out.push_str(&format!("!! record failed: {e}\n")),
+                    Err(e) => {
+                        warn!(path, fps, error = %e, "record failed");
+                        out.push_str(&format!("!! record failed: {e}\n"));
+                    }
                 }
             }
         }
@@ -875,6 +1069,7 @@ fn print_frame_daemon(
     screenshot_dir: Option<&Path>,
     frame_num: &mut u32,
 ) {
+    trace!("printing daemon frame");
     println!("--- frame ---");
     print!("{}", backend.render());
     println!("---");
@@ -885,9 +1080,11 @@ fn print_frame_daemon(
         let png_path = dir.join(&filename);
         match backend.screenshot(png_path.to_str().unwrap()) {
             Ok(()) => {
+                trace!(path = %png_path.display(), "daemon screenshot saved");
                 println!("--- screenshot: {} ---", png_path.display());
             }
             Err(e) => {
+                warn!(path = %png_path.display(), error = %e, "daemon screenshot failed");
                 eprintln!("!! screenshot failed: {e}");
             }
         }
@@ -911,6 +1108,96 @@ fn parse_quoted(s: &str) -> Option<&str> {
         Some(&s[1..s.len() - 1])
     } else {
         None
+    }
+}
+
+/// Human-readable name for an `AgentEvent` variant (no sensitive payload).
+fn agent_event_name(ev: &mew_agent::AgentEvent) -> &'static str {
+    match ev {
+        mew_agent::AgentEvent::Provider(_) => "Provider",
+        mew_agent::AgentEvent::PermissionRequest { .. } => "PermissionRequest",
+        mew_agent::AgentEvent::ToolStart { .. } => "ToolStart",
+        mew_agent::AgentEvent::ToolEnd { .. } => "ToolEnd",
+        mew_agent::AgentEvent::PartUpdated { .. } => "PartUpdated",
+        mew_agent::AgentEvent::ToolProgress { .. } => "ToolProgress",
+        mew_agent::AgentEvent::Error(_) => "Error",
+        mew_agent::AgentEvent::WorkspacePermissionRequest { .. } => "WorkspacePermissionRequest",
+        mew_agent::AgentEvent::SubagentStart { .. } => "SubagentStart",
+        mew_agent::AgentEvent::SubagentProgress { .. } => "SubagentProgress",
+        mew_agent::AgentEvent::SubagentStatus { .. } => "SubagentStatus",
+        mew_agent::AgentEvent::SubagentEnd { .. } => "SubagentEnd",
+        mew_agent::AgentEvent::SubagentPermissionRequest { .. } => "SubagentPermissionRequest",
+        mew_agent::AgentEvent::AskUser { .. } => "AskUser",
+        mew_agent::AgentEvent::PlanApprovalRequest { .. } => "PlanApprovalRequest",
+        mew_agent::AgentEvent::TodosUpdated { .. } => "TodosUpdated",
+        mew_agent::AgentEvent::PersonaSwitchRequested { .. } => "PersonaSwitchRequested",
+        mew_agent::AgentEvent::JobUpdate { .. } => "JobUpdate",
+        mew_agent::AgentEvent::FileDelta { .. } => "FileDelta",
+        mew_agent::AgentEvent::FlaggedFilesChanged { .. } => "FlaggedFilesChanged",
+    }
+}
+
+/// Human-readable type name for a `ServerMessage` variant (no payload).
+fn server_message_type(msg: &mew_protocol::ServerMessage) -> &'static str {
+    match msg {
+        mew_protocol::ServerMessage::SessionReady { .. } => "SessionReady",
+        mew_protocol::ServerMessage::Error { .. } => "Error",
+        mew_protocol::ServerMessage::Provider { .. } => "Provider",
+        mew_protocol::ServerMessage::UserMessage { .. } => "UserMessage",
+        mew_protocol::ServerMessage::ToolStart { .. } => "ToolStart",
+        mew_protocol::ServerMessage::ToolEnd { .. } => "ToolEnd",
+        mew_protocol::ServerMessage::PartUpdated { .. } => "PartUpdated",
+        mew_protocol::ServerMessage::ToolProgress { .. } => "ToolProgress",
+        mew_protocol::ServerMessage::ErrorEvent { .. } => "ErrorEvent",
+        mew_protocol::ServerMessage::PermissionRequest { .. } => "PermissionRequest",
+        mew_protocol::ServerMessage::WorkspacePermissionRequest { .. } => {
+            "WorkspacePermissionRequest"
+        }
+        mew_protocol::ServerMessage::AskUserRequest { .. } => "AskUserRequest",
+        mew_protocol::ServerMessage::PlanApprovalRequest { .. } => "PlanApprovalRequest",
+        mew_protocol::ServerMessage::SubagentStart { .. } => "SubagentStart",
+        mew_protocol::ServerMessage::SubagentStatus { .. } => "SubagentStatus",
+        mew_protocol::ServerMessage::SubagentEnd { .. } => "SubagentEnd",
+        mew_protocol::ServerMessage::SubagentPermissionRequest { .. } => {
+            "SubagentPermissionRequest"
+        }
+        mew_protocol::ServerMessage::TodosUpdated { .. } => "TodosUpdated",
+        mew_protocol::ServerMessage::PersonaSwitchRequested { .. } => "PersonaSwitchRequested",
+        mew_protocol::ServerMessage::JobUpdate { .. } => "JobUpdate",
+        mew_protocol::ServerMessage::SessionList { .. } => "SessionList",
+        mew_protocol::ServerMessage::SessionHistory { .. } => "SessionHistory",
+        mew_protocol::ServerMessage::SessionTitleChanged { .. } => "SessionTitleChanged",
+        mew_protocol::ServerMessage::SessionSummaryChanged { .. } => "SessionSummaryChanged",
+        mew_protocol::ServerMessage::SessionAlert { .. } => "SessionAlert",
+        mew_protocol::ServerMessage::ModelSwitched { .. } => "ModelSwitched",
+        mew_protocol::ServerMessage::ThinkingVariantChanged { .. } => "ThinkingVariantChanged",
+        mew_protocol::ServerMessage::PermissionModeChanged { .. } => "PermissionModeChanged",
+        mew_protocol::ServerMessage::SessionMetaChanged { .. } => "SessionMetaChanged",
+        mew_protocol::ServerMessage::FlaggedFilesChanged { .. } => "FlaggedFilesChanged",
+        mew_protocol::ServerMessage::SessionActivityChanged { .. } => "SessionActivityChanged",
+        mew_protocol::ServerMessage::SessionStatsChanged { .. } => "SessionStatsChanged",
+        mew_protocol::ServerMessage::SessionUsageChanged { .. } => "SessionUsageChanged",
+        mew_protocol::ServerMessage::SessionAttentionChanged { .. } => "SessionAttentionChanged",
+        mew_protocol::ServerMessage::ModelList { .. } => "ModelList",
+        mew_protocol::ServerMessage::Pong { .. } => "Pong",
+        mew_protocol::ServerMessage::PersonaList { .. } => "PersonaList",
+        mew_protocol::ServerMessage::PersonaSwitched { .. } => "PersonaSwitched",
+        mew_protocol::ServerMessage::ProjectList { .. } => "ProjectList",
+        mew_protocol::ServerMessage::BrowserSnapshot { .. } => "BrowserSnapshot",
+        mew_protocol::ServerMessage::BrowserScreenshot { .. } => "BrowserScreenshot",
+        mew_protocol::ServerMessage::BrowserState { .. } => "BrowserState",
+        mew_protocol::ServerMessage::GroupList { .. } => "GroupList",
+        mew_protocol::ServerMessage::GroupsChanged { .. } => "GroupsChanged",
+        mew_protocol::ServerMessage::DirListing { .. } => "DirListing",
+        mew_protocol::ServerMessage::FilePreview { .. } => "FilePreview",
+        mew_protocol::ServerMessage::GitStatusResult { .. } => "GitStatusResult",
+        mew_protocol::ServerMessage::FsChanged { .. } => "FsChanged",
+        mew_protocol::ServerMessage::SlashResult { .. } => "SlashResult",
+        mew_protocol::ServerMessage::RequestResolved { .. } => "RequestResolved",
+        mew_protocol::ServerMessage::SessionCleared => "SessionCleared",
+        mew_protocol::ServerMessage::ClientAttached { .. } => "ClientAttached",
+        mew_protocol::ServerMessage::ClientDetached { .. } => "ClientDetached",
+        mew_protocol::ServerMessage::ControlYielded { .. } => "ControlYielded",
     }
 }
 
@@ -1061,6 +1348,36 @@ mod tests {
         assert!(
             output.contains("not available in daemon-capture mode"),
             "output: {output}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spinner_advances_while_streaming() {
+        // A long response streams for ~500ms (fake provider: 4 chars per
+        // delta, 10ms apart), long enough for the 16ms tick cadence in
+        // wait_turn to advance the spinner several times.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = mew_daemon::DaemonServer::with_session_dir(
+            fake_provider_builder(
+                "a fairly long response so that streaming lasts long enough for the \
+                 spinner to visibly advance across several animation frames while \
+                 wait_turn is capturing video frames at its sixty fps cadence",
+            ),
+            dir.path().to_path_buf(),
+        );
+        let (addr, handle) = spawn_daemon_tcp(server).await;
+        let url = format!("ws://{addr}");
+
+        let mut backend = DaemonBackend::connect(&url, 80, 24).await.expect("connect");
+        Backend::start_recording(&mut backend);
+        backend.send_text("hi").await.expect("send");
+        backend.wait_turn(30_000).await.expect("wait_turn");
+        handle.abort();
+
+        assert!(
+            backend.app.spinner_frame >= 1,
+            "spinner should advance during a ~500ms streamed turn, got frame {}",
+            backend.app.spinner_frame
         );
     }
 

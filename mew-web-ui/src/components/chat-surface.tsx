@@ -1,12 +1,16 @@
 import { useEffect, useRef } from "react";
+import { useRouter } from "@tanstack/react-router";
 import { useSessionStore } from "../stores/session";
 import { MessageItem } from "./message-item";
 import { ErrorBoundary } from "./error-boundary";
 import { MessageSquare } from "lucide-react";
 import { formatRelativeAge } from "../lib/format";
+import { SESSION_ID_KEY } from "../lib/client";
 
 function EmptyChatSurface() {
   const sessions = useSessionStore((s) => s.availableSessions);
+  const titles = useSessionStore((s) => s.sessionTitles);
+  const router = useRouter();
   const recent = [...sessions]
     .sort(
       (a, b) =>
@@ -19,7 +23,12 @@ function EmptyChatSurface() {
     <div className="flex gap-2 px-4 pb-12 pt-20">
       <div className="flex h-full flex-col items-start justify-center text-start">
         <div className="mb-4 flex gap-4 items-center">
-          <img src="/mew-transparent-closeup.png" className="size-12" />
+          <img
+            src="/mew-transparent-closeup.png"
+            className="size-12"
+            alt=""
+            aria-hidden="true"
+          />
           <h2 className="mb-2 text-xl text-foreground mt-4">Where to next?</h2>
         </div>
         {recent.length > 0 && (
@@ -28,18 +37,24 @@ function EmptyChatSurface() {
               Recent sessions
             </div>
             {recent.map((s) => (
-              <div
+              <button
                 key={s.session_id}
-                className="flex w-full items-center gap-2 rounded-md border border-border bg-card px-3 py-2"
+                type="button"
+                onClick={() => {
+                  localStorage.setItem(SESSION_ID_KEY, s.session_id);
+                  router.navigate({ to: "/session/$sessionId", params: { sessionId: s.session_id } });
+                }}
+                className="flex w-full items-center gap-2 rounded-md border border-border bg-card px-3 py-2 text-left transition-[background-color,border-color] duration-150 ease-out hover:border-foreground/20 hover:bg-accent"
+                aria-label={"Open session " + (titles.get(s.session_id) ?? s.summary ?? s.first_message ?? s.session_id)}
               >
                 <MessageSquare className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <span className="flex-1 truncate text-xs text-foreground">
-                  {s.session_id.slice(0, 10)}…
+                  {titles.get(s.session_id) ?? s.summary ?? s.first_message ?? s.model ?? "Untitled session"}
                 </span>
                 <span className="text-[10px] text-muted-foreground">
                   {formatRelativeAge(s.last_message_at ?? s.created_at)}
                 </span>
-              </div>
+              </button>
             ))}
           </div>
         )}

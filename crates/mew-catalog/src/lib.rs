@@ -283,6 +283,18 @@ impl Catalog {
             ];
         }
 
+        // Kimi K3: configurable thinking effort via top-level reasoning_effort.
+        // (kimi-for-coding / kimi-for-coding-highspeed have no thinking.)
+        if id.contains("k3") {
+            return ["low", "high", "max"]
+                .iter()
+                .map(|effort| ThinkingVariant {
+                    name: (*effort).into(),
+                    params: serde_json::json!({"reasoning_effort": effort}),
+                })
+                .collect();
+        }
+
         // Models with no configurable thinking
         if id.contains("deepseek")
             || id.contains("glm")

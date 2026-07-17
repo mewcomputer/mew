@@ -124,6 +124,26 @@ export type ClientMessage = {
     type: "ping";
 } | {
     type: "list_projects";
+} | {
+    type: "browser_open";
+    url: string;
+} | {
+    type: "browser_snapshot";
+} | {
+    type: "browser_screenshot";
+    annotate: boolean;
+} | {
+    type: "browser_click";
+    selector: string;
+} | {
+    type: "browser_fill";
+    selector: string;
+    text: string;
+} | {
+    type: "browser_press";
+    key: string;
+} | {
+    type: "browser_close";
 };
 export type ProviderEventWire = {
     type: "part_start";
@@ -419,6 +439,7 @@ export interface Segment {
 export type ServerMessage = {
     type: "session_ready";
     session_id: string;
+    cwd?: string;
     model?: string;
     provider?: string;
     permission_mode?: string;
@@ -618,6 +639,20 @@ export type ServerMessage = {
 } | {
     type: "project_list";
     projects: ProjectInfo[];
+} | {
+    type: "browser_snapshot";
+    snapshot: string;
+    url: string;
+    title: string;
+} | {
+    type: "browser_screenshot";
+    data: string;
+    url: string;
+} | {
+    type: "browser_state";
+    open: boolean;
+    url?: string;
+    title?: string;
 };
 export interface MewWebSocket {
     send(data: string): void;
@@ -640,6 +675,7 @@ export interface MewClientEvents {
     error: (err: unknown) => void;
     "session-ready": (data: {
         session_id: string;
+        cwd?: string;
         model?: string;
         provider?: string;
         permission_mode?: string;
@@ -831,6 +867,20 @@ export interface MewClientEvents {
     "project-list": (data: {
         projects: ProjectInfo[];
     }) => void;
+    "browser-snapshot": (data: {
+        snapshot: string;
+        url: string;
+        title: string;
+    }) => void;
+    "browser-screenshot": (data: {
+        data: string;
+        url: string;
+    }) => void;
+    "browser-state": (data: {
+        open: boolean;
+        url?: string;
+        title?: string;
+    }) => void;
 }
 export type MewEventName = keyof MewClientEvents;
 export interface MewClientOptions {
@@ -854,12 +904,16 @@ export declare class MewClient {
     private openPromise;
     /** Session id returned by `newSession`. */
     private sessionId;
+    /** Session lifecycle requests share uncorrelated daemon errors. */
+    private sessionCommandTail;
     constructor(url: string, opts?: MewClientOptions);
     /** Open the WebSocket connection. Idempotent. */
     connect(): Promise<void>;
     /** Close the WebSocket. After calling this, the client cannot be reused. */
     disconnect(code?: number, reason?: string): void;
     isConnected(): boolean;
+    /** Serialize lifecycle requests because daemon errors have no request id. */
+    private enqueueSessionCommand;
     /** Send `new_session`. Resolves with the daemon-assigned session id. */
     newSession(cwd?: string | null): Promise<string>;
     /** Send `prompt`. Streaming events are emitted via the registered handlers. */
@@ -942,6 +996,13 @@ export declare class MewClient {
     ping(): Promise<string>;
     /** List known projects (recent session cwds). */
     listProjects(): void;
+    browserOpen(url: string): void;
+    browserSnapshot(): void;
+    browserScreenshot(annotate?: boolean): void;
+    browserClick(selector: string): void;
+    browserFill(selector: string, text: string): void;
+    browserPress(key: string): void;
+    browserClose(): void;
     on<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     off<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     private emit;

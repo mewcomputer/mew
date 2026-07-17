@@ -1,17 +1,13 @@
 import { MewClient } from "@mew/web-client";
 import { bridgeClientToStore } from "../stores/session";
 import { setClient } from "./client-ref";
-
-const WS_URL = (() => {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${location.host}/ws`;
-})();
+import { getWebSocketUrl } from "./host";
 
 let clientInstance: MewClient | null = null;
 
 export function getClient(): MewClient {
   if (!clientInstance) {
-    clientInstance = new MewClient(WS_URL, { debug: false });
+    clientInstance = new MewClient(getWebSocketUrl(), { debug: false });
     setClient(clientInstance);
     bridgeClientToStore(clientInstance);
   }

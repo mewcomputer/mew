@@ -23,7 +23,7 @@ fn main() -> io::Result<()> {
     let mut stream = MdStream::new(Options::default());
     let mut doc_state = mdstream::DocumentState::new();
     let mut view_state = StreamViewState::new()
-        .with_highlighter(ratatui_mdstream::highlight::SyntectHighlighter::new());
+        .with_highlighter(ratatui_mdstream::highlight::SyntectHighlighter::default());
 
     // Feed some sample markdown in chunks to simulate streaming.
     let chunks = vec![
@@ -80,7 +80,7 @@ where
             let inner = block.inner(chunks[0]);
             f.render_widget(block, chunks[0]);
 
-            let theme = Theme::dark();
+            let theme = ratatui_mdstream::theme::neutral();
             let view = StreamView::new(doc_state).theme(&theme).follow_tail(true);
             f.render_stateful_widget(view, inner, view_state);
 

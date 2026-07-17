@@ -26,7 +26,7 @@ pub fn render_markdown(text: &str, width: u16, theme: &Theme) -> Vec<Line<'stati
     let finalize = stream.finalize();
     doc_state.apply(finalize);
 
-    let mut highlighter = highlight::SyntectHighlighter::new();
+    let mut highlighter = highlight::SyntectHighlighter::default();
     render_doc_state(&doc_state, width, theme, &mut highlighter)
 }
 

@@ -99,6 +99,7 @@ pub(crate) async fn build_daemon_server(
                 mode,
                 Some(params.writer),
                 session_id,
+                params.cwd,
                 Arc::new(mew_hooks::NopDispatcher),
                 None,
                 &[],

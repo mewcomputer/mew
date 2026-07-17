@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { SessionInfo } from "@mew/web-client";
-import { groupByWorkspace, deriveTitle } from "../components/session-rail";
+import { displaySessionTitle, groupByWorkspace, deriveTitle, limitTimelineSessions } from "../components/session-rail";
 
 function makeSession(overrides: Partial<SessionInfo> = {}): SessionInfo {
   return {
@@ -148,5 +148,20 @@ describe("deriveTitle", () => {
     const title = deriveTitle(s);
     expect(title).not.toContain("sess_");
     expect(title).toBe("Untitled");
+  });
+});
+
+describe("session rail density", () => {
+  it("keeps the full list available when searching", () => {
+    const sessions = Array.from({ length: 45 }, (_, index) => makeSession({ session_id: `s-${index}` }));
+    expect(limitTimelineSessions(sessions, "")).toHaveLength(40);
+    expect(limitTimelineSessions(sessions, "rust")).toHaveLength(45);
+  });
+
+  it("gives a fresh session a useful label instead of an ID or Untitled", () => {
+    expect(displaySessionTitle(undefined, makeSession({ cwd: "/projects/mew" }))).toBe(
+      "New session · mew",
+    );
+    expect(displaySessionTitle(undefined)).toBe("New session");
   });
 });

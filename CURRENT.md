@@ -1,3 +1,188 @@
+# 2026-07-17 — Add Kimi (Moonshot AI) provider
+
+## Summary
+
+Added Kimi as a built-in provider using the Anthropic-compatible endpoint.
+Kimi serves three models: `k3` (Kimi K3, thinking-capable), `kimi-for-coding`
+(Kimi K2.7 Code), and `kimi-for-coding-highspeed` (Kimi K2.7 Code HighSpeed).
+K3 supports low/high/max thinking effort via top-level `reasoning_effort`.
+
+## Changes
+
+- `crates/mew-config/src/lib.rs`: Added `kimi` to `Config::default()` with
+  `shape = "anthropic"`, `base_url = "https://api.kimi.com/coding/v1"`,
+  `credential_ref = "kimi"`. Added `test_default_kimi_provider` and updated
+  `test_load_default_when_missing`.
+- `crates/mew/src/setup/providers.rs`: Added `"kimi"` to the anthropic arm of
+  `provider_name_to_shape()`. Added kimi/k3 to the `discover_models()`
+  fallback list gated on credential presence. Updated
+  `provider_name_to_shape_known` test.
+- `crates/mew-catalog/src/lib.rs`: Added k3 thinking variants (low/high/max
+  via `reasoning_effort`) in `builtin_thinking_variants()` before the `kimi`
+  catch-all that returns empty.
+
+## Notes
+
+- The `mew` binary does not compile due to a pre-existing error in
+  `crates/mew/src/commands/tui_capture.rs:1142` — a non-exhaustive match on
+  `ServerMessage` missing `BrowserSnapshot`/`BrowserScreenshot`/`BrowserState`
+  variants from in-progress browser work. Not caused by these changes.
+- `mew-config` and `mew-catalog` compile and pass all tests (37/37 catalog,
+  2/2 config kimi tests).
+
+# 2026-07-14 — Rework mew theming to a flat, aliased token table
+
+## Summary
+
+Replaced the hardcoded `ThemeTokens` struct with a flat, aliased token table
+loaded from a single shared manifest. Built a `theme_codegen` binary that emits
+the web UI CSS, Rust default/overrides, and a syntect `.tmTheme` from the same
+manifest. Migrated TUI color usage to `Theme::resolve`, updated
+`ratatui-mdstream` to consume the shared theme and generated syntect theme, and
+migrated all 21 web UI themes into the manifest.
+
+## Changes
+
+- `crates/mew-tui/resources/theme_manifest.json`: new single source of truth
+  with base tokens, aliases, and 21 selectable themes as sparse overrides.
+- `crates/mew-tui/src/bin/theme_codegen.rs`: codegen binary producing
+  `mew-web-ui/src/generated-themes.css`,
+  `crates/mew-tui/src/theme_generated.rs`, and
+  `crates/ratatui-mdstream/resources/theme.tmTheme`.
+- `crates/mew-tui/src/theme.rs`: `Theme` backed by `HashMap<String, Color>`,
+  `resolve`, `ansi`, `with_persona_accent`, `css_variables`, and manifest
+  validation for custom theme files.
+- `crates/mew-tui/src/ui/*.rs`, `settings.rs`: migrated `Color::` usage to token
+  lookups.
+- `crates/ratatui-mdstream/src/*.rs`: consumes the shared token table and the
+  generated `.tmTheme` instead of hardcoded colors / `base16-ocean.dark`.
+- `mew-web-ui/src/index.css`: imports `generated-themes.css` before the
+  `@theme inline` mapping; hand-written theme blocks removed.
+- `crates/mew/src/cli.rs` + `commands/theme.rs`: added `mew theme export-css`
+  command.
+- `crates/mew/tests/theme_install.rs`: integration tests for validation and
+  install behavior.
+- `docs/THEMING.md`: new design and vocabulary reference.
+- `justfile`: `theme-codegen` and `theme-codegen-check` recipes wired into
+  `just ci`.
+
+## UI polish follow-up
+
+- `crates/mew-tui/src/ui/input.rs`: input bar now uses `muted` token for its
+  background instead of `status_bar.background`.
+- `crates/mew-tui/src/ui/mod.rs`: removed the 1-cell divider line between chat
+  and input; separation now comes from the muted input background.
+- `crates/mew-tui/src/ui/status.rs`: removed the now-unused `draw_divider`
+  function.
+- Golden frames in `crates/mew-tui/tests/golden/` updated to reflect the removed
+  divider line.
+- `crates/mew-tui/src/app/mod.rs`: status-bar marquee tick interval halved
+  from 300ms to 150ms, so overflow pill text scrolls roughly twice as fast.
+
+## Verification
+
+- `cargo clippy --all -- -D warnings` — clean
+- `cargo test -p mew-tui` — passes after golden update
+- Visual inspection via `mew tui-capture`: input bar shows muted background and
+  no divider line.
+- `just theme-codegen-check` — generated files up-to-date
+- `pnpm build` in `mew-web-ui` — succeeds
+
+---
+
+# 2026-07-14 — Fix slow rasterization by caching the font system
+
+## Summary
+
+Root-caused the slow daemon capture: `mew_raster::rasterize` was creating a
+fresh `cosmic_text::FontSystem` for every single frame. Font system creation is
+expensive, so captures were taking ~1s per frame and producing very short
+videos. Added a reusable `Rasterizer` that caches the font system and updated all
+call sites to use it. Also switched shaping from `Advanced` to `Basic` and split
+the capture timing log into draw vs rasterize time.
+
+## Changes
+
+- `crates/mew-raster/src/lib.rs`:
+  - New `Rasterizer` struct that owns the `FontSystem` and `SwashCache`.
+  - `Rasterizer::new()` builds the font system once with the bundled
+    IoskeleyMono fonts.
+  - `Rasterizer::rasterize()` and `Rasterizer::to_png()` are the cached
+    equivalents of the old free functions.
+  - The old free `rasterize()` and `to_png()` functions remain as convenience
+    wrappers that create a one-off `Rasterizer` for callers that only need a
+    single frame.
+  - Switched `Shaping::Advanced` to `Shaping::Basic` for faster monospace text
+    rendering.
+
+- `crates/mew/src/commands/tui_capture.rs`:
+  - `DaemonBackend` now owns a `Rasterizer` and uses it for both frame capture
+    and screenshot PNG encoding.
+  - Per-frame log now reports `draw_ms` and `rasterize_ms` separately.
+
+- `crates/mew-tui/src/harness.rs`:
+  - `LocalBackend` now owns a `Rasterizer` and uses it for frame capture and
+    screenshots.
+
+## CI Gate
+
+- `cargo build` — clean
+- `cargo test -p mew-raster` — 10 tests + 1 doc-test pass
+- `cargo test -p mew-tui harness` — 15 tests pass
+- `cargo test -p mew tui_capture` — 5 tests pass
+- `cargo clippy -p mew-raster -- -D warnings` — clean
+- `cargo clippy -p mew-tui -p mew -- -D warnings` — blocked by an unrelated
+  `theme.rs` clippy warning (`manual_strip`) that is not part of these changes
+
+---
+
+# 2026-07-13 — Real-time streaming, flushing, tracing, and fast typing in daemon `tui-capture`
+
+## Summary
+
+Made daemon-connected `mew tui-capture --connect` record thinking and streaming
+output progressively, keep pace with the real stream, print output incrementally
+instead of buffering it all until exit, added tracing logs at the major flow
+points, and fixed the long-prompt typing stall by stopping per-keystroke frame
+rasterization.
+
+## Changes
+
+- `crates/mew/src/commands/tui_capture.rs`:
+  - `DaemonBackend::send_text` no longer rasterizes a frame after every
+    character; it types the whole prompt, then captures one frame. This fixes
+    the "really long time" at `send_text: typing prompt` for long prompts.
+  - `DaemonBackend::type_str` uses the same fast path (one frame after the full
+    string).
+  - `DaemonBackend::wait_turn` applies a streaming drain limit of 4
+    `AgentEvent`s per frame, the same limit used by the live TUI drain loop.
+  - `wait_turn` no longer sleeps after every batch when more events are already
+    available, so it keeps pace with the actual stream instead of artificially
+    slowing down the capture.
+  - Drawing/capturing only happens when a 60 fps frame is due; the sleep is now
+    reserved for idle waits when no events are ready.
+  - `send_text` skips its 5 ms sleep once `app.streaming` is true.
+  - `run_script_daemon` now prints each verb's output immediately and flushes
+    stdout, rather than accumulating the entire script's output and printing it
+    all at the end.
+  - Added `tracing` logs: command start/finish, daemon connect/session ready,
+    each script verb, `send`/`wait_turn` lifecycle, frame capture counts,
+    per-frame capture timing, typing timing, and failure paths.
+  - Added `agent_event_name` and `server_message_type` helpers so trace logs can
+    record which event variant arrived without exposing channel payloads.
+
+- `crates/mew-tui/src/harness.rs`:
+  - `LocalBackend::type_str` also stops per-character captures and captures one
+    frame after the full string, keeping harness mode consistent.
+
+## Notes
+
+- A reported symptom (UI shows "thought for 41.2s" but video is only 10s)
+  pointed to slow frame rasterization. This was root-caused and fixed in the
+  following entry by caching the `mew_raster` font system.
+
+---
+
 # 2026-07-13 — Daemon-connected `mew tui-capture --connect`
 
 ## Summary
@@ -361,3 +546,294 @@ Threaded manifests from child agent → `SubagentResult::Complete` →
 - `pnpm build` (web-ui) — clean
 - `pnpm test` (web-ui) — 50 tests pass
 - `just ios-core` (Swift binding regen) — manual step (AC.12), not run
+
+## 2026-07-13 — mew-raster: ~190x faster frame rasterization
+
+`Rasterizer::rasterize` went from ~410ms to ~2.2ms warm per frame (160x48, scale 2, release), measured with the new `cargo run -p mew-raster --release --example bench`.
+
+What changed in `crates/mew-raster/src/lib.rs`:
+- Replaced per-pixel `tiny_skia::fill_rect` calls (one per glyph pixel via cosmic-text's `draw()` callback) with direct blends into the pixmap buffer (`blit_glyph`). This alone: 410ms → 92ms.
+- Discovered the remaining cost was cosmic-text shaping+layout per row per frame (was hidden — lazy layout inside `draw()`). Replaced per-line shaping with a per-symbol shape cache: each unique (symbol, bold, italic) is shaped once, then frames are pure mask blitting at cell origins. 92ms → 2.2ms. Also removes per-cell String allocs and per-row TextBuffer creation.
+- Backgrounds: single `pixels_mut().fill()` for the canvas + merged same-bg cell spans written as row slices.
+- PNG encode: `png::Compression::Fast` (104ms → 11ms per screenshot; files ~40% larger, fine for capture).
+- New shared `mew_raster::encode_frames_mp4` pipes raw RGBA to ffmpeg (`-f rawvideo`) instead of writing a temp PNG per frame; both `mew-tui/src/harness.rs` and `mew/src/commands/tui_capture.rs` `encode_mp4` impls now delegate to it. Dropped the now-unused `png` dep from both crates.
+
+Verified: mew-raster tests (10), harness tests (15), tui_capture daemon tests (5), plus e2e smoke: harness script → mp4 (ffprobe-valid h264) and PNG screenshot visually checked (bold, bg spans, box-drawing, colors all correct).
+
+Note: capture perf logging in `wait_turn` (`rasterize_ms`) should now read ~2ms; if it's still slow, check for a debug build — the blend loops are heavily penalized without optimization.
+
+## 2026-07-13 — mew-raster: fix tofu glyphs and block-element seams
+
+Follow-up to the rasterizer rewrite; user screenshot showed the welcome-screen cat rendering as tofu boxes and the block "mew" wordmark with grid seams.
+
+- Tofu: `Shaping::Basic` (`shape_skip` in cosmic-text) never font-falls-back for `Family::Monospace`, so kana/CJK punctuation missing from IoskeleyMono rendered as .notdef. Pre-existing bug, not a regression. Switched `shape_symbol` to `Shaping::Advanced` — per-glyph system-font fallback (Hiragino Sans for kana on macOS). Cost is once per unique symbol thanks to the shape cache; warm frame time unchanged (2.2ms).
+- Seams: block elements (U+2580–U+259F) from the font don't cover the full cell (advance ≈15.6px < 16px cell), so per-cell placement left background lines between cells. Added `draw_block_element` — geometric fills in cell-eighths (halves, eighth-blocks, shades with alpha, quadrants), same approach as terminal emulators. Blocks now tile edge-to-edge.
+- New tests: full block fills entire cell incl. corners, adjacent blocks tile without seams, half block covers exactly its half. 13 mew-raster tests pass; harness (15) and tui_capture (5) still green; welcome screen visually verified (cat + seamless wordmark).
+
+## 2026-07-13 — tui-capture: animate spinner in daemon-mode recordings
+
+The input-bar spinner was static in captured videos: `app.tick()` (which advances `spinner_frame` every 5th tick) is driven by the EventLoop's 60fps tick task, which the headless `DaemonBackend` never spawns. `wait_turn` now calls `app.tick()` on its own 16ms cadence, matching the real TUI's animation rate. Local harness mode is unaffected by design (turns are synchronous; `pause` duplicates frames).
+
+Test: `test_spinner_advances_while_streaming` — long fake-provider response (~500ms stream), asserts `spinner_frame` advanced during `wait_turn`. Written failing-first, passes after the fix; all 6 tui_capture tests green.
+
+## 2026-07-17 — Tauri desktop shell scaffold
+
+- Added `mew-web-ui/src-tauri`, a thin Tauri 2 shell around the existing React/Vite app.
+- Kept the shell outside the root Cargo workspace so desktop-only dependencies do not enter the core workspace checks.
+- Added `just desktop-dev` and `just desktop-build`, plus Tauri-aware Vite settings for fixed-port dev/HMR and WebKit-compatible production builds.
+- Generated the initial app icons from `mew-web-ui/public/favicon.svg`.
+- Daemon supervision and the desktop host/runtime adapter are intentionally left for the next slice.
+
+Verified: `cargo check --manifest-path mew-web-ui/src-tauri/Cargo.toml`, `pnpm --filter mew-web-ui build`, `pnpm --filter mew-web-ui exec tauri info`, and `pnpm --filter mew-web-ui desktop:build`.
+
+## 2026-07-17 — Tauri daemon supervision and shared host bootstrap
+
+- Added `DaemonSupervisor` to the Tauri host. It supports an explicit
+  `MEW_DESKTOP_DAEMON_URL`, otherwise reserves a loopback port, launches
+  `mew daemon --port ...`, waits for TCP readiness, and kills the child when
+  the desktop process exits.
+- Added `mew-web-ui/src/lib/host.ts`. Browser mode still derives `/ws` from the
+  current origin; Tauri mode resolves the daemon URL through the native
+  `daemon_ws_url` command before mounting the same React tree.
+- Updated daemon startup so a stale persisted provider/model state cannot block
+  a non-interactive desktop-owned daemon with an interactive healing prompt.
+- Release sidecar packaging remains a follow-up. The current host discovers
+  `mew` from `MEW_DESKTOP_DAEMON_BINARY`, a sibling/debug/release path, or
+  `PATH`.
+
+Verified: `pnpm --filter mew-web-ui test` (52 tests), `pnpm --filter mew-web-ui build`,
+desktop-host Rust tests (4), desktop-host clippy, `cargo test -p mew` (105 tests),
+and a Tauri dev smoke with a real loopback daemon and established WebSocket
+connection. `cargo fmt --all -- --check` still reports unrelated pre-existing
+formatting differences in several dirty files; the changed desktop and daemon
+files are formatted.
+
+## 2026-07-17 — Tauri sidecar packaging and daemon ownership
+
+- Added the Tauri shell plugin and `bundle.externalBin` configuration for an
+  architecture-specific `mew` sidecar.
+- Added `mew-web-ui/scripts/build-sidecar.mjs`; `desktop:dev` prepares a debug
+  sidecar and `desktop:build` prepares a release sidecar before Tauri runs.
+- Made ownership explicit: `MEW_DESKTOP_DAEMON_URL` attaches without owning or
+  killing the process; bundled sidecars and binaries launched through
+  `MEW_DESKTOP_DAEMON_BINARY` are owned by the current desktop process.
+- Removed the release fallback that could mistake the Tauri executable itself
+  for the `mew` daemon, and corrected the repository target paths used by the
+  development fallback.
+
+Verified: sidecar unit tests, browser tests (52), Tauri dev with a bundled debug
+sidecar, explicit attach to an existing daemon on port 25566, clean child
+shutdown in both modes, and the packaged release executable. The release app
+bundle contains `Contents/MacOS/mew` alongside the desktop host.
+
+## 2026-07-17 — Desktop daemon rendezvous and adversarial UX pass
+
+- Reworked the Tauri supervisor around a shared loopback rendezvous port
+  (25566 by default, with MEW_DESKTOP_DAEMON_PORT as an override). It performs
+  a real WebSocket ping/pong check before launching anything, attaches to an
+  existing mew daemon without owning it, rejects occupied non-mew ports, and
+  lazily starts owned sidecars/processes only when the frontend requests the
+  endpoint.
+- Made native host bootstrap failures recoverable in the UI with a clear error
+  message and retry action. The frontend connection manager now reports
+  connection errors, retries with bounded backoff, and recovers after both
+  pre-open failures and established socket closes.
+- Removed automatic session creation from the home route. Reopening the last
+  session is explicit and failure leaves a useful new-session path instead of
+  silently replacing the session.
+- Added workspace context to the header, session search, clickable recent
+  sessions, a labeled view dropdown for timeline/workspace/grouped modes, and
+  mobile dock spacing that keeps the composer, status footer, permission toast,
+  and bottom navigation from overlapping.
+- Added shared press/focus behavior and reduced-motion handling, replaced the
+  reasoning bounce indicator, and added labels to icon-only controls.
+
+Verified: web UI tests (52), web UI production build, web-client tests (12),
+Tauri host tests (7), Tauri host clippy, and a real ping/pong probe against the
+existing daemon on 127.0.0.1:25566.
+
+## 2026-07-17 — Desktop release verification
+
+Verified the updated host and shared React app through
+pnpm --filter mew-web-ui desktop:build. The macOS app and aarch64 DMG both
+bundled successfully with the architecture-specific mew sidecar.
+
+## 2026-07-17 — Final daemon lifecycle and UX verification
+
+- Corrected the interim daemon notes above: desktop startup now uses the shared
+  25566 rendezvous port, protocol-level WebSocket ping/pong health checks, lazy
+  startup, attach-without-ownership, and an explicit occupied-port failure.
+- Added retry coverage for both pre-open failures and errors emitted after an
+  established WebSocket connection.
+- Kept the final frontend pass focused on recoverable states, session discovery,
+  workspace context, labeled view switching, mobile dock spacing, keyboard
+  focus, reduced motion, and icon-only control labels.
+
+Verified: web UI tests (54), web-client tests (13), web UI production build,
+Tauri host tests (7), Tauri host clippy, Tauri formatting, scoped diff checks,
+and the packaged macOS app plus aarch64 DMG from the release build.
+
+## 2026-07-17 — Session rail overlap and radius restoration
+
+- Reserved the hover-action column inside each session title row so regenerate,
+  pin, archive, and grouping controls cannot cover session text.
+- Restored the shared `--radius` CSS token at `0.625rem`; the theme generator
+  emits color variables only, so this dimension belongs in the web base layer.
+- Added a regression test for the reserved session-action space and explicit
+  cleanup between rail renders.
+
+Verified: web UI tests (55), the production web build, generated CSS containing
+the radius token and rounded utilities, and scoped diff checks.
+
+## 2026-07-17 — Interactive activity panel and workspace lifecycle pass
+
+- Rebuilt the Activity sheet around six visible icon-and-label sections, with
+  actionable-first opening, wrapped mobile tabs, richer empty states, pinned
+  context, stable question resolution, and rounded desktop/mobile treatment.
+- Prevented Files and Changes from probing sessions without a workspace; they
+  now explain the missing context instead of injecting daemon errors into chat.
+- Made browser-created sessions inherit and persist the daemon launch cwd,
+  exposed it through `SessionReady`, kept writer metadata synchronized, and
+  threaded it into resumed agent construction so chat tools, file browsing, and
+  git status share one workspace.
+- Serialized overlapping client session lifecycle requests. This prevents an
+  old failed attach from rejecting a new-session request and fixes the live
+  `session not found` route handoff.
+- Limited the default session timeline to the 40 newest sessions while keeping
+  search access to older history, replaced raw ids with useful titles, and
+  added accessible labels to session/group actions.
+
+Verified: interactive browser smoke tests for fresh-session creation, Activity,
+Files, Changes, recovery, and workspace-backed git status; web UI tests (64),
+web-client tests (14), session metadata regression coverage, bridge e2e, daemon
+and workspace builds, production web build, and scoped diff checks.
+
+## 2026-07-17 — Keyboard-first session and project search
+
+- Added the shadcn Command primitive via `npx shadcn@latest add command --yes
+  --overwrite` and moved the existing palette onto the shared UI component.
+- Expanded cmd/ctrl+k into a searchable workspace launcher for actions, sessions,
+  projects, titles, summaries, first-message content, loaded current-session
+  content, folders, and dates.
+- Added `project:`, `folder:`, `before:`, and `after:` query operators, with
+  project results opening a fresh session in that directory.
+- Added focused search tests covering content, path, combined filters, inclusive
+  dates, and project matching. The index tolerates both seconds and milliseconds
+  from older and newer daemon metadata.
+
+Verified: browser interaction for cmd/ctrl+k, content search, no-match state, and
+project results; web UI tests (68) and production web build.
+
+## 2026-07-17 — Attention-first notification hierarchy
+
+- Added a shared attention taxonomy with explicit labels: `Permissions needed`,
+  `Question · needs input`, and `Turn failed`.
+- Session ordering now puts attention ahead of recency, running state, and pin
+  state in the timeline, grouped view, and workspace folders. The current
+  session no longer gets an exception.
+- Added a persistent `Needs attention` queue at the top of Activity, with
+  session-level badges and a header indicator. Queue items navigate directly to
+  the session that needs action.
+- Stopped treating ordinary turn completion as an in-app notification. A
+  successful follow-up clears the previous failure alert, while permission and
+  question items remain driven by their live pending counts.
+- Added regression coverage for precedence, explicit labels, queue rendering,
+  current-session ordering, and alert lifecycle cleanup.
+
+Verified: interactive Activity-panel smoke test, web UI tests (73), production
+web build, and scoped diff checks.
+
+## 2026-07-17 — Browser-use vertical slice
+
+- Added daemon-owned browser commands backed by the installed native
+  `agent-browser` CLI. Browser sessions are keyed to mew sessions and support
+  HTTP(S) navigation, accessibility snapshots, screenshots, click, fill, key
+  press, and close.
+- Extended the Rust and TypeScript wire clients with browser state, snapshot,
+  and screenshot messages.
+- Added a Browser tab to the Activity rail with URL navigation, semantic text
+  inspection, screenshot capture, and basic element actions.
+
+Verified: `agent-browser` opened and inspected example.com, Rust daemon and
+protocol tests (101 protocol tests, 3 daemon tests), web-client build, and
+production web build.
+
+## 2026-07-17 — macOS CEF authoritative-browser proof of concept
+
+- Added `native/cef-host`, a standalone Rust `cef-rs` host that creates a
+  visible Chromium window and exposes loopback CDP for `agent-browser`.
+- Added the macOS helper target and CEF bundle metadata required to produce a
+  real `.app` with the framework and helper app bundles.
+- Added a stable per-user CEF cache path and defaulted the unsigned development
+  host to Chromium's mock keychain to avoid repeated macOS Keychain prompts.
+  `MEW_CEF_USE_SYSTEM_KEYCHAIN=1` opts back into real browser Keychain storage.
+
+Verified: native all-targets check, official CEF bundle generation, launch of
+the bundled app, CDP `/json/version`, accessibility snapshot, and an
+`agent-browser --cdp 9223` click against the same visible page.
+
+## 2026-07-17 — Tauri native sibling integration
+
+- Exposed `mew-cef-host` as a reusable macOS embedding library. It creates a
+  CEF child `NSView` inside the Tauri content view, keeps bounds and visibility
+  on the main thread, and uses Tauri's external message-pump callback.
+- Added Tauri commands for CEF availability, bounds, navigation, visibility,
+  and close/hide behavior. React now positions the native surface over the
+  Browser panel viewport while retaining the existing WKWebView controls and
+  text snapshot fallback.
+- Routed desktop daemon `agent-browser` calls to the same CEF CDP endpoint and
+  removed the incompatible persistent agent-browser session flag in that mode.
+- Added CEF framework preparation for development links and release copies,
+  macOS framework bundling, CEF helper-process dispatch, mock-keychain defaults,
+  and graceful fallback when the native sibling is unavailable.
+
+Verified: native all-targets check, Tauri cargo check, web UI tests (73), web
+production build, daemon CDP argument tests, Tauri debug `.app` bundle build,
+and standalone CEF CDP control with `agent-browser`. The bundled Tauri process
+reaches CEF DevTools, but its GPU subprocess is still unstable in this local
+environment even though embedded mode requests software rendering; GPU remains
+opt-in for experiments via `MEW_CEF_ENABLE_GPU=1`. macOS sandbox/helper
+hardening is still a follow-up before release signing.
+
+## 2026-07-17 — CEF reopen lifecycle hardening
+
+- Fixed helper startup ordering so the CEF command-line wrapper is never
+  constructed before `libcef` is loaded.
+- Packaged and selected the dedicated `mew-cef-host-helper` for Tauri CEF
+  subprocesses. The helper now resolves both nested CEF helper bundles and the
+  flat `Contents/MacOS` layout used by Tauri.
+- Removed the inline message-loop call from `CefInitialize`, seeded the first
+  external-pump turn after Tauri re-enters its event loop, isolated the embedded
+  cache from the standalone host, and close/release the browser before
+  `CefShutdown`.
+- Split native browser layout and visibility effects so tab unmounts and
+  reopenings cannot enqueue stale hide/show work against the native view.
+
+Verified: native helper and embedding tests, Tauri cargo check, web UI tests
+(73), frontend build, Tauri debug `.app` bundle build, CEF page startup, and
+two launches against the same cache with the page available at the CDP target.
+
+## 2026-07-17 — Daemon sidecar rebuild
+
+- Added the three browser message variants to the TUI capture message-name
+  formatter so the daemon binary remains exhaustive as the wire protocol
+  evolves.
+- Rebuilt the debug daemon sidecar and bundled debug `.app` after the CEF
+  lifecycle changes.
+
+Verified: `cargo test -p mew --bin mew tui_capture` (6 passed),
+`pnpm desktop:prepare:dev`, and `pnpm tauri build --debug --bundles app
+--no-sign`.
+
+## 2026-07-17 — Workspace surfaces design direction
+
+- Established the frontend direction as a Codex-style desktop workspace with
+  two independent surfaces: a default-on pinned summary for project/session
+  orientation and a separately toggled workbench for activity, browser,
+  changes, and review.
+- Captured the design context in `.impeccable.md`: the product should feel
+  fast, focused, and alive, with attention surfaced before ordinary session
+  navigation and keyboard-first, low-latency interactions.
+- Identified the main implementation constraint: the native CEF browser must
+  remain mounted while switching workbench tabs so its visible page and CDP
+  target survive tab changes.

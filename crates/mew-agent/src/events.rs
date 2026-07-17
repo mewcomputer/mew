@@ -135,6 +135,8 @@ impl Agent {
                         p.text.push_str(delta);
                     } else if field == "signature" {
                         p.signature = Some(delta.to_string());
+                    } else if field == "encrypted_content" {
+                        p.encrypted_content = Some(delta.to_string());
                     }
                 }
                 Part::ToolCall(ref mut p) => match field {

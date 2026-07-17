@@ -160,7 +160,47 @@ mod tests {
     use super::*;
 
     fn theme() -> Theme {
-        Theme::dark()
+        use ratatui::style::{Color, Modifier, Style};
+        Theme {
+            paragraph: Style::default().fg(Color::White),
+            heading: [
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ],
+            emphasis: Style::default().add_modifier(Modifier::ITALIC),
+            strong: Style::default().add_modifier(Modifier::BOLD),
+            strikethrough: Style::default().add_modifier(Modifier::CROSSED_OUT),
+            inline_code: Style::default().bg(Color::Rgb(40, 40, 45)),
+            link_text: Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::UNDERLINED),
+            link_url: Style::default().fg(Color::DarkGray),
+            list_bullet: Style::default().fg(Color::White),
+            block_quote: Style::default().fg(Color::Gray),
+            thematic_break: Style::default().fg(Color::DarkGray),
+            table_header: Style::default().add_modifier(Modifier::BOLD),
+            table_cell: Style::default(),
+            table_border: Style::default().fg(Color::DarkGray),
+            code_fence_default: Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 35)),
+            code_fence_border: Style::default().fg(Color::DarkGray),
+            pending_indicator: Style::default().fg(Color::Yellow),
+        }
     }
 
     #[test]

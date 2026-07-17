@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -38,9 +38,9 @@ pub(super) fn draw_landing(f: &mut Frame, app: &App, area: Rect, slash_height: u
     let cat_lines: Vec<&str> = CAT.lines().collect();
     let logo_lines = logo_lines();
 
-    let green = Style::default().fg(Color::Green);
+    let green = Style::default().fg(app.theme.resolve("text.success"));
     let wordmark = Style::default()
-        .fg(Color::White)
+        .fg(app.theme.resolve("foreground"))
         .add_modifier(Modifier::BOLD);
 
     // Fixed column widths so the cat and the multi-row logo stay aligned across

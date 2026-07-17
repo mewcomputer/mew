@@ -30,8 +30,11 @@ ignore = { workspace = true }
 unicode-width = "0.2"
 rand.workspace = true
 strum = { version = "0.26", features = ["derive"] }
-png = "0.18"
 mew-config = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
 tempfile = "3"
+
+[[bin]]
+name = "theme_codegen"
+path = "src/bin/theme_codegen.rs"

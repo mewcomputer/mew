@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Paragraph, Wrap},
     Frame,
@@ -24,11 +24,14 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.sidebar_header_rows.push((visual_row, "context".into()));
     visual_row += 1;
     text.push_line(Line::from(vec![
-        Span::styled(ctx_arrow, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            ctx_arrow,
+            Style::default().fg(app.theme.resolve("text.muted")),
+        ),
         Span::styled(
             " Context",
             Style::default()
-                .fg(Color::White)
+                .fg(app.theme.resolve("text.body"))
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -37,7 +40,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         if app.context_files.is_empty() {
             text.push_line(Line::from(Span::styled(
                 "  No context files loaded",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(app.theme.resolve("text.muted")),
             )));
             visual_row += 1;
         } else {
@@ -45,7 +48,10 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             for path in &ctx {
                 text.push_line(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(path.clone(), Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        path.clone(),
+                        Style::default().fg(app.theme.resolve("text.placeholder")),
+                    ),
                 ]));
             }
             visual_row += ctx.len() as u16;
@@ -54,7 +60,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     text.push_line(Line::from(Span::styled(
         "─".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(app.theme.tokens.divider),
+        Style::default().fg(app.theme.resolve("divider")),
     )));
     visual_row += 1;
 
@@ -70,11 +76,14 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         .filter(|t| t.status == mew_agent::TodoStatus::Done)
         .count();
     text.push_line(Line::from(vec![
-        Span::styled(todos_arrow, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            todos_arrow,
+            Style::default().fg(app.theme.resolve("text.muted")),
+        ),
         Span::styled(
             format!(" Todos ({}/{})", todo_done, todo_total),
             Style::default()
-                .fg(Color::White)
+                .fg(app.theme.resolve("text.body"))
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -83,17 +92,17 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         if app.todos.is_empty() {
             text.push_line(Line::from(Span::styled(
                 "  no todos yet",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(app.theme.resolve("text.muted")),
             )));
             visual_row += 1;
         } else {
             let max_width = area.width.saturating_sub(8) as usize;
             for t in &app.todos {
                 let (mark, color) = match t.status {
-                    mew_agent::TodoStatus::Done => ("x", Color::DarkGray),
-                    mew_agent::TodoStatus::InProgress => ("~", Color::Yellow),
-                    mew_agent::TodoStatus::Pending => (" ", Color::Gray),
-                    mew_agent::TodoStatus::Blocked => ("!", Color::Red),
+                    mew_agent::TodoStatus::Done => ("x", app.theme.resolve("text.muted")),
+                    mew_agent::TodoStatus::InProgress => ("~", app.theme.resolve("text.warning")),
+                    mew_agent::TodoStatus::Pending => (" ", app.theme.resolve("text.placeholder")),
+                    mew_agent::TodoStatus::Blocked => ("!", app.theme.resolve("text.error")),
                 };
                 let content: String = t.content.chars().take(max_width).collect();
                 let label = if t.content.chars().count() > max_width {
@@ -112,7 +121,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     text.push_line(Line::from(Span::styled(
         "─".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(app.theme.tokens.divider),
+        Style::default().fg(app.theme.resolve("divider")),
     )));
     visual_row += 1;
 
@@ -125,11 +134,14 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     app.sidebar_header_rows.push((visual_row, "tools".into()));
     visual_row += 1;
     text.push_line(Line::from(vec![
-        Span::styled(tools_arrow, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            tools_arrow,
+            Style::default().fg(app.theme.resolve("text.muted")),
+        ),
         Span::styled(
             " Tools",
             Style::default()
-                .fg(Color::White)
+                .fg(app.theme.resolve("text.body"))
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -138,7 +150,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         if app.tools.is_empty() {
             text.push_line(Line::from(Span::styled(
                 "  No tools available",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(app.theme.resolve("text.muted")),
             )));
             visual_row += 1;
         } else {
@@ -146,7 +158,10 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             for tool in &tools {
                 text.push_line(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(tool.clone(), Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        tool.clone(),
+                        Style::default().fg(app.theme.resolve("text.placeholder")),
+                    ),
                 ]));
             }
             visual_row += tools.len() as u16;
@@ -155,7 +170,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     text.push_line(Line::from(Span::styled(
         "─".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(app.theme.tokens.divider),
+        Style::default().fg(app.theme.resolve("divider")),
     )));
     visual_row += 1;
 
@@ -170,11 +185,14 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         .push((visual_row, "personas".into()));
     visual_row += 1;
     text.push_line(Line::from(vec![
-        Span::styled(personas_arrow, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            personas_arrow,
+            Style::default().fg(app.theme.resolve("text.muted")),
+        ),
         Span::styled(
             " Personas",
             Style::default()
-                .fg(Color::White)
+                .fg(app.theme.resolve("text.body"))
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -183,7 +201,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         if app.personas.is_empty() {
             text.push_line(Line::from(Span::styled(
                 "  No personas loaded",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(app.theme.resolve("text.muted")),
             )));
             visual_row += 1;
         } else {
@@ -204,16 +222,24 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 // Active persona uses its accent color; inactive ones
                 // stay gray.
                 let (name_color, marker_color) = if is_active {
-                    let accent =
-                        crate::theme::persona_accent(name, app.active_persona_color.as_deref());
-                    (accent.fg, accent.fg)
+                    let persona_theme = app
+                        .theme
+                        .with_persona_accent(name, app.active_persona_color.as_deref());
+                    let accent_fg = persona_theme.resolve("persona.accent.fg");
+                    (accent_fg, accent_fg)
                 } else {
-                    (Color::Gray, Color::DarkGray)
+                    (
+                        app.theme.resolve("text.placeholder"),
+                        app.theme.resolve("text.muted"),
+                    )
                 };
                 text.push_line(Line::from(vec![
                     Span::styled(marker, Style::default().fg(marker_color)),
                     Span::styled(name.clone(), Style::default().fg(name_color)),
-                    Span::styled(desc_str, Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        desc_str,
+                        Style::default().fg(app.theme.resolve("text.muted")),
+                    ),
                 ]));
                 visual_row += 1;
             }
@@ -222,7 +248,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     text.push_line(Line::from(Span::styled(
         "─".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(app.theme.tokens.divider),
+        Style::default().fg(app.theme.resolve("divider")),
     )));
     visual_row += 1;
 
@@ -231,11 +257,14 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let mcp_arrow = if mcp_collapsed { "▶" } else { "▼" };
     app.sidebar_header_rows.push((visual_row, "mcp".into()));
     text.push_line(Line::from(vec![
-        Span::styled(mcp_arrow, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            mcp_arrow,
+            Style::default().fg(app.theme.resolve("text.muted")),
+        ),
         Span::styled(
             " MCP Servers",
             Style::default()
-                .fg(Color::White)
+                .fg(app.theme.resolve("text.body"))
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -244,15 +273,15 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         if app.mcp_status.is_empty() {
             text.push_line(Line::from(Span::styled(
                 "  No MCP servers configured",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(app.theme.resolve("text.muted")),
             )));
         } else {
             let mcp = app.mcp_status.clone();
             for (name, ok, count) in &mcp {
                 let (icon, style) = if *ok {
-                    ("✓", Style::default().fg(Color::Green))
+                    ("✓", Style::default().fg(app.theme.resolve("text.success")))
                 } else {
-                    ("✗", Style::default().fg(Color::Red))
+                    ("✗", Style::default().fg(app.theme.resolve("text.error")))
                 };
                 let label = if *ok && *count > 0 {
                     format!("{} ({} tools)", name, count)
@@ -265,7 +294,10 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     Span::styled("  ", Style::default()),
                     Span::styled(icon, style),
                     Span::styled(" ", Style::default()),
-                    Span::styled(label, Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        label,
+                        Style::default().fg(app.theme.resolve("text.placeholder")),
+                    ),
                 ]));
             }
         }
@@ -273,7 +305,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
 
     text.push_line(Line::from(Span::styled(
         "─".repeat(area.width.saturating_sub(2) as usize),
-        Style::default().fg(app.theme.tokens.divider),
+        Style::default().fg(app.theme.resolve("divider")),
     )));
 
     // Sessions (daemon mode only)
@@ -286,16 +318,16 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         text.push_line(Line::from(vec![Span::styled(
             "Subagents",
             Style::default()
-                .fg(Color::White)
+                .fg(app.theme.resolve("text.body"))
                 .add_modifier(Modifier::BOLD),
         )]));
         for sa in &app.subagents {
             let elapsed = sa.started_at.elapsed().as_secs();
             let (icon, color) = match &sa.status {
-                crate::app::SubagentStatus::Running => ("▸", Color::Yellow),
-                crate::app::SubagentStatus::Completed => ("✓", Color::Green),
-                crate::app::SubagentStatus::Failed { .. } => ("✗", Color::Red),
-                crate::app::SubagentStatus::Cancelled => ("⊘", Color::DarkGray),
+                crate::app::SubagentStatus::Running => ("▸", app.theme.resolve("text.warning")),
+                crate::app::SubagentStatus::Completed => ("✓", app.theme.resolve("text.success")),
+                crate::app::SubagentStatus::Failed { .. } => ("✗", app.theme.resolve("text.error")),
+                crate::app::SubagentStatus::Cancelled => ("⊘", app.theme.resolve("text.muted")),
             };
             let time_str = if elapsed < 60 {
                 format!("{}s", elapsed)
@@ -315,18 +347,18 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(format!("  {} ", icon), Style::default().fg(color)),
                 Span::styled(
                     sa.display_name.as_deref().unwrap_or(&sa.name).to_string(),
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(app.theme.resolve("text.placeholder")),
                 ),
                 Span::styled(
                     match &sa.display_name {
                         Some(_) => format!("  ({})", sa.name),
                         None => "".to_string(),
                     },
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.theme.resolve("text.muted")),
                 ),
                 Span::styled(
                     format!("  {}", time_str),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.theme.resolve("text.muted")),
                 ),
                 Span::styled(status_label, Style::default().fg(color)),
             ]));
@@ -342,13 +374,13 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 };
                 text.push_line(Line::from(Span::styled(
                     line,
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.theme.resolve("text.muted")),
                 )));
             }
         }
         text.push_line(Line::from(Span::styled(
             "─".repeat(area.width.saturating_sub(2) as usize),
-            Style::default().fg(app.theme.tokens.divider),
+            Style::default().fg(app.theme.resolve("divider")),
         )));
     }
 
@@ -357,16 +389,22 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         text.push_line(Line::from(vec![Span::styled(
             "Background Jobs",
             Style::default()
-                .fg(Color::White)
+                .fg(app.theme.resolve("text.body"))
                 .add_modifier(Modifier::BOLD),
         )]));
         for job in &app.background_jobs {
             let elapsed = job.started_at.elapsed().as_secs();
             let (icon, color) = match &job.status {
-                crate::app::BackgroundJobStatus::Running => ("▸", Color::Yellow),
-                crate::app::BackgroundJobStatus::Completed => ("✓", Color::Green),
-                crate::app::BackgroundJobStatus::Failed => ("✗", Color::Red),
-                crate::app::BackgroundJobStatus::Cancelled => ("⊘", Color::DarkGray),
+                crate::app::BackgroundJobStatus::Running => {
+                    ("▸", app.theme.resolve("text.warning"))
+                }
+                crate::app::BackgroundJobStatus::Completed => {
+                    ("✓", app.theme.resolve("text.success"))
+                }
+                crate::app::BackgroundJobStatus::Failed => ("✗", app.theme.resolve("text.error")),
+                crate::app::BackgroundJobStatus::Cancelled => {
+                    ("⊘", app.theme.resolve("text.muted"))
+                }
             };
             let time_str = if elapsed < 60 {
                 format!("{}s", elapsed)
@@ -389,17 +427,20 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
             };
             text.push_line(Line::from(vec![
                 Span::styled(format!("  {} ", icon), Style::default().fg(color)),
-                Span::styled(cmd, Style::default().fg(Color::Gray)),
+                Span::styled(
+                    cmd,
+                    Style::default().fg(app.theme.resolve("text.placeholder")),
+                ),
                 Span::styled(
                     format!("  {}", time_str),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(app.theme.resolve("text.muted")),
                 ),
                 Span::styled(status_label, Style::default().fg(color)),
             ]));
         }
         text.push_line(Line::from(Span::styled(
             "─".repeat(area.width.saturating_sub(2) as usize),
-            Style::default().fg(app.theme.tokens.divider),
+            Style::default().fg(app.theme.resolve("divider")),
         )));
     }
 
@@ -407,22 +448,28 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     text.push_line(Line::from(vec![Span::styled(
         "Session",
         Style::default()
-            .fg(Color::White)
+            .fg(app.theme.resolve("text.body"))
             .add_modifier(Modifier::BOLD),
     )]));
     text.push_line(Line::from(""));
     text.push_line(Line::from(vec![
-        Span::styled("  id  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "  id  ",
+            Style::default().fg(app.theme.resolve("text.muted")),
+        ),
         Span::styled(
             &app.status.session_id[..8.min(app.status.session_id.len())],
-            Style::default().fg(Color::Gray),
+            Style::default().fg(app.theme.resolve("text.placeholder")),
         ),
     ]));
     text.push_line(Line::from(vec![
-        Span::styled("  msg ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "  msg ",
+            Style::default().fg(app.theme.resolve("text.muted")),
+        ),
         Span::styled(
             format!("{}", app.messages.len()),
-            Style::default().fg(Color::Gray),
+            Style::default().fg(app.theme.resolve("text.placeholder")),
         ),
     ]));
 
@@ -450,11 +497,11 @@ fn draw_companion_section(text: &mut Text, visual_row: &mut u16, app: &mut App, 
         .push((*visual_row, "companion".into()));
     *visual_row += 1;
     text.push_line(Line::from(vec![
-        Span::styled(arrow, Style::default().fg(Color::DarkGray)),
+        Span::styled(arrow, Style::default().fg(app.theme.resolve("text.muted"))),
         Span::styled(
             " Companion",
             Style::default()
-                .fg(Color::Green)
+                .fg(app.theme.resolve("text.body"))
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -462,14 +509,14 @@ fn draw_companion_section(text: &mut Text, visual_row: &mut u16, app: &mut App, 
     if !collapsed && info.is_empty() {
         text.push_line(Line::from(Span::styled(
             "  no companion loaded",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(app.theme.resolve("text.muted")),
         )));
         *visual_row += 1;
     } else if !collapsed {
         for line in info.lines().take(12) {
             text.push_line(Line::from(Span::styled(
                 format!("  {line}"),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(app.theme.resolve("text.placeholder")),
             )));
         }
         *visual_row += info.lines().count().min(12) as u16;
@@ -492,11 +539,11 @@ fn draw_sessions_section(text: &mut Text, visual_row: &mut u16, app: &mut App, w
 
     let count = app.daemon_sessions.iter().filter(|s| !s.archived).count();
     text.push_line(Line::from(vec![
-        Span::styled(arrow, Style::default().fg(Color::DarkGray)),
+        Span::styled(arrow, Style::default().fg(app.theme.resolve("text.muted"))),
         Span::styled(
             format!(" Sessions ({})", count),
             Style::default()
-                .fg(Color::White)
+                .fg(app.theme.resolve("text.body"))
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -508,7 +555,7 @@ fn draw_sessions_section(text: &mut Text, visual_row: &mut u16, app: &mut App, w
     if app.daemon_sessions.is_empty() {
         text.push_line(Line::from(Span::styled(
             "  no sessions",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(app.theme.resolve("text.muted")),
         )));
         *visual_row += 1;
     } else {
@@ -532,9 +579,9 @@ fn draw_sessions_section(text: &mut Text, visual_row: &mut u16, app: &mut App, w
             };
 
             let (glyph, glyph_color) = match s.state {
-                mew_protocol::SessionState::Running => ("▶", Color::Yellow),
-                mew_protocol::SessionState::Active => ("●", Color::Green),
-                mew_protocol::SessionState::Idle => ("○", Color::DarkGray),
+                mew_protocol::SessionState::Running => ("▶", app.theme.resolve("text.warning")),
+                mew_protocol::SessionState::Active => ("●", app.theme.resolve("text.success")),
+                mew_protocol::SessionState::Idle => ("○", app.theme.resolve("text.muted")),
             };
 
             let cost = s
@@ -556,20 +603,30 @@ fn draw_sessions_section(text: &mut Text, visual_row: &mut u16, app: &mut App, w
                 String::new()
             };
             let badge_color = if *perm_n > 0 {
-                Color::Yellow
+                app.theme.resolve("text.warning")
             } else {
-                Color::Cyan
+                app.theme.resolve("text.accent")
             };
 
             let is_active = s.session_id == active_id;
             let marker = if is_active { "▸" } else { " " };
-            let title_color = if is_active { Color::White } else { Color::Gray };
+            let title_color = if is_active {
+                app.theme.resolve("text.accent")
+            } else {
+                app.theme.resolve("text.placeholder")
+            };
 
             text.push_line(Line::from(vec![
-                Span::styled(marker, Style::default().fg(Color::Green)),
+                Span::styled(
+                    marker,
+                    Style::default().fg(app.theme.resolve("text.success")),
+                ),
                 Span::styled(format!(" {} ", glyph), Style::default().fg(glyph_color)),
                 Span::styled(title_str, Style::default().fg(title_color)),
-                Span::styled(format!("  {}", cost), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  {}", cost),
+                    Style::default().fg(app.theme.resolve("text.muted")),
+                ),
                 Span::styled(badge_str, Style::default().fg(badge_color)),
             ]));
             *visual_row += 1;
@@ -578,7 +635,7 @@ fn draw_sessions_section(text: &mut Text, visual_row: &mut u16, app: &mut App, w
 
     text.push_line(Line::from(Span::styled(
         "─".repeat(width.saturating_sub(2) as usize),
-        Style::default().fg(app.theme.tokens.divider),
+        Style::default().fg(app.theme.resolve("divider")),
     )));
     *visual_row += 1;
 }

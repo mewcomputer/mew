@@ -411,7 +411,7 @@ fn codex_logged_in() -> bool {
 pub(crate) fn provider_name_to_shape(pid: &str) -> &'static str {
     match pid {
         "opencode-zen" | "opencode-go" => "openai",
-        "z-ai" | "umans" => "anthropic",
+        "z-ai" | "umans" | "kimi" => "anthropic",
         "codex" => "responses",
         _ => "openai",
     }
@@ -696,6 +696,10 @@ pub(crate) async fn discover_models(
         // Only advertise umans in the fallback list when a credential is set.
         if provider_has_credential(cfg, "umans") {
             fallbacks.push(("umans/umans-coder".into(), "umans · anthropic".into()));
+        }
+        // Only advertise kimi in the fallback list when a credential is set.
+        if provider_has_credential(cfg, "kimi") {
+            fallbacks.push(("kimi/k3".into(), "kimi · anthropic".into()));
         }
         for (id, desc) in fallbacks {
             if seen.insert(id.clone()) {
@@ -1299,6 +1303,7 @@ mod tests {
         assert_eq!(provider_name_to_shape("opencode-go"), "openai");
         assert_eq!(provider_name_to_shape("z-ai"), "anthropic");
         assert_eq!(provider_name_to_shape("umans"), "anthropic");
+        assert_eq!(provider_name_to_shape("kimi"), "anthropic");
         assert_eq!(provider_name_to_shape("codex"), "responses");
     }
 

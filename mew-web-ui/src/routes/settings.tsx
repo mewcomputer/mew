@@ -157,7 +157,7 @@ function SettingsRouteComponent() {
                       key={t.id}
                       onClick={() => setThemeId(t.id)}
                       className={cn(
-                        "group relative flex flex-col gap-1.5 rounded-lg border p-2.5 text-left transition-all",
+                        "group relative flex flex-col gap-1.5 rounded-lg border p-2.5 text-left transition-[background-color,border-color,box-shadow] duration-150 ease-out",
                         t.id === themeId
                           ? "border-primary ring-1 ring-primary"
                           : "border-border hover:border-foreground/20 hover:bg-accent",

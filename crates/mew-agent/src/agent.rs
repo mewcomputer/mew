@@ -745,6 +745,14 @@ impl Agent {
             denied_tools,
             skills: self.skills.iter().map(|s| s.name.clone()).collect(),
             project_vars: self.project_vars.clone(),
+            available_subagents: self
+                .subagent_defs
+                .iter()
+                .map(|d| mew_prompts::template::SubagentInfo {
+                    name: d.name.clone(),
+                    description: d.description.clone(),
+                })
+                .collect(),
             ..Default::default()
         };
 

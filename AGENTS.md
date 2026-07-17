@@ -1,184 +1,323 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+Project guidance for coding agents working in this repository.
+
+## Working rules
+
+- Preserve unrelated edits in the worktree. Inspect `git status` before editing and keep changes scoped to the request.
+- Follow the surrounding Rust or TypeScript style. Prefer small, reviewable changes and existing helpers over new abstractions.
+- Write behavior tests with implementation changes. Run the narrowest relevant tests first, then the broader gate when practical.
+- Update `CURRENT.md` with an append-only dated entry after each meaningful chunk of work. Do this after verification, not as a substitute for it.
+- Do not manually edit generated theme outputs. Change the manifest and run the theme codegen command.
 
 ## Commands
 
+Rust and repository checks:
+
 ```bash
-cargo build -p mew                  # build the binary
-cargo test --all                    # run all tests
-cargo test -p mew-agent             # run tests for one crate
-cargo test test_text_turn           # run a single test by name
-cargo clippy --all -- -D warnings   # lint (CI requires zero warnings)
-cargo fmt                           # format
-just ci                             # fmt + clippy + test (full CI gate)
-just run --model deepseek-v4-flash "hello"   # run a prompt
-just test-v                         # run tests with verbose output
-just deps                           # show crate dependency tree
-just tidy                           # update lockfile dependencies
-just record                         # record a new provider test fixture (set MEW_RECORD=1)
-just install                        # install to ~/.cargo/bin
+cargo build -p mew
+cargo test --all
+cargo test -p mew-agent
+cargo test test_text_turn
+cargo clippy --all -- -D warnings
+cargo fmt
+just ci                         # full CI gate: fmt, clippy, arch, themes, Rust/JS tests, e2e
+just arch-check
+just theme-codegen-check
+just test-v
+just deps
+just tidy
+MEW_RECORD=1 cargo test -p mew-provider-openai
+just install
 ```
 
-## Architecture
+Web, capture, docs, and mobile workflows:
 
-Three-layer pipeline: **TUI → Agent → Provider**
-
-```
-mew (binary)
-  ├─ mew-tui        event loop, ratatui UI, App state
-  │    │              ui/ (draw orchestration) → chat, sidebar, input, status, overlays, welcome
-  │    ├─ mew-agent conversation state, tool execution loop, AgentEvent channel
-  │    │    ├─ mew-provider     Provider trait + ProviderEvent stream
-  │    │    │    ├─ mew-provider-openai
-  │    │    │    ├─ mew-provider-anthropic
-  │    │    │    ├─ mew-provider-fake (tests only)
-  │    │    │    └─ mew-provider-router  splits traffic between cheap + capable models
-  │    │    ├─ mew-tools        Tool trait + built-ins (Bash, Read, Write, Edit, Glob, Grep, Echo, ExitTool, ProgressUpdate)
-  │    │    │    └─ mew-mcp     McpTool wraps remote MCP servers as Tool impls
-  │    │    ├─ mew-subagents    SubagentDef, SubagentRunner, child agent spawning
-  │    │    ├─ mew-personas     switchable system prompts with model pinning + tool allowlists
-  │    │    ├─ mew-hooks-runtime  subprocess-based Dispatcher: loads external plugins
-  │    ├─ mew-daemon    WebSocket server. Owns the agent loop;
-  │    │    per-connection session, ID-paired permission/ask requests via `mew-protocol`.
-  │    │    Listens on Unix socket AND/OR TCP (--port flag) for browser frontends.
-  │    ├─ mew-protocol  Wire message types + JSON codec (ClientMessage/ServerMessage).
-  │    │    Future: MessagePack over binary frames, same schema.
-  │    ├─ mew-web-bridge  TCP+WS listener that relays browser WS connections to the
-  │    │    daemon's Unix socket. Also serves the chat UI's static assets.
-  │    └─ mew-skills    skill discovery + loading from .mew/skills, .opencode/skills, etc.
-  └─ mew-context   discovers AGENTS.md / AGENTS.md files from cwd up to git root
-
-Non-Rust frontends:
-  mew-web-client (TypeScript)  Typed client for the mew wire protocol. Used by the
-    bundled chat UI and reusable for Discord/iOS/web frontends. Builds to
-    ESM with `.d.ts` types via `tsc`.
-
-Shared crates (data types, traits, and utilities used across layers):
-  mew-message   canonical message/part types (Message, Part, Role, Finish, ToolState…)
-  mew-config    config.toml + credential resolution + permission rule engine
-  mew-hooks     Dispatcher trait — pluggable hooks for observability, mutation, permissions
-  mew-session   JSONL session persistence (~/.local/share/mew/sessions/<id>.jsonl)
-  mew-catalog   models.dev catalog with 24-hour cache (pricing, shapes, context windows)
-  ratatui-mdstream  streaming markdown → ratatui Lines with syntect highlighting
+```bash
+just install-js                 # first checkout or lockfile changes
+just test-js
+just build-js
+just build-web
+just lint-all                   # Rust clippy + web-client TypeScript check
+just dev-web                    # Vite UI + bridge; accepts --open and bridge flags
+just dev-ui                     # Vite UI only
+just desktop-dev                # Tauri desktop shell + bundled debug daemon + HMR
+just desktop-build              # release Tauri bundle + architecture-specific daemon sidecar
+just site-dev
+just e2e                        # builds web assets and runs subprocess bridge tests
+just ios-core
+just ios-test
+mew tui-capture --help
 ```
 
-### Event flow
+`mew-web-bridge` embeds `mew-web-ui/dist`, so rebuild the UI before testing a
+production bridge. `mew tui-capture` is deterministic in local harness mode;
+daemon-connected capture requires a running daemon and real credentials. MP4
+capture also requires `ffmpeg`.
 
-1. User presses Enter → `Action::Submit` → `agent.run(prompt)` returns `mpsc::Receiver<AgentEvent>`
-2. `forward_agent_events` pumps that receiver into the TUI's main event channel
-3. TUI `recv()` loop processes events → `app.handle_agent_event()` updates App state → `draw()`
-4. Inside the agent: `turn_loop` streams provider events, collects tool calls from `MessageEnd(ToolUse)`, executes them sequentially, then loops back for the next LLM turn
+## Repository shape
 
-The drain loop after each primary event coalesces Agent/Tick events but caps agent events at 4 per frame during streaming so text appears incrementally.
+The Cargo workspace is defined in `Cargo.toml`. The important boundaries are:
 
-### Message model
+```text
+frontends and entry points
+  crates/mew             CLI and application wiring
+  crates/mew-tui         ratatui app, event loop, display state, headless harness
+  crates/mew-daemon      session-owning WebSocket daemon
+  crates/mew-web-bridge  browser TCP/WS bridge and embedded static UI server
+  crates/mew-mobile-core UniFFI mobile core and iroh client
 
-`Message` contains a `Vec<Part>`. Parts are `Text | Reasoning | ToolCall | ToolResult | Error`. `ToolCallPart` carries a `ToolState` enum (`Pending → Running → Completed | Error`) updated live as the tool executes. `app.tool_states: HashMap<PartId, ToolDisplayState>` mirrors this for the TUI.
+agent runtime
+  crates/mew-agent       conversation state, turn loop, compaction, tool execution
+  crates/mew-provider    Provider trait, requests, streaming events, auth helpers
+  crates/mew-provider-openai       OpenAI-compatible chat/SSE adapter
+  crates/mew-provider-anthropic    Anthropic-compatible adapter
+  crates/mew-provider-responses    OpenAI Responses and Codex OAuth adapter
+  crates/mew-provider-router       tiered provider resolution for task/subagent use
+  crates/mew-provider-fake          deterministic test/demo provider
+  crates/mew-tools        built-in tools and tool context
+  crates/mew-mcp          MCP stdio/HTTP clients and MCP tool wrappers
+  crates/mew-subagents    definitions, loaders, runners, child sessions
+  crates/mew-personas     persona definitions, loaders, transitions, model/tool policy
+  crates/mew-skills       SKILL.md discovery and loading
+  crates/mew-context      AGENTS.md/CLAUDE.md/project context loading
+  crates/mew-prompts      embedded prompt resources and template rendering
+  crates/mew-hooks        Dispatcher trait, hook types, plugin host
+  crates/mew-hooks-runtime subprocess plugin transport
+  crates/mew-ext-broker   extension manifests, capabilities, consent, tokens, sandboxing
 
-The TUI's `app.messages` is the **display** store. The agent's `self.messages` is the **API history** store. They're separate. In the TUI, all parts from a multi-turn agentic loop (text → tool calls → follow-up text) are merged into one assistant message display entry.
+shared data and infrastructure
+  crates/mew-message      canonical messages, parts, tool state, turn manifests
+  crates/mew-protocol     JSON WebSocket wire types and command registry
+  crates/mew-session       JSONL history, metadata, groups, and session readers/writers
+  crates/mew-config        config/state loading, credentials, permission engine, shell parsing
+  crates/mew-catalog       model metadata, pricing, thinking variants, cache
+  crates/mew-hashline      hash-anchored file patch format and recovery
+  crates/mew-harness       shared filesystem discovery helpers
+  crates/mew-raster        deterministic ratatui Buffer to PNG/MP4 rasterization support
+  crates/ratatui-mdstream  streaming markdown, wrapping, syntax highlighting, and tables
 
-### Streaming markdown
+other frontends
+  mew-web-client            TypeScript wire-protocol client
+  mew-web-ui                React/Vite browser frontend
+    src-tauri               macOS-first Tauri desktop shell (outside Cargo workspace)
+  mew-ios                   Swift app using mew-mobile-core
+  site                      Astro documentation/marketing site
+```
 
-`app.md_stream` / `app.md_state` track the currently-streaming text part. Only the **last** `Part::Text` in the active message uses `render_streaming(md_state)`; earlier text parts (preceding tool calls) use the static cached path. On `MessageEnd`, the stream is finalized and `pending_md_rerender` triggers a full re-render from `tp.text` on the next frame.
+## Runtime architecture
 
-### Adding a provider
+The canonical path is:
 
-Implement `Provider` in a new `mew-provider-*` crate. The two shapes already handled are `openai` (SSE, delta-based) and `anthropic` (SSE, content-block events). `build_provider` in `main.rs` maps `shape` strings to adapters; add a new match arm there.
+```text
+frontend → transport → daemon → session → agent → provider
+```
 
-Router providers are a task-only configuration primitive. A provider entry with `kind = "router"` defines three tiers: `nano` (cheapest), `micro` (medium), and `deci` (most capable). The Auto/Auto+ permission classifier automatically uses the router's `micro` tier, and subagents can request a tier by passing `model: "nano"`, `model: "micro"`, `model: "deci"`, or any fully-qualified `provider/model`. Router providers cannot be selected as the main chat provider; the user's chosen model handles all chat turns, including tool-call turns, without escalation.
+The built-in TUI has two modes:
 
-### Adding a tool
+- Standalone mode uses `runtime::local::LocalTarget` and owns an `Agent` in the
+  `mew` binary.
+- Daemon mode uses `runtime::daemon::DaemonTarget` and `DaemonClient`. The
+  daemon owns the `Agent`; the TUI receives the same logical `AgentEvent` stream
+  after wire translation.
 
-Implement the `Tool` trait (name, description, JSON schema, sensitivity, async execute). Register it in `build_tools()` in `main.rs`. MCP tools register automatically via `McpTool` after `connect_mcp_servers()`.
+The web path is `browser → mew-web-bridge → daemon`. The bridge relays WebSocket
+frames to the daemon's Unix socket and serves the compiled React assets. The
+mobile path uses `mew-mobile-core` over iroh and the same protocol model.
 
-Tool `sensitivity()` controls the default permission gate: `ReadOnly` → auto-allow, `Mutating` → prompt, `Dangerous` → prompt. The `PermissionEngine` in `mew-config` applies declarative rules before prompting.
+The desktop path is `Tauri host → loopback TCP daemon`. The thin Rust host in
+`mew-web-ui/src-tauri` uses a shared loopback rendezvous port (`25566` by
+default, overridable with `MEW_DESKTOP_DAEMON_PORT`). It first performs a
+WebSocket ping/pong health check and attaches to an existing mew daemon without
+owning it. If the port is occupied by another service, startup fails with an
+actionable error rather than launching a duplicate. Otherwise it starts
+`mew daemon --port 127.0.0.1:<port>`, waits for a protocol-level health check,
+and exposes the WebSocket URL through the `daemon_ws_url` command. Startup is
+lazy so the shared React app can render a retryable failure state.
 
-### Personas
+The React tree is shared with the browser app; `mew-web-ui/src/lib/host.ts`
+only changes how the endpoint is resolved. Release bundles contain an
+architecture-specific `mew` sidecar, prepared by
+`mew-web-ui/scripts/build-sidecar.mjs`. The host owns and kills sidecars and
+binaries it launches. `MEW_DESKTOP_DAEMON_URL` is attach-only: it connects to
+an already-running daemon and never kills it. `MEW_DESKTOP_DAEMON_BINARY`
+selects an external executable for this app instance to launch and own.
 
-Switchable system prompts with per-persona model pinning and tool allowlisting. Personas are loaded at startup from `PERSONA.md` files:
+`SessionManager` owns active sessions and reloads idle top-level sessions from
+the path returned by `mew_session::session_dir()` (`MEW_SESSION_DIR` overrides
+it). A session serializes turns with a lock and
+broadcasts provider, tool, permission, question, subagent, and metadata events
+to all attached clients. Permission and question requests are paired by request
+ID on the wire. The daemon is single-user and has no general authentication or
+multi-tenant isolation; do not expose an unauthenticated TCP listener publicly.
 
-- **Search order** (earlier wins on duplicate name): `<cwd→git-root>/.mew/personas/<name>/PERSONA.md`, then `~/.config/mew/personas/<name>/PERSONA.md`
-- **Format**: YAML frontmatter (`name`, `description`, optional `mew:` block with `model` and `tools` list) followed by markdown body
-- **Model pinning**: a persona can force a specific `provider/model` pair (e.g. `z-ai/glm-4.5-air`), overriding the session default
-- **Tool allowlisting**: `tools: []` (no tools), `tools: [read, bash]` (whitelist), or absent (all tools available)
-- **Activation**: `mew-personas` discovers and loads them; the TUI exposes switching via the sidebar
+### Agent turn loop
 
-The system prompt is rebuilt from scratch every turn, so persona body text is always injected fresh.
+`Agent::run_with_parts` returns an `mpsc::Receiver<AgentEvent>` immediately and
+runs the turn asynchronously. `turn_loop` streams provider events, appends the
+assistant message, collects tool calls at `MessageEnd`, executes pending tools
+sequentially, and loops back to the provider when tool results require another
+turn. Compaction, hooks, permission checks, subagents, shell jobs, and session
+persistence all sit around this loop.
 
-### Hooks / Dispatcher
+`mew_message::Message` is the API/history model. Its parts are `Text`,
+`Reasoning`, `File`, `ToolCall`, `ToolResult`, and `Compaction`. Tool calls carry
+`ToolState` transitions of `Pending → Running → Completed | Error`.
 
-The `mew-hooks::Dispatcher` trait is the plugin architecture. It exposes twenty-one hook points (`HookId` variants) across twenty-six `Dispatcher` trait methods covering the full agent lifecycle: `init`, `shutdown`, `on_register_tools`, `on_register_slash_commands`, `execute_slash_command`, `on_provider_event`, `on_tool_error`, `on_subagent_start`, `on_subagent_end`, `on_turn_end`, `on_pre_model_turn`, `on_stop`, `on_pre_compaction`, `on_post_compaction`, `on_chat_message`, `on_chat_params`, `on_chat_headers`, `on_system_prompt`, `on_tool_execute_before`, `on_tool_execute_after`, `on_permission_ask`, `on_shell_env`, `on_user_input`, `on_persona_change`, `on_session_save`, and `on_model_finish`.
+The TUI's `App` owns a separate display store. It merges all parts from a
+multi-turn agentic exchange into the visible assistant entry. Streaming markdown
+uses `app.md_stream` and `app.md_state`; only the last active text part uses the
+incremental renderer, while completed or earlier parts use the cache.
 
-`NopDispatcher` is the default (all passthrough/no-op). `mew-hooks-runtime` provides `SubprocessDispatcher`, which spawns plugins as subprocesses communicating via stdin/stdout newline-delimited JSON-RPC 2.0. Plugins can register dynamic tools (`ToolRegistration`), slash commands (`SlashCommandDef`), and hook into any lifecycle event. The `PluginHost` handle gives plugins access to a restricted config subset, key-value storage (per-plugin, persisted to disk), a notify channel to the TUI, and a `set_ui` function for rendering custom content beside the input area.
+### TUI event flow
 
-The upgrade path to a Wasmtime component-model runtime keeps the same `Dispatcher` trait — only the transport changes.
+1. Crossterm input becomes a `mew_tui::events::Action`.
+2. `EventLoop::forward_agent_events` pumps agent events into the TUI channel.
+3. The main loop updates `App` state and draws.
+4. The drain coalesces ticks and queued actions, processes at most four agent
+   events per frame while streaming, then replays actions through the runtime
+   dispatcher.
 
-### Subagent run display
+### Runtime invariants
 
-The sidebar shows a human-friendly name for every running subagent (e.g. `▸ Curie (researcher)  3s ↳ scanning the repo`). The display name is picked by the runner at spawn time from `mew_subagents::DISPLAY_NAMES` (25 entries) via `pick_display_name(seed: u128)`, which hashes the subagent's fresh `SessionId` with splitmix64 — deterministic, no `rand` dep, decent distribution.
+These are enforced by `just arch-check` and by the deny lint in
+`crates/mew/src/runtime/dispatch.rs`:
 
-To add a new name: append it to `DISPLAY_NAMES` in `crates/mew-subagents/src/lib.rs`. To plug a user-configurable pool in later, the function already takes `(seed, list)`-shaped args.
+1. Match `Action` and `SlashResult` only in `runtime/dispatch.rs`. Constructors,
+   tests, and `App::handle_slash` are fine; execution belongs in
+   `handle_action`.
+2. The event drain never interprets actions. It coalesces events, caps streaming
+   work, queues every produced action, and replays the queue after draining.
+3. Push display messages through `app.push_message`, `app.push_synthetic_message`,
+   or `app.push_user`. Direct `app.messages.push(...)` skips dirty-state updates.
+4. A new command needs a `CommandTarget` method, a dispatch arm, and a test in
+   the same change. `LocalTarget` and `DaemonTarget` are both implemented today.
+5. `Unsupported` is the only sanctioned backend no-op. Returning it renders a
+   visible alert; never swallow an unsupported command.
 
-`AgentEvent::SubagentStatus { parent_call_id, tool_name, message }` carries the subagent's `progress_update(message: "...")` content from the runner up to the TUI's `SubagentState.last_progress`, which the sidebar renders on a sub-line with a `↳` indent. To add a new subagent-controlled UI affordance, the pattern is: runner emits a new `SubagentEvent` variant → pump translates to a new `AgentEvent` variant → `App::handle_agent_event` stores it in `SubagentState` → sidebar renders it.
+### Adding providers, tools, and protocol features
 
-## Configuration
+To add a provider, implement `Provider` in a `mew-provider-*` crate and add the
+adapter selection in `crates/mew/src/setup/providers.rs`. Current configured
+adapter shapes are `openai`, `anthropic`, and `responses`; keep provider-specific
+wire details inside the adapter. Add fixture or adapter tests before changing
+the shared `ProviderEvent` model.
 
-Config file: `~/.config/mew/config.toml` (macOS: `~/Library/Application Support/ai.mew.mew/config.toml`)
+To add a built-in tool, implement `mew_tools::Tool` with a name, description,
+JSON schema, sensitivity, and async `execute`, then register it in
+`crates/mew/src/setup/agent.rs::build_tools`. `ReadOnly`, `Mutating`, and
+`Dangerous` sensitivity feed the permission engine. MCP tools and approved
+plugin tools are registered through their own integration paths.
 
-Config is loaded via `config-rs` with layered sources (later wins):
-1. Built-in provider defaults (`Config::default()`: `opencode-zen`, `opencode-go`, `z-ai`, `deepseek`)
-2. `config.toml` (overrides built-in providers, adds custom providers)
-3. Environment variables with `MEW_` prefix (`MEW_DEFAULT_MODEL`, `MEW_WORKSPACE__ROOTS`, `__` = nested path)
+To add a daemon feature, update `ClientMessage`/`ServerMessage` in
+`mew-protocol`, the daemon handler and event translators, `DaemonClient`, the
+TypeScript client, and the web store/UI as applicable. Add JSON roundtrip and
+end-to-end coverage. Keep session-management messages separate from the
+streaming `AgentEvent` translation path.
 
-`.env` in the working directory is loaded via `dotenvy` at startup (before tracing init, so `RUST_LOG` works).
+## Loadable project resources
 
-Credential resolution order for `credential_ref`:
-1. Env var `MEW_CRED_<REF_UPPERCASED>` (hyphens → underscores)
-2. System keyring (`mew` service, account = ref name)
-3. `credentials.json` in the config directory
+`mew-context` walks from the current directory to the git root and loads files
+from most general to most specific. At each level, `AGENTS.md` wins over
+`CLAUDE.md`; `.mew/AGENTS.md` and `.mew/wiki.md` are additive. Global context
+uses `~/.config/mew/AGENTS.md`, then `~/.claude/CLAUDE.md` as fallback.
 
-MCP servers are loaded from `mcp.json` in the working directory (Codex format: `{ "mcpServers": { "name": { "command": "...", "args": [...] } } }`).
+Skills and personas use project and global locations under `.mew`, `.opencode`,
+`.claude`, and `.agents`, with project-local definitions taking precedence over
+global definitions and earlier duplicates winning. Skills are directories
+containing `SKILL.md`; personas are directories containing `PERSONA.md`; custom
+subagents are markdown definitions in the corresponding agent locations. Built-in
+skills and the `planner`/`builder` personas are added when not overridden.
 
-Last-used model/provider is persisted to `state.toml` and restored on next launch. CLI `--provider`/`--model` flags override state, which overrides the built-in default (`opencode-zen`).
+Persona frontmatter supports `name`, `description`, and a `mew:` or `polytoken:`
+block for model pinning, tool/skill allowlists, denied tools, templates,
+transitions, fallback models, and an accent color. Persona bodies are injected
+into a freshly rebuilt system prompt each turn.
 
-### Workspace sandboxing
+Subagent definitions can pin a fully qualified `provider/model` or a router tier
+(`nano`, `micro`, `deci`), restrict tools, and set `max_turns` or
+`max_duration_secs`. The runner gives active tasks a deterministic human display
+name and emits progress through `AgentEvent::SubagentStatus`.
 
-`workspace.roots` is a list of directories the agent is allowed to touch. It feeds two layers:
+## Configuration and security boundaries
 
-- **Agent layer (read/write/edit/glob/grep)**: `agent.workspace_roots` (defaulted to current_dir when empty) is enforced by `ensure_workspace_path` before any path-based tool runs. This is the existing behavior.
-- **Permission-engine escape tier (bash/shell_background/shell_monitor)**: the engine's `with_workspace_roots` (set in `build_permission_engine` from `cfg.workspace.roots`) inspects parsed shell commands. If any path-shaped positional arg resolves outside the configured roots, the decision is escalated from `AllowOnce` to `Prompt`. Deny rules still win. Sits between deny rules and the Permissive short-circuit so user rules and the mode hierarchy both apply. Empty `workspace_roots` disables the escape tier — useful as an opt-out.
+Use `mew config path` to locate the platform-specific config directory. It holds
+`config.toml`, `state.toml`, credentials fallback data, plugin storage, and
+related config state. Session storage, extension consent, model caches, and
+installed themes have their own resolver functions and may use separate data
+locations. Configuration layers are:
 
-Cwd sourcing for the escape tier: `input["cwd"]` (when present, e.g. on `shell_background` / `shell_monitor`) → caller-supplied `cwd` argument to `engine.check()` → engine's `default_cwd` → `Path::new(".")`. A `cat /etc/passwd` always escapes regardless of cwd. `$HOME/...` and `~/...` are conservatively flagged as escapes without trying to resolve them.
+1. Built-in defaults (`opencode-zen`, `opencode-go`, `z-ai`, `deepseek`, `umans`,
+   and `codex` provider entries).
+2. `config.toml` overrides and additions.
+3. `MEW_` environment variables, with `__` for nesting.
 
-### Multi-workspace daemon sessions
+`.env` is loaded at process startup. Credential lookup is
+`MEW_CRED_<NORMALIZED_REF>`, then the `mew` keyring service, then
+`credentials.json` in the config directory. Do not log or commit credentials.
 
-A single daemon can serve sessions across multiple project directories. Each session carries its own `cwd` (sent in `NewSession { cwd }` and persisted in session metadata). The agent build path (`build_session_agent`) threads this cwd through:
+Important config fields include `default_model`, `models`, `default_persona`,
+`plan_path`, `workspace.roots`, `permissions`, `secrets`, `plugins`, and
+`tui.theme`. `state.toml` persists last provider/model, sidebar state, disabled
+plugins, revoked extensions, and the active theme. Use
+`mew_session::session_dir()` for session files, `ConsentState::load()` for
+extension consent, and `Theme::themes_dir()` for installed themes instead of
+hardcoding platform paths.
 
-- `Agent.cwd` field — all file tools, the permission engine, template context, and `plan_path` resolution read from it
-- Skills, personas, context files (AGENTS.md/AGENTS.md), and subagent defs are loaded relative to the session cwd
-- Shell session cwd and `workspace_roots` default to the session cwd
-- Subagents inherit the parent agent's cwd and workspace roots via `SimpleRunner::with_cwd`
-- Resume/attach passes `meta.cwd` through, so cwd survives daemon restarts and session eviction
+`workspace.roots` protects path-based tools and also adds an escape check for
+shell, background-shell, and shell-monitor commands. Empty roots opt out of the
+escape tier and default path tools to the current directory. Secret file globs
+force prompts, while configured secret words are redacted from search/tool
+output. Permission modes are `standard`, `permissive`, `auto`, `auto_plus`, and
+`dangerous`; dangerous mode bypasses prompts and rules, so use it only when
+explicitly requested.
 
-The TUI client (`mew chat --connect`) sends its `current_dir()` as the session cwd. The web client already sends cwd. Sessions created without a cwd fall back to the daemon's launch directory (today's behavior).
+Daemon sessions currently carry a `cwd` through the protocol and persist it in
+session metadata, but `build_session_agent` still derives its operational cwd
+from the daemon process. Treat per-session loading of context, skills, personas,
+MCP config, shell state, and workspace roots as incomplete until the builder
+accepts and uses `AgentBuildParams.cwd`. Project `.env` and MCP discovery are
+also process-startup concerns, not per-session configuration.
 
-**Limitations:** Project `.env` is not applied per-session (process env comes from the daemon's launch dir). `mcp.json` is not yet wired into daemon sessions (MCP config discovery is cwd-based but the daemon doesn't call `connect_mcp_servers`).
+### Plugins and extensions
 
-## Progress tracking
+Bare executable plugins are discovered in `~/.config/mew/plugins` and
+`.mew/plugins`, then run through newline-delimited JSON-RPC by
+`mew-hooks-runtime`. They can register tools and slash commands and observe or
+mutate dispatcher hooks. Plugin host storage is namespaced and persisted.
 
-Save progress frequently to `CURRENT.md`. Treat it as append-only — add a dated section each time you complete a meaningful chunk of work. Summarize what was done, where, and any decisions made. User clears this file periodically.
+Structured extension packages live in `~/.config/mew/extensions/<name>` or
+`.mew/extensions/<name>` and contain `mew-ext.toml`. Project packages beat global
+packages. `mew-ext-broker` applies capability-based consent, attach tokens, and
+macOS Seatbelt sandboxing. Network is denied by default for sandboxed extensions;
+non-macOS platforms currently warn and run without OS sandbox enforcement.
 
-## Runtime invariants
+## Themes and generated assets
 
-The `runtime/` module in `crates/mew/src/` is the single dispatch path. These invariants are enforced by `just arch-check` and `#![deny(clippy::wildcard_enum_match_arm)]` in `dispatch.rs`:
+`crates/mew-tui/resources/theme_manifest.json` is the source of truth for the
+TUI and web theme tokens. `theme_codegen` generates:
 
-1. **Never match `Action` or `SlashResult` outside `runtime/dispatch.rs`.** The `handle_action` function is the only place that pattern-matches on these enums. Adding a variant breaks the build (clippy deny + exhaustive match).
+- `crates/mew-tui/src/theme_generated.rs`
+- `mew-web-ui/src/generated-themes.css`
+- `crates/ratatui-mdstream/resources/theme.tmTheme`
 
-2. **The drain never interprets events.** The drain loop coalesces scrolls/ticks, caps agent events at 4 per frame during streaming, and queues every produced `Action` into a `Vec<Action>`. After the drain exits, the vec is replayed through `handle_action`.
+Run `just theme-codegen` after manifest changes and `just theme-codegen-check`
+before committing. Installed theme JSON files are validated against the shared
+manifest. See `docs/THEMING.md` for token conventions.
 
-3. **Messages are pushed only through `App` methods.** Use `app.push_message(msg)`, `app.push_synthetic_message(text)`, or `app.push_user(display, attachments)`. Never call `app.messages.push(...)` directly — it skips `mark_chat_dirty()` and causes stale renders. Enforced by `just arch-check` grep.
+## Verification targets
 
-4. **A new command means a `CommandTarget` method + dispatch arm + test in the same change.** The `CommandTarget` trait in `runtime/target.rs` defines the backend abstraction. `LocalTarget` implements it for standalone mode; `DaemonTarget` (Phase 2) for daemon mode.
+- Rust behavior: `cargo test --all` and `cargo clippy --all -- -D warnings`.
+- Architecture rules and generated themes: `just arch-check` and
+  `just theme-codegen-check`.
+- TypeScript client: `just test-js`, `just build-js`, and `pnpm --filter
+  @mew/web-client exec tsc --noEmit`.
+- React UI: `pnpm --filter mew-web-ui test` and
+  `pnpm --filter mew-web-ui build`.
+- Daemon/bridge subprocess path: `just e2e`.
+- TUI appearance: golden frames under `crates/mew-tui/tests/golden/` and
+  `mew tui-capture` screenshots.
 
-5. **`Unsupported` is the only sanctioned way to not implement something.** Returning `Err(Unsupported("reason"))` from a `CommandTarget` method renders a visible alert — never a swallowed keypress.
+When a test fails, fix the underlying behavior or document a reproducible
+external blocker. Do not remove coverage or weaken a check to make the suite
+green.

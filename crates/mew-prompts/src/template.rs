@@ -64,6 +64,16 @@ pub struct TemplateContext {
     pub skills: Vec<String>,
     pub mcp_servers: Vec<String>,
     pub project_vars: std::collections::HashMap<String, String>,
+    /// Subagent defs available to dispatch (name + description). Empty when
+    /// no subagents are configured.
+    pub available_subagents: Vec<SubagentInfo>,
+}
+
+/// Minimal info about a subagent for template rendering.
+#[derive(Debug, Clone, Default)]
+pub struct SubagentInfo {
+    pub name: String,
+    pub description: String,
 }
 
 impl TemplateContext {
@@ -119,6 +129,18 @@ pub fn render(body: &str, ctx: &TemplateContext) -> String {
         .map(|s| MjValue::from(s.as_str()))
         .collect();
 
+    let subagents_val: Vec<MjValue> = ctx
+        .available_subagents
+        .iter()
+        .map(|s| {
+            let ctx = minijinja::context! {
+                name => s.name.as_str(),
+                description => s.description.as_str(),
+            };
+            ctx
+        })
+        .collect();
+
     let env_ctx = context! {
         supports_vision => ctx.supports_vision,
         persona_name => &ctx.persona_name,
@@ -135,6 +157,7 @@ pub fn render(body: &str, ctx: &TemplateContext) -> String {
         skills => skills_val,
         mcp_servers => mcp_val,
         project_vars => &ctx.project_vars,
+        available_subagents => subagents_val,
     };
 
     let mut env = minijinja::Environment::new();

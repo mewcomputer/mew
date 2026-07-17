@@ -1,12 +1,12 @@
 use ansi_to_tui::IntoText as _;
+use ratatui::style::Color;
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame,
 };
-use ratatui_mdstream::Theme as MdTheme;
 use std::rc::Rc;
 
 use super::display_width;
@@ -27,6 +27,8 @@ struct ChatLineCtx<'t> {
     anchor_col: usize,
     end_row: usize,
     end_col: usize,
+    sel_fg: Color,
+    sel_bg: Color,
 }
 
 impl<'t> ChatLineCtx<'t> {
@@ -91,13 +93,13 @@ impl<'t> ChatLineCtx<'t> {
         }
         if start == 0 && end_excl == full.len() {
             for s in line.spans.iter_mut() {
-                s.style = s.style.fg(Color::Black).bg(Color::White);
+                s.style = s.style.fg(self.sel_fg).bg(self.sel_bg);
             }
             return line;
         }
         let mut new_spans: Vec<Span<'static>> = Vec::new();
         let mut offset = 0usize;
-        let sel_style = Style::default().fg(Color::Black).bg(Color::White);
+        let sel_style = Style::default().fg(self.sel_fg).bg(self.sel_bg);
         for s in line.spans {
             let len = s.content.len();
             let span_end = offset + len;
@@ -134,7 +136,7 @@ impl<'t> ChatLineCtx<'t> {
 
 pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     // Reserve the rightmost 1 column for the scrollbar so tool blocks (which
-    // paint app.theme.tokens.tool_bg across the full paragraph width) can't cover it. The
+    // paint app.theme.resolve("tool.background") across the full paragraph width) can't cover it. The
     // down-indicator then overlays the last column of the chat (like the
     // up-indicator at the top-left).
     let scrollbar_area = Rect {
@@ -214,12 +216,12 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.scroll > 0 {
-        let indicator = Span::styled("↑", Style::default().fg(Color::Yellow));
+        let indicator = Span::styled("↑", Style::default().fg(app.theme.resolve("text.warning")));
         let indicator_area = Rect::new(area.x, area.y, 2, 1);
         f.render_widget(Paragraph::new(Line::from(indicator)), indicator_area);
     }
     if app.scroll < max_scroll {
-        let indicator = Span::styled("↓", Style::default().fg(Color::Yellow));
+        let indicator = Span::styled("↓", Style::default().fg(app.theme.resolve("text.warning")));
         let indicator_area = Rect::new(
             chat_inner.x + chat_inner.width - 1,
             area.y + area.height - 1,
@@ -243,7 +245,8 @@ pub(crate) fn build_chat_lines(
 ) -> crate::app::BuiltChat {
     let mut lines: Vec<ratatui::text::Line<'static>> = Vec::new();
     let mut chat_rows: Vec<String> = Vec::new();
-    let tool_bg_style = Style::default().bg(app.theme.tokens.tool_bg);
+    let tool_bg = app.theme.resolve("tool.background");
+    let tool_bg_style = Style::default().bg(tool_bg);
     let msg_count = app.messages.len();
     let tool_width = chat_width;
     app.reasoning_header_rows.clear();
@@ -256,14 +259,24 @@ pub(crate) fn build_chat_lines(
         anchor_col: app.sel_anchor_col.unwrap_or(0),
         end_row: app.sel_end_row.unwrap_or(0),
         end_col: app.sel_end_col.unwrap_or(0),
+        sel_fg: app.theme.resolve("selection.foreground"),
+        sel_bg: app.theme.resolve("selection.background"),
     };
 
     for (msg_idx, msg) in app.messages.iter().enumerate() {
         let is_last = msg_idx + 1 == msg_count;
         let is_streaming = app.streaming && is_last;
         let (prefix, prefix_color, content_style) = match msg.role {
-            Role::User => (">", Color::Cyan, Style::default().fg(Color::White)),
-            Role::Assistant => ("", Color::Gray, Style::default().fg(Color::White)),
+            Role::User => (
+                ">",
+                app.theme.resolve("text.accent"),
+                Style::default().fg(app.theme.resolve("foreground")),
+            ),
+            Role::Assistant => (
+                "",
+                app.theme.resolve("text.muted"),
+                Style::default().fg(app.theme.resolve("foreground")),
+            ),
         };
 
         let mut message_had_content = false;
@@ -276,7 +289,10 @@ pub(crate) fn build_chat_lines(
                     for chunk in wrap_text_to_width(&header, header_w) {
                         sel_ctx.push_line(Line::from(vec![
                             Span::raw("  "),
-                            Span::styled(chunk, Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                chunk,
+                                Style::default().fg(app.theme.resolve("text.muted")),
+                            ),
                         ]));
                     }
                     message_had_content = true;
@@ -367,11 +383,11 @@ pub(crate) fn build_chat_lines(
                         "○"
                     };
                     let state_color = if any_error {
-                        Color::Red
+                        app.theme.resolve("text.error")
                     } else if any_running {
-                        Color::Yellow
+                        app.theme.resolve("text.warning")
                     } else {
-                        Color::Green
+                        app.theme.resolve("text.success")
                     };
 
                     // Deduplicate tool names for the summary.
@@ -387,7 +403,7 @@ pub(crate) fn build_chat_lines(
                         format!("{}, +{}", unique_names[0], unique_names.len() - 1)
                     };
 
-                    if let Some(line) = push_tool_edge(tool_width, true, app.theme.tokens.tool_bg) {
+                    if let Some(line) = push_tool_edge(tool_width, true, tool_bg) {
                         sel_ctx.push_line(line);
                     }
                     sel_ctx.push_line(push_tool_line(
@@ -398,20 +414,19 @@ pub(crate) fn build_chat_lines(
                                 format!("{} {} tool calls: {}", state_glyph, run_len, names_str),
                                 Style::default()
                                     .fg(state_color)
-                                    .bg(app.theme.tokens.tool_bg)
+                                    .bg(tool_bg)
                                     .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
                                 "  (click to expand)",
                                 Style::default()
-                                    .fg(Color::DarkGray)
-                                    .bg(app.theme.tokens.tool_bg),
+                                    .fg(app.theme.resolve("text.muted"))
+                                    .bg(tool_bg),
                             ),
                         ],
                         tool_bg_style,
                     ));
-                    if let Some(line) = push_tool_edge(tool_width, false, app.theme.tokens.tool_bg)
-                    {
+                    if let Some(line) = push_tool_edge(tool_width, false, tool_bg) {
                         sel_ctx.push_line(line);
                     }
                     message_had_content = true;
@@ -423,15 +438,16 @@ pub(crate) fn build_chat_lines(
                 Part::Text(tp) => {
                     if prefix.is_empty() {
                         let use_streaming = is_streaming && Some(part_idx) == last_text_part_idx;
+                        let md_theme = app.theme.md_theme();
                         let md_lines: Vec<ratatui::text::Line<'static>> = if use_streaming {
                             // Use incremental RenderCache: cache committed blocks,
                             // only render the pending block each frame.
                             let mut highlighter =
-                                ratatui_mdstream::highlight::SyntectHighlighter::new();
+                                ratatui_mdstream::highlight::SyntectHighlighter::default();
                             app.md_render_cache.extend(
                                 app.md_state.committed(),
                                 md_width,
-                                &MdTheme::dark(),
+                                &md_theme,
                                 &mut highlighter,
                             );
                             let mut lines = app.md_render_cache.collect_lines();
@@ -446,7 +462,7 @@ pub(crate) fn build_chat_lines(
                                 let pending_lines = ratatui_mdstream::render::render_pending(
                                     &pending_ref,
                                     md_width,
-                                    &MdTheme::dark(),
+                                    &md_theme,
                                     &mut highlighter,
                                     &ratatui_mdstream::pending::FullPending,
                                 );
@@ -470,9 +486,7 @@ pub(crate) fn build_chat_lines(
                                 } else {
                                     cache.remove(&tp.base.id);
                                     let lines = fix_em_dashes(ratatui_mdstream::render_markdown(
-                                        &tp.text,
-                                        md_width,
-                                        &MdTheme::dark(),
+                                        &tp.text, md_width, &md_theme,
                                     ));
                                     let rc = Rc::new(lines);
                                     cache.insert(
@@ -483,9 +497,7 @@ pub(crate) fn build_chat_lines(
                                 }
                             } else {
                                 let lines = fix_em_dashes(ratatui_mdstream::render_markdown(
-                                    &tp.text,
-                                    md_width,
-                                    &MdTheme::dark(),
+                                    &tp.text, md_width, &md_theme,
                                 ));
                                 let rc = Rc::new(lines);
                                 cache.insert(
@@ -550,7 +562,7 @@ pub(crate) fn build_chat_lines(
                         .push((rp.base.id, sel_ctx.visual_row));
                     sel_ctx.push_line(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled(header, Style::default().fg(Color::DarkGray)),
+                        Span::styled(header, Style::default().fg(app.theme.resolve("text.muted"))),
                     ]));
                     if is_expanded {
                         // Pre-wrap reasoning text to `md_width` so each line
@@ -559,7 +571,10 @@ pub(crate) fn build_chat_lines(
                             for chunk in wrap_text_to_width(src_line, md_width) {
                                 sel_ctx.push_line(Line::from(vec![
                                     Span::raw("  "),
-                                    Span::styled(chunk, Style::default().fg(Color::DarkGray)),
+                                    Span::styled(
+                                        chunk,
+                                        Style::default().fg(app.theme.resolve("text.muted")),
+                                    ),
                                 ]));
                             }
                         }
@@ -576,8 +591,14 @@ pub(crate) fn build_chat_lines(
                         .unwrap_or("file");
                     sel_ctx.push_line(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled("[image]  ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(name.to_string(), Style::default().fg(Color::Cyan)),
+                        Span::styled(
+                            "[image]  ",
+                            Style::default().fg(app.theme.resolve("text.muted")),
+                        ),
+                        Span::styled(
+                            name.to_string(),
+                            Style::default().fg(app.theme.resolve("text.accent")),
+                        ),
                     ]));
                     message_had_content = true;
                 }
@@ -603,9 +624,10 @@ fn render_single_tool_call(
     tool_width: u16,
     tool_bg_style: Style,
 ) {
+    let tool_bg = app.theme.resolve("tool.background");
     let (state_label, state_color) = tool_call_label_and_color(app, tc);
 
-    if let Some(line) = push_tool_edge(tool_width, true, app.theme.tokens.tool_bg) {
+    if let Some(line) = push_tool_edge(tool_width, true, tool_bg) {
         sel_ctx.push_line(line);
     }
 
@@ -617,7 +639,7 @@ fn render_single_tool_call(
                 format!("{} {}", state_label, tc.tool_name),
                 Style::default()
                     .fg(state_color)
-                    .bg(app.theme.tokens.tool_bg)
+                    .bg(tool_bg)
                     .add_modifier(Modifier::BOLD),
             ),
         ],
@@ -632,8 +654,8 @@ fn render_single_tool_call(
                 Span::styled(
                     args,
                     Style::default()
-                        .fg(Color::DarkGray)
-                        .bg(app.theme.tokens.tool_bg),
+                        .fg(app.theme.resolve("text.muted"))
+                        .bg(tool_bg),
                 ),
             ],
             tool_bg_style,
@@ -646,8 +668,7 @@ fn render_single_tool_call(
             let lines = parsed.lines;
             let skip = lines.len().saturating_sub(TOOL_LINES_LIVE);
             for line in lines.into_iter().skip(skip) {
-                for wrapped in wrap_tool_line(tool_width, line, "      ", app.theme.tokens.tool_bg)
-                {
+                for wrapped in wrap_tool_line(tool_width, line, "      ", tool_bg) {
                     sel_ctx.push_line(wrapped);
                 }
             }
@@ -676,25 +697,21 @@ fn render_single_tool_call(
                             Span::styled(
                                 format!("... ({} earlier lines)", skip),
                                 Style::default()
-                                    .fg(Color::DarkGray)
-                                    .bg(app.theme.tokens.tool_bg),
+                                    .fg(app.theme.resolve("text.muted"))
+                                    .bg(tool_bg),
                             ),
                         ],
                         tool_bg_style,
                     ));
                 }
                 for line in lines.into_iter().skip(skip) {
-                    for wrapped in
-                        wrap_tool_line(tool_width, line, "      ", app.theme.tokens.tool_bg)
-                    {
+                    for wrapped in wrap_tool_line(tool_width, line, "      ", tool_bg) {
                         sel_ctx.push_line(wrapped);
                     }
                 }
             } else {
                 for line in lines.into_iter().take(TOOL_LINES_MAX) {
-                    for wrapped in
-                        wrap_tool_line(tool_width, line, "      ", app.theme.tokens.tool_bg)
-                    {
+                    for wrapped in wrap_tool_line(tool_width, line, "      ", tool_bg) {
                         sel_ctx.push_line(wrapped);
                     }
                 }
@@ -706,8 +723,8 @@ fn render_single_tool_call(
                             Span::styled(
                                 format!("... ({} more lines)", line_count - TOOL_LINES_MAX),
                                 Style::default()
-                                    .fg(Color::DarkGray)
-                                    .bg(app.theme.tokens.tool_bg),
+                                    .fg(app.theme.resolve("text.muted"))
+                                    .bg(tool_bg),
                             ),
                         ],
                         tool_bg_style,
@@ -719,14 +736,16 @@ fn render_single_tool_call(
             for line in diff.lines().take(DIFF_LINES_MAX) {
                 let style = if line.starts_with('+') {
                     Style::default()
-                        .fg(Color::Green)
-                        .bg(app.theme.tokens.tool_bg)
+                        .fg(app.theme.resolve("text.success"))
+                        .bg(tool_bg)
                 } else if line.starts_with('-') {
-                    Style::default().fg(Color::Red).bg(app.theme.tokens.tool_bg)
+                    Style::default()
+                        .fg(app.theme.resolve("text.error"))
+                        .bg(tool_bg)
                 } else {
                     Style::default()
-                        .fg(Color::DarkGray)
-                        .bg(app.theme.tokens.tool_bg)
+                        .fg(app.theme.resolve("text.muted"))
+                        .bg(tool_bg)
                 };
                 sel_ctx.push_line(push_tool_line(
                     tool_width,
@@ -746,8 +765,8 @@ fn render_single_tool_call(
                         Span::styled(
                             format!("... ({} more lines)", diff_lines - DIFF_LINES_MAX),
                             Style::default()
-                                .fg(Color::DarkGray)
-                                .bg(app.theme.tokens.tool_bg),
+                                .fg(app.theme.resolve("text.muted"))
+                                .bg(tool_bg),
                         ),
                     ],
                     tool_bg_style,
@@ -759,15 +778,14 @@ fn render_single_tool_call(
         if !err.is_empty() {
             let parsed = err.as_str().into_text().unwrap_or_default();
             for line in parsed.lines {
-                for wrapped in wrap_tool_line(tool_width, line, "      ", app.theme.tokens.tool_bg)
-                {
+                for wrapped in wrap_tool_line(tool_width, line, "      ", tool_bg) {
                     sel_ctx.push_line(wrapped);
                 }
             }
         }
     }
 
-    if let Some(line) = push_tool_edge(tool_width, false, app.theme.tokens.tool_bg) {
+    if let Some(line) = push_tool_edge(tool_width, false, tool_bg) {
         sel_ctx.push_line(line);
     }
 }
@@ -977,14 +995,14 @@ pub(super) fn wrap_text_to_width(text: &str, max_width: u16) -> Vec<String> {
 
 fn tool_call_label_and_color(app: &App, tc: &mew_message::ToolCallPart) -> (&'static str, Color) {
     match app.tool_states.get(&tc.base.id) {
-        Some(ToolDisplayState::Running) => ("▶", Color::Yellow),
-        Some(ToolDisplayState::Completed { .. }) => ("✓", Color::Green),
-        Some(ToolDisplayState::Error(_)) => ("✗", Color::Red),
+        Some(ToolDisplayState::Running) => ("▶", app.theme.resolve("text.warning")),
+        Some(ToolDisplayState::Completed { .. }) => ("✓", app.theme.resolve("text.success")),
+        Some(ToolDisplayState::Error(_)) => ("✗", app.theme.resolve("text.error")),
         None => match &tc.state {
-            ToolState::Pending(_) => ("○", Color::Yellow),
-            ToolState::Running(_) => ("▶", Color::Yellow),
-            ToolState::Completed(_) => ("✓", Color::Green),
-            ToolState::Error(_) => ("✗", Color::Red),
+            ToolState::Pending(_) => ("○", app.theme.resolve("text.warning")),
+            ToolState::Running(_) => ("▶", app.theme.resolve("text.warning")),
+            ToolState::Completed(_) => ("✓", app.theme.resolve("text.success")),
+            ToolState::Error(_) => ("✗", app.theme.resolve("text.error")),
         },
     }
 }

@@ -161,6 +161,14 @@ _open-url url:
 dev-ui:
     pnpm --filter mew-web-ui dev
 
+# Run the React app inside the Tauri desktop shell with Vite HMR.
+desktop-dev:
+    pnpm --filter mew-web-ui desktop:dev
+
+# Build the desktop bundle from the existing React app.
+desktop-build:
+    pnpm --filter mew-web-ui desktop:build
+
 # Full watch dev mode: Vite dev server + cargo-watch for the Rust stack.
 # Rebuilds and restarts the bridge/daemon whenever Rust sources change.
 # Flags are forwarded to the bridge; use --open to launch the browser.
@@ -217,11 +225,43 @@ arch-check:
     if grep -rn 'unimplemented!()' crates/mew/src --include='*.rs' ; then
         echo "ERROR: unimplemented!() in crates/mew/src" ; exit 1
     fi
+    # No hardcoded ratatui colors in non-test mew-tui source outside theme.rs.
+    # Syntect is allowed to produce Color::Rgb from highlighter output.
+    # status.rs and chat.rs contain inline #[cfg(test)] modules that legitimately
+    # use arbitrary Color:: values; those files are excluded at file level.
+    if grep -rnE 'Color::(Rgb|Cyan|Green|Yellow|Red|DarkGray|Gray|Black|White|Blue|Magenta|LightCyan|LightGreen|LightRed|LightYellow|LightBlue|LightMagenta)' \
+        crates/mew-tui/src --include='*.rs' \
+        | grep -v 'crates/mew-tui/src/theme.rs' \
+        | grep -v 'crates/mew-tui/src/ui/status.rs' \
+        | grep -v 'crates/mew-tui/src/ui/chat.rs' ; then
+        echo "ERROR: hardcoded Color:: in non-test mew-tui source outside theme.rs" ; exit 1
+    fi
+    # ratatui-mdstream may produce Color::Rgb in the syntect highlighter; other
+    # hardcoded colors must be inside #[cfg(test)] modules. Inline test modules
+    # span multiple lines, so we exclude files whose only Color:: usage is tests.
+    if grep -rnE 'Color::(Rgb|Cyan|Green|Yellow|Red|DarkGray|Gray|Black|White|Blue|Magenta|LightCyan|LightGreen|LightRed|LightYellow|LightBlue|LightMagenta)' \
+        crates/ratatui-mdstream/src --include='*.rs' \
+        | grep -v 'highlight/syntect.rs' \
+        | grep -v 'crates/ratatui-mdstream/src/inline.rs' \
+        | grep -v 'crates/ratatui-mdstream/src/table.rs' \
+        | grep -v 'crates/ratatui-mdstream/src/wrap.rs' ; then
+        echo "ERROR: hardcoded Color:: in ratatui-mdstream outside tests/syntect" ; exit 1
+    fi
+
+# Regenerate theme CSS/Rust constants/syntect theme from the manifest.
+theme-codegen:
+    cargo run -p mew-tui --bin theme_codegen
+
+# Check that generated theme files are up-to-date. Builds the binary first so
+# `just ci` doesn't fail when the binary doesn't exist yet.
+theme-codegen-check:
+    cargo build -p mew-tui --bin theme_codegen
+    cargo run -p mew-tui --bin theme_codegen -- --check
 
 # CI-ready check: format, clippy, unit/integration tests (Rust + JS),
 # and the subprocess e2e test. The e2e test needs the binaries built;
 # `build-web` depends on the right set.
-ci: fmt clippy arch-check test-all e2e
+ci: fmt clippy arch-check theme-codegen-check test-all e2e
 
 # End-to-end check: build binaries and run subprocess e2e tests.
 # The e2e test in mew-web-bridge spawns real `mew` and `mew-web`

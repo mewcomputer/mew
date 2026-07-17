@@ -227,6 +227,33 @@ pub enum ClientMessage {
     /// Ping the daemon for liveness check and version negotiation.
     /// The daemon responds with `ServerMessage::Pong { version }`.
     Ping,
+
+    // -- Browser --
+    /// Navigate the browser session to an HTTP(S) URL.
+    BrowserOpen {
+        url: String,
+    },
+    /// Return the active page's accessibility snapshot.
+    BrowserSnapshot,
+    /// Capture the active page as a base64-encoded PNG.
+    BrowserScreenshot {
+        annotate: bool,
+    },
+    /// Click an accessibility ref or CSS selector.
+    BrowserClick {
+        selector: String,
+    },
+    /// Fill an input identified by an accessibility ref or CSS selector.
+    BrowserFill {
+        selector: String,
+        text: String,
+    },
+    /// Press a keyboard key in the active page.
+    BrowserPress {
+        key: String,
+    },
+    /// Close the browser session.
+    BrowserClose,
 }
 
 /// What kind of client is connected to a session.
@@ -431,6 +458,9 @@ pub enum ServerMessage {
     /// frontend can display it immediately without a separate ListModels round-trip.
     SessionReady {
         session_id: String,
+        /// The session's workspace, when one is available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -761,6 +791,22 @@ pub enum ServerMessage {
     /// derived from session metadata.
     ProjectList {
         projects: Vec<ProjectInfo>,
+    },
+
+    // -- Browser --
+    BrowserSnapshot {
+        snapshot: String,
+        url: String,
+        title: String,
+    },
+    BrowserScreenshot {
+        data: String,
+        url: String,
+    },
+    BrowserState {
+        open: bool,
+        url: Option<String>,
+        title: Option<String>,
     },
 }
 
@@ -1449,6 +1495,7 @@ mod tests {
     fn server_message_session_ready_roundtrip() {
         let m = ServerMessage::SessionReady {
             session_id: "01H".into(),
+            cwd: Some("/tmp/workspace".into()),
             model: Some("deepseek-v4-flash".into()),
             provider: Some("deepseek".into()),
             permission_mode: None,
@@ -1456,11 +1503,13 @@ mod tests {
         match round_trip(&m) {
             ServerMessage::SessionReady {
                 session_id,
+                cwd,
                 model,
                 provider,
                 permission_mode,
             } => {
                 assert_eq!(session_id, "01H");
+                assert_eq!(cwd.as_deref(), Some("/tmp/workspace"));
                 assert_eq!(model.as_deref(), Some("deepseek-v4-flash"));
                 assert_eq!(provider.as_deref(), Some("deepseek"));
                 assert!(permission_mode.is_none());
@@ -2681,6 +2730,7 @@ mod tests {
     fn test_session_ready_includes_permission_mode() {
         let m = ServerMessage::SessionReady {
             session_id: "s1".into(),
+            cwd: None,
             model: Some("test/model".into()),
             provider: Some("test".into()),
             permission_mode: Some("permissive".into()),
@@ -2688,11 +2738,13 @@ mod tests {
         match round_trip(&m) {
             ServerMessage::SessionReady {
                 session_id,
+                cwd,
                 model,
                 provider,
                 permission_mode,
             } => {
                 assert_eq!(session_id, "s1");
+                assert!(cwd.is_none());
                 assert_eq!(model.as_deref(), Some("test/model"));
                 assert_eq!(provider.as_deref(), Some("test"));
                 assert_eq!(permission_mode.as_deref(), Some("permissive"));
@@ -2705,6 +2757,7 @@ mod tests {
     fn test_session_ready_permission_mode_skipped_when_absent() {
         let m = ServerMessage::SessionReady {
             session_id: "s1".into(),
+            cwd: None,
             model: None,
             provider: None,
             permission_mode: None,

@@ -1,10 +1,83 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { useSessionStore } from "../stores/session";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { bridgeClientToStore, useSessionStore } from "../stores/session";
+import type { MewClient } from "@mew/web-client";
 
 // Helper to get fresh store state.
 function store() {
   return useSessionStore.getState();
 }
+
+describe("connection recovery", () => {
+  beforeEach(() => {
+    useSessionStore.setState({
+      connectionState: "disconnected",
+      connectionError: null,
+      connectionRetryToken: 0,
+    });
+  });
+
+  it("clears the error and requests a fresh connection attempt", () => {
+    useSessionStore.setState({
+      connectionState: "reconnecting",
+      connectionError: "daemon stopped",
+      connectionRetryToken: 4,
+    });
+
+    store().retryConnection();
+
+    expect(useSessionStore.getState().connectionState).toBe("connecting");
+    expect(useSessionStore.getState().connectionError).toBeNull();
+    expect(useSessionStore.getState().connectionRetryToken).toBe(5);
+  });
+});
+
+describe("session-ready bridge", () => {
+  it("refreshes session metadata only after a session is ready", () => {
+    const handlers = new Map<string, (data: any) => void>();
+    const client = {
+      on: (event: string, handler: (data: any) => void) => handlers.set(event, handler),
+      off: vi.fn(),
+      listModels: vi.fn(() => Promise.resolve([])),
+      listPersonas: vi.fn(() => Promise.resolve([])),
+    } as unknown as MewClient & {
+      listModels: ReturnType<typeof vi.fn>;
+      listPersonas: ReturnType<typeof vi.fn>;
+    };
+
+    useSessionStore.setState({ sessionId: null, sessionCwd: null, messages: [] });
+    bridgeClientToStore(client);
+
+    expect(client.listModels).not.toHaveBeenCalled();
+    expect(client.listPersonas).not.toHaveBeenCalled();
+
+    handlers.get("session-ready")?.({
+      session_id: "sess-ready",
+      provider: "test",
+      model: "model",
+      permission_mode: "auto",
+      cwd: "/projects/mew",
+    });
+
+    expect(client.listModels).toHaveBeenCalledOnce();
+    expect(client.listPersonas).toHaveBeenCalledOnce();
+    expect(useSessionStore.getState().sessionId).toBe("sess-ready");
+    expect(useSessionStore.getState().sessionCwd).toBe("/projects/mew");
+  });
+
+  it("does not add a pre-session no-session error to the chat", () => {
+    const handlers = new Map<string, (data: any) => void>();
+    const client = {
+      on: (event: string, handler: (data: any) => void) => handlers.set(event, handler),
+      off: vi.fn(),
+    } as unknown as MewClient;
+
+    useSessionStore.setState({ sessionId: null, sessionCwd: null, messages: [] });
+    bridgeClientToStore(client);
+    handlers.get("errorMessage")?.({ message: "no session" });
+
+    expect(useSessionStore.getState().messages).toHaveLength(0);
+  });
+});
 
 describe("alert lifecycle", () => {
   beforeEach(() => {
@@ -13,16 +86,18 @@ describe("alert lifecycle", () => {
     store().clearAlertsForSession("test-b");
   });
 
-  it("onSessionAlert pushes to the alerts array", () => {
+  it("onSessionAlert stores actionable alerts but ignores completion noise", () => {
     store().onSessionAlert("test-a", "Session A", "turn_complete");
+    expect(useSessionStore.getState().alerts).toHaveLength(0);
+    store().onSessionAlert("test-a", "Session A", "permission_needed");
     const alerts = useSessionStore.getState().alerts;
     expect(alerts).toHaveLength(1);
     expect(alerts[0]!.sessionId).toBe("test-a");
-    expect(alerts[0]!.kind).toBe("turn_complete");
+    expect(alerts[0]!.kind).toBe("permission_needed");
   });
 
   it("clearAlertsForSession removes only matching alerts", () => {
-    store().onSessionAlert("test-a", "A", "turn_complete");
+    store().onSessionAlert("test-a", "A", "permission_needed");
     store().onSessionAlert("test-b", "B", "permission_needed");
     store().onSessionAlert("test-a", "A2", "turn_failed");
 
@@ -36,7 +111,7 @@ describe("alert lifecycle", () => {
   it("dismissAlert removes an entry by timestamp", async () => {
     useSessionStore.setState({ alerts: [] });
 
-    store().onSessionAlert("test-a", "A", "turn_complete");
+    store().onSessionAlert("test-a", "A", "permission_needed");
     // Small delay to ensure different timestamps.
     await new Promise((r) => setTimeout(r, 2));
     store().onSessionAlert("test-a", "A2", "turn_failed");
@@ -49,6 +124,13 @@ describe("alert lifecycle", () => {
     const alerts = useSessionStore.getState().alerts;
     expect(alerts).toHaveLength(1);
     expect(alerts[0]!.title).toBe("A2");
+  });
+
+  it("a successful turn clears the previous failure alert", () => {
+    store().onSessionAlert("test-a", "A", "turn_failed");
+    expect(useSessionStore.getState().alerts).toHaveLength(1);
+    store().onSessionAlert("test-a", "A", "turn_complete");
+    expect(useSessionStore.getState().alerts).toHaveLength(0);
   });
 });
 

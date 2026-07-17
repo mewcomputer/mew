@@ -316,13 +316,23 @@ impl Adapter {
                             content.push(json!({"type": "text", "text": pt.text}));
                         }
                         Part::Reasoning(pt) => {
-                            let mut block = serde_json::Map::new();
-                            block.insert("type".to_string(), json!("thinking"));
-                            block.insert("thinking".to_string(), json!(pt.text));
-                            if let Some(sig) = &pt.signature {
-                                block.insert("signature".to_string(), json!(sig));
+                            if let Some(ref encrypted) = pt.encrypted_content {
+                                // Redacted thinking block — opaque data that
+                                // must be round-tripped verbatim.
+                                content.push(json!({
+                                    "type": "redacted_thinking",
+                                    "data": encrypted,
+                                }));
+                            } else {
+                                // Normal thinking block with signature.
+                                let mut block = serde_json::Map::new();
+                                block.insert("type".to_string(), json!("thinking"));
+                                block.insert("thinking".to_string(), json!(pt.text));
+                                if let Some(sig) = &pt.signature {
+                                    block.insert("signature".to_string(), json!(sig));
+                                }
+                                content.push(serde_json::Value::Object(block));
                             }
-                            content.push(serde_json::Value::Object(block));
                         }
                         Part::ToolCall(pt) => {
                             // The API rejects non-object input (sessions
@@ -484,6 +494,8 @@ impl Adapter {
             typ: String,
             id: Option<String>,
             name: Option<String>,
+            // redacted_thinking carries opaque data in content_block_start.
+            data: Option<String>,
         }
 
         let event: Event = match serde_json::from_str(data) {
@@ -509,6 +521,30 @@ impl Adapter {
                     })
                     .await;
                 *current_reasoning_part = Some(part);
+            }
+            "redacted_thinking" => {
+                // Redacted thinking blocks arrive complete in content_block_start
+                // with an opaque `data` field. No deltas follow. We create a
+                // reasoning part, emit the data as an encrypted_content delta,
+                // and immediately finalize it (content_block_stop will fire next).
+                let part = new_reasoning_part();
+                let part_id = part.base.id;
+                let _ = tx
+                    .send(ProviderEvent::PartStart {
+                        part: Part::Reasoning(part),
+                    })
+                    .await;
+                if let Some(data) = event.content_block.data {
+                    let _ = tx
+                        .send(ProviderEvent::PartDelta {
+                            part_id,
+                            field: "encrypted_content",
+                            delta: data,
+                        })
+                        .await;
+                }
+                // redacted_thinking has no text; clear any dangling state.
+                // content_block_stop will emit PartEnd.
             }
             "tool_use" => {
                 let part = ToolCallPart {
@@ -780,6 +816,7 @@ fn new_reasoning_part() -> ReasoningPart {
         },
         text: String::new(),
         signature: None,
+        encrypted_content: None,
     }
 }
 
@@ -855,6 +892,7 @@ mod tests {
                     },
                     text: "Thinking...".to_string(),
                     signature: Some("sig123".to_string()),
+                    encrypted_content: None,
                 }),
                 Part::Text(TextPart {
                     base: PartBase {
@@ -910,6 +948,61 @@ mod tests {
         assert_eq!(content[2]["type"], "tool_use");
         assert_eq!(content[2]["id"], "call_456");
         assert_eq!(content[2]["name"], "echo");
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_redacted_thinking_round_trip() {
+        // A reasoning part with encrypted_content (from a redacted_thinking
+        // block) should be sent back as {"type": "redacted_thinking", "data": ...}
+        // not as a regular thinking block.
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![
+                Part::Reasoning(ReasoningPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: String::new(),
+                    signature: None,
+                    encrypted_content: Some("opaque_redacted_data_blob".to_string()),
+                }),
+                Part::Text(TextPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: "Here you go".to_string(),
+                    synthetic: false,
+                }),
+            ],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let wire = adapter.build_wire_message(&[], &msg).await;
+        assert!(wire.is_some());
+        let wire = wire.unwrap();
+        let content = wire["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "redacted_thinking");
+        assert_eq!(content[0]["data"], "opaque_redacted_data_blob");
+        // Should NOT have thinking fields.
+        assert!(content[0].get("thinking").is_none());
+        assert!(content[0].get("signature").is_none());
+        // Text block follows.
+        assert_eq!(content[1]["type"], "text");
     }
 
     #[tokio::test]

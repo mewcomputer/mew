@@ -121,6 +121,20 @@ impl Default for Config {
                 ..Default::default()
             },
         );
+        // Kimi (Moonshot AI) coding endpoint — Anthropic-compatible.
+        // Base URL includes /v1 so the adapter hits /v1/messages.
+        // Models: k3 (Kimi K3, thinking-capable), kimi-for-coding (Kimi K2.7
+        // Code), kimi-for-coding-highspeed (Kimi K2.7 Code HighSpeed).
+        // Docs: https://platform.kimi.ai/docs/guide/coding
+        providers.insert(
+            "kimi".into(),
+            ProviderConfig {
+                shape: "anthropic".into(),
+                base_url: "https://api.kimi.com/coding/v1".into(),
+                credential_ref: "kimi".into(),
+                ..Default::default()
+            },
+        );
         Self {
             providers,
             default_model: String::new(),
@@ -585,6 +599,7 @@ mod tests {
         assert!(cfg.providers.contains_key("opencode-go"));
         assert!(cfg.providers.contains_key("z-ai"));
         assert!(cfg.providers.contains_key("umans"));
+        assert!(cfg.providers.contains_key("kimi"));
     }
 
     #[test]
@@ -598,6 +613,19 @@ mod tests {
         assert_eq!(umans.base_url, "https://api.code.umans.ai/v1");
         assert_eq!(umans.credential_ref, "umans");
         assert_eq!(umans.kind, "direct");
+    }
+
+    #[test]
+    fn test_default_kimi_provider() {
+        let cfg = Config::default();
+        let kimi = cfg
+            .providers
+            .get("kimi")
+            .expect("kimi built-in provider should be present");
+        assert_eq!(kimi.shape, "anthropic");
+        assert_eq!(kimi.base_url, "https://api.kimi.com/coding/v1");
+        assert_eq!(kimi.credential_ref, "kimi");
+        assert_eq!(kimi.kind, "direct");
     }
 
     #[test]

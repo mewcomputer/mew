@@ -7,8 +7,9 @@ import { Toaster } from "@/components/ui/sonner";
 import { getClient } from "@/lib/client";
 import { routerRef } from "@/lib/router-ref";
 import { useSessionStore } from "@/stores/session";
-import { useSessionNavigation } from "@/lib/hooks";
+import { useMewConnection, useSessionNavigation } from "@/lib/hooks";
 import { MobileNav } from "@/components/mobile-nav";
+import { ConnectionBanner } from "@/components/connection-banner";
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -16,6 +17,7 @@ export const Route = createRootRoute({
 
 function RootComponent() {
   const router = useRouter();
+  useMewConnection();
   useSessionNavigation();
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -44,14 +46,26 @@ function RootComponent() {
         // Delegate to the command palette's new-session action.
         const client = getClient();
         if (!client) return;
-        useSessionStore.getState().reset();
-        client.newSession().then((newId) => {
-          localStorage.setItem("mew.sessionId", newId);
-          router.navigate({
-            to: "/session/$sessionId",
-            params: { sessionId: newId },
+        const store = useSessionStore.getState();
+        if (store.connectionState !== "connected") {
+          store.setConnectionError("Connect to the daemon before creating a session.");
+          return;
+        }
+        store.reset();
+        client
+          .newSession()
+          .then((newId) => {
+            localStorage.setItem("mew.sessionId", newId);
+            router.navigate({
+              to: "/session/$sessionId",
+              params: { sessionId: newId },
+            });
+          })
+          .catch((error: unknown) => {
+            useSessionStore
+              .getState()
+              .onError(error instanceof Error ? error.message : "Could not create a session.");
           });
-        });
       }
     };
     window.addEventListener("keydown", handler);
@@ -85,6 +99,7 @@ function RootComponent() {
           onMore={() => router.navigate({ to: "/settings" })}
         />
       </SidebarInset>
+      <ConnectionBanner />
       <CommandPalette
         client={getClient()}
         open={paletteOpen}

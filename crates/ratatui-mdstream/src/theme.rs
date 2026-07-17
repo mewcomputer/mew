@@ -1,6 +1,11 @@
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 
 /// Styling for markdown elements.
+///
+/// This struct is intentionally empty of defaults: every style must be
+/// supplied by the caller. In mew-tui the active `Theme::md_theme()` builds
+/// these styles from the shared token manifest, so no hardcoded colors live
+/// inside the markdown renderer.
 #[derive(Clone)]
 pub struct Theme {
     pub paragraph: Style,
@@ -22,61 +27,39 @@ pub struct Theme {
     pub pending_indicator: Style,
 }
 
-impl Theme {
-    pub fn dark() -> Self {
-        Self {
-            paragraph: Style::default().fg(Color::White),
-            heading: [
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ],
-            emphasis: Style::default().add_modifier(Modifier::ITALIC),
-            strong: Style::default().add_modifier(Modifier::BOLD),
-            strikethrough: Style::default().add_modifier(Modifier::CROSSED_OUT),
-            inline_code: Style::default().bg(Color::Rgb(40, 40, 45)),
-            link_text: Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::UNDERLINED),
-            link_url: Style::default().fg(Color::DarkGray),
-            list_bullet: Style::default().fg(Color::White),
-            block_quote: Style::default().fg(Color::Gray),
-            thematic_break: Style::default().fg(Color::DarkGray),
-            table_header: Style::default().add_modifier(Modifier::BOLD),
-            table_cell: Style::default(),
-            table_border: Style::default().fg(Color::DarkGray),
-            code_fence_default: Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 35)),
-            code_fence_border: Style::default().fg(Color::DarkGray),
-            pending_indicator: Style::default().fg(Color::Yellow),
-        }
-    }
-
-    pub fn light() -> Self {
-        Self::dark()
-    }
-
-    pub fn monochrome() -> Self {
-        Self::dark()
+/// A neutral theme with no foreground/background colors set. Used only as a
+/// placeholder when a caller has not supplied a theme (e.g. some tests).
+pub fn neutral() -> Theme {
+    Theme {
+        paragraph: Style::default(),
+        heading: [
+            Style::default().add_modifier(Modifier::BOLD),
+            Style::default().add_modifier(Modifier::BOLD),
+            Style::default().add_modifier(Modifier::BOLD),
+            Style::default().add_modifier(Modifier::BOLD),
+            Style::default().add_modifier(Modifier::BOLD),
+            Style::default().add_modifier(Modifier::BOLD),
+        ],
+        emphasis: Style::default().add_modifier(Modifier::ITALIC),
+        strong: Style::default().add_modifier(Modifier::BOLD),
+        strikethrough: Style::default().add_modifier(Modifier::CROSSED_OUT),
+        inline_code: Style::default(),
+        link_text: Style::default().add_modifier(Modifier::UNDERLINED),
+        link_url: Style::default(),
+        list_bullet: Style::default(),
+        block_quote: Style::default(),
+        thematic_break: Style::default(),
+        table_header: Style::default().add_modifier(Modifier::BOLD),
+        table_cell: Style::default(),
+        table_border: Style::default(),
+        code_fence_default: Style::default(),
+        code_fence_border: Style::default(),
+        pending_indicator: Style::default(),
     }
 }
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::dark()
+        neutral()
     }
 }

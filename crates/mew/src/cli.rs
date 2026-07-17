@@ -315,6 +315,11 @@ pub enum ThemeCommands {
         /// Path to the JSON theme file to install
         path: std::path::PathBuf,
     },
+    /// Print the resolved CSS variable block for a theme
+    ExportCss {
+        /// Theme name (built-in or installed)
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]

@@ -1,5 +1,5 @@
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 
@@ -205,11 +205,11 @@ fn render_table(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     crate::table::compose_table(&parsed, width, theme)
 }
 
-fn render_raw(text: &str, width: u16, _theme: &Theme, prefix: &str) -> Vec<Line<'static>> {
+fn render_raw(text: &str, width: u16, theme: &Theme, prefix: &str) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for line in text.lines() {
         let content = format!("{prefix} {line}");
-        let runs = vec![(content, Style::default().fg(Color::DarkGray))];
+        let runs = vec![(content, theme.paragraph)];
         let wrapped = wrap_styled(&runs, width);
         for spans in wrapped {
             lines.push(Line::from(spans));

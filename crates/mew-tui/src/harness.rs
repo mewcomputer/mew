@@ -102,6 +102,7 @@ pub struct LocalBackend {
     frames: Vec<tiny_skia::Pixmap>,
     /// When true, a frame is captured after each verb.
     recording: bool,
+    rasterizer: mew_raster::Rasterizer,
 }
 
 impl LocalBackend {
@@ -114,6 +115,7 @@ impl LocalBackend {
             terminal,
             frames: Vec::new(),
             recording: false,
+            rasterizer: mew_raster::Rasterizer::new(),
         }
     }
 
@@ -168,7 +170,9 @@ impl LocalBackend {
         let app = &mut self.app;
         self.terminal.draw(|f| ui::draw(f, app)).expect("draw");
         let buf = self.terminal.backend().buffer();
-        let pixmap = mew_raster::rasterize(buf, &mew_raster::RasterOptions::default());
+        let pixmap = self
+            .rasterizer
+            .rasterize(buf, &mew_raster::RasterOptions::default());
         self.frames.push(pixmap);
     }
 
@@ -327,6 +331,7 @@ impl LocalBackend {
                 },
                 text: text.to_string(),
                 signature: None,
+                encrypted_content: None,
             }),
         }));
         self.agent(AgentEvent::Provider(ProviderEvent::PartEnd { part_id }));
@@ -344,7 +349,9 @@ impl Backend for LocalBackend {
         let app = &mut self.app;
         self.terminal.draw(|f| ui::draw(f, app)).expect("draw");
         let buf = self.terminal.backend().buffer();
-        let png_bytes = mew_raster::to_png(buf, &mew_raster::RasterOptions::default());
+        let png_bytes = self
+            .rasterizer
+            .to_png(buf, &mew_raster::RasterOptions::default());
         std::fs::write(path, png_bytes)
     }
 
@@ -356,9 +363,17 @@ impl Backend for LocalBackend {
     }
 
     fn type_str(&mut self, text: &str) {
+        // Type without per-character captures; rasterizing every keystroke is
+        // too slow for long strings.
         for ch in text.chars() {
-            self.send_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+            if let Some(action) = handle_key_event(
+                &mut self.app,
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+            ) {
+                self.apply_action(action);
+            }
         }
+        self.capture_frame();
     }
 
     fn send_text(&mut self, text: &str) {
@@ -396,40 +411,7 @@ impl Backend for LocalBackend {
     }
 
     fn encode_mp4(&self, output_path: &str, fps: u32) -> io::Result<String> {
-        if self.frames.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no frames recorded",
-            ));
-        }
-
-        let dir = tempfile::tempdir()?;
-        for (i, pixmap) in self.frames.iter().enumerate() {
-            let png_path = dir.path().join(format!("frame_{:04}.png", i));
-            let png_bytes = pixmap_to_png_bytes(pixmap);
-            std::fs::write(&png_path, png_bytes)?;
-        }
-
-        let frame_pattern = dir.path().join("frame_%04d.png");
-        let output = std::process::Command::new("ffmpeg")
-            .arg("-framerate")
-            .arg(fps.to_string())
-            .arg("-i")
-            .arg(&frame_pattern)
-            .arg("-pix_fmt")
-            .arg("yuv420p")
-            .arg("-y")
-            .arg(output_path)
-            .output()?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stderr).to_string())
-        } else {
-            Err(io::Error::other(format!(
-                "ffmpeg failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )))
-        }
+        mew_raster::encode_frames_mp4(&self.frames, output_path, fps)
     }
 
     fn duplicate_last_frame(&mut self, count: usize) {
@@ -762,20 +744,6 @@ fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
     out
 }
 
-/// Encode a `tiny_skia::Pixmap` to PNG bytes.
-fn pixmap_to_png_bytes(pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
-    use png::{BitDepth, ColorType, Encoder};
-    let mut out = Vec::new();
-    {
-        let mut encoder = Encoder::new(&mut out, pixmap.width(), pixmap.height());
-        encoder.set_color(ColorType::Rgba);
-        encoder.set_depth(BitDepth::Eight);
-        let mut writer = encoder.write_header().expect("png header");
-        writer.write_image_data(pixmap.data()).expect("png write");
-    }
-    out
-}
-
 /// Run a line-based script against a fresh harness and return the accumulated
 /// snapshots as text. See the module docs for the verb list.
 pub fn run_script(script: &str, width: u16, height: u16) -> String {
@@ -936,21 +904,21 @@ mod tests {
         // start_recording captures 1 initial frame
         assert_eq!(h.frame_count(), 1);
 
-        // type_str: "hi" = 2 keystrokes = 2 frames
+        // type_str: "hi" = 2 keystrokes, captured as 1 final frame
         h.type_str("hi");
-        assert_eq!(h.frame_count(), 3);
+        assert_eq!(h.frame_count(), 2);
 
         // key: enter = 1 frame
         h.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(h.frame_count(), 4);
+        assert_eq!(h.frame_count(), 3);
 
         // say: "hello" has 5 chars, chunked by 8 = 1 delta + 1 final = 2 frames
         h.say("hello");
-        assert_eq!(h.frame_count(), 6);
+        assert_eq!(h.frame_count(), 5);
 
         h.stop_recording();
         // stop_recording captures 1 final frame
-        assert_eq!(h.frame_count(), 7);
+        assert_eq!(h.frame_count(), 6);
     }
 
     #[test]

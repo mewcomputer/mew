@@ -162,7 +162,10 @@ export type ConnectionState = "disconnected" | "connecting" | "connected" | "rec
 interface SessionState {
   // Connection
   connectionState: ConnectionState;
+  connectionError: string | null;
+  connectionRetryToken: number;
   sessionId: string | null;
+  sessionCwd: string | null;
 
   // Messages
   messages: ChatMessage[];
@@ -254,6 +257,8 @@ interface SessionState {
 
   // Actions
   setConnectionState: (s: ConnectionState) => void;
+  setConnectionError: (message: string | null) => void;
+  retryConnection: () => void;
   setSessionId: (id: string | null) => void;
 
   addUserMessage: (text: string) => void;
@@ -347,7 +352,10 @@ interface SessionState {
 
 export const useSessionStore = create<SessionState>((set, get) => ({
   connectionState: "disconnected",
+  connectionError: null,
+  connectionRetryToken: 0,
   sessionId: null,
+  sessionCwd: null,
   messages: [],
   streamingPartId: null,
   streamingText: "",
@@ -391,6 +399,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   promptHistory: [],
 
   setConnectionState: (s) => set({ connectionState: s }),
+  setConnectionError: (message) => set({ connectionError: message }),
+  retryConnection: () =>
+    set((state) => ({
+      connectionState: "connecting",
+      connectionError: null,
+      connectionRetryToken: state.connectionRetryToken + 1,
+    })),
   setSessionId: (id) => set({ sessionId: id }),
 
   addUserMessage: (text) =>
@@ -872,10 +887,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   onSessionAlert: (sessionId, title, kind, detail) =>
     set((state) => {
-      const alerts = [
-        ...state.alerts,
-        { sessionId, title, kind, detail, timestamp: Date.now() },
-      ];
+      // Turn completion is useful for OS delivery but is not actionable
+      // attention. A successful follow-up also resolves an earlier failure.
+      const alerts = state.alerts.filter(
+        (alert) =>
+          alert.sessionId !== sessionId ||
+          (alert.kind !== "turn_failed" && kind !== "turn_complete"),
+      );
+      if (kind === "turn_complete") {
+        syncTitleBadge(alerts);
+        return { alerts };
+      }
+      alerts.push({ sessionId, title, kind, detail, timestamp: Date.now() });
       syncTitleBadge(alerts);
       return { alerts };
     }),
@@ -1114,6 +1137,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       totalOutputTokens: 0,
       totalCost: 0,
       // Clear per-session state that shouldn't leak across sessions.
+      sessionCwd: null,
       flaggedFiles: [],
       dirListing: null,
       dirListingPath: null,
@@ -1136,17 +1160,26 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 export function bridgeClientToStore(client: MewClient) {
   const store = useSessionStore;
 
-  client.on("open", () => store.getState().setConnectionState("connected"));
+  client.on("open", () => {
+    store.getState().setConnectionState("connected");
+    store.getState().setConnectionError(null);
+  });
   client.on("close", () => store.getState().setConnectionState("disconnected"));
 
   client.on("session-ready", (data) => {
     store.getState().setSessionId(data.session_id);
+    useSessionStore.setState({ sessionCwd: data.cwd ?? null });
     if (data.model && data.provider) {
       store.getState().setCurrentModel(data.provider, data.model);
     }
     if (data.permission_mode) {
       store.getState().setPermissionMode(data.permission_mode);
     }
+    // Model and persona discovery is session-scoped. Waiting until the
+    // daemon confirms a session prevents startup errors from being rendered
+    // as chat messages on the home screen.
+    void client.listModels();
+    void client.listPersonas();
   });
 
   client.on("provider", (ev) => store.getState().onProviderEvent(ev));
@@ -1298,10 +1331,7 @@ export function bridgeClientToStore(client: MewClient) {
   );
 
   client.on("session-alert", (data) => {
-    // Suppress alerts for the currently viewed session.
     const currentSessionId = store.getState().sessionId;
-    if (data.session_id === currentSessionId) return;
-
     store.getState().onSessionAlert(
       data.session_id,
       data.title,
@@ -1309,8 +1339,9 @@ export function bridgeClientToStore(client: MewClient) {
       data.detail,
     );
 
-    // OS notification delivery.
-    if (typeof Notification !== "undefined") {
+    // Keep the in-app alert for every session. Only background sessions need
+    // an OS notification because the active session is already visible.
+    if (data.session_id !== currentSessionId && typeof Notification !== "undefined") {
       if (Notification.permission === "default") {
         // Request permission lazily (Safari needs a user gesture, but
         // Chrome/Firefox honor this from background events).
@@ -1335,8 +1366,12 @@ export function bridgeClientToStore(client: MewClient) {
     store.getState().resolvePermission(data.request_id);
   });
 
-  client.on("errorMessage", (data) => store.getState().onError(data.message));
-  client.on("errorEvent", (data) => store.getState().onError(data.message));
+  const handleDaemonError = (data: { message: string }) => {
+    if (data.message === "no session" && !store.getState().sessionId) return;
+    store.getState().onError(data.message);
+  };
+  client.on("errorMessage", handleDaemonError);
+  client.on("errorEvent", handleDaemonError);
 }
 
 /** Sync document.title with the alert count. Called after any alerts mutation. */

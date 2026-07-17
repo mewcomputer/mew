@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Paragraph},
     Frame,
@@ -74,7 +74,7 @@ pub fn draw_companion_float(f: &mut Frame, app: &mut App, chat_area: Rect) {
         return;
     }
 
-    let chat_bg = Color::Rgb(22, 22, 26);
+    let chat_bg = app.theme.resolve("panel.background");
 
     // Sprite: first 5 lines of info.
     let sprite_lines: Vec<&str> = info.lines().take(5).collect();
@@ -144,7 +144,9 @@ pub fn draw_companion_float(f: &mut Frame, app: &mut App, chat_area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 top,
-                Style::default().fg(Color::DarkGray).bg(chat_bg),
+                Style::default()
+                    .fg(app.theme.resolve("text.muted"))
+                    .bg(chat_bg),
             ))),
             Rect::new(x, row, bw + 2, 1),
         );
@@ -161,9 +163,24 @@ pub fn draw_companion_float(f: &mut Frame, app: &mut App, chat_area: Rect) {
                 .collect();
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("\u{2502}", Style::default().fg(Color::DarkGray).bg(chat_bg)),
-                    Span::styled(truncated, Style::default().fg(Color::Yellow).bg(chat_bg)),
-                    Span::styled("\u{2502}", Style::default().fg(Color::DarkGray).bg(chat_bg)),
+                    Span::styled(
+                        "\u{2502}",
+                        Style::default()
+                            .fg(app.theme.resolve("text.muted"))
+                            .bg(chat_bg),
+                    ),
+                    Span::styled(
+                        truncated,
+                        Style::default()
+                            .fg(app.theme.resolve("text.warning"))
+                            .bg(chat_bg),
+                    ),
+                    Span::styled(
+                        "\u{2502}",
+                        Style::default()
+                            .fg(app.theme.resolve("text.muted"))
+                            .bg(chat_bg),
+                    ),
                 ])),
                 Rect::new(x, row, bw + 2, 1),
             );
@@ -174,7 +191,9 @@ pub fn draw_companion_float(f: &mut Frame, app: &mut App, chat_area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 bottom,
-                Style::default().fg(Color::DarkGray).bg(chat_bg),
+                Style::default()
+                    .fg(app.theme.resolve("text.muted"))
+                    .bg(chat_bg),
             ))),
             Rect::new(x, row, bw + 2, 1),
         );
@@ -191,7 +210,9 @@ pub fn draw_companion_float(f: &mut Frame, app: &mut App, chat_area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 *line,
-                Style::default().fg(Color::Green).bg(chat_bg),
+                Style::default()
+                    .fg(app.theme.resolve("text.success"))
+                    .bg(chat_bg),
             ))),
             Rect::new(lx, row, lw, 1),
         );

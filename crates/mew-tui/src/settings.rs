@@ -13,7 +13,7 @@ use ratatui::{
 };
 use std::collections::BTreeMap;
 
-use crate::theme::ThemeTokens;
+use crate::theme::Theme;
 use crate::ui::overlays::centered_rect;
 
 /// A discovered plugin entry with its on-disk path and enabled flag.
@@ -564,10 +564,18 @@ pub struct SettingsState {
     scroll: usize,
 }
 
-const BG_LEFT: Color = Color::Rgb(26, 26, 38);
-const BG_RIGHT: Color = Color::Rgb(30, 30, 46);
-const BG_STATUS: Color = Color::Rgb(17, 17, 27);
-const BG_POPUP: Color = Color::Rgb(24, 24, 37);
+fn bg_left(theme: &Theme) -> Color {
+    theme.resolve("sidebar.background")
+}
+fn bg_right(theme: &Theme) -> Color {
+    theme.resolve("card")
+}
+fn bg_status(theme: &Theme) -> Color {
+    theme.resolve("status_bar.background")
+}
+fn bg_popup(theme: &Theme) -> Color {
+    theme.resolve("popover")
+}
 
 impl SettingsState {
     pub fn new(config: mew_config::Config, plugins: Vec<PluginEntry>) -> Self {
@@ -1038,9 +1046,12 @@ impl SettingsState {
     // Drawing
     // ------------------------------------------------------------------
 
-    pub fn draw(&self, f: &mut Frame, area: Rect, tokens: &ThemeTokens) {
+    pub fn draw(&self, f: &mut Frame, area: Rect, tokens: &Theme) {
         f.render_widget(Clear, area);
-        f.render_widget(Block::default().style(Style::default().bg(BG_RIGHT)), area);
+        f.render_widget(
+            Block::default().style(Style::default().bg(bg_right(tokens))),
+            area,
+        );
 
         let title = if self.dirty {
             " mew settings * "
@@ -1049,11 +1060,11 @@ impl SettingsState {
         };
         let block = Block::default()
             .borders(Borders::ALL)
-            .style(Style::default().bg(BG_RIGHT))
+            .style(Style::default().bg(bg_right(tokens)))
             .title(Line::from(Span::styled(
                 title,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(tokens.resolve("text.accent"))
                     .add_modifier(Modifier::BOLD),
             )));
         f.render_widget(block, area);
@@ -1069,22 +1080,23 @@ impl SettingsState {
             .split(inner);
         self.draw_left_panel(f, panes[0], tokens);
         self.draw_right_panel(f, panes[1], tokens);
-        self.draw_status_bar(f, area);
-        self.draw_message_popup(f, area);
+        self.draw_status_bar(f, area, tokens);
+        self.draw_message_popup(f, area, tokens);
 
         if self.edit_mode == EditMode::Naming {
-            self.draw_naming_popup(f, area);
+            self.draw_naming_popup(f, area, tokens);
         }
     }
 
-    fn draw_left_panel(&self, f: &mut Frame, area: Rect, _tokens: &ThemeTokens) {
+    fn draw_left_panel(&self, f: &mut Frame, area: Rect, tokens: &Theme) {
         let active = self.active == Panel::Left && self.edit_mode == EditMode::Normal;
+        let bg = bg_left(tokens);
         let block = Block::default()
             .borders(Borders::RIGHT)
-            .style(Style::default().bg(BG_LEFT))
+            .style(Style::default().bg(bg))
             .title(Span::styled(
                 " categories ",
-                Style::default().fg(Color::DarkGray).bg(BG_LEFT),
+                Style::default().fg(tokens.resolve("text.muted")).bg(bg),
             ));
         f.render_widget(block, area);
 
@@ -1108,29 +1120,29 @@ impl SettingsState {
                 LeftItem::Category(cat) => {
                     let style = Style::default()
                         .fg(if selected {
-                            Color::Yellow
+                            tokens.resolve("text.warning")
                         } else {
-                            Color::White
+                            tokens.resolve("text.body")
                         })
-                        .bg(BG_LEFT)
+                        .bg(bg)
                         .add_modifier(Modifier::BOLD);
                     Line::from(vec![Span::raw(marker), Span::styled(cat.label(), style)])
                 }
                 LeftItem::Provider(id) => {
                     let status = self.credential_status(id);
                     let (fg, status_text) = match status {
-                        "authenticated" => (Color::Green, "✓"),
-                        _ => (Color::DarkGray, "✗"),
+                        "authenticated" => (tokens.resolve("text.success"), "✓"),
+                        _ => (tokens.resolve("text.muted"), "✗"),
                     };
                     let name_style = if selected {
                         Style::default()
-                            .fg(Color::Yellow)
-                            .bg(BG_LEFT)
+                            .fg(tokens.resolve("text.warning"))
+                            .bg(bg)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(fg).bg(BG_LEFT)
+                        Style::default().fg(fg).bg(bg)
                     };
-                    let dim = Style::default().fg(Color::DarkGray).bg(BG_LEFT);
+                    let dim = Style::default().fg(tokens.resolve("text.muted")).bg(bg);
                     Line::from(vec![
                         Span::raw(marker),
                         Span::styled(format!("  {status_text} "), dim),
@@ -1149,18 +1161,21 @@ impl SettingsState {
                     let plugin = self.plugins.get(*i);
                     let enabled = plugin.map(|p| p.enabled).unwrap_or(false);
                     let icon = if enabled { "✓" } else { "✗" };
-                    let icon_color = if enabled { Color::Green } else { Color::Red };
-                    let name_style = if selected {
-                        Style::default().fg(Color::Yellow).bg(BG_LEFT)
+                    let icon_color = if enabled {
+                        tokens.resolve("text.success")
                     } else {
-                        Style::default().fg(Color::Gray).bg(BG_LEFT)
+                        tokens.resolve("text.error")
+                    };
+                    let name_style = if selected {
+                        Style::default().fg(tokens.resolve("text.warning")).bg(bg)
+                    } else {
+                        Style::default()
+                            .fg(tokens.resolve("text.placeholder"))
+                            .bg(bg)
                     };
                     Line::from(vec![
                         Span::raw(marker),
-                        Span::styled(
-                            format!("  {icon} "),
-                            Style::default().fg(icon_color).bg(BG_LEFT),
-                        ),
+                        Span::styled(format!("  {icon} "), Style::default().fg(icon_color).bg(bg)),
                         Span::styled(
                             plugin.map(|p| p.name.clone()).unwrap_or_default(),
                             name_style,
@@ -1170,9 +1185,9 @@ impl SettingsState {
                 _ => {
                     // Add actions and sub-items.
                     let style = if selected {
-                        Style::default().fg(Color::Green).bg(BG_LEFT)
+                        Style::default().fg(tokens.resolve("text.success")).bg(bg)
                     } else {
-                        Style::default().fg(Color::DarkGray).bg(BG_LEFT)
+                        Style::default().fg(tokens.resolve("text.muted")).bg(bg)
                     };
                     Line::from(vec![
                         Span::raw(marker),
@@ -1183,10 +1198,7 @@ impl SettingsState {
             lines.push(line);
         }
 
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(BG_LEFT)),
-            inner,
-        );
+        f.render_widget(Paragraph::new(lines).style(Style::default().bg(bg)), inner);
 
         if self.left_items.len() > visible {
             let mut state = ScrollbarState::new(self.left_items.len())
@@ -1208,12 +1220,13 @@ impl SettingsState {
         }
     }
 
-    fn draw_right_panel(&self, f: &mut Frame, area: Rect, _tokens: &ThemeTokens) {
+    fn draw_right_panel(&self, f: &mut Frame, area: Rect, tokens: &Theme) {
+        let bg = bg_right(tokens);
         let block = Block::default()
-            .style(Style::default().bg(BG_RIGHT))
+            .style(Style::default().bg(bg))
             .title(Span::styled(
                 " details ",
-                Style::default().fg(Color::DarkGray).bg(BG_RIGHT),
+                Style::default().fg(tokens.resolve("text.muted")).bg(bg),
             ));
         f.render_widget(block, area);
 
@@ -1233,22 +1246,22 @@ impl SettingsState {
                 lines.push(Line::from(Span::styled(
                     format!("Account: {id}"),
                     Style::default()
-                        .fg(Color::White)
-                        .bg(BG_RIGHT)
+                        .fg(tokens.resolve("text.body"))
+                        .bg(bg)
                         .add_modifier(Modifier::BOLD),
                 )));
                 let status = self.credential_status(id);
                 let status_fg = if status == "authenticated" {
-                    Color::Green
+                    tokens.resolve("text.success")
                 } else {
-                    Color::Red
+                    tokens.resolve("text.error")
                 };
                 lines.push(Line::from(vec![
                     Span::styled(
                         "  status: ",
-                        Style::default().fg(Color::DarkGray).bg(BG_RIGHT),
+                        Style::default().fg(tokens.resolve("text.muted")).bg(bg),
                     ),
-                    Span::styled(status, Style::default().fg(status_fg).bg(BG_RIGHT)),
+                    Span::styled(status, Style::default().fg(status_fg).bg(bg)),
                 ]));
                 lines.push(Line::from(""));
             }
@@ -1256,8 +1269,8 @@ impl SettingsState {
                 lines.push(Line::from(Span::styled(
                     cat.label(),
                     Style::default()
-                        .fg(Color::White)
-                        .bg(BG_RIGHT)
+                        .fg(tokens.resolve("text.body"))
+                        .bg(bg)
                         .add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(""));
@@ -1266,8 +1279,8 @@ impl SettingsState {
                 lines.push(Line::from(Span::styled(
                     "Custom Model",
                     Style::default()
-                        .fg(Color::White)
-                        .bg(BG_RIGHT)
+                        .fg(tokens.resolve("text.body"))
+                        .bg(bg)
                         .add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(""));
@@ -1276,8 +1289,8 @@ impl SettingsState {
                 lines.push(Line::from(Span::styled(
                     "Permission Rule",
                     Style::default()
-                        .fg(Color::White)
-                        .bg(BG_RIGHT)
+                        .fg(tokens.resolve("text.body"))
+                        .bg(bg)
                         .add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(""));
@@ -1286,8 +1299,8 @@ impl SettingsState {
                 lines.push(Line::from(Span::styled(
                     "Secret Files Group",
                     Style::default()
-                        .fg(Color::White)
-                        .bg(BG_RIGHT)
+                        .fg(tokens.resolve("text.body"))
+                        .bg(bg)
                         .add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(""));
@@ -1296,8 +1309,8 @@ impl SettingsState {
                 lines.push(Line::from(Span::styled(
                     "Secret Words Group",
                     Style::default()
-                        .fg(Color::White)
-                        .bg(BG_RIGHT)
+                        .fg(tokens.resolve("text.body"))
+                        .bg(bg)
                         .add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(""));
@@ -1306,25 +1319,22 @@ impl SettingsState {
                 lines.push(Line::from(Span::styled(
                     "Plugin",
                     Style::default()
-                        .fg(Color::White)
-                        .bg(BG_RIGHT)
+                        .fg(tokens.resolve("text.body"))
+                        .bg(bg)
                         .add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(vec![Span::styled(
                     "  Enter on the left toggles enabled/disabled.",
-                    Style::default().fg(Color::DarkGray).bg(BG_RIGHT),
+                    Style::default().fg(tokens.resolve("text.muted")).bg(bg),
                 )]));
                 lines.push(Line::from(""));
             }
             _ => {
                 lines.push(Line::from(Span::styled(
                     "Select an item on the left",
-                    Style::default().fg(Color::DarkGray).bg(BG_RIGHT),
+                    Style::default().fg(tokens.resolve("text.muted")).bg(bg),
                 )));
-                f.render_widget(
-                    Paragraph::new(lines).style(Style::default().bg(BG_RIGHT)),
-                    inner,
-                );
+                f.render_widget(Paragraph::new(lines).style(Style::default().bg(bg)), inner);
                 return;
             }
         }
@@ -1346,16 +1356,20 @@ impl SettingsState {
             };
 
             let val_style = if editing {
-                Style::default().fg(Color::Green).bg(BG_RIGHT)
+                Style::default().fg(tokens.resolve("text.success")).bg(bg)
             } else if selected {
-                Style::default().fg(Color::Yellow).bg(BG_RIGHT)
+                Style::default().fg(tokens.resolve("text.warning")).bg(bg)
             } else {
-                Style::default().fg(Color::Gray).bg(BG_RIGHT)
+                Style::default()
+                    .fg(tokens.resolve("text.placeholder"))
+                    .bg(bg)
             };
             let label_style = if selected {
-                Style::default().fg(Color::Yellow).bg(BG_RIGHT)
+                Style::default().fg(tokens.resolve("text.warning")).bg(bg)
             } else {
-                Style::default().fg(Color::Gray).bg(BG_RIGHT)
+                Style::default()
+                    .fg(tokens.resolve("text.placeholder"))
+                    .bg(bg)
             };
 
             lines.push(Line::from(vec![
@@ -1364,13 +1378,11 @@ impl SettingsState {
             ]));
         }
 
-        f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(BG_RIGHT)),
-            inner,
-        );
+        f.render_widget(Paragraph::new(lines).style(Style::default().bg(bg)), inner);
     }
 
-    fn draw_status_bar(&self, f: &mut Frame, area: Rect) {
+    fn draw_status_bar(&self, f: &mut Frame, area: Rect, tokens: &Theme) {
+        let bg = bg_status(tokens);
         let bar_area = Rect::new(
             area.x + 1,
             area.y + area.height - 2,
@@ -1394,69 +1406,72 @@ impl SettingsState {
         f.render_widget(
             Paragraph::new(Span::styled(
                 format!("{}{}", panel, help),
-                Style::default().fg(Color::DarkGray).bg(BG_STATUS),
+                Style::default().fg(tokens.resolve("text.muted")).bg(bg),
             ))
-            .style(Style::default().bg(BG_STATUS)),
+            .style(Style::default().bg(bg)),
             bar_area,
         );
     }
 
-    fn draw_message_popup(&self, f: &mut Frame, area: Rect) {
+    fn draw_message_popup(&self, f: &mut Frame, area: Rect, tokens: &Theme) {
         if self.message.is_none() || self.edit_mode == EditMode::Naming {
             return;
         }
+        let bg = bg_popup(tokens);
         let msg = self.message.as_ref().unwrap();
         let popup = centered_rect((msg.len() as u16).max(20) + 4, 3, area);
         f.render_widget(Clear, popup);
         f.render_widget(
             Paragraph::new(msg.as_str())
-                .style(Style::default().fg(Color::Green).bg(BG_POPUP))
+                .style(Style::default().fg(tokens.resolve("text.success")).bg(bg))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .style(Style::default().bg(BG_POPUP))
-                        .border_style(Style::default().fg(Color::Green)),
+                        .style(Style::default().bg(bg))
+                        .border_style(Style::default().fg(tokens.resolve("text.success"))),
                 ),
             popup,
         );
     }
 
-    fn draw_naming_popup(&self, f: &mut Frame, area: Rect) {
+    fn draw_naming_popup(&self, f: &mut Frame, area: Rect, tokens: &Theme) {
+        let bg = bg_popup(tokens);
         let popup = centered_rect(50, 5, area);
         f.render_widget(Clear, popup);
         let lines = vec![
             Line::from(""),
             Line::from(vec![
-                Span::styled("  name: ", Style::default().fg(Color::Cyan).bg(BG_POPUP)),
+                Span::styled(
+                    "  name: ",
+                    Style::default().fg(tokens.resolve("text.accent")).bg(bg),
+                ),
                 Span::styled(
                     format!("{}_│", self.buf),
-                    Style::default().fg(Color::Green).bg(BG_POPUP),
+                    Style::default().fg(tokens.resolve("text.success")).bg(bg),
                 ),
             ]),
             Line::from(""),
         ];
         f.render_widget(
-            Paragraph::new(lines)
-                .style(Style::default().bg(BG_POPUP))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .style(Style::default().bg(BG_POPUP))
-                        .title(Span::styled(
-                            " New Provider ",
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .bg(BG_POPUP)
-                                .add_modifier(Modifier::BOLD),
-                        ))
-                        .border_style(Style::default().fg(Color::Cyan)),
-                ),
+            Paragraph::new(lines).style(Style::default().bg(bg)).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .style(Style::default().bg(bg))
+                    .title(Span::styled(
+                        " New Provider ",
+                        Style::default()
+                            .fg(tokens.resolve("text.accent"))
+                            .bg(bg)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .border_style(Style::default().fg(tokens.resolve("text.accent"))),
+            ),
             popup,
         );
     }
 }
 
 /// Helper used by the TUI overlay system to render the settings screen.
-pub fn draw_settings(f: &mut Frame, state: &SettingsState, area: Rect, tokens: &ThemeTokens) {
+pub fn draw_settings(f: &mut Frame, state: &SettingsState, area: Rect, tokens: &Theme) {
     state.draw(f, area, tokens);
 }

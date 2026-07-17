@@ -48,6 +48,7 @@ impl EventLoop {
                             CrosstermEvent::Key(_)
                                 | CrosstermEvent::Mouse(_)
                                 | CrosstermEvent::Paste(_)
+                                | CrosstermEvent::Resize(_, _)
                         ) && tx.send(Event::Input(event)).await.is_err()
                         {
                             break;
@@ -93,6 +94,14 @@ pub fn handle_input_event(app: &mut crate::app::App, event: CrosstermEvent) -> O
         CrosstermEvent::Key(key) => handle_key_event(app, key),
         CrosstermEvent::Mouse(mouse) => handle_mouse_event(app, mouse),
         CrosstermEvent::Paste(text) => handle_paste_event(app, text),
+        CrosstermEvent::Resize(_, _) => {
+            // A terminal resize changes the area every widget draws into.
+            // Mark the chat dirty so the next render rebuilds the cached
+            // chat lines with the new width instead of waiting for the next
+            // keypress or animated tick.
+            app.mark_chat_dirty();
+            None
+        }
         _ => None,
     }
 }

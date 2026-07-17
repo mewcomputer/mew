@@ -420,6 +420,7 @@ pub(crate) async fn run_tui(
         mode,
         Some(session_writer),
         None,
+        None,
         dispatcher.clone(),
         todos_path.clone(),
         &discovered,

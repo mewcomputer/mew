@@ -233,7 +233,10 @@ async fn bridge_relays_session_ready_to_browser() {
     })
     .await;
     let last = msgs.last().unwrap();
-    assert!(matches!(last, ServerMessage::SessionReady { .. }));
+    match last {
+        ServerMessage::SessionReady { cwd, .. } => assert!(cwd.is_some()),
+        other => panic!("expected SessionReady, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -402,7 +405,6 @@ async fn bridge_handles_tool_use_finish_end_to_end() {
             m,
             ServerMessage::Provider {
                 event: mew_message::ProviderEventWire::MessageEnd {
-                    manifest: None,
                     finish: Finish::ToolUse,
                     ..
                 }

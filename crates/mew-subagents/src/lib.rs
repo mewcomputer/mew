@@ -302,7 +302,7 @@ impl Loader {
                     .unwrap_or("")
                     .to_string(),
                 path: PathBuf::from("(built-in)"),
-                template: false,
+                template: true,
             },
             SubagentDef {
                 name: "plan-reviewer".into(),
@@ -315,7 +315,7 @@ impl Loader {
                     .unwrap_or("")
                     .to_string(),
                 path: PathBuf::from("(built-in)"),
-                template: false,
+                template: true,
             },
             SubagentDef {
                 name: "coder".into(),
@@ -328,7 +328,7 @@ impl Loader {
                     .unwrap_or("")
                     .to_string(),
                 path: PathBuf::from("(built-in)"),
-                template: false,
+                template: true,
             },
         ]
     }

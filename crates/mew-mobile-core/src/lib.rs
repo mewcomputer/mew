@@ -949,6 +949,7 @@ fn translate_message(
             model,
             provider,
             permission_mode,
+            ..
         } => {
             *conn_state.session_state.lock().unwrap() = Some(SessionState::new(session_id.clone()));
             // Capture current model/provider/permission_mode from SessionReady.
