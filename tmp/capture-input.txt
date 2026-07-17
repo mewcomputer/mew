@@ -1,4 +1,0 @@
-# exit welcome screen and show input area
-type hello
-snapshot after-typing
-screenshot tmp/input-mute.png
