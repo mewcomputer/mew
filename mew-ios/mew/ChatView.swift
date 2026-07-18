@@ -14,6 +14,7 @@ struct ChatView: View {
 
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // Composer
     @State private var inputText: String = ""
@@ -54,7 +55,10 @@ struct ChatView: View {
                     TodoPanelView(todos: todos)
                 }
             }
-            .animation(.easeInOut(duration: 0.25), value: showsRetryBanner)
+            .animation(
+                Theme.Motion.value(Theme.Motion.surface, reduced: reduceMotion),
+                value: showsRetryBanner
+            )
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbarContent }
@@ -272,7 +276,7 @@ struct ChatView: View {
         .background(
             Color(.secondarySystemBackground)
         )
-        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
     }
 
     @ViewBuilder
@@ -294,7 +298,7 @@ struct ChatView: View {
     private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool = true) {
         guard autoScroll else { return }
         if animated {
-            withAnimation(.easeOut(duration: 0.2)) {
+            withAnimation(Theme.Motion.value(.easeOut(duration: 0.2), reduced: reduceMotion)) {
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
         } else {
@@ -462,7 +466,7 @@ private struct PermissionSheet: View {
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(10)
-                            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: Theme.Layout.controlRadius, style: .continuous))
                     }
                 }
                 .padding(20)
@@ -663,12 +667,13 @@ struct ChatBar: View {
             Image(systemName: "plus")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 36, height: 36)
+                .frame(width: Theme.Layout.compactControlSize, height: Theme.Layout.compactControlSize)
                 .background(
                     Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
                 )
         }
         .accessibilityLabel("Browse files")
+        .buttonStyle(MewPressButtonStyle())
     }
 
     @ViewBuilder
@@ -686,7 +691,7 @@ struct ChatBar: View {
             .font(.callout)
             .lineLimit(1)
             .padding(.horizontal, 14)
-            .frame(height: 36)
+            .frame(height: Theme.Layout.compactControlSize)
             .background(
                 Capsule().fill(.clear).glassEffect(
                     .regular,
@@ -780,7 +785,7 @@ struct ChatBar: View {
             Image(systemName: "shield")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
-                .frame(width: 36, height: 36)
+                .frame(width: Theme.Layout.compactControlSize, height: Theme.Layout.compactControlSize)
                 .background(
                     Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
                 )
@@ -821,7 +826,7 @@ struct ChatBar: View {
                 Image(systemName: "person.crop.circle")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
-                    .frame(width: 36, height: 36)
+                    .frame(width: Theme.Layout.compactControlSize, height: Theme.Layout.compactControlSize)
                     .background(
                         Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
                     )
@@ -847,7 +852,7 @@ struct ChatBar: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 10)
-        .frame(height: 36)
+        .frame(height: Theme.Layout.compactControlSize)
         .background(
             Capsule().fill(.clear).glassEffect(.regular, in: Capsule())
         )
@@ -864,6 +869,7 @@ struct ChatBar: View {
                     .foregroundStyle(.red)
             }
             .accessibilityLabel("Stop generating")
+            .buttonStyle(MewPressButtonStyle())
         } else {
             Button {
                 onSubmit()
@@ -874,6 +880,7 @@ struct ChatBar: View {
             }
             .disabled(!canSend)
             .accessibilityLabel("Send")
+            .buttonStyle(MewPressButtonStyle())
         }
     }
 

@@ -9,6 +9,9 @@ use tauri::AppHandle;
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 use tungstenite::{client, Message};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 const DESKTOP_DAEMON_URL: &str = "MEW_DESKTOP_DAEMON_URL";
 const DESKTOP_DAEMON_BINARY: &str = "MEW_DESKTOP_DAEMON_BINARY";
 const DESKTOP_DAEMON_PORT: &str = "MEW_DESKTOP_DAEMON_PORT";
@@ -63,6 +66,14 @@ impl DaemonSupervisor {
 
         if let Some((child, binary)) = spawn_configured_daemon(address)? {
             tracing::info!(binary = %binary.display(), %address, "configured mew daemon is ready");
+            return Ok(ReadyDaemon {
+                websocket_url: url,
+                child: Some(OwnedDaemon::Process(child)),
+            });
+        }
+
+        if let Some((child, binary)) = spawn_bundled_daemon(address)? {
+            tracing::info!(binary = %binary.display(), %address, "bundled mew daemon is ready");
             return Ok(ReadyDaemon {
                 websocket_url: url,
                 child: Some(OwnedDaemon::Process(child)),
@@ -203,6 +214,19 @@ fn spawn_configured_daemon(address: SocketAddr) -> Result<Option<(Child, PathBuf
     Ok(Some((child, binary)))
 }
 
+fn spawn_bundled_daemon(address: SocketAddr) -> Result<Option<(Child, PathBuf)>> {
+    let Some(binary) = std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(|directory| directory.join("mew")))
+        .filter(|binary| binary.is_file())
+    else {
+        return Ok(None);
+    };
+
+    let child = spawn_daemon_binary(address, &binary)?;
+    Ok(Some((child, binary)))
+}
+
 fn spawn_daemon(address: SocketAddr) -> Result<(Child, PathBuf)> {
     let mut last_error = None;
     let port = address.port().to_string();
@@ -215,6 +239,7 @@ fn spawn_daemon(address: SocketAddr) -> Result<(Child, PathBuf)> {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        close_inherited_descriptors(&mut command);
 
         let mut child = match command.spawn() {
             Ok(child) => child,
@@ -257,11 +282,14 @@ fn daemon_binary_candidates() -> Vec<PathBuf> {
 
 fn spawn_daemon_binary(address: SocketAddr, binary: &Path) -> Result<Child> {
     let port_arg = format!("127.0.0.1:{}", address.port());
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(["daemon", "--port", &port_arg])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    close_inherited_descriptors(&mut command);
+    let mut child = command
         .spawn()
         .with_context(|| format!("spawn configured daemon {}", binary.display()))?;
 
@@ -275,6 +303,20 @@ fn spawn_daemon_binary(address: SocketAddr, binary: &Path) -> Result<Child> {
         "configured daemon {} did not bind {address}",
         binary.display()
     )
+}
+
+fn close_inherited_descriptors(command: &mut Command) {
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            let limit = libc::sysconf(libc::_SC_OPEN_MAX);
+            let limit = if limit > 3 { limit } else { 1024 };
+            for fd in 3..limit {
+                libc::close(fd as libc::c_int);
+            }
+            Ok(())
+        });
+    }
 }
 
 fn wait_for_daemon(address: SocketAddr, timeout: Duration) -> bool {

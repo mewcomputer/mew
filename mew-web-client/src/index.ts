@@ -93,13 +93,13 @@ export type ClientMessage =
   | { type: "unflag_file"; session_id: string; path: string }
   | { type: "ping" }
   | { type: "list_projects" }
-  | { type: "browser_open"; url: string }
-  | { type: "browser_snapshot" }
-  | { type: "browser_screenshot"; annotate: boolean }
-  | { type: "browser_click"; selector: string }
-  | { type: "browser_fill"; selector: string; text: string }
-  | { type: "browser_press"; key: string }
-  | { type: "browser_close" };
+  | { type: "browser_open"; url: string; tab_id?: string }
+  | { type: "browser_snapshot"; tab_id?: string }
+  | { type: "browser_screenshot"; annotate: boolean; tab_id?: string }
+  | { type: "browser_click"; selector: string; tab_id?: string }
+  | { type: "browser_fill"; selector: string; text: string; tab_id?: string }
+  | { type: "browser_press"; key: string; tab_id?: string }
+  | { type: "browser_close"; tab_id?: string };
 
 // Provider events — see mew_message::ProviderEventWire.
 export type ProviderEventWire =
@@ -523,9 +523,10 @@ export type ServerMessage =
     }
   | { type: "pong"; version: string }
   | { type: "project_list"; projects: ProjectInfo[] }
-  | { type: "browser_snapshot"; snapshot: string; url: string; title: string }
-  | { type: "browser_screenshot"; data: string; url: string }
-  | { type: "browser_state"; open: boolean; url?: string; title?: string };
+  | { type: "browser_snapshot"; snapshot: string; url: string; title: string; tab_id?: string }
+  | { type: "browser_screenshot"; data: string; url: string; tab_id?: string }
+  | { type: "browser_state"; open: boolean; url?: string; title?: string; tab_id?: string }
+  | { type: "browser_error"; message: string; tab_id?: string };
 
 // ---------------------------------------------------------------------------
 // Minimal WebSocket interface — lets Node users pass `ws` while browsers
@@ -693,9 +694,10 @@ export interface MewClientEvents {
   errorEvent: (data: { message: string }) => void;
   pong: (data: { version: string }) => void;
   "project-list": (data: { projects: ProjectInfo[] }) => void;
-  "browser-snapshot": (data: { snapshot: string; url: string; title: string }) => void;
-  "browser-screenshot": (data: { data: string; url: string }) => void;
-  "browser-state": (data: { open: boolean; url?: string; title?: string }) => void;
+  "browser-snapshot": (data: { snapshot: string; url: string; title: string; tabId?: string }) => void;
+  "browser-screenshot": (data: { data: string; url: string; tabId?: string }) => void;
+  "browser-state": (data: { open: boolean; url?: string; title?: string; tabId?: string }) => void;
+  "browser-error": (data: { message: string; tabId?: string }) => void;
 }
 
 export type MewEventName = keyof MewClientEvents;
@@ -1095,13 +1097,13 @@ export class MewClient {
     this.send({ type: "list_projects" });
   }
 
-  browserOpen(url: string): void { this.send({ type: "browser_open", url }); }
-  browserSnapshot(): void { this.send({ type: "browser_snapshot" }); }
-  browserScreenshot(annotate = false): void { this.send({ type: "browser_screenshot", annotate }); }
-  browserClick(selector: string): void { this.send({ type: "browser_click", selector }); }
-  browserFill(selector: string, text: string): void { this.send({ type: "browser_fill", selector, text }); }
-  browserPress(key: string): void { this.send({ type: "browser_press", key }); }
-  browserClose(): void { this.send({ type: "browser_close" }); }
+  browserOpen(url: string, tabId?: string): void { this.send({ type: "browser_open", url, tab_id: tabId }); }
+  browserSnapshot(tabId?: string): void { this.send({ type: "browser_snapshot", tab_id: tabId }); }
+  browserScreenshot(annotate = false, tabId?: string): void { this.send({ type: "browser_screenshot", annotate, tab_id: tabId }); }
+  browserClick(selector: string, tabId?: string): void { this.send({ type: "browser_click", selector, tab_id: tabId }); }
+  browserFill(selector: string, text: string, tabId?: string): void { this.send({ type: "browser_fill", selector, text, tab_id: tabId }); }
+  browserPress(key: string, tabId?: string): void { this.send({ type: "browser_press", key, tab_id: tabId }); }
+  browserClose(tabId?: string): void { this.send({ type: "browser_close", tab_id: tabId }); }
 
   // -------------------------------------------------------------------------
   // Event registration
@@ -1401,13 +1403,16 @@ export class MewClient {
         this.emit("project-list", { projects: msg.projects });
         break;
       case "browser_snapshot":
-        this.emit("browser-snapshot", { snapshot: msg.snapshot, url: msg.url, title: msg.title });
+        this.emit("browser-snapshot", { snapshot: msg.snapshot, url: msg.url, title: msg.title, tabId: msg.tab_id });
         break;
       case "browser_screenshot":
-        this.emit("browser-screenshot", { data: msg.data, url: msg.url });
+        this.emit("browser-screenshot", { data: msg.data, url: msg.url, tabId: msg.tab_id });
         break;
       case "browser_state":
-        this.emit("browser-state", { open: msg.open, url: msg.url, title: msg.title });
+        this.emit("browser-state", { open: msg.open, url: msg.url, title: msg.title, tabId: msg.tab_id });
+        break;
+      case "browser_error":
+        this.emit("browser-error", { message: msg.message, tabId: msg.tab_id });
         break;
       default: {
         // Exhaustiveness check: adding a new ServerMessage variant

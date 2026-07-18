@@ -332,7 +332,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
               <button
                 onClick={() => fileInputRef.current?.click()}
                 disabled={!connected}
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+                className="motion-pressable flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
                 title="Attach file"
                 aria-label="Attach file"
               >
@@ -365,7 +365,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
               {hasStreaming ? (
                 <button
                   onClick={onCancel}
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-destructive/50 text-destructive transition-colors hover:bg-destructive/10"
+                  className="motion-pressable flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-destructive/50 text-destructive hover:bg-destructive/10"
                   title="Cancel"
                   aria-label="Cancel response"
                 >
@@ -376,7 +376,7 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
                   onClick={handleSubmit}
                   disabled={!text.trim() || !connected || isSending}
                   className={cn(
-                    "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50",
+                    "motion-pressable flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50",
                   )}
                   title="Send"
                   aria-label="Send prompt"
@@ -461,7 +461,7 @@ function MenuPanel({
   children: React.ReactNode;
 }) {
   return (
-    <div className="absolute bottom-full left-0 z-30 mb-1 w-56 rounded-lg border border-border bg-popover shadow-lg">
+    <div className="motion-enter absolute bottom-full left-0 z-30 mb-1 w-56 rounded-lg border border-border bg-popover shadow-lg">
       <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
         {title}
       </div>
@@ -488,7 +488,7 @@ function MenuRow({
         onClick();
       }}
       className={cn(
-        "flex w-full flex-col gap-0.5 px-2 py-1.5 text-left transition-colors",
+        "motion-pressable flex w-full flex-col gap-0.5 px-2 py-1.5 text-left",
         active ? "bg-accent" : "hover:bg-accent",
       )}
     >

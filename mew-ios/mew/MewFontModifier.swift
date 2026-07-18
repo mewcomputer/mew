@@ -11,7 +11,7 @@ enum MewFontConfig {
     static func apply() {
         // Set the default label font — affects most SwiftUI text
         if MewFonts.sansAvailable {
-            UILabel.appearance().font = UIFont(name: "MiSans", size: UIFont.systemFontSize)
+            UILabel.appearance().font = UIFont(name: "MiSansLatinVF", size: UIFont.systemFontSize)
         }
     }
 }

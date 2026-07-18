@@ -227,6 +227,52 @@ test("provider events are dispatched to listeners", async () => {
   assert.equal((got[0] as any).event.delta, "hi");
 });
 
+test("browser messages are dispatched by the SDK", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connectP = client.connect();
+  setImmediate(() => latest().open());
+  await connectP;
+
+  const states: Array<{ open: boolean; url?: string; title?: string; tabId?: string }> = [];
+  client.on("browser-state", (data) => states.push(data));
+  const errors: Array<{ message: string; tabId?: string }> = [];
+  client.on("browser-error", (data) => errors.push(data));
+
+  client.browserOpen("https://example.com", "browser-2");
+  assert.deepEqual(latest().sent[0], {
+    type: "browser_open",
+    url: "https://example.com",
+    tab_id: "browser-2",
+  });
+
+  assert.doesNotThrow(() => {
+    latest().peerSend({
+      type: "browser_state",
+      open: true,
+      url: "https://example.com",
+      title: "Example Domain",
+      tab_id: "browser-2",
+    });
+  });
+  await new Promise((r) => setImmediate(r));
+
+  assert.deepEqual(states, [{
+    open: true,
+    url: "https://example.com",
+    title: "Example Domain",
+    tabId: "browser-2",
+  }]);
+
+  latest().peerSend({
+    type: "browser_error",
+    message: "browser open failed",
+    tab_id: "browser-1",
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(errors, [{ message: "browser open failed", tabId: "browser-1" }]);
+});
+
 test("permission-request handler can respond", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });

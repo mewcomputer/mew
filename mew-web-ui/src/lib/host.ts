@@ -3,12 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 type WebLocation = Pick<Location, "protocol" | "host">;
 
 export type NativeBrowserRect = {
+  owner: string;
   x: number;
   y: number;
   width: number;
   height: number;
   visible: boolean;
 };
+
+export type NativeBrowserEvent =
+  | { kind: "address_changed"; owner?: string; url: string }
+  | { kind: "title_changed"; owner?: string; title: string; url: string };
 
 let websocketUrl: string | null = null;
 let initialization: Promise<void> | null = null;
@@ -72,14 +77,23 @@ export function setCefBrowserRect(rect: NativeBrowserRect): Promise<void> {
   return invoke<void>("cef_browser_set_rect", { rect });
 }
 
-export function setCefBrowserVisible(visible: boolean): Promise<void> {
-  return invoke<void>("cef_browser_set_visible", { visible });
+export function setCefBrowserVisible(visible: boolean, owner: string): Promise<void> {
+  return invoke<void>("cef_browser_set_visible", { payload: { visible, owner } });
 }
 
-export function navigateCefBrowser(url: string): Promise<void> {
-  return invoke<void>("cef_browser_navigate", { url });
+export function navigateCefBrowser(url: string, owner: string): Promise<void> {
+  return invoke<void>("cef_browser_navigate", { url, owner });
 }
 
-export function closeCefBrowser(): Promise<void> {
-  return invoke<void>("cef_browser_close");
+export function closeCefBrowser(owner: string): Promise<void> {
+  return invoke<void>("cef_browser_close", { owner });
+}
+
+export function listenCefBrowserEvents(
+  handler: (event: NativeBrowserEvent) => void,
+): Promise<() => void> {
+  if (!isDesktopHost()) return Promise.resolve(() => undefined);
+  return import("@tauri-apps/api/event").then(({ listen }) =>
+    listen<NativeBrowserEvent>("cef-browser-event", (event) => handler(event.payload)),
+  );
 }

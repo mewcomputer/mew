@@ -13,7 +13,7 @@ export function ConnectionBanner() {
   return (
     <div className="pointer-events-none fixed inset-x-0 top-2 z-50 flex justify-center px-3">
       <div
-        className="pointer-events-auto flex w-full max-w-md items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs shadow-lg"
+        className="motion-enter pointer-events-auto flex w-full max-w-md items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs shadow-lg"
         role={reconnecting ? "status" : "alert"}
       >
         {reconnecting ? (

@@ -95,7 +95,7 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
     >
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-4 py-2 text-left"
+        className="motion-pressable flex w-full items-center gap-2 px-4 py-2 text-left"
       >
         {expanded ? (
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -130,7 +130,7 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
           <div className="group relative">
             <button
               onClick={handleCopy}
-              className="absolute right-2 top-2 rounded border border-border bg-background p-1 opacity-0 transition-opacity group-hover:opacity-100"
+              className="motion-pressable absolute right-2 top-2 rounded border border-border bg-background p-1 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
               title="Copy output"
             >
               {copied ? <CheckCircle2 className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
@@ -174,7 +174,7 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
                 </span>
                 <button
                   onClick={handleCopy}
-                  className="flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] transition-colors hover:bg-accent"
+                  className="motion-pressable flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10px] hover:bg-accent"
                 >
                   {copied ? <CheckCircle2 className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
                   {copied ? "copied" : "copy"}

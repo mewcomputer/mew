@@ -1,7 +1,5 @@
 import { createRootRoute, Outlet, useRouter } from "@tanstack/react-router";
 import { useState, useEffect } from "react";
-import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
-import { SessionRail } from "@/components/session-rail";
 import { CommandPalette } from "@/components/command-palette";
 import { Toaster } from "@/components/ui/sonner";
 import { getClient } from "@/lib/client";
@@ -10,6 +8,7 @@ import { useSessionStore } from "@/stores/session";
 import { useMewConnection, useSessionNavigation } from "@/lib/hooks";
 import { MobileNav } from "@/components/mobile-nav";
 import { ConnectionBanner } from "@/components/connection-banner";
+import { WorkspaceFrame } from "@/components/workspace-frame";
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -73,17 +72,8 @@ function RootComponent() {
   }, [router]);
 
   return (
-    <SidebarProvider
-      style={
-        {
-          "--sidebar-width": "calc(var(--spacing) * 72)",
-          "--header-height": "calc(var(--spacing) * 12)",
-        } as React.CSSProperties
-      }
-      defaultOpen
-    >
-      <SessionRail client={getClient()} />
-      <SidebarInset className="flex flex-1 flex-col h-screen">
+    <>
+      <WorkspaceFrame>
         <Outlet />
         <MobileNav
           active="chat"
@@ -98,7 +88,7 @@ function RootComponent() {
           onSessions={() => {}}
           onMore={() => router.navigate({ to: "/settings" })}
         />
-      </SidebarInset>
+      </WorkspaceFrame>
       <ConnectionBanner />
       <CommandPalette
         client={getClient()}
@@ -106,6 +96,6 @@ function RootComponent() {
         onOpenChange={setPaletteOpen}
       />
       <Toaster />
-    </SidebarProvider>
+    </>
   );
 }

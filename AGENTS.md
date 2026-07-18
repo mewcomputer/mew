@@ -9,6 +9,7 @@ Project guidance for coding agents working in this repository.
 - Write behavior tests with implementation changes. Run the narrowest relevant tests first, then the broader gate when practical.
 - Update `CURRENT.md` with an append-only dated entry after each meaningful chunk of work. Do this after verification, not as a substitute for it.
 - Do not manually edit generated theme outputs. Change the manifest and run the theme codegen command.
+- When adding shadcn components, use `npx shadcn@latest add <component>` so the CLI owns installation and local component scaffolding.
 
 ## Commands
 

@@ -14,7 +14,7 @@ export function PlanApprovalCard() {
   if (pending.length === 0) return null;
 
   return (
-    <div className="border-t border-border bg-muted/30 p-3">
+    <div className="motion-enter border-t border-border bg-muted/30 p-3">
       <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
         Plan approval
       </div>
@@ -61,7 +61,7 @@ export function PlanApprovalForm({
   };
 
   return (
-    <div className="rounded-lg border border-border bg-background p-3">
+    <div className="motion-enter rounded-lg border border-border bg-background p-3">
       <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
         <span className="font-mono">{req.planPath}</span>
         <span>→</span>
@@ -90,13 +90,13 @@ export function PlanApprovalForm({
             <button
               onClick={requestChanges}
               disabled={!feedback.trim()}
-              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+              className="motion-pressable rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             >
               Send feedback
             </button>
             <button
               onClick={() => setRequesting(false)}
-              className="rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent"
+              className="motion-pressable rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground hover:bg-accent"
             >
               Cancel
             </button>
@@ -106,13 +106,13 @@ export function PlanApprovalForm({
         <div className="mt-3 flex gap-2">
           <button
             onClick={approve}
-            className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            className="motion-pressable rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
           >
             Approve
           </button>
           <button
             onClick={() => setRequesting(true)}
-            className="rounded-md px-3 py-1.5 text-sm font-medium text-foreground ring-1 ring-border transition-colors hover:bg-accent"
+            className="motion-pressable rounded-md px-3 py-1.5 text-sm font-medium text-foreground ring-1 ring-border hover:bg-accent"
           >
             Request changes
           </button>

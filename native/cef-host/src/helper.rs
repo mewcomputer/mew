@@ -8,9 +8,22 @@ fn main() {
         let is_framework_helper = executable
             .components()
             .any(|component| component.as_os_str() == "Helpers");
-        let loader = library_loader::LibraryLoader::new(&executable, is_framework_helper);
-        assert!(loader.load(), "failed to load Chromium Embedded Framework");
-        loader
+        if let Some(framework) = std::env::var_os("MEW_CEF_FRAMEWORK_PATH") {
+            use std::os::unix::ffi::OsStrExt;
+            let framework = std::ffi::CString::new(framework.as_bytes())
+                .expect("CEF framework path contains an invalid nul byte");
+            let framework_ptr = unsafe { &*framework.as_ptr().cast() };
+            assert_eq!(
+                cef::load_library(Some(framework_ptr)),
+                1,
+                "failed to load Chromium Embedded Framework"
+            );
+            None
+        } else {
+            let loader = library_loader::LibraryLoader::new(&executable, is_framework_helper);
+            assert!(loader.load(), "failed to load Chromium Embedded Framework");
+            Some(loader)
+        }
     };
 
     // The CEF command-line wrapper calls into the dynamically loaded API, so

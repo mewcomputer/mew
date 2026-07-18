@@ -16,6 +16,7 @@ import SwiftStreamingMarkdown
 struct MessageItemView: View {
     let message: ChatMessage
     var fontChoice: MewFontChoice = .miSans
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var isUser: Bool { message.role == "user" }
 
@@ -53,7 +54,7 @@ struct MessageItemView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: Theme.Layout.panelRadius, style: .continuous))
         .frame(maxWidth: 320, alignment: .trailing)
     }
 
@@ -216,6 +217,7 @@ private func toolSensitivity(for part: MessagePart) -> ToolSensitivity {
 private struct ToolGroupRow: View {
     let parts: [MessagePart]
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var expanded = false
 
     private var anyActive: Bool {
@@ -258,7 +260,11 @@ private struct ToolGroupRow: View {
                     .foregroundStyle(.tertiary)
             }
             .contentShape(Rectangle())
-            .onTapGesture { withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() } }
+            .onTapGesture {
+                withAnimation(Theme.Motion.value(Theme.Motion.disclosure, reduced: reduceMotion)) {
+                    expanded.toggle()
+                }
+            }
 
             if expanded {
                 VStack(alignment: .leading, spacing: 4) {
@@ -295,6 +301,7 @@ private struct ToolGroupRow: View {
 private struct ToolCallRow: View {
     let part: MessagePart
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var expanded = false
 
     private var state: ToolState {
@@ -329,7 +336,11 @@ private struct ToolCallRow: View {
                 }
             }
             .contentShape(Rectangle())
-            .onTapGesture { withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() } }
+            .onTapGesture {
+                withAnimation(Theme.Motion.value(Theme.Motion.disclosure, reduced: reduceMotion)) {
+                    expanded.toggle()
+                }
+            }
 
             if expanded {
                 detailContent
@@ -474,8 +485,6 @@ struct StreamingBubble: View {
                 if text.isEmpty {
                     HStack(spacing: 4) {
                         TypingDot()
-                        TypingDot(delay: 0.2)
-                        TypingDot(delay: 0.4)
                     }
                 } else {
                     StreamedMarkdownView(source: source, config: .mew(fontChoice: fontChoice))
@@ -484,7 +493,7 @@ struct StreamingBubble: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .frame(maxWidth: 360, alignment: .leading)
-            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: Theme.Layout.panelRadius, style: .continuous))
 
             Spacer(minLength: 0)
         }
@@ -498,7 +507,7 @@ struct StreamingBubble: View {
 
 /// A single pulsing dot used in the "assistant is typing" indicator.
 private struct TypingDot: View {
-    var delay: Double = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var animate = false
 
     var body: some View {
@@ -506,7 +515,10 @@ private struct TypingDot: View {
             .fill(Color.secondary)
             .frame(width: 6, height: 6)
             .opacity(animate ? 0.3 : 1.0)
-            .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true).delay(delay), value: animate)
-            .onAppear { animate = true }
+            .animation(
+                reduceMotion ? nil : .easeInOut(duration: 0.6).repeatForever(autoreverses: true),
+                value: animate
+            )
+            .onAppear { if !reduceMotion { animate = true } }
     }
 }

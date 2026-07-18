@@ -366,13 +366,13 @@ export class MewClient {
     listProjects() {
         this.send({ type: "list_projects" });
     }
-    browserOpen(url) { this.send({ type: "browser_open", url }); }
-    browserSnapshot() { this.send({ type: "browser_snapshot" }); }
-    browserScreenshot(annotate = false) { this.send({ type: "browser_screenshot", annotate }); }
-    browserClick(selector) { this.send({ type: "browser_click", selector }); }
-    browserFill(selector, text) { this.send({ type: "browser_fill", selector, text }); }
-    browserPress(key) { this.send({ type: "browser_press", key }); }
-    browserClose() { this.send({ type: "browser_close" }); }
+    browserOpen(url, tabId) { this.send({ type: "browser_open", url, tab_id: tabId }); }
+    browserSnapshot(tabId) { this.send({ type: "browser_snapshot", tab_id: tabId }); }
+    browserScreenshot(annotate = false, tabId) { this.send({ type: "browser_screenshot", annotate, tab_id: tabId }); }
+    browserClick(selector, tabId) { this.send({ type: "browser_click", selector, tab_id: tabId }); }
+    browserFill(selector, text, tabId) { this.send({ type: "browser_fill", selector, text, tab_id: tabId }); }
+    browserPress(key, tabId) { this.send({ type: "browser_press", key, tab_id: tabId }); }
+    browserClose(tabId) { this.send({ type: "browser_close", tab_id: tabId }); }
     // -------------------------------------------------------------------------
     // Event registration
     // -------------------------------------------------------------------------
@@ -653,13 +653,16 @@ export class MewClient {
                 this.emit("project-list", { projects: msg.projects });
                 break;
             case "browser_snapshot":
-                this.emit("browser-snapshot", { snapshot: msg.snapshot, url: msg.url, title: msg.title });
+                this.emit("browser-snapshot", { snapshot: msg.snapshot, url: msg.url, title: msg.title, tabId: msg.tab_id });
                 break;
             case "browser_screenshot":
-                this.emit("browser-screenshot", { data: msg.data, url: msg.url });
+                this.emit("browser-screenshot", { data: msg.data, url: msg.url, tabId: msg.tab_id });
                 break;
             case "browser_state":
-                this.emit("browser-state", { open: msg.open, url: msg.url, title: msg.title });
+                this.emit("browser-state", { open: msg.open, url: msg.url, title: msg.title, tabId: msg.tab_id });
+                break;
+            case "browser_error":
+                this.emit("browser-error", { message: msg.message, tabId: msg.tab_id });
                 break;
             default: {
                 // Exhaustiveness check: adding a new ServerMessage variant

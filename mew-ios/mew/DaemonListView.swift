@@ -141,16 +141,25 @@ struct DaemonListView: View {
 
 struct PulseModifier: ViewModifier {
     let active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pulsing = false
 
     func body(content: Content) -> some View {
         content
             .scaleEffect(pulsing ? 1.3 : 1.0)
             .animation(
-                active ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true) : .default,
+                active && !reduceMotion
+                    ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
+                    : nil,
                 value: pulsing
             )
-            .onAppear { pulsing = active }
+            .onAppear { pulsing = active && !reduceMotion }
+            .onChange(of: active) { _, isActive in
+                pulsing = isActive && !reduceMotion
+            }
+            .onChange(of: reduceMotion) { _, isReduced in
+                pulsing = active && !isReduced
+            }
     }
 }
 

@@ -1186,6 +1186,7 @@ fn server_message_type(msg: &mew_protocol::ServerMessage) -> &'static str {
         mew_protocol::ServerMessage::BrowserSnapshot { .. } => "BrowserSnapshot",
         mew_protocol::ServerMessage::BrowserScreenshot { .. } => "BrowserScreenshot",
         mew_protocol::ServerMessage::BrowserState { .. } => "BrowserState",
+        mew_protocol::ServerMessage::BrowserError { .. } => "BrowserError",
         mew_protocol::ServerMessage::GroupList { .. } => "GroupList",
         mew_protocol::ServerMessage::GroupsChanged { .. } => "GroupsChanged",
         mew_protocol::ServerMessage::DirListing { .. } => "DirListing",

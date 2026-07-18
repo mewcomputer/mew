@@ -62,7 +62,7 @@ function ToolCallGroup({
     <div className="max-w-[85%]">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-left"
+        className="motion-pressable flex w-full items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-left"
       >
         <Terminal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         <span className="text-sm font-medium">{parts.length} tool calls</span>
@@ -77,7 +77,7 @@ function ToolCallGroup({
         />
       </button>
       {expanded && (
-        <div className="mt-1 space-y-1 pl-2">
+        <div className="motion-enter mt-1 space-y-1 pl-2">
           {parts.map((part, i) => (
             <ToolCallCard key={i} part={part} />
           ))}

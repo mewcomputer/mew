@@ -4,6 +4,7 @@ import MewMobileCore
 /// Root navigation: Daemons → Sessions → Chat
 struct RootView: View {
     @EnvironmentObject var store: AppStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var bannerTask: Task<Void, Never>?
 
     var body: some View {
@@ -24,7 +25,7 @@ struct RootView: View {
         .overlay(alignment: .top) {
             if let banner = store.activeBanner {
                 alertBanner(banner)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
                     .zIndex(100)
             }
         }
@@ -34,7 +35,9 @@ struct RootView: View {
                 bannerTask = Task {
                     try? await Task.sleep(for: .seconds(5))
                     if !Task.isCancelled {
-                        withAnimation { store.activeBanner = nil }
+                        withAnimation(Theme.Motion.value(Theme.Motion.surface, reduced: reduceMotion)) {
+                            store.activeBanner = nil
+                        }
                     }
                 }
             }
@@ -48,7 +51,9 @@ struct RootView: View {
             if let daemonId = store.selectedDaemonId {
                 store.path.append(.chat(daemonNodeId: daemonId.nodeId, sessionId: item.sessionId))
             }
-            withAnimation { store.activeBanner = nil }
+            withAnimation(Theme.Motion.value(Theme.Motion.surface, reduced: reduceMotion)) {
+                store.activeBanner = nil
+            }
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: iconForAlertKind(item.kind))
@@ -71,7 +76,7 @@ struct RootView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                RoundedRectangle(cornerRadius: Theme.Layout.panelRadius, style: .continuous)
                     .fill(.black.opacity(0.85))
             )
             .padding(.horizontal, 12)

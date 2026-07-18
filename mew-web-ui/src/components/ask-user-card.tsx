@@ -15,7 +15,7 @@ export function AskUserCard() {
   if (pending.length === 0) return null;
 
   return (
-    <div className="border-t border-border bg-muted/30 p-3">
+    <div className="motion-enter border-t border-border bg-muted/30 p-3">
       <div className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
         Questions
       </div>
@@ -71,7 +71,7 @@ export function AskUserForm({
                       next[qi] = opt.label;
                       setAnswers(next);
                     }}
-                    className={`flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent ${
+                    className={`motion-pressable flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent ${
                       answers[qi] === opt.label ? "bg-accent ring-1 ring-ring" : ""
                     }`}
                   >
@@ -103,7 +103,7 @@ export function AskUserForm({
       <button
         onClick={handleSubmit}
         disabled={answers.some((a) => !a)}
-        className="mt-3 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+        className="motion-pressable mt-3 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
       >
         Submit
       </button>

@@ -3,6 +3,7 @@ dist*/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/binaries/
+binaries/
 src-tauri/cef/
 src-tauri/icons/android/
 src-tauri/icons/ios/

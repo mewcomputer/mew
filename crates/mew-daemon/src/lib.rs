@@ -1140,10 +1140,11 @@ where
             }
 
             // -- Browser --
-            ClientMessage::BrowserOpen { url } => {
+            ClientMessage::BrowserOpen { url, tab_id } => {
                 let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::Error {
+                    reply(ServerMessage::BrowserError {
                         message: "attach a session before opening a browser".into(),
+                        tab_id,
                     });
                     continue;
                 };
@@ -1152,16 +1153,19 @@ where
                         open: true,
                         url: Some(url),
                         title: Some(title),
+                        tab_id,
                     }),
-                    Err(e) => reply(ServerMessage::Error {
+                    Err(e) => reply(ServerMessage::BrowserError {
                         message: format!("browser open: {e}"),
+                        tab_id,
                     }),
                 }
             }
-            ClientMessage::BrowserSnapshot => {
+            ClientMessage::BrowserSnapshot { tab_id } => {
                 let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::Error {
+                    reply(ServerMessage::BrowserError {
                         message: "attach a session before using the browser".into(),
+                        tab_id,
                     });
                     continue;
                 };
@@ -1170,30 +1174,37 @@ where
                         snapshot,
                         url,
                         title,
+                        tab_id,
                     }),
-                    Err(e) => reply(ServerMessage::Error {
+                    Err(e) => reply(ServerMessage::BrowserError {
                         message: format!("browser snapshot: {e}"),
+                        tab_id,
                     }),
                 }
             }
-            ClientMessage::BrowserScreenshot { annotate } => {
+            ClientMessage::BrowserScreenshot { annotate, tab_id } => {
                 let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::Error {
+                    reply(ServerMessage::BrowserError {
                         message: "attach a session before using the browser".into(),
+                        tab_id,
                     });
                     continue;
                 };
                 match crate::browser::screenshot(&session.id, annotate).await {
-                    Ok((data, url)) => reply(ServerMessage::BrowserScreenshot { data, url }),
-                    Err(e) => reply(ServerMessage::Error {
+                    Ok((data, url)) => {
+                        reply(ServerMessage::BrowserScreenshot { data, url, tab_id })
+                    }
+                    Err(e) => reply(ServerMessage::BrowserError {
                         message: format!("browser screenshot: {e}"),
+                        tab_id,
                     }),
                 }
             }
-            ClientMessage::BrowserClick { selector } => {
+            ClientMessage::BrowserClick { selector, tab_id } => {
                 let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::Error {
+                    reply(ServerMessage::BrowserError {
                         message: "attach a session before using the browser".into(),
+                        tab_id,
                     });
                     continue;
                 };
@@ -1202,16 +1213,23 @@ where
                         open: true,
                         url: Some(url),
                         title: Some(title),
+                        tab_id,
                     }),
-                    Err(e) => reply(ServerMessage::Error {
+                    Err(e) => reply(ServerMessage::BrowserError {
                         message: format!("browser click: {e}"),
+                        tab_id,
                     }),
                 }
             }
-            ClientMessage::BrowserFill { selector, text } => {
+            ClientMessage::BrowserFill {
+                selector,
+                text,
+                tab_id,
+            } => {
                 let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::Error {
+                    reply(ServerMessage::BrowserError {
                         message: "attach a session before using the browser".into(),
+                        tab_id,
                     });
                     continue;
                 };
@@ -1220,16 +1238,19 @@ where
                         open: true,
                         url: Some(url),
                         title: Some(title),
+                        tab_id,
                     }),
-                    Err(e) => reply(ServerMessage::Error {
+                    Err(e) => reply(ServerMessage::BrowserError {
                         message: format!("browser fill: {e}"),
+                        tab_id,
                     }),
                 }
             }
-            ClientMessage::BrowserPress { key } => {
+            ClientMessage::BrowserPress { key, tab_id } => {
                 let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::Error {
+                    reply(ServerMessage::BrowserError {
                         message: "attach a session before using the browser".into(),
+                        tab_id,
                     });
                     continue;
                 };
@@ -1238,16 +1259,19 @@ where
                         open: true,
                         url: Some(url),
                         title: Some(title),
+                        tab_id,
                     }),
-                    Err(e) => reply(ServerMessage::Error {
+                    Err(e) => reply(ServerMessage::BrowserError {
                         message: format!("browser press: {e}"),
+                        tab_id,
                     }),
                 }
             }
-            ClientMessage::BrowserClose => {
+            ClientMessage::BrowserClose { tab_id } => {
                 let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::Error {
+                    reply(ServerMessage::BrowserError {
                         message: "attach a session before using the browser".into(),
+                        tab_id,
                     });
                     continue;
                 };
@@ -1256,9 +1280,11 @@ where
                         open: false,
                         url: None,
                         title: None,
+                        tab_id,
                     }),
-                    Err(e) => reply(ServerMessage::Error {
+                    Err(e) => reply(ServerMessage::BrowserError {
                         message: format!("browser close: {e}"),
+                        tab_id,
                     }),
                 }
             }

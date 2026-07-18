@@ -1,3 +1,62 @@
+# 2026-07-17 — Fix dev CEF Mach-port rendezvous by anchoring a main bundle
+
+## Summary
+
+The Tauri dev app spawned CEF helpers that died in a loop with
+`bootstrap_look_up org.cef.framework.MachPortRendezvousServer.<pid>: Unknown
+service name` followed by `Network service crashed or was terminated,
+restarting service`. Root cause: Chromium names the browser's Mach rendezvous
+server `<main bundle id>.MachPortRendezvousServer.<pid>` and helpers derive
+the same name from their own main bundle. The unbundled dev executable has no
+bundle identifier (the server registered as `.MachPortRendezvousServer.<pid>`,
+verified with `bootstrap_look_up` probes), while helpers resolve the CEF
+framework identifier `org.cef.framework`, so every lookup missed and each
+helper terminated on startup.
+
+Fix: point CEF at a real bundle for dev. `scripts/prepare-cef.mjs` now writes
+a synthetic `src-tauri/target/debug/mew.app` (Info.plist with the
+`ai.mew.mew` identifier) next to the dev executable, and the CEF host sets
+`main_bundle_path` to it plus an explicit `framework_dir_path`. CEF appends
+both as command-line switches and propagates them to every helper, so browser
+and helpers agree on one rendezvous name. Verified in the dev app: browser
+registers `ai.mew.mew.MachPortRendezvousServer.<pid>`, helpers stay alive,
+CDP answers on 9223, zero rendezvous errors.
+
+## Changes
+
+- `native/cef-host/src/embed.rs`: set `Settings.main_bundle_path` (new
+  `main_bundle_path()` resolver: `MEW_CEF_MAIN_BUNDLE_PATH` env override,
+  nothing when running packaged, else exe-adjacent `mew.app`) and
+  `Settings.framework_dir_path` (parent dir of the resolved framework).
+- `mew-web-ui/scripts/prepare-cef.mjs`: write the synthetic development
+  bundle `src-tauri/target/debug/mew.app/Contents/Info.plist` on every run.
+- `mew-web-ui/src-tauri/src/lib.rs`: also print the CEF fallback reason to
+  stderr; the desktop binary installs no tracing subscriber, so
+  `tracing::warn` made CEF init failures invisible.
+- `native/cef-host/README.md`: document the rendezvous/bundle relationship
+  and the new `MEW_CEF_MAIN_BUNDLE_PATH` override; correct the dev prepare
+  description (copies by default, `--link` symlinks).
+
+## Notes
+
+- Packaged (release) runs are unchanged: the resolver returns nothing when
+  the executable lives inside a real `.app`, so CEF derives the bundle from
+  the executable location as before.
+- `cargo clippy --all-targets -- -D warnings` previously failed on five
+  pre-existing lints in `native/cef-host`; these are now fixed (collapsed
+  nested `if let` into let-chains, moved a `pub use` ahead of the test
+  module), and the crate and `src-tauri` are both clippy-clean.
+- Helpers no longer strictly need the `binaries/Resources` copy for ICU/pak
+  files since `framework_dir_path` is propagated, but the copy is kept as a
+  fallback.
+- Force-killing the dev app leaves CEF's `SingletonLock`/`SingletonSocket`
+  in the cache profile, which can make the next launch silently skip CEF
+  initialization (WKWebView fallback). The new stderr message surfaces that
+  failure; clearing `~/Library/Application Support/ai.mew.mew/cef-desktop-cache`
+  recovers.
+- Production sandbox/helper `.app` layout under `Contents/Frameworks` remains
+  separate hardening, as before.
+
 # 2026-07-17 — Add Kimi (Moonshot AI) provider
 
 ## Summary
@@ -837,3 +896,300 @@ Verified: `cargo test -p mew --bin mew tui_capture` (6 passed),
 - Identified the main implementation constraint: the native CEF browser must
   remain mounted while switching workbench tabs so its visible page and CDP
   target survive tab changes.
+
+## 2026-07-17 — Independent workspace surfaces implementation
+
+- Added persisted workspace-surface state with a pinned summary defaulting on
+  and a workbench defaulting off. `⌘B` controls the summary and `⌘⇧B` controls
+  the workbench independently.
+- Added a root-level `WorkspaceFrame` so the desktop workbench is a dock beside
+  the chat surface. Mobile keeps the existing sheet behavior.
+- Reworked the activity rail into top-level Activity, Browser, Changes, and
+  Review tabs. Browser lazy-mounts on first use and stays mounted while tabs
+  switch, while CEF visibility follows the active surface.
+- Added a first local working-tree Review surface and removed duplicate Changes
+  navigation from the Activity sub-tabs.
+
+Verified: web UI tests (80), production web build, and `git diff --check`.
+The in-app browser smoke pass could not start because this sandbox rejects
+binding the local Vite development port.
+
+## 2026-07-17 — Tauri CEF dev preparation fix
+
+- Isolated the opaque Tauri `os error 2`: sidecars were present; the failing
+  resource was the CEF framework path and dev preparation was linking it.
+- Updated the dev CEF preparation command to copy a real framework directory,
+  matching Tauri's macOS framework resource copier.
+- Confirmed `cargo check --manifest-path mew-web-ui/src-tauri/Cargo.toml` and
+  `just desktop-dev` reach a successful `mew-desktop` build and launch.
+
+## 2026-07-17 — CEF development runtime assets
+
+- Added explicit CEF resource and locale paths for the embedded browser.
+- Prepared `icudtl.dat`, CEF resources, and GPU libraries for the unbundled
+  macOS debug executable.
+- Updated the helper loader to use `MEW_CEF_FRAMEWORK_PATH` when running
+  outside the packaged `.app` helper layout.
+- The ICU and missing-library errors are gone. Remaining dev-only output is
+  CEF Mach port rendezvous noise from the unbundled helper/runtime layout.
+
+Verified: `cargo check --manifest-path native/cef-host/Cargo.toml`,
+`cargo fmt --all -- --check`, and desktop launch through `just desktop-dev`.
+
+## 2026-07-17 — CEF diagnostic cleanup
+
+- Kept the confirmed synthetic bundle/rendezvous fix and external-pump
+  backstop.
+- Removed the confirmed no-op occlusion switches and reverted the diagnostic
+  800×600 initial bounds to 1×1.
+- Removed inert `was_hidden`/`was_resized` host notifications from the embed
+  path after verification showed they do not affect this CEF build.
+- Added the dev helper framework/resource loading path and development CEF
+  asset preparation needed by the unbundled macOS executable.
+
+Verified: native and Tauri cargo checks, cargo formatting, and diff hygiene.
+
+## 2026-07-18 — Codex-style browser workbench tabs
+
+- Added a tested browser-tab reducer with add, select, update, and close
+  behavior that always leaves one usable new-tab surface.
+- Added a compact tab strip inside the Browser workbench with explicit close
+  and new-tab controls, hostname labels, and `⌘T`/`⌘W` shortcuts.
+- Kept the browser surface mounted while switching workbench modes and made
+  the native CEF visibility follow both the active workbench mode and the
+  active browser tab.
+- Exercised the interaction in the local app: opened the workbench, created a
+  second tab, navigated it to example.com, and switched back to the new tab.
+
+Verified: browser-tab and RightRail tests (12 passed), TypeScript build,
+production web build, and `git diff --check`. The local smoke app still reports
+the pre-existing daemon connection outage, but the workbench remains usable.
+
+## 2026-07-18 — Packaged Tauri native smoke test
+
+- Built and launched the debug `.app` bundle with the real macOS bundle
+  identity, including the bundled CEF framework and helper.
+- Confirmed the clean packaged launch reaches the native event loop and starts
+  the CEF helper processes without the earlier ICU/resource errors.
+- The embedded CEF target still advertises a DevTools page but has no renderer
+  child; `Page.enable` times out. This is the remaining native browser blocker
+  before the browser workbench can be exercised visually in the packaged app.
+- The Computer Use accessibility probe could not retrieve the native AX tree in
+  this environment, so no source changes were made from this smoke pass.
+
+Verified: Tauri debug bundle, clean native launch, process/helper inspection,
+and `git diff --check`. `desktop:verify:cef` reaches the DevTools endpoint but
+fails at `Page.enable` timeout.
+
+## 2026-07-18 — CEF renderer startup unblocked
+
+- Switched embedded browser creation to CEF's asynchronous API and retained the
+  browser handle from `on_after_created`, removing the create-time race.
+- Added the macOS helper app bundle layout CEF expects under
+  `Contents/Frameworks`: renderer, GPU, plugin, alerts, and base helpers named
+  from the Tauri executable (`mew-desktop Helper*.app`).
+- Kept the flat helper for fallback/dev preparation, but let packaged CEF use
+  the nested helper apps and propagate the bundled framework path to children.
+- Re-sign the generated app after adding nested helpers so the debug and
+  release bundle workflows remain verifiable on macOS.
+
+Verified: web tests (86), native and Tauri cargo checks/clippy, a rebuilt and
+launched packaged `.app`, live renderer helper processes, `codesign --verify
+--deep --strict`, and all 7 `desktop:verify:cef` checks including a compositor
+screenshot.
+
+## 2026-07-18 — Shared native browser session verification
+
+- Launched the packaged Tauri app and attached `agent-browser --cdp` to the
+  same CEF target used by the visible app surface.
+- Navigated from `https://example.com/` to `https://example.org/` through the
+  agent path and captured a screenshot, confirming the user-facing renderer
+and agent control path share one browser session.
+
+## 2026-07-18 — Tauri dev framework preparation fix
+
+- Restored the normal `desktop:dev` CEF preparation step to copy the framework
+  instead of symlinking it.
+- Tauri's macOS build script walks and recopies the framework, and its symlink
+  failure surfaced only as `No such file or directory (os error 2)` during the
+  custom build command.
+
+Verified: `desktop:prepare:dev`, `desktop:prepare:cef:dev`, `tauri dev`, live
+CEF renderer helper processes, and `agent-browser --cdp 9223` reading the
+embedded page title and URL.
+
+## 2026-07-18 — Browser protocol mismatch recovery
+
+- Made both desktop preparation paths rebuild `@mew/web-client` before Vite
+  or Tauri starts, so the generated SDK distribution cannot lag behind its
+  browser protocol source.
+- Added SDK coverage for browser response dispatch.
+- Made the Browser workbench listen for browser-scoped daemon errors, clear
+  its loading state, and show the protocol error inline instead of appearing
+  frozen.
+- The existing daemon on the shared port was started from an older binary and
+  cannot decode the browser variants. Restart that daemon after browser
+  protocol changes, or use `MEW_DESKTOP_DAEMON_PORT` to attach to a fresh
+  instance during development.
+
+Verified: 15 web-client tests, 87 web UI tests, production web build, and
+`git diff --check`.
+
+## 2026-07-18 — Workbench tab restructuring plan
+
+- Decided to use the existing shadcn/Radix Tabs primitive for accessible tab
+  semantics and keyboard behavior, with a custom document-strip presentation.
+- Defined a unified workbench tab registry for browser pages, terminals, files,
+  changes, reviews, and activity. The pinned summary remains independent.
+- Recorded the staged architecture and migration plan in
+  `docs/development/workbench-tabs.md`.
+
+Verified: local shadcn Tabs implementation review, official shadcn Tabs
+reference review, and `git diff --check`.
+
+## 2026-07-18 — Resizable workbench decision
+
+- Chose shadcn's Resizable panel composition for the conversation/workbench
+  split, with a draggable and keyboard-adjustable divider.
+- The workbench will collapse to zero when closed and restore its last usable
+  width when reopened; mobile keeps the existing sheet behavior.
+- Recorded the CLI convention for new shadcn components in `AGENTS.md`:
+  `npx shadcn@latest add <component>`.
+
+Verified: local dependency/component inventory, official shadcn Resizable
+reference review, and `git diff --check`.
+
+## 2026-07-18 — Resizable workbench shell implemented
+
+- Added shadcn's `resizable` component through the CLI and adapted its wrapper
+  to the installed `react-resizable-panels` v4 exports (`Group` and
+  `Separator`).
+- Replaced the fixed desktop workbench width with a keyboard- and pointer-
+  adjustable conversation/workbench split.
+- Persisted the workbench width, restored it after collapse/reopen, and kept
+  the mobile sheet path unchanged.
+- Added reducer coverage for width clamping and visibility synchronization.
+
+Verified: 89 web UI tests, production web build, and `git diff --check`.
+
+## 2026-07-18 — Unified workbench tabs implemented
+
+- Added a persistent workbench tab registry for Activity, browser pages,
+  terminal/job output, files, Changes, and Review.
+- Migrated the old single `workbenchTab` preference into the new registry while
+  keeping the pinned summary independent from the workbench.
+- Replaced the fixed workbench mode buttons and nested browser tabs with one
+  shared shadcn/Radix Tabs strip, close controls, a surface picker, and
+  Codex-style Cmd/Ctrl+T, Cmd/Ctrl+W, and Cmd/Ctrl+1–9 shortcuts.
+- Promoted browser URL/title state into top-level tabs and kept native CEF
+  navigation scoped to the active browser tab. Terminal copy is deliberately
+  labeled as background job output until the daemon has PTY support.
+- Added reducer, migration, persistence, accessibility, browser-tab, and
+  RightRail interaction coverage.
+
+Verified: 95 web UI tests, TypeScript check, production web build, and
+`git diff --check`.
+
+## 2026-07-18 — Browser lifecycle and tab routing hardening
+
+- Added optional `tab_id` fields to browser commands and responses, plus a
+  typed `browser_error` response so late failures cannot overwrite the active
+  browser tab.
+- Updated the daemon and TypeScript client to echo browser tab identity while
+  retaining decode compatibility with older messages that omit it.
+- Filtered browser events in the workbench by tab identity, scoped browser
+  close requests, and cleared loading state for every typed browser error.
+- Kept browser surfaces mounted through tab switches so snapshots and errors
+  survive selection changes, while inactive panels remain hidden from the
+  accessibility tree and cannot trigger navigation.
+- Added owner-gated native CEF bounds, visibility, navigation, and cleanup
+  calls. Stale queued callbacks cannot hide or release a newly active tab, and
+  failed main-thread scheduling releases only the owner that claimed it.
+- Documented phase 2 as in progress. The remaining lifecycle work is a live
+  unlocked-screen CEF soak covering repeated tab switches, close/reopen, and
+  agent-browser CDP control.
+
+Verified: 103 protocol tests, 15 web-client tests, 101 web UI tests, web-client
+build, UI TypeScript check, production UI build, `cargo check -p mew-daemon -p
+mew`, 10 Tauri shell tests, `cargo fmt --all -- --check`, and `git diff
+--check`.
+
+## 2026-07-18 — Desktop browser soak and lifecycle hardening
+
+- Ran the live browser soak against the Tauri app: 12 rapid switches between
+  two browser tabs stayed on the expected URL, close/reopen preserved the
+  workbench, and a newly created tab navigated successfully.
+- Verified `agent-browser --cdp 9223` against the packaged CEF page. Native CEF
+  address/title events now update the active React tab, so CDP navigation and
+  the visible tab strip share one authority.
+- Removed the Tauri host's inherited browser-CDP environment override so the
+  daemon cannot be configured to launch a second browser session. Directly
+  spawned daemon children close inherited descriptors; a fresh packaged launch
+  now leaves the daemon on 25566 without a copied listener on 9223. The desktop
+  shell also uses Tauri's single-instance plugin to focus the existing app
+  instead of creating a competing host.
+- Added a web-host no-op listener regression test for native CEF events.
+
+Verified: 102 web UI tests, 15 web-client tests, 103 protocol tests, web-client
+build, UI TypeScript check, production UI build, packaged `pnpm desktop:build`,
+`pnpm desktop:verify:cef` with all 7 checks passing, 10 Tauri shell tests,
+`cargo check -p mew-daemon -p mew`, `cargo fmt --all -- --check`, and
+`git diff --check`.
+
+## 2026-07-18 — Desktop browser authority and shutdown fixes
+
+- Restored the desktop browser transport contract: when CEF is available, the
+  daemon receives `MEW_BROWSER_CDP_PORT` and `agent-browser` targets the same
+  visible CEF page used by the workbench.
+- Added an explicit CEF pump lifecycle with a stop token, callback guards, and
+  a joined worker so queued message-loop work cannot run after `libcef`
+  shutdown.
+- Added URL-aware native CEF event filtering, native title URL context, and
+  reducer-action routing for controlled workbench state so rapid navigation
+  events cannot overwrite newer tab state.
+- Closed inherited file descriptors inside daemon startup as well as the
+  direct desktop spawn path, covering the shell-sidecar fallback.
+- Removed the unused duplicate browser-tab registry and the obsolete native
+  close helper.
+
+Verified: 101 web UI tests, UI TypeScript check, production UI build, 103
+protocol tests, daemon and Tauri checks, packaged `pnpm desktop:build`, fresh
+packaged launch/relaunch, `pnpm desktop:verify:cef` with all 7 checks passing,
+`cargo fmt --all -- --check`, and `git diff --check`.
+
+## 2026-07-18 — UI motion and surface polish
+
+- Added shared motion tokens and custom easing curves for press feedback,
+  menus, drawers, panels, and reduced-motion behavior in the web UI.
+- Replaced generic shadcn animation utilities on dialogs, alert dialogs,
+  sheets, tooltips, dropdowns, and selects with explicit property-scoped
+  opacity/transform transitions and origin-aware popover behavior.
+- Added consistent press feedback to the shared Button primitive and the
+  highest-frequency raw controls, plus restrained entry motion for activity,
+  attention, permission, connection, and plan-request surfaces.
+- Added rounded desktop conversation/workbench surfaces and a clearer resize
+  handle treatment. Native CEF visibility remains discrete and is not CSS
+  transformed or faded.
+- Reduced streaming-adjacent motion noise by keeping tab selection and token
+  streaming immediate and collapsing reasoning activity to one live indicator.
+
+Verified: 101 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — iOS motion and surface parity
+
+- Added native motion tokens for press feedback, disclosures, and surface
+  changes, using SwiftUI springs/snappy timing instead of generic easing.
+- Added a shared press style for frequent controls, with a restrained 0.97
+  touch-down scale and reduced-motion support.
+- Applied the motion vocabulary to connection banners, retry states, todo and
+  tool disclosures, scrolling, typing indicators, and daemon activity pulses.
+- Made custom fonts Dynamic Type-aware and corrected the MiSans runtime font
+  name used by the UIKit fallback configuration.
+- Standardized the main message and todo panel geometry around continuous,
+  rounded surfaces while preserving native sheets and navigation.
+
+Verified: arm64 iOS Simulator `xcodebuild` succeeded with
+`CODE_SIGNING_ALLOWED=NO`, and `git diff --check` passed. The default
+multi-architecture simulator build remains blocked by the checked-in
+`mew_mobile_core.xcframework` missing an x86_64 simulator slice.

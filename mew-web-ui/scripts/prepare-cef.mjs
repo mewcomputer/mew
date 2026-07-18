@@ -1,4 +1,4 @@
-import { cp, mkdir, readdir, rm, symlink } from "node:fs/promises";
+import { cp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { homedir, platform, arch } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,27 @@ const runtimeDestination = join(
   "target",
   "Frameworks",
   "Chromium Embedded Framework.framework",
+);
+const developmentResourcesDestination = join(
+  webUiRoot,
+  "src-tauri",
+  "target",
+  "debug",
+  "Resources",
+);
+const developmentLibrariesDestination = join(
+  webUiRoot,
+  "src-tauri",
+  "target",
+  "debug",
+  "Libraries",
+);
+const developmentBundleDestination = join(
+  webUiRoot,
+  "src-tauri",
+  "target",
+  "debug",
+  "mew.app",
 );
 const required = process.argv.includes("--required");
 const link = process.argv.includes("--link");
@@ -46,7 +67,67 @@ if (link) {
   console.log(`linked CEF framework from ${source}`);
 } else {
   await cp(source, packageDestination, { recursive: true });
+  await mkdir(dirname(runtimeDestination), { recursive: true });
+  await rm(runtimeDestination, { recursive: true, force: true });
+  await cp(source, runtimeDestination, { recursive: true });
+  await rm(developmentResourcesDestination, { recursive: true, force: true });
+  await cp(join(source, "Resources"), developmentResourcesDestination, {
+    recursive: true,
+  });
+  await rm(developmentLibrariesDestination, { recursive: true, force: true });
+  await cp(join(source, "Libraries"), developmentLibrariesDestination, {
+    recursive: true,
+  });
+  for (const library of ["libEGL.dylib", "libGLESv2.dylib"]) {
+    await cp(
+      join(source, "Libraries", library),
+      join(dirname(developmentLibrariesDestination), library),
+    );
+  }
   console.log(`copied CEF framework from ${source}`);
+}
+
+await writeDevelopmentBundle();
+
+// `tauri dev` runs an unbundled executable, but Chromium anchors its
+// Mach-port rendezvous names to the main bundle identifier. Write a
+// synthetic bundle next to the development executable so the CEF host can
+// point CEF at it and the browser and helper processes agree on a name.
+async function writeDevelopmentBundle() {
+  const infoPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>mew</string>
+	<key>CFBundleIdentifier</key>
+	<string>ai.mew.mew</string>
+	<key>CFBundleDisplayName</key>
+	<string>mew</string>
+	<key>CFBundleExecutable</key>
+	<string>mew</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleVersion</key>
+	<string>0.2.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>LSEnvironment</key>
+	<dict>
+		<key>MallocNanoZone</key>
+		<string>0</string>
+	</dict>
+</dict>
+</plist>
+`;
+  const contentsDir = join(developmentBundleDestination, "Contents");
+  await mkdir(contentsDir, { recursive: true });
+  await writeFile(join(contentsDir, "Info.plist"), infoPlist);
+  console.log(`wrote development bundle at ${developmentBundleDestination}`);
 }
 
 async function findFramework() {

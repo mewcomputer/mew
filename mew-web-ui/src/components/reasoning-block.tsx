@@ -22,7 +22,7 @@ export function ReasoningBlock({ text, streaming }: ReasoningBlockProps) {
       <button
         onClick={() => setExpanded((e) => !e)}
         className={cn(
-          "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors",
+          "motion-pressable flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs",
           expanded
             ? "border-border bg-muted text-foreground"
             : "border-border bg-card text-muted-foreground hover:bg-muted",
@@ -37,7 +37,7 @@ export function ReasoningBlock({ text, streaming }: ReasoningBlockProps) {
       </button>
 
       {expanded && (
-        <div className="mt-2 rounded-lg border border-border bg-card p-3">
+        <div className="motion-enter mt-2 rounded-lg border border-border bg-card p-3">
           <div className="relative space-y-3">
             {steps.map((step, i) => (
               <div key={i} className="flex gap-3">
@@ -63,8 +63,6 @@ export function ReasoningBlock({ text, streaming }: ReasoningBlockProps) {
                 </span>
                 <div className="flex items-center gap-1 pt-1">
                   <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500 [animation-delay:0.1s]" />
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500 [animation-delay:0.2s]" />
                 </div>
               </div>
             )}

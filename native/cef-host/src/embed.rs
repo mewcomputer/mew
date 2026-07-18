@@ -1,8 +1,19 @@
 //! Embed a windowed CEF browser as a native child of an existing macOS view.
 
+use std::sync::Arc;
+
+#[derive(Clone, Debug)]
+pub enum BrowserEvent {
+    AddressChanged { url: String },
+    TitleChanged { title: String, url: String },
+}
+
+pub type BrowserEventCallback = Arc<dyn Fn(BrowserEvent) + Send + Sync + 'static>;
+
 #[cfg(target_os = "macos")]
 mod mac_impl {
     use crate::mac;
+    use super::{BrowserEvent, BrowserEventCallback};
     use cef::*;
     use objc2_app_kit::NSView;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -37,6 +48,7 @@ mod mac_impl {
         last_rect: Mutex<Option<BrowserRect>>,
         native_view: AtomicUsize,
         initialized: AtomicBool,
+        browser_event: BrowserEventCallback,
     }
 
     // CEF objects are only touched from the macOS main thread. The controller
@@ -58,12 +70,19 @@ mod mac_impl {
             parent_view: usize,
             url: &str,
             pump: PumpCallback,
+            browser_event: BrowserEventCallback,
         ) -> Result<Option<Self>, String> {
             let Some(framework_path) = framework_path() else {
                 return Ok(None);
             };
 
             let framework_display = framework_path.display().to_string();
+            let framework_dir = framework_path.parent().map(|path| path.to_path_buf());
+            let resources_dir = framework_path
+                .parent()
+                .map(|path| path.join("Resources"))
+                .filter(|path| path.is_dir());
+            let locales_dir = resources_dir.as_ref().map(|path| path.join("locales"));
             let framework_path = CString::new(framework_path.as_os_str().as_bytes())
                 .map_err(|_| "CEF framework path contains an invalid nul byte".to_owned())?;
             let load_result = unsafe { cef::load_library(Some(&*framework_path.as_ptr().cast())) };
@@ -91,17 +110,26 @@ mod mac_impl {
                 last_rect: Mutex::new(None),
                 native_view: AtomicUsize::new(0),
                 initialized: AtomicBool::new(false),
+                browser_event: browser_event.clone(),
             });
             let app = Box::leak(Box::new(MewCefApp::new(
                 parent_view,
                 CefString::from(url),
                 state.clone(),
                 pump,
+                browser_event,
             )));
             let cache_dir = cache_dir();
             std::fs::create_dir_all(&cache_dir)
                 .map_err(|_| "failed to create the CEF cache directory".to_owned())?;
             let cache_dir = CefString::from(cache_dir.to_string_lossy().as_ref());
+            let browser_subprocess_path = if helper_app_bundles_available() {
+                CefString::default()
+            } else {
+                helper_path()
+                    .map(|path| CefString::from(path.to_string_lossy().as_ref()))
+                    .unwrap_or_default()
+            };
             let settings = Settings {
                 external_message_pump: 1,
                 // The Tauri sibling does not have a separate sandbox bootstrap
@@ -110,9 +138,22 @@ mod mac_impl {
                 no_sandbox: 1,
                 remote_debugging_port: debug_port(),
                 root_cache_path: cache_dir,
-                browser_subprocess_path: helper_path()
+                framework_dir_path: framework_dir
+                    .as_ref()
                     .map(|path| CefString::from(path.to_string_lossy().as_ref()))
                     .unwrap_or_default(),
+                main_bundle_path: main_bundle_path()
+                    .map(|path| CefString::from(path.to_string_lossy().as_ref()))
+                    .unwrap_or_default(),
+                resources_dir_path: resources_dir
+                    .as_ref()
+                    .map(|path| CefString::from(path.to_string_lossy().as_ref()))
+                    .unwrap_or_default(),
+                locales_dir_path: locales_dir
+                    .as_ref()
+                    .map(|path| CefString::from(path.to_string_lossy().as_ref()))
+                    .unwrap_or_default(),
+                browser_subprocess_path,
                 ..Default::default()
             };
 
@@ -162,25 +203,13 @@ mod mac_impl {
             }
         }
 
-        pub fn close_on_main_thread(&self) {
-            let Ok(mut browser) = self.state.browser.lock() else {
-                return;
-            };
-            if let Some(browser) = browser.as_mut() {
-                if let Some(host) = browser.host() {
-                    host.close_browser(true as _);
-                }
-            }
-            self.state.native_view.store(0, Ordering::Release);
-        }
-
         pub fn shutdown(&self) {
             if self.state.initialized.swap(false, Ordering::AcqRel) {
                 if let Ok(mut browser) = self.state.browser.lock() {
-                    if let Some(browser) = browser.as_mut() {
-                        if let Some(host) = browser.host() {
-                            host.close_browser(true as _);
-                        }
+                    if let Some(browser) = browser.as_mut()
+                        && let Some(host) = browser.host()
+                    {
+                        host.close_browser(true as _);
                     }
                     // Release the Rust wrapper before unloading libcef. The
                     // browser process owns the actual close lifecycle, while
@@ -194,10 +223,10 @@ mod mac_impl {
         }
 
         pub fn set_visible_on_main_thread(&self, visible: bool) {
-            if let Ok(mut last_rect) = self.state.last_rect.lock() {
-                if let Some(rect) = last_rect.as_mut() {
-                    rect.visible = visible;
-                }
+            if let Ok(mut last_rect) = self.state.last_rect.lock()
+                && let Some(rect) = last_rect.as_mut()
+            {
+                rect.visible = visible;
             }
             let handle = self.state.native_view.load(Ordering::Acquire);
             if handle == 0 {
@@ -210,6 +239,7 @@ mod mac_impl {
         pub fn do_message_loop_work() {
             cef::do_message_loop_work();
         }
+
     }
 
     impl Drop for CefEmbedController {
@@ -254,10 +284,17 @@ mod mac_impl {
             last_rect: Mutex::new(None),
             native_view: AtomicUsize::new(0),
             initialized: AtomicBool::new(false),
+            browser_event: Arc::new(|_| {}),
         });
         let helper_pump: PumpCallback = Arc::new(|_| {});
         let mut helper_app =
-            MewCefApp::new(0, CefString::from("about:blank"), helper_state, helper_pump);
+            MewCefApp::new(
+                0,
+                CefString::from("about:blank"),
+                helper_state,
+                helper_pump,
+                Arc::new(|_| {}),
+            );
         let exit_code = cef::execute_process(
             Some(args.as_main_args()),
             Some(&mut helper_app),
@@ -301,6 +338,59 @@ mod mac_impl {
         adjacent.exists().then_some(adjacent)
     }
 
+    fn helper_app_bundles_available() -> bool {
+        let Some(app_bundle) = app_bundle_path() else {
+            return false;
+        };
+        let Some(app_name) = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.file_stem().map(|name| name.to_os_string()))
+            .and_then(|name| name.into_string().ok())
+        else {
+            return false;
+        };
+        app_bundle
+            .join(format!(
+                "Contents/Frameworks/{app_name} Helper.app/Contents/MacOS/{app_name} Helper"
+            ))
+            .is_file()
+    }
+
+    fn app_bundle_path() -> Option<PathBuf> {
+        if let Some(bundle) = main_bundle_path() {
+            return Some(bundle);
+        }
+        let executable = std::env::current_exe().ok()?;
+        let contents = executable.parent()?.parent()?;
+        contents.parent().map(PathBuf::from)
+    }
+
+    /// Anchor bundle for CEF's macOS bundle lookups.
+    ///
+    /// Chromium registers the browser's Mach-port rendezvous server under
+    /// "<main bundle id>.MachPortRendezvousServer.<pid>" and every helper
+    /// resolves that name from its own main bundle. An unbundled browser
+    /// executable has no bundle identifier, while helpers resolve the CEF
+    /// framework identifier, so the names never match and each helper exits.
+    /// Pointing CEF at a real bundle makes both sides agree on one name.
+    fn main_bundle_path() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("MEW_CEF_MAIN_BUNDLE_PATH") {
+            let path = PathBuf::from(path);
+            return path.is_dir().then_some(path);
+        }
+
+        let executable = std::env::current_exe().ok()?;
+        if executable.to_string_lossy().contains(".app/Contents/") {
+            // Packaged run: CEF derives the main bundle from the executable.
+            return None;
+        }
+
+        // Development run: the desktop packaging scripts place a synthetic
+        // bundle next to the executable for exactly this purpose.
+        let bundle = executable.parent()?.join("mew.app");
+        bundle.is_dir().then_some(bundle)
+    }
+
     fn cache_dir() -> PathBuf {
         if let Some(path) = std::env::var_os("MEW_CEF_CACHE_DIR") {
             return path.into();
@@ -333,6 +423,7 @@ mod mac_impl {
             url: CefString,
             state: Arc<EmbedState>,
             pump: PumpCallback,
+            browser_event: BrowserEventCallback,
         }
 
         impl App {
@@ -365,6 +456,7 @@ mod mac_impl {
                     self.url.clone(),
                     self.state.clone(),
                     self.pump.clone(),
+                    self.browser_event.clone(),
                 ))
             }
         }
@@ -376,6 +468,7 @@ mod mac_impl {
             url: CefString,
             state: Arc<EmbedState>,
             pump: PumpCallback,
+            browser_event: BrowserEventCallback,
         }
 
         impl BrowserProcessHandler {
@@ -388,7 +481,7 @@ mod mac_impl {
                     &bounds,
                 );
                 let settings = BrowserSettings::default();
-                let browser = browser_host_create_browser_sync(
+                let created = browser_host_create_browser(
                     Some(&window_info),
                     client.as_mut(),
                     Some(&self.url),
@@ -396,13 +489,8 @@ mod mac_impl {
                     None,
                     None,
                 );
-                if let Some(browser) = browser {
-                    if let Some(host) = browser.host() {
-                        self.state
-                            .native_view
-                            .store(host.window_handle() as usize, Ordering::Release);
-                    }
-                    *self.state.browser.lock().expect("CEF browser mutex poisoned") = Some(browser);
+                if created == 0 {
+                    eprintln!("CEF failed to schedule the embedded browser");
                 }
             }
 
@@ -421,6 +509,50 @@ mod mac_impl {
             fn life_span_handler(&self) -> Option<LifeSpanHandler> {
                 Some(MewLifeSpanHandler::new(self.state.clone()))
             }
+
+            fn display_handler(&self) -> Option<DisplayHandler> {
+                Some(MewDisplayHandler::new(self.state.clone()))
+            }
+        }
+    }
+
+    wrap_display_handler! {
+        struct MewDisplayHandler {
+            state: Arc<EmbedState>,
+        }
+
+        impl DisplayHandler {
+            fn on_address_change(
+                &self,
+                _browser: Option<&mut Browser>,
+                frame: Option<&mut Frame>,
+                url: Option<&CefString>,
+            ) {
+                if frame.is_some_and(|frame| frame.is_main() == 0) {
+                    return;
+                }
+                (self.state.browser_event)(BrowserEvent::AddressChanged {
+                    url: url.map(ToString::to_string).unwrap_or_default(),
+                });
+            }
+
+            fn on_title_change(
+                &self,
+                browser: Option<&mut Browser>,
+                title: Option<&CefString>,
+            ) {
+                let url = browser
+                    .and_then(|browser| browser.main_frame())
+                    .map(|frame| {
+                        let url = frame.url();
+                        CefString::from(&url).to_string()
+                    })
+                    .unwrap_or_default();
+                (self.state.browser_event)(BrowserEvent::TitleChanged {
+                    title: title.map(ToString::to_string).unwrap_or_default(),
+                    url,
+                });
+            }
         }
     }
 
@@ -432,13 +564,15 @@ mod mac_impl {
         impl LifeSpanHandler {
             fn on_after_created(&self, browser: Option<&mut Browser>) {
                 let Some(browser) = browser else { return };
+                *self.state.browser.lock().expect("CEF browser mutex poisoned") =
+                    Some(browser.clone());
                 if let Some(host) = browser.host() {
                     let handle = host.window_handle() as usize;
                     self.state.native_view.store(handle, Ordering::Release);
-                    if let Ok(last_rect) = self.state.last_rect.lock() {
-                        if let Some(rect) = *last_rect {
-                            apply_rect(handle, rect);
-                        }
+                    if let Ok(last_rect) = self.state.last_rect.lock()
+                        && let Some(rect) = *last_rect
+                    {
+                        apply_rect(handle, rect);
                     }
                 }
             }
@@ -448,6 +582,8 @@ mod mac_impl {
             }
         }
     }
+
+    pub use CefEmbedController as Controller;
 
     #[cfg(test)]
     mod tests {
@@ -471,8 +607,6 @@ mod mac_impl {
             ]));
         }
     }
-
-    pub use CefEmbedController as Controller;
 }
 
 #[cfg(target_os = "macos")]
@@ -482,6 +616,7 @@ pub use mac_impl::{
 
 #[cfg(not(target_os = "macos"))]
 mod non_macos {
+    use super::BrowserEventCallback;
     use std::sync::Arc;
 
     pub type PumpCallback = Arc<dyn Fn(i64) + Send + Sync + 'static>;
@@ -503,6 +638,7 @@ mod non_macos {
             _parent_view: usize,
             _url: &str,
             _pump: PumpCallback,
+            _browser_event: BrowserEventCallback,
         ) -> Result<Option<Self>, String> {
             Ok(None)
         }

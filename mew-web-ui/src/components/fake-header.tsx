@@ -1,18 +1,15 @@
-import { useState } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { useSessionStore } from "../stores/session";
 import { getSessionAttention } from "../lib/attention";
-import { useSidebar } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
-import { RightRail } from "../components/right-rail";
 import { displaySessionTitle } from "./session-rail";
+import { useWorkspaceFrame } from "./workspace-frame";
 import { PanelLeft, PanelRight, Activity, Settings, Folder } from "lucide-react";
 import type { AlertKind } from "@mew/web-client";
 
 /** Fake header — borderless, natural extension of the chat surface. */
 export function FakeHeader() {
-  const { toggleSidebar, open } = useSidebar();
-  const [rightSheetOpen, setRightSheetOpen] = useState(false);
+  const { surfaces, toggleSummary, toggleWorkbench } = useWorkspaceFrame();
   const sessionId = useSessionStore((s) => s.sessionId);
   const titles = useSessionStore((s) => s.sessionTitles);
   const sessions = useSessionStore((s) => s.availableSessions);
@@ -39,11 +36,12 @@ export function FakeHeader() {
           variant="ghost"
           size="icon"
           className="relative h-7 w-7"
-          onClick={toggleSidebar}
-          title={open ? "Collapse sidebar" : "Expand sidebar"}
-          aria-label={open ? "Collapse sidebar" : "Expand sidebar"}
+          onClick={toggleSummary}
+          title={surfaces.summaryOpen ? "Collapse summary" : "Expand summary"}
+          aria-label={surfaces.summaryOpen ? "Collapse summary" : "Expand summary"}
+          aria-pressed={surfaces.summaryOpen}
         >
-          {open ? (
+          {surfaces.summaryOpen ? (
             <PanelLeft className="h-3.5 w-3.5" />
           ) : (
             <PanelRight className="h-3.5 w-3.5" />
@@ -67,10 +65,11 @@ export function FakeHeader() {
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7"
-          onClick={() => setRightSheetOpen(true)}
-          title="Activity"
-          aria-label="Open activity"
+          className={surfaces.workbenchOpen ? "relative h-7 w-7 bg-accent text-accent-foreground" : "relative h-7 w-7"}
+          onClick={toggleWorkbench}
+          title={surfaces.workbenchOpen ? "Close workbench" : "Open workbench"}
+          aria-label={surfaces.workbenchOpen ? "Close workbench" : "Open workbench"}
+          aria-pressed={surfaces.workbenchOpen}
         >
           <Activity className="h-3.5 w-3.5" />
           {attentionCount > 0 && (
@@ -88,7 +87,6 @@ export function FakeHeader() {
           <Settings className="h-3.5 w-3.5" />
         </Button>
       </div>
-      <RightRail open={rightSheetOpen} onOpenChange={setRightSheetOpen} />
     </>
   );
 }

@@ -56,10 +56,20 @@ the layout and sends the browser viewport bounds to Tauri; CEF creates a child
 surface around it, and `agent-browser` is pointed at CEF's CDP port when the
 native surface is available.
 
-`pnpm desktop:prepare:cef:dev` links a local CEF distribution for development.
-`pnpm desktop:prepare:cef` copies the framework into the macOS app bundle for
-release packaging. Set `MEW_CEF_FRAMEWORK_SOURCE` or `CEF_PATH` when the CEF
-distribution is outside `~/.local/share/cef`.
+`pnpm desktop:prepare:cef:dev` copies a local CEF distribution into the
+development layout (pass `--link` to `scripts/prepare-cef.mjs` to symlink
+instead). `pnpm desktop:prepare:cef` copies the framework into the macOS app
+bundle for release packaging. Set `MEW_CEF_FRAMEWORK_SOURCE` or `CEF_PATH` when
+the CEF distribution is outside `~/.local/share/cef`.
+
+Chromium anchors its Mach-port rendezvous names to the main bundle identifier,
+and every helper process resolves the same name to find the browser's
+rendezvous server. A packaged app gets this for free, but `tauri dev` runs an
+unbundled executable, so `scripts/prepare-cef.mjs` also writes a synthetic
+`mew.app` (just an `Info.plist`) next to the development binary. The host sets
+`main_bundle_path` to that bundle plus an explicit `framework_dir_path`, and
+CEF propagates both to every helper so all processes agree on the rendezvous
+name. Set `MEW_CEF_MAIN_BUNDLE_PATH` to override the bundle location.
 
 The embedded sibling currently runs without Chromium's macOS sandbox bootstrap
 and requests software rendering by default. The Tauri smoke path still needs

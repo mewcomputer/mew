@@ -3,52 +3,52 @@ import SwiftUI
 /// Custom fonts bundled with the app, matching the mew web UI.
 extension Font {
     // MiSans — the primary sans-serif body font
-    static let mewSans = Font.custom("MiSansLatinVF", size: UIFont.systemFontSize)
-    static let mewSansMedium = Font.custom("MiSansLatinVF", size: UIFont.systemFontSize).weight(.medium)
-    static let mewSansSemibold = Font.custom("MiSansLatinVF", size: UIFont.systemFontSize).weight(.semibold)
-    static let mewSansBold = Font.custom("MiSansLatinVF", size: UIFont.systemFontSize).weight(.bold)
+    static let mewSans = Font.custom("MiSansLatinVF", size: 17, relativeTo: .body)
+    static let mewSansMedium = Font.custom("MiSansLatinVF", size: 17, relativeTo: .body).weight(.medium)
+    static let mewSansSemibold = Font.custom("MiSansLatinVF", size: 17, relativeTo: .body).weight(.semibold)
+    static let mewSansBold = Font.custom("MiSansLatinVF", size: 17, relativeTo: .body).weight(.bold)
 
     // Banga — display/headline font
     static func mewDisplay(_ size: CGFloat) -> Font {
-        Font.custom("Banga-ExtraLight", size: size)
+        Font.custom("Banga-ExtraLight", size: size, relativeTo: .title)
     }
 
     // Ioskeley Mono — code/monospaced font (Regular and Medium are separate faces)
-    static let mewMono = Font.custom("Ioskeley-Mono", size: UIFont.systemFontSize)
-    static let mewMonoMedium = Font.custom("Ioskeley-Mono-Medium", size: UIFont.systemFontSize)
+    static let mewMono = Font.custom("Ioskeley-Mono", size: 17, relativeTo: .body)
+    static let mewMonoMedium = Font.custom("Ioskeley-Mono-Medium", size: 17, relativeTo: .body)
 
     // Junicode — serif body font
     static func mewSerif(_ size: CGFloat) -> Font {
-        Font.custom("JunicodeVF-Regular", size: size)
+        Font.custom("JunicodeVF-Regular", size: size, relativeTo: .body)
     }
     static func mewSerifItalic(_ size: CGFloat) -> Font {
-        Font.custom("JunicodeVF-Italic", size: size)
+        Font.custom("JunicodeVF-Italic", size: size, relativeTo: .body)
     }
 
     // OFL Goudy — display/headline serif font
     static func mewGoudy(_ size: CGFloat) -> Font {
-        Font.custom("OFLGoudyStMTT", size: size)
+        Font.custom("OFLGoudyStMTT", size: size, relativeTo: .title)
     }
     static func mewGoudyItalic(_ size: CGFloat) -> Font {
-        Font.custom("OFLGoudyStMTT-Italic", size: size)
+        Font.custom("OFLGoudyStMTT-Italic", size: size, relativeTo: .title)
     }
 
     // Garamontio — secondary serif font (regular and italic)
     static func mewGaramontio(_ size: CGFloat) -> Font {
-        Font.custom("Garamontio-Regular", size: size)
+        Font.custom("Garamontio-Regular", size: size, relativeTo: .body)
     }
     static func mewGaramontioItalic(_ size: CGFloat) -> Font {
-        Font.custom("Garamontio-Italic", size: size)
+        Font.custom("Garamontio-Italic", size: size, relativeTo: .body)
     }
 
     /// Convenience: mewSans at a specific size
     static func mewSans(_ size: CGFloat) -> Font {
-        Font.custom("MiSansLatinVF", size: size)
+        Font.custom("MiSansLatinVF", size: size, relativeTo: .body)
     }
 
     /// Convenience: IoskeleyMono at a specific size
     static func mewMono(_ size: CGFloat) -> Font {
-        Font.custom("Ioskeley-Mono", size: size)
+        Font.custom("Ioskeley-Mono", size: size, relativeTo: .body)
     }
 }
 

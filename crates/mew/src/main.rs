@@ -143,12 +143,31 @@ fn main() -> Result<()> {
         false
     };
 
+    // A desktop host may launch the daemon through a shell sidecar. Close
+    // descriptors inherited from the host before Tokio creates its runtime;
+    // otherwise the daemon can keep the host's listening sockets alive after
+    // the desktop process exits.
+    if matches!(&cli.command, Some(Commands::Daemon { .. })) {
+        close_inherited_descriptors();
+    }
+
     // Now safe to start the tokio runtime.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
     runtime.block_on(async_main(cli, daemonized))
+}
+
+fn close_inherited_descriptors() {
+    #[cfg(unix)]
+    unsafe {
+        let limit = libc::sysconf(libc::_SC_OPEN_MAX);
+        let limit = if limit > 3 { limit } else { 1024 };
+        for fd in 3..limit {
+            libc::close(fd as libc::c_int);
+        }
+    }
 }
 
 async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {

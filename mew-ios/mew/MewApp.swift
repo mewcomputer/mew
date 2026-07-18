@@ -14,6 +14,7 @@ struct MewApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(appStore)
+                .mewBodyFont()
                 .onAppear { appStore.start() }
         }
     }

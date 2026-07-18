@@ -3,6 +3,7 @@ import {
   browserWebSocketUrl,
   getWebSocketUrl,
   initializeHost,
+  listenCefBrowserEvents,
   resetHost,
 } from "@/lib/host";
 
@@ -25,5 +26,11 @@ describe("host runtime", () => {
     await initializeHost();
 
     expect(getWebSocketUrl()).toBe(browserWebSocketUrl(window.location));
+  });
+
+  it("keeps the native browser event listener a no-op in the web host", async () => {
+    const cleanup = await listenCefBrowserEvents(() => undefined);
+
+    expect(cleanup()).toBeUndefined();
   });
 });

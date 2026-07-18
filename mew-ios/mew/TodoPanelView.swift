@@ -8,13 +8,14 @@ import MewMobileCore
 struct TodoPanelView: View {
     let todos: [TodoItem]
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isExpanded: Bool = true
 
     var body: some View {
         if !todos.isEmpty {
             VStack(spacing: 0) {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
+                    withAnimation(Theme.Motion.value(Theme.Motion.disclosure, reduced: reduceMotion)) {
                         isExpanded.toggle()
                     }
                 } label: {
@@ -33,7 +34,7 @@ struct TodoPanelView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(MewPressButtonStyle())
 
                 if isExpanded {
                     VStack(spacing: 0) {
@@ -45,7 +46,7 @@ struct TodoPanelView: View {
                 }
             }
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    RoundedRectangle(cornerRadius: Theme.Layout.controlRadius, style: .continuous)
                     .fill(Color(.secondarySystemBackground).opacity(0.7))
             )
             .padding(.horizontal, 12)

@@ -232,28 +232,45 @@ pub enum ClientMessage {
     /// Navigate the browser session to an HTTP(S) URL.
     BrowserOpen {
         url: String,
+        /// Frontend-owned tab identity, echoed by browser responses.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
     },
     /// Return the active page's accessibility snapshot.
-    BrowserSnapshot,
+    BrowserSnapshot {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
+    },
     /// Capture the active page as a base64-encoded PNG.
     BrowserScreenshot {
         annotate: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
     },
     /// Click an accessibility ref or CSS selector.
     BrowserClick {
         selector: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
     },
     /// Fill an input identified by an accessibility ref or CSS selector.
     BrowserFill {
         selector: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
     },
     /// Press a keyboard key in the active page.
     BrowserPress {
         key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
     },
     /// Close the browser session.
-    BrowserClose,
+    BrowserClose {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
+    },
 }
 
 /// What kind of client is connected to a session.
@@ -798,15 +815,28 @@ pub enum ServerMessage {
         snapshot: String,
         url: String,
         title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
     },
     BrowserScreenshot {
         data: String,
         url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
     },
     BrowserState {
         open: bool,
         url: Option<String>,
         title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
+    },
+    /// A browser operation failed. The tab identity prevents a late error
+    /// from replacing the state of whichever tab is active now.
+    BrowserError {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab_id: Option<String>,
     },
 }
 
@@ -2590,6 +2620,50 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn browser_messages_roundtrip_tab_identity() {
+        let request = ClientMessage::BrowserOpen {
+            url: "https://example.com".into(),
+            tab_id: Some("browser-2".into()),
+        };
+        match round_trip(&request) {
+            ClientMessage::BrowserOpen { url, tab_id } => {
+                assert_eq!(url, "https://example.com");
+                assert_eq!(tab_id.as_deref(), Some("browser-2"));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let response = ServerMessage::BrowserError {
+            message: "browser operation failed".into(),
+            tab_id: Some("browser-2".into()),
+        };
+        match round_trip(&response) {
+            ServerMessage::BrowserError { message, tab_id } => {
+                assert_eq!(message, "browser operation failed");
+                assert_eq!(tab_id.as_deref(), Some("browser-2"));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn browser_messages_remain_compatible_without_tab_identity() {
+        let request: ClientMessage = decode_json(r#"{"type":"browser_close"}"#).unwrap();
+        assert!(matches!(
+            request,
+            ClientMessage::BrowserClose { tab_id: None }
+        ));
+
+        let response: ServerMessage =
+            decode_json(r#"{"type":"browser_state","open":false,"url":null,"title":null}"#)
+                .unwrap();
+        assert!(matches!(
+            response,
+            ServerMessage::BrowserState { tab_id: None, .. }
+        ));
     }
 
     #[test]

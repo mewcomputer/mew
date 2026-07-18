@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdir } from "node:fs/promises";
+import { chmod, copyFile, cp, mkdir } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,9 +42,18 @@ const destination = join(
   binariesDir,
   `mew-cef-host-helper-${target}${process.platform === "win32" ? ".exe" : ""}`,
 );
+const frameworkResources = join(
+  webUiRoot,
+  "src-tauri",
+  "cef",
+  "Chromium Embedded Framework.framework",
+  "Resources",
+);
+const helperResources = join(binariesDir, "Resources");
 
 await mkdir(binariesDir, { recursive: true });
 await copyFile(source, destination);
+await cp(frameworkResources, helperResources, { recursive: true, force: true });
 if (process.platform !== "win32") {
   await chmod(destination, 0o755);
 }

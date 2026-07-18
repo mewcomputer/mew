@@ -127,23 +127,30 @@ export type ClientMessage = {
 } | {
     type: "browser_open";
     url: string;
+    tab_id?: string;
 } | {
     type: "browser_snapshot";
+    tab_id?: string;
 } | {
     type: "browser_screenshot";
     annotate: boolean;
+    tab_id?: string;
 } | {
     type: "browser_click";
     selector: string;
+    tab_id?: string;
 } | {
     type: "browser_fill";
     selector: string;
     text: string;
+    tab_id?: string;
 } | {
     type: "browser_press";
     key: string;
+    tab_id?: string;
 } | {
     type: "browser_close";
+    tab_id?: string;
 };
 export type ProviderEventWire = {
     type: "part_start";
@@ -644,15 +651,22 @@ export type ServerMessage = {
     snapshot: string;
     url: string;
     title: string;
+    tab_id?: string;
 } | {
     type: "browser_screenshot";
     data: string;
     url: string;
+    tab_id?: string;
 } | {
     type: "browser_state";
     open: boolean;
     url?: string;
     title?: string;
+    tab_id?: string;
+} | {
+    type: "browser_error";
+    message: string;
+    tab_id?: string;
 };
 export interface MewWebSocket {
     send(data: string): void;
@@ -871,15 +885,22 @@ export interface MewClientEvents {
         snapshot: string;
         url: string;
         title: string;
+        tabId?: string;
     }) => void;
     "browser-screenshot": (data: {
         data: string;
         url: string;
+        tabId?: string;
     }) => void;
     "browser-state": (data: {
         open: boolean;
         url?: string;
         title?: string;
+        tabId?: string;
+    }) => void;
+    "browser-error": (data: {
+        message: string;
+        tabId?: string;
     }) => void;
 }
 export type MewEventName = keyof MewClientEvents;
@@ -996,13 +1017,13 @@ export declare class MewClient {
     ping(): Promise<string>;
     /** List known projects (recent session cwds). */
     listProjects(): void;
-    browserOpen(url: string): void;
-    browserSnapshot(): void;
-    browserScreenshot(annotate?: boolean): void;
-    browserClick(selector: string): void;
-    browserFill(selector: string, text: string): void;
-    browserPress(key: string): void;
-    browserClose(): void;
+    browserOpen(url: string, tabId?: string): void;
+    browserSnapshot(tabId?: string): void;
+    browserScreenshot(annotate?: boolean, tabId?: string): void;
+    browserClick(selector: string, tabId?: string): void;
+    browserFill(selector: string, text: string, tabId?: string): void;
+    browserPress(key: string, tabId?: string): void;
+    browserClose(tabId?: string): void;
     on<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     off<E extends MewEventName>(event: E, cb: MewClientEvents[E]): void;
     private emit;

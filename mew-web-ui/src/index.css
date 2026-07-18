@@ -7,6 +7,16 @@
 /* Context inspector color palette — shared across all themes. */
 :root {
   --radius: 0.625rem;
+  --radius-control: 0.5rem;
+  --radius-panel: 0.75rem;
+  --radius-shell: 1rem;
+  --motion-press: 120ms;
+  --motion-tooltip: 150ms;
+  --motion-menu: 180ms;
+  --motion-panel: 260ms;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --inspector-scaffold: oklch(0.55 0.02 250);
   --inspector-context: oklch(0.55 0.12 220);
   --inspector-skill: oklch(0.55 0.10 190);
@@ -16,10 +26,6 @@
   --inspector-compaction: oklch(0.55 0.14 50);
   --inspector-free: oklch(0.35 0.01 250);
 }
-
-/** {
-  @apply duration-150 ease-in-out;
-}*/
 
 @theme inline {
   --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
@@ -116,9 +122,115 @@ button:focus-visible,
   outline-offset: 2px;
 }
 
-button:not(:disabled):active {
+.motion-pressable {
+  transition-property: transform, background-color, border-color, color, box-shadow, opacity;
+  transition-duration: var(--motion-press);
+  transition-timing-function: var(--ease-out);
+}
+
+.motion-pressable:not(:disabled):active {
   transform: scale(0.97);
-  transition-duration: 120ms;
+}
+
+.motion-enter {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transition: opacity var(--motion-menu) var(--ease-out), transform var(--motion-menu) var(--ease-out);
+}
+
+@starting-style {
+  .motion-enter {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+}
+
+.motion-popover {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: var(--radix-dropdown-menu-content-transform-origin, var(--radix-select-content-transform-origin, var(--radix-tooltip-content-transform-origin, center)));
+  transition: opacity var(--motion-menu) var(--ease-out), transform var(--motion-menu) var(--ease-out);
+}
+
+.motion-popover[data-state="closed"] {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px) scale(0.97);
+}
+
+.motion-popover[data-side="top"][data-state="closed"] {
+  transform: translateY(4px) scale(0.97);
+}
+
+.motion-popover[data-side="left"][data-state="closed"] {
+  transform: translateX(4px) scale(0.97);
+}
+
+.motion-popover[data-side="right"][data-state="closed"] {
+  transform: translateX(-4px) scale(0.97);
+}
+
+.motion-dialog {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+  transition: opacity var(--motion-menu) var(--ease-out), transform var(--motion-menu) var(--ease-out);
+}
+
+.motion-dialog[data-state="closed"] {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(0.98);
+}
+
+.motion-overlay {
+  opacity: 1;
+  transition: opacity var(--motion-panel) var(--ease-out);
+}
+
+.motion-overlay[data-state="closed"] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.motion-drawer {
+  transition: transform var(--motion-panel) var(--ease-drawer);
+}
+
+.motion-drawer[data-side="right"][data-state="closed"] {
+  transform: translateX(100%);
+}
+
+.motion-drawer[data-side="left"][data-state="closed"] {
+  transform: translateX(-100%);
+}
+
+.motion-drawer[data-side="top"][data-state="closed"] {
+  transform: translateY(-100%);
+}
+
+.motion-drawer[data-side="bottom"][data-state="closed"] {
+  transform: translateY(100%);
+}
+
+.motion-panel-size {
+  transition-property: width, left, right, margin;
+  transition-duration: var(--motion-panel);
+  transition-timing-function: var(--ease-out);
+}
+
+.motion-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--motion-menu) var(--ease-out);
+}
+
+.motion-disclosure[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+
+.motion-disclosure > * {
+  min-height: 0;
+  overflow: hidden;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -129,6 +241,20 @@ button:not(:disabled):active {
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .motion-enter,
+  .motion-popover,
+  .motion-dialog,
+  .motion-overlay,
+  .motion-drawer,
+  .motion-panel-size {
+    transition: none !important;
+    transform: none !important;
+  }
+
+  .motion-disclosure {
+    transition: none !important;
   }
 }
 

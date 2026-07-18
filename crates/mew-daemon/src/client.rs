@@ -686,7 +686,8 @@ async fn translate_server_message(
 
         ServerMessage::BrowserSnapshot { .. }
         | ServerMessage::BrowserScreenshot { .. }
-        | ServerMessage::BrowserState { .. } => {
+        | ServerMessage::BrowserState { .. }
+        | ServerMessage::BrowserError { .. } => {
             let _ = state.notify_tx.send(msg.clone()).await;
             Vec::new()
         }
