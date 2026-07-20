@@ -133,11 +133,11 @@ impl Default for Config {
         // by a top-level `reasoning_effort` param (low/high/max), which the
         // catalog produces and the OpenAI adapter forwards as-is.
         providers.insert(
-            "kimi".into(),
+            "kimi-for-coding".into(),
             ProviderConfig {
                 shape: "openai".into(),
                 base_url: "https://api.kimi.com/coding/v1".into(),
-                credential_ref: "kimi".into(),
+                credential_ref: "kimi-for-coding".into(),
                 ..Default::default()
             },
         );
@@ -419,6 +419,10 @@ pub struct State {
     /// Stored as "provider/model" IDs matching the model picker.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_models: Vec<String>,
+    /// Last active thinking variant (e.g. "high", "max"). Restored on
+    /// startup if the model supports it (or a close match is found).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_thinking_variant: Option<String>,
 }
 
 /// Reads state from the standard location.
@@ -479,10 +483,19 @@ pub fn validate_state(cfg: &Config, state: &State) -> Vec<String> {
     }
 
     if !state.last_model.is_empty() && !is_valid_persisted_model(cfg, &state.last_model) {
-        issues.push(format!(
-            "unknown model {:?} in last_model",
-            state.last_model
-        ));
+        // Bare model IDs (e.g. "k3" from provider "kimi") are valid when the
+        // companion last_provider names a configured provider. The model list
+        // for that provider isn't statically known (it comes from the daemon
+        // at runtime), so we trust the provider existence check.
+        let provider_ok = !state.last_provider.is_empty()
+            && !state.last_model.contains('/')
+            && cfg.providers.contains_key(&state.last_provider);
+        if !provider_ok {
+            issues.push(format!(
+                "unknown model {:?} in last_model",
+                state.last_model
+            ));
+        }
     }
 
     issues
@@ -494,6 +507,10 @@ fn is_valid_persisted_model(cfg: &Config, model_id: &str) -> bool {
         let model = &model_id[idx + 1..];
         !provider.is_empty() && !model.is_empty() && cfg.providers.contains_key(provider)
     } else {
+        // Bare model ID — valid if it's a custom model, or if the companion
+        // `last_provider` field (checked by the caller via validate_state)
+        // names a known provider. Here we check custom models; the provider
+        // cross-check is done in validate_state to avoid passing both fields.
         cfg.models.iter().any(|m| m.id == model_id)
     }
 }
@@ -507,7 +524,14 @@ pub fn heal_state(cfg: &Config, state: &State) -> State {
         healed.last_provider = String::new();
     }
     if !healed.last_model.is_empty() && !is_valid_persisted_model(cfg, &healed.last_model) {
-        healed.last_model = String::new();
+        // Don't clear a bare model ID if its provider is known (see
+        // validate_state for the rationale).
+        let provider_ok = !healed.last_provider.is_empty()
+            && !healed.last_model.contains('/')
+            && cfg.providers.contains_key(&healed.last_provider);
+        if !provider_ok {
+            healed.last_model = String::new();
+        }
     }
     healed
 }
@@ -614,7 +638,7 @@ mod tests {
         assert!(cfg.providers.contains_key("opencode-go"));
         assert!(cfg.providers.contains_key("z-ai"));
         assert!(cfg.providers.contains_key("umans"));
-        assert!(cfg.providers.contains_key("kimi"));
+        assert!(cfg.providers.contains_key("kimi-for-coding"));
     }
 
     #[test]
@@ -635,11 +659,11 @@ mod tests {
         let cfg = Config::default();
         let kimi = cfg
             .providers
-            .get("kimi")
-            .expect("kimi built-in provider should be present");
+            .get("kimi-for-coding")
+            .expect("kimi-for-coding built-in provider should be present");
         assert_eq!(kimi.shape, "openai");
         assert_eq!(kimi.base_url, "https://api.kimi.com/coding/v1");
-        assert_eq!(kimi.credential_ref, "kimi");
+        assert_eq!(kimi.credential_ref, "kimi-for-coding");
         assert_eq!(kimi.kind, "direct");
     }
 
@@ -891,6 +915,26 @@ values = ["sk_test_deadbeef"]
     }
 
     #[test]
+    fn validate_state_bare_model_with_known_provider_is_valid() {
+        // Bare model id "k3" with last_provider="kimi-for-coding" — the model
+        // list for "kimi-for-coding" isn't statically known (it comes from the
+        // daemon at runtime), but if the provider is configured, the bare
+        // model ID is well-formed enough.
+        let cfg = Config::default();
+        let state = state_with("k3", "kimi-for-coding", vec![]);
+        assert!(validate_state(&cfg, &state).is_empty());
+    }
+
+    #[test]
+    fn heal_state_preserves_bare_model_with_known_provider() {
+        let cfg = Config::default();
+        let state = state_with("k3", "kimi-for-coding", vec![]);
+        let healed = heal_state(&cfg, &state);
+        assert_eq!(healed.last_model, "k3");
+        assert_eq!(healed.last_provider, "kimi-for-coding");
+    }
+
+    #[test]
     fn validate_state_disabled_plugins_are_not_validated() {
         // The plugin catalog isn't available here, and the user authored
         // the list directly. Bogus names should not trigger an issue.
@@ -909,6 +953,8 @@ values = ["sk_test_deadbeef"]
             revoked_extensions: vec![],
             theme: "dark".into(),
             sidebar_collapsed: HashMap::new(),
+            recent_models: vec![],
+            last_thinking_variant: None,
         };
         let healed = heal_state(&cfg, &state);
         assert!(healed.last_provider.is_empty());

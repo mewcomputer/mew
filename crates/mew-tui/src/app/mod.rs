@@ -90,6 +90,17 @@ pub struct App {
     /// Recently used models (most recent first), capped at 6.
     /// Loaded from persisted state and updated on model switch.
     pub recent_models: Vec<String>,
+    /// Messages queued while a turn is streaming. Each is sent (oldest first)
+    /// when the current turn finishes. Up-Up cancels the current turn and
+    /// sends the oldest immediately.
+    pub queued_messages: Vec<String>,
+    /// Tracks Up-Up detection for sending queued messages immediately.
+    /// Holds the count and the timestamp of the first press; resets after 15s.
+    pub up_press: Option<(u32, std::time::Instant)>,
+    /// Set when a turn finishes and there are queued messages to send.
+    /// The main loop checks this after processing agent events and, if set,
+    /// submits the oldest queued message.
+    pub pending_queued_send: bool,
     pub picker: Option<PickerState>,
     pub settings: Option<crate::settings::SettingsState>,
     pub slash_selected: usize,
@@ -470,6 +481,9 @@ impl App {
             thinking_variants: HashMap::new(),
             active_thinking_variant: None,
             recent_models: Vec::new(),
+            queued_messages: Vec::new(),
+            up_press: None,
+            pending_queued_send: false,
             picker: None,
             settings: None,
             slash_selected: 0,
@@ -615,6 +629,31 @@ impl App {
             } => {
                 self.status.provider = provider.clone();
                 self.status.model = model.clone();
+            }
+            ServerMessage::SessionReady {
+                model,
+                provider,
+                permission_mode,
+                ..
+            } => {
+                // On attach, update the active model/provider from the
+                // daemon's session state. Fields may be empty if the
+                // session hasn't been used yet.
+                if let Some(m) = model {
+                    if !m.is_empty() {
+                        self.status.model = m.clone();
+                    }
+                }
+                if let Some(p) = provider {
+                    if !p.is_empty() {
+                        self.status.provider = p.clone();
+                    }
+                }
+                if let Some(pm) = permission_mode {
+                    if let Some(mode) = mew_hooks::PermissionMode::from_id(pm) {
+                        self.permission_mode = mode;
+                    }
+                }
             }
             ServerMessage::ThinkingVariantChanged { variant, .. } => {
                 self.active_thinking_variant = variant.clone();
@@ -1082,6 +1121,17 @@ impl App {
         self.chat_dirty = Some(self.chat_dirty.unwrap_or(0).wrapping_add(1));
     }
 
+    /// Pop the oldest queued message (FIFO), if any.
+    pub fn pop_queued_message(&mut self) -> Option<String> {
+        if self.queued_messages.is_empty() {
+            None
+        } else {
+            let msg = self.queued_messages.remove(0);
+            self.mark_chat_dirty();
+            Some(msg)
+        }
+    }
+
     /// Ensure `rendered_chat` is up to date for the current `chat_dirty`
     /// generation and width. Rebuilds only when stale — idle scroll frames
     /// (which don't bump `chat_dirty`) skip the rebuild and stay O(visible).
@@ -1279,6 +1329,12 @@ impl App {
             if since.elapsed() > Duration::from_secs(2) {
                 self.esc_cancel_pending = None;
                 self.ctrl_c_quit_pending = None;
+            }
+        }
+        // Reset Up-Up detection after 15 seconds.
+        if let Some((_, at)) = self.up_press {
+            if at.elapsed() > Duration::from_secs(15) {
+                self.up_press = None;
             }
         }
         if let Some(since) = self.ctrl_c_quit_pending {
@@ -1497,6 +1553,11 @@ impl App {
                     self.esc_cancel_pending = None;
                     self.ctrl_c_quit_pending = None;
                     self.retry_status = None;
+                    // If there are queued messages, signal the main loop to
+                    // send the oldest one as a new turn.
+                    if !self.queued_messages.is_empty() {
+                        self.pending_queued_send = true;
+                    }
                 }
                 self.status.input_tokens += usage.input;
                 self.status.output_tokens += usage.output;

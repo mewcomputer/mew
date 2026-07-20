@@ -140,6 +140,25 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
             }
             mew_tui::Event::Agent(agent_event) => {
                 app.handle_agent_event(agent_event);
+                // After processing agent events, check if a turn just finished
+                // and there are queued messages to send.
+                if app.pending_queued_send {
+                    app.pending_queued_send = false;
+                    if let Some(text) = app.pop_queued_message() {
+                        let mut target =
+                            crate::runtime::daemon::DaemonTarget::new(client.clone());
+                        let mut cx = crate::runtime::Ctx {
+                            app: &mut app,
+                            target: &mut target,
+                            event_loop: &event_loop,
+                            should_break: &mut should_break,
+                            cat: None,
+                            loaded_personas: &[],
+                            plugin_info: &plugin_info,
+                        };
+                        crate::runtime::handle_action(&mut cx, mew_tui::events::Action::Submit(text)).await;
+                    }
+                }
             }
             mew_tui::Event::Quit => should_break = true,
             mew_tui::Event::Tick => {
@@ -196,6 +215,15 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
                     should_break = true;
                     break 'drain;
                 }
+            }
+        }
+
+        // If a turn just finished and there are queued messages, submit the
+        // oldest one as a new turn.
+        if app.pending_queued_send {
+            app.pending_queued_send = false;
+            if let Some(text) = app.pop_queued_message() {
+                queued_actions.push(mew_tui::events::Action::Submit(text));
             }
         }
 
@@ -466,11 +494,38 @@ pub(crate) async fn run_tui(
         }
     }
 
-    // Apply reasoning variant from catalog or CLI flag.
-    let reasoning = resolve_reasoning(cat, &model_id, variant_flag.as_deref());
+    // Load persisted state for theme, recent models, and thinking variant.
+    let state = mew_config::load_state().unwrap_or_default();
+
+    // Apply reasoning variant: CLI flag > persisted state > catalog default.
+    let variant_source = variant_flag
+        .as_deref()
+        .map(|_| "cli")
+        .or_else(|| {
+            if state.last_thinking_variant.is_some() {
+                Some("state")
+            } else {
+                None
+            }
+        });
+    let variant_name = variant_flag.as_deref().or(state.last_thinking_variant.as_deref());
+    let reasoning = if let Some(name) = variant_name {
+        if name == "off" || name == "none" {
+            None
+        } else if let Some(c) = cat {
+            c.map_variant(name, &model_id)
+                .map(|v| mew_provider::ReasoningConfig {
+                    params: v.params.as_object().cloned().unwrap_or_default(),
+                })
+        } else {
+            resolve_reasoning(cat, &model_id, Some(name))
+        }
+    } else {
+        resolve_reasoning(cat, &model_id, None)
+    };
     if let Some(r) = reasoning {
         agent.set_reasoning(Some(r));
-        info!(variant = ?variant_flag, model = %model_id, "enabled thinking variant");
+        info!(source = ?variant_source, model = %model_id, "enabled thinking variant");
     }
 
     // Apply the default persona on startup (builder by default). The agent's
@@ -496,8 +551,7 @@ pub(crate) async fn run_tui(
     };
 
     let mut app = mew_tui::App::new();
-    // Load theme: state.toml overrides config.toml, falling back to "dark".
-    let state = mew_config::load_state().unwrap_or_default();
+    // Theme: state.toml overrides config.toml, falling back to "dark".
     let theme_name = if !state.theme.is_empty() {
         &state.theme
     } else {
@@ -505,6 +559,22 @@ pub(crate) async fn run_tui(
     };
     app.theme = mew_tui::theme::Theme::load(theme_name);
     app.recent_models = state.recent_models.clone();
+
+    // Restore the thinking variant display so the status bar shows it.
+    if let Some(name) = variant_name {
+        if name != "off" && name != "none" {
+            // The variant may have been mapped to a different name for this
+            // model. Show the mapped name if it resolved, otherwise the
+            // original.
+            if let Some(c) = cat {
+                if let Some(mapped) = c.map_variant(name, &model_id) {
+                    app.active_thinking_variant = Some(mapped.name);
+                }
+            } else {
+                app.active_thinking_variant = Some(name.to_string());
+            }
+        }
+    }
 
     // Seed the sidebar's todos pane from whatever was loaded at startup.
     app.todos = agent.todos.lock().await.items.clone();
@@ -741,6 +811,15 @@ pub(crate) async fn run_tui(
             }
         }
 
+        // If a turn just finished and there are queued messages, submit the
+        // oldest one as a new turn.
+        if app.pending_queued_send {
+            app.pending_queued_send = false;
+            if let Some(text) = app.pop_queued_message() {
+                queued_actions.push(mew_tui::events::Action::Submit(text));
+            }
+        }
+
         // Replay queued actions through handle_action (the single dispatch path).
         // The drain no longer interprets actions — it just coalesces and queues.
         for action in queued_actions {
@@ -787,9 +866,13 @@ pub(crate) async fn run_tui(
     // Save sidebar collapsed state for next session.
     {
         let mut save = mew_config::load_state().unwrap_or_default();
-        save.last_model = display_model.clone();
-        save.last_provider = display_provider.clone();
+        // Use the app's current model/provider, which reflects any switches
+        // made during the session (handle_switch_model updates app.status).
+        save.last_model = app.status.model.clone();
+        save.last_provider = app.status.provider.clone();
+        save.last_thinking_variant = app.active_thinking_variant.clone();
         save.sidebar_collapsed = app.sidebar_collapsed.clone();
+        save.recent_models = app.recent_models.clone();
         let _ = mew_config::save_state(&save);
     }
 

@@ -90,7 +90,7 @@ pub(crate) fn resolve_provider(
         "z-ai",
         "umans",
         "deepseek",
-        "kimi",
+        "kimi-for-coding",
         "codex",
     ]
     .into_iter()
@@ -108,11 +108,23 @@ pub(crate) fn resolve_model_opt(
 ) -> Option<String> {
     cli.or_else(|| {
         let persisted = state.last_model.as_str();
-        if persisted.is_empty() || !is_known_model(cfg, persisted) {
-            None
-        } else {
-            Some(persisted.to_string())
+        if persisted.is_empty() {
+            return None;
         }
+        if is_known_model(cfg, persisted) {
+            return Some(persisted.to_string());
+        }
+        // Bare model ID (no '/') from a built-in provider — accept if the
+        // companion last_provider names a configured provider. The model
+        // list for that provider isn't statically known (it comes from the
+        // daemon or /v1/models at runtime), so we trust the provider check.
+        if !persisted.contains('/')
+            && !state.last_provider.is_empty()
+            && is_known_provider(cfg, &state.last_provider)
+        {
+            return Some(persisted.to_string());
+        }
+        None
     })
 }
 
@@ -133,6 +145,11 @@ pub(crate) fn is_known_model(cfg: &Config, model_id: &str) -> bool {
         // reject truly bogus ids at runtime.
         return !model_part.is_empty();
     }
+    // Bare model ID — valid if it's a custom model. Built-in models from
+    // configured providers (e.g. "k3" from "kimi-for-coding") are also valid when the
+    // companion last_provider names a known provider, but that cross-check
+    // is done by the caller (resolve_model_opt) which has access to both
+    // last_model and last_provider.
     cfg.models.iter().any(|m| m.id == model_id)
 }
 
@@ -368,7 +385,11 @@ pub(crate) fn resolve_model(
         // Check catalog first for automatic provider/shape selection.
         if let Some(c) = cat {
             if let Some(m) = c.lookup(&model_id) {
-                provider_id = m.provider.clone();
+                // The catalog may use a different provider name than the
+                // config (e.g. catalog may use a different name). Map it back
+                // to the configured provider if a known mapping exists.
+                provider_id = config_provider_for_catalog(cfg, &m.provider)
+                    .unwrap_or_else(|| m.provider.clone());
             } else if let Some(idx) = model_id.find('/') {
                 let candidate = &model_id[..idx];
                 if is_known_provider(cfg, candidate) {
@@ -461,10 +482,18 @@ pub(crate) fn catalog_provider_matches(configured: &str, catalog: &str) -> bool 
             ("opencode-zen", "opencode")
                 | ("z-ai", "zai")
                 | ("z-ai", "zai-coding-plan")
-                | ("kimi", "kimi-for-coding")
                 | ("umans", "umans-ai")
                 | ("umans", "umans-ai-coding-plan")
         )
+}
+
+/// Reverse mapping of `catalog_provider_matches`: given a catalog provider
+/// name, return the matching configured provider name if one exists.
+fn config_provider_for_catalog(cfg: &Config, catalog: &str) -> Option<String> {
+    cfg.providers
+        .keys()
+        .find(|configured| catalog_provider_matches(configured, catalog))
+        .cloned()
 }
 
 /// Build a direct provider adapter from a concrete provider config.
@@ -762,9 +791,9 @@ pub(crate) async fn discover_models(
         if provider_has_credential(cfg, "umans") {
             fallbacks.push(("umans/umans-coder".into(), "umans · anthropic".into()));
         }
-        // Only advertise kimi in the fallback list when a credential is set.
-        if provider_has_credential(cfg, "kimi") {
-            fallbacks.push(("kimi/k3".into(), "kimi · openai".into()));
+        // Only advertise kimi-for-coding in the fallback list when a credential is set.
+        if provider_has_credential(cfg, "kimi-for-coding") {
+            fallbacks.push(("kimi-for-coding/k3".into(), "kimi · openai".into()));
         }
         for (id, desc) in fallbacks {
             if seen.insert(id.clone()) {
@@ -981,7 +1010,7 @@ mod tests {
     fn catalog_provider_matches_configured_aliases() {
         assert!(catalog_provider_matches("opencode-zen", "opencode"));
         assert!(catalog_provider_matches("z-ai", "zai-coding-plan"));
-        assert!(catalog_provider_matches("kimi", "kimi-for-coding"));
+        assert!(catalog_provider_matches("kimi-for-coding", "kimi-for-coding"));
         assert!(!catalog_provider_matches("deepseek", "opencode"));
     }
 
@@ -1299,6 +1328,35 @@ mod tests {
     }
 
     #[test]
+    fn resolve_model_opt_accepts_bare_model_with_known_provider() {
+        // Bare model id "k3" with last_provider="kimi-for-coding" — the model
+        // list for "kimi-for-coding" isn't statically known, but the provider
+        // is configured, so the bare id is accepted as a starting point.
+        let state = mew_config::State {
+            last_model: "k3".into(),
+            last_provider: "kimi-for-coding".into(),
+            ..Default::default()
+        };
+        let cfg = cfg_with_default_providers();
+        assert_eq!(
+            resolve_model_opt(None, &state, &cfg),
+            Some("k3".into())
+        );
+    }
+
+    #[test]
+    fn resolve_model_opt_rejects_bare_model_with_unknown_provider() {
+        // Bare model id with an unknown provider should still be rejected.
+        let state = mew_config::State {
+            last_model: "k3".into(),
+            last_provider: "bogus".into(),
+            ..Default::default()
+        };
+        let cfg = cfg_with_default_providers();
+        assert_eq!(resolve_model_opt(None, &state, &cfg), None);
+    }
+
+    #[test]
     fn resolve_model_opt_ignores_state_with_unknown_provider_prefix() {
         // `bogus/foo` — provider part is not in cfg.providers.
         let state = mew_config::State {
@@ -1376,7 +1434,7 @@ mod tests {
         assert_eq!(provider_name_to_shape("opencode-go"), "openai");
         assert_eq!(provider_name_to_shape("z-ai"), "anthropic");
         assert_eq!(provider_name_to_shape("umans"), "anthropic");
-        assert_eq!(provider_name_to_shape("kimi"), "openai");
+        assert_eq!(provider_name_to_shape("kimi-for-coding"), "openai");
         assert_eq!(provider_name_to_shape("codex"), "responses");
     }
 

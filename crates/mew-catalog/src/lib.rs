@@ -213,6 +213,49 @@ impl Catalog {
             .cloned()
     }
 
+    /// Map a variant name from one model's set to the closest match in
+    /// another model's set. Used when switching models to carry over the
+    /// thinking effort level. Tries exact match first, then maps by
+    /// effort level using a canonical ordering.
+    pub fn map_variant(&self, variant: &str, model_id: &str) -> Option<ThinkingVariant> {
+        let variants = self.thinking_variants(model_id);
+        if variants.is_empty() {
+            return None;
+        }
+        // Exact match.
+        if let Some(v) = variants.iter().find(|v| v.name == variant) {
+            return Some(v.clone());
+        }
+        // Map by effort level. Canonical ordering from lowest to highest.
+        let effort_order = [
+            "none", "low", "medium", "high", "xhigh", "max", "ultra",
+        ];
+        let source_effort = effort_order.iter().position(|&e| e == variant);
+        let target_by_effort: Vec<(usize, &ThinkingVariant)> = variants
+            .iter()
+            .filter_map(|v| {
+                effort_order
+                    .iter()
+                    .position(|&e| e == v.name)
+                    .map(|pos| (pos, v))
+            })
+            .collect();
+        if let Some(src) = source_effort {
+            if !target_by_effort.is_empty() {
+                // Find the target with the closest effort level.
+                let closest = target_by_effort
+                    .iter()
+                    .min_by_key(|(pos, _)| (*pos as i32 - src as i32).abs())
+                    .map(|(_, v)| (*v).clone());
+                if closest.is_some() {
+                    return closest;
+                }
+            }
+        }
+        // Fall back to the default for this model.
+        self.default_thinking(model_id)
+    }
+
     /// Built-in thinking variant defaults based on model ID patterns.
     ///
     /// Returns an empty vec for models that don't support configurable thinking.
@@ -1210,6 +1253,39 @@ mod tests {
         let variants = build_umans_thinking_variants(Some(&r));
         let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, vec!["none", "high", "max"]);
+    }
+
+    #[test]
+    fn test_map_variant_exact_match() {
+        let cat = Catalog::empty();
+        // k3 has low/high/max — exact match should return the same name.
+        let v = cat.map_variant("high", "k3").unwrap();
+        assert_eq!(v.name, "high");
+    }
+
+    #[test]
+    fn test_map_variant_closest_effort() {
+        let cat = Catalog::empty();
+        // k3 has low/high/max. "medium" isn't available, so it should map
+        // to the closest effort level — "low" or "high" (both are distance 1).
+        let v = cat.map_variant("medium", "k3").unwrap();
+        assert!(v.name == "low" || v.name == "high");
+    }
+
+    #[test]
+    fn test_map_variant_unknown_source_falls_back_to_default() {
+        let cat = Catalog::empty();
+        // "ultra" isn't in k3's set but IS in the effort_order. k3 has
+        // low/high/max, so "ultra" (index 6) is closest to "max" (index 5).
+        let v = cat.map_variant("ultra", "k3").unwrap();
+        assert_eq!(v.name, "max");
+    }
+
+    #[test]
+    fn test_map_variant_no_variants_returns_none() {
+        let cat = Catalog::empty();
+        // kimi-for-coding has no thinking variants.
+        assert!(cat.map_variant("high", "kimi-for-coding").is_none());
     }
 
     #[test]

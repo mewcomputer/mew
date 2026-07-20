@@ -609,14 +609,21 @@ pub(super) fn draw_picker(
 ) {
     let width = 60u16.min(area.width.saturating_sub(4));
 
-    let item_lines: u16 =
-        picker
-            .items
-            .first()
-            .map_or(1, |i| if i.description.is_empty() { 1 } else { 2 });
+    // Determine lines per item. Headers take 1 line; regular items take 1 or 2
+    // depending on whether they have a description. Use the max across all
+    // non-header items so the height accommodates descriptions.
+    let item_lines: u16 = picker
+        .items
+        .iter()
+        .filter(|i| !i.header)
+        .map(|i| if i.description.is_empty() { 1 } else { 2 })
+        .max()
+        .unwrap_or(1);
 
     let max_items = PICKER_VISIBLE_ITEMS as u16;
-    let content_height = max_items * item_lines;
+    // Reserve space for section headers (each takes 1 line).
+    let header_count = picker.items.iter().filter(|i| i.header).count() as u16;
+    let content_height = max_items * item_lines + header_count;
     let height = (4 + content_height).min(area.height.saturating_sub(4));
 
     let list_area_height = height.saturating_sub(4);

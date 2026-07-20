@@ -180,6 +180,7 @@ async fn test_action_variant_table() {
             }
             Action::SetThinkingVariant(_) => Action::SetThinkingVariant("off".into()),
             Action::AttachSession(_) => Action::AttachSession("sess_123".into()),
+            Action::SendQueuedNow(_) => Action::SendQueuedNow("queued text".into()),
             other => other,
         };
         let mut app = mew_tui::App::new();

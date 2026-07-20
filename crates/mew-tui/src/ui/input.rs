@@ -1,6 +1,6 @@
 use ratatui::{
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Paragraph},
     Frame,
@@ -20,6 +20,39 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             .fg(app.theme.resolve("foreground"))
             .bg(input_bg),
     };
+
+    // If there are queued messages, render a dimmed preview strip above the
+    // input area showing the oldest queued message with a (+N) badge.
+    if !app.queued_messages.is_empty() {
+        let queue_height = 1u16;
+        let queue_area = Rect::new(area.x, area.y, area.width, queue_height);
+        let queue_bg = app.theme.resolve("muted");
+        let muted_style = Style::default()
+            .fg(app.theme.resolve("text.muted"))
+            .bg(queue_bg)
+            .add_modifier(Modifier::DIM);
+        let badge_style = Style::default()
+            .fg(app.theme.resolve("text.warning"))
+            .bg(queue_bg);
+
+        let oldest = app.queued_messages[0].as_str();
+        let extra = app.queued_messages.len().saturating_sub(1);
+        let badge = if extra > 0 {
+            format!(" (+{})", extra)
+        } else {
+            String::new()
+        };
+        // Truncate the preview to fit the available width minus prefix/badge.
+        let prefix_str = "⏳ ";
+        let available = area.width.saturating_sub(prefix_str.len() as u16).saturating_sub(badge.len() as u16);
+        let preview: String = oldest.chars().take(available as usize).collect();
+        let line = Line::from(vec![
+            Span::styled(prefix_str, badge_style),
+            Span::styled(preview, muted_style),
+            Span::styled(badge, badge_style),
+        ]);
+        f.render_widget(Paragraph::new(line), queue_area);
+    }
 
     let content_width = area.width.saturating_sub(2);
     // The prefix ("> " or spinner + space) takes 2 columns, so the

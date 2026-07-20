@@ -135,14 +135,26 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             handle_attach_session(cx, &id).await;
             Flow::Continue
         }
+        Action::SendQueuedNow(text) => {
+            // Cancel the current turn, then submit the queued message.
+            cx.target.cancel().await;
+            cx.app.streaming = false;
+            handle_submit(cx, text).await;
+            Flow::Continue
+        }
     }
 }
 
 /// Handle `Action::Submit` — process mentions, push user message, start the turn.
 async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String) {
     if cx.app.streaming {
-        cx.app
-            .set_alert("wait for the current response to finish (or press Ctrl+C to cancel)");
+        // Queue the message instead of rejecting it. It will be sent
+        // automatically when the current turn finishes, or immediately
+        // if the user presses Up-Up.
+        if !text.trim().is_empty() {
+            cx.app.queued_messages.push(text);
+            cx.app.mark_chat_dirty();
+        }
         return;
     }
     let text = cx.target.intercept_user_input(text).await;
@@ -324,10 +336,22 @@ async fn handle_switch_model<T: CommandTarget>(cx: &mut Ctx<'_, T>, spec: &str) 
         Ok(switched) => {
             cx.app.status.model = switched.model_id.clone();
             cx.app.status.provider = switched.provider_id.clone();
-            // Clear thinking variant display — the new model may not support
-            // the same variants. The agent's reasoning config is rebuilt on
-            // provider swap, so the TUI state should match.
+            // Try to carry over the thinking variant to the new model.
+            // Maps by effort level (e.g. "max" on k3 → "high" on a model
+            // that only has low/medium/high).
+            let prev_variant = cx.app.active_thinking_variant.clone();
             cx.app.active_thinking_variant = None;
+            if let Some(ref prev) = prev_variant {
+                if let Some(c) = cx.cat {
+                    if let Some(mapped) = c.map_variant(prev, &switched.model_id) {
+                        // set_thinking resolves the variant via the catalog
+                        // and applies the reasoning config to the agent.
+                        if cx.target.set_thinking(&mapped.name).await.is_ok() {
+                            cx.app.active_thinking_variant = Some(mapped.name);
+                        }
+                    }
+                }
+            }
             // Update context window from catalog
             if let Some(c) = cx.cat {
                 cx.app.status.context_window = c.context_window(&switched.model_id) as u32;
@@ -336,6 +360,7 @@ async fn handle_switch_model<T: CommandTarget>(cx: &mut Ctx<'_, T>, spec: &str) 
             let mut state = mew_config::load_state().unwrap_or_default();
             state.last_model = switched.model_id.clone();
             state.last_provider = switched.provider_id.clone();
+            state.last_thinking_variant = cx.app.active_thinking_variant.clone();
             state.sidebar_collapsed = cx.app.sidebar_collapsed.clone();
             // Record in recent models: move to front, dedupe, cap at 6.
             let full_id = format!("{}/{}", switched.provider_id, switched.model_id);
@@ -411,9 +436,17 @@ async fn handle_set_thinking_variant<T: CommandTarget>(cx: &mut Ctx<'_, T>, vari
             if variant.is_empty() || variant == "off" || variant == "none" {
                 cx.app.active_thinking_variant = None;
                 cx.app.set_alert("thinking disabled");
+                // Persist: clear the saved variant.
+                let mut state = mew_config::load_state().unwrap_or_default();
+                state.last_thinking_variant = None;
+                let _ = mew_config::save_state(&state);
             } else {
                 cx.app.active_thinking_variant = Some(variant.to_string());
                 cx.app.set_alert(format!("thinking: {}", variant));
+                // Persist the variant.
+                let mut state = mew_config::load_state().unwrap_or_default();
+                state.last_thinking_variant = Some(variant.to_string());
+                let _ = mew_config::save_state(&state);
             }
         }
         Err(Unsupported(reason)) => cx.app.set_alert(reason),

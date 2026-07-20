@@ -420,30 +420,11 @@ impl Adapter {
 
             let delta = &chunk.choices[0].delta;
 
-            // The first chunk often has {"role":"assistant"} with no content yet.
-            // Don't eagerly create a text part here — if reasoning follows
-            // (either in this delta or the next), the text part would be
-            // registered before the reasoning part, rendering text above
-            // thinking instead of below. The content handler below creates
-            // the text part lazily when actual content arrives.
-            if delta.role.as_deref() == Some("assistant")
-                && current_text_part.is_none()
-                && delta.reasoning.is_none()
-                && delta.content.as_deref().map(|c| !c.is_empty()).unwrap_or(false)
-                && delta
-                    .tool_calls
-                    .as_ref()
-                    .map(|v| v.is_empty())
-                    .unwrap_or(true)
-            {
-                let part = new_text_part();
-                let _ = tx
-                    .send(ProviderEvent::PartStart {
-                        part: Part::Text(part.clone()),
-                    })
-                    .await;
-                current_text_part = Some(part);
-            }
+            // Text and reasoning parts are created lazily by their respective
+            // content handlers below. We do NOT eagerly create a text part
+            // on the {"role":"assistant"} chunk, because reasoning may arrive
+            // in this delta or the next — if we create the text part first,
+            // it renders above reasoning instead of below.
 
             if let Some(content) = &delta.content {
                 if !content.is_empty() {
@@ -644,6 +625,7 @@ struct Choice {
 
 #[derive(Debug, Default, serde::Deserialize)]
 struct Delta {
+    #[allow(dead_code)]
     role: Option<String>,
     content: Option<String>,
     #[serde(alias = "reasoning_content")]

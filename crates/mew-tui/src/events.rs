@@ -636,6 +636,10 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
     if key.code != KeyCode::Esc {
         app.esc_cancel_pending = None;
     }
+    // Reset Up-Up detection on any non-Up key.
+    if key.code != KeyCode::Up {
+        app.up_press = None;
+    }
 
     // Global shortcuts.
     match key.code {
@@ -935,6 +939,18 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     && app.cursor_visual_up(content_width)
                 {
                     // Cursor moved up within the input.
+                } else if app.input.is_empty() && app.streaming && !app.queued_messages.is_empty() {
+                    // Up-Up while streaming with queued messages: cancel the
+                    // current turn and send the oldest queued message.
+                    let count = app.up_press.map(|(c, _)| c).unwrap_or(0) + 1;
+                    if count >= 2 {
+                        app.up_press = None;
+                        if let Some(text) = app.pop_queued_message() {
+                            return Some(Action::SendQueuedNow(text));
+                        }
+                    } else {
+                        app.up_press = Some((count, std::time::Instant::now()));
+                    }
                 } else if app.input.is_empty() {
                     app.scroll_up(1);
                 } else {
@@ -1177,4 +1193,7 @@ pub enum Action {
     /// Attach to a different daemon session (switch chat). Only meaningful
     /// in daemon mode; local `run_tui` handles it as a no-op with an alert.
     AttachSession(String),
+    /// Cancel the current turn and immediately submit the given text as a
+    /// new turn. Fires from Up-Up when there are queued messages.
+    SendQueuedNow(String),
 }
