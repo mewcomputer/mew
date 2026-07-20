@@ -42,6 +42,83 @@ fn resolve_scoped(cwd: &Path, relative: Option<&str>) -> Result<PathBuf, String>
     Ok(canon_target)
 }
 
+fn filesystem_path_allowed(path: &Path, home: &Path) -> bool {
+    let protected = ["/System", "/Library", "/private", "/Volumes"];
+    path.starts_with(home) && !protected.iter().any(|prefix| path.starts_with(prefix))
+}
+
+fn filesystem_root_allowed(path: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return false;
+    };
+    filesystem_path_allowed(path, &home)
+}
+
+pub async fn handle_list_filesystem_dir(path: Option<String>) -> Result<ServerMessage, String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| "home directory unavailable".to_string())?;
+    let target = match path.as_deref() {
+        None | Some("") | Some("~") => home,
+        Some(value) => PathBuf::from(value),
+    };
+    let target = target
+        .canonicalize()
+        .map_err(|e| format!("path canonicalize: {e}"))?;
+    if !filesystem_root_allowed(&target) {
+        return Err(format!(
+            "path is outside user workspace: {}",
+            target.display()
+        ));
+    }
+    let mut entries = Vec::new();
+    let mut reader = tokio::fs::read_dir(&target)
+        .await
+        .map_err(|e| format!("read_dir: {e}"))?;
+    while let Ok(Some(entry)) = reader.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let is_dir = entry
+            .file_type()
+            .await
+            .map(|ft| ft.is_dir())
+            .unwrap_or(false);
+        if is_dir {
+            entries.push(DirEntry {
+                name,
+                is_dir: true,
+                size: None,
+            });
+        }
+    }
+    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(ServerMessage::FilesystemDirListing {
+        path: target.display().to_string(),
+        entries,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::filesystem_path_allowed;
+    use std::path::Path;
+
+    #[test]
+    fn filesystem_browser_stays_inside_home_and_skips_protected_roots() {
+        let home = Path::new("/Users/tester");
+        assert!(filesystem_path_allowed(
+            Path::new("/Users/tester/projects"),
+            home
+        ));
+        assert!(!filesystem_path_allowed(Path::new("/Users/other"), home));
+        assert!(!filesystem_path_allowed(Path::new("/System"), home));
+        assert!(!filesystem_path_allowed(Path::new("/Library"), home));
+        assert!(!filesystem_path_allowed(Path::new("/private/tmp"), home));
+    }
+}
+
 /// Handle `ListDir`.
 pub async fn handle_list_dir(
     sm: &SessionManager,

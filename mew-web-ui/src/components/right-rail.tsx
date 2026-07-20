@@ -1,31 +1,20 @@
 import { useState, useEffect, type ReactNode } from "react";
 import {
-  AlertCircle,
-  Activity,
-  CheckCircle2,
-  CircleAlert,
   Folder,
   GitBranch,
   GitPullRequest,
-  HelpCircle,
   Loader2,
-  MessageCircleQuestion,
-  PlayCircle,
   Pin,
-  ShieldAlert,
   Terminal,
   Plus,
   X,
   XCircle,
-  ArrowUpRight,
   Globe,
   type LucideIcon,
 } from "lucide-react";
-import { useSessionStore, type TodoItem, type SubagentInfo, type PendingAskUser, type JobInfo } from "../stores/session";
+import { useSessionStore, type SubagentInfo, type JobInfo } from "../stores/session";
 import { cn } from "../lib/utils";
-import { compareSessionsByAttention, getSessionAttention, type SessionAttention } from "../lib/attention";
-import { navigateToSession } from "../lib/router-ref";
-import type { AlertKind, GitEntry, SessionInfo } from "@mew/web-client";
+import type { GitEntry } from "@mew/web-client";
 import { useIsMobile } from "../hooks/use-mobile";
 import {
   createWorkbenchTab,
@@ -37,7 +26,6 @@ import {
   type WorkbenchTabKind,
   type WorkbenchTabsState,
 } from "../lib/workbench-tabs";
-import { AskUserForm } from "./ask-user-card";
 import { getClient } from "../lib/client-ref";
 import { FileTreePanel, ChangesPanel } from "./file-tree";
 import { BrowserPanel } from "./browser-panel";
@@ -46,18 +34,30 @@ import {
   SheetContent,
 } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandShortcut,
+} from "@/components/ui/command";
 
-type ActivityTabKey = "todos" | "subagents" | "questions" | "jobs";
-
-const ACTIVITY_TABS: ReadonlyArray<{
-  key: ActivityTabKey;
+const WORKBENCH_SURFACES: ReadonlyArray<{
+  kind: WorkbenchTabKind;
   label: string;
+  description: string;
+  shortcut?: string;
   icon: LucideIcon;
 }> = [
-  { key: "todos", label: "Plan", icon: CheckCircle2 },
-  { key: "subagents", label: "Agents", icon: Loader2 },
-  { key: "questions", label: "Questions", icon: HelpCircle },
-  { key: "jobs", label: "Jobs", icon: Terminal },
+  { kind: "review", label: "Review", description: "Inspect and review working-tree changes", shortcut: "⌃⇧G", icon: GitPullRequest },
+  { kind: "terminal", label: "Terminal", description: "Run and inspect background commands", icon: Terminal },
+  { kind: "browser", label: "Browser", description: "Open a browser tab in the workbench", shortcut: "⌘T", icon: Globe },
+  { kind: "file", label: "Files", description: "Browse the active project files", shortcut: "⌘P", icon: Folder },
+  { kind: "agents", label: "Agents", description: "Watch delegated work in progress", icon: Loader2 },
+  { kind: "jobs", label: "Jobs", description: "Track long-running background commands", icon: Terminal },
+  { kind: "changes", label: "Changes", description: "Inspect the active working tree", icon: GitBranch },
 ];
 
 interface RightRailProps {
@@ -78,8 +78,7 @@ export function RightRail({
   onWorkbenchTabsAction,
 }: RightRailProps) {
   const isMobile = useIsMobile();
-  const [activeTab, setActiveTab] = useState<ActivityTabKey>("todos");
-  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [surfacePickerOpen, setSurfacePickerOpen] = useState(false);
   const [uncontrolledWorkbenchTabs, setUncontrolledWorkbenchTabs] = useState(DEFAULT_WORKBENCH_TABS);
   const selectedWorkbenchTabs = onWorkbenchTabsChange || onWorkbenchTabsAction
     ? workbenchTabs
@@ -93,16 +92,14 @@ export function RightRail({
     if (onWorkbenchTabsAction) onWorkbenchTabsAction(action);
     else setSelectedWorkbenchTabs(workbenchTabsReducer(selectedWorkbenchTabs, action));
   };
-  const todos = useSessionStore((s) => s.todos);
   const subagents = useSessionStore((s) => s.subagents);
-  const questions = useSessionStore((s) => s.pendingAskUser);
   const flaggedFiles = useSessionStore((s) => s.flaggedFiles);
   const jobs = useSessionStore((s) => s.jobs);
+  const connected = useSessionStore((s) => s.connectionState === "connected");
   const gitStatus = useSessionStore((s) => s.gitStatus);
   const sessionId = useSessionStore((s) => s.sessionId);
   const sessionCwd = useSessionStore((s) => s.sessionCwd);
   const availableSessions = useSessionStore((s) => s.availableSessions);
-  const alerts = useSessionStore((s) => s.alerts);
   const sessionHasWorkspace = Boolean(
     sessionCwd || availableSessions.find((s) => s.session_id === sessionId)?.cwd,
   );
@@ -115,23 +112,18 @@ export function RightRail({
     applyWorkbenchAction({ type: "add", tab });
   };
 
-  const alertKindsBySession = new Map<string, AlertKind[]>();
-  for (const alert of alerts) {
-    const kinds = alertKindsBySession.get(alert.sessionId) ?? [];
-    kinds.push(alert.kind);
-    alertKindsBySession.set(alert.sessionId, kinds);
-  }
-  const attentionSessions = [...availableSessions]
-    .filter((session) => !session.archived)
-    .filter((session) => getSessionAttention(session, alertKindsBySession.get(session.session_id)).length > 0)
-    .sort((a, b) => compareSessionsByAttention(a, b, alertKindsBySession));
-  const attentionCount = attentionSessions.length;
+  const openAddWorkbenchMenu = () => {
+    setSurfacePickerOpen(true);
+  };
+
+  // When the Files or Changes tab is opened, enable workspace watching so
 
   // When the Files or Changes tab is opened, enable workspace watching so
   // fs_changed events keep the listings/git status live. Stop watching
   // when those tabs are closed to avoid unnecessary traffic.
   useEffect(() => {
     if (!open || !sessionId || !sessionHasWorkspace) return;
+    if (!selectedWorkbenchTab) return;
     if (selectedWorkbenchTab.kind !== "changes" && selectedWorkbenchTab.kind !== "file") return;
     const client = getClient();
     if (!client) return;
@@ -141,30 +133,43 @@ export function RightRail({
     return () => {
       client.watchWorkspace(sessionId, false);
     };
-  }, [open, activeTab, selectedWorkbenchTab, sessionId, sessionHasWorkspace]);
+  }, [open, selectedWorkbenchTab, sessionId, sessionHasWorkspace]);
 
   const activeCounts = {
-    todos: todos.filter((t) => t.status === "in_progress" || t.status === "pending").length,
     subagents: [...subagents.values()].filter((s) => s.status === "running").length,
-    questions: questions.length,
     jobs: [...jobs.values()].filter(
       (j) => j.state !== "done" && j.state !== "failed" && j.state !== "cancelled",
     ).length,
   };
-  const totalActive = activeCounts.todos + activeCounts.subagents + activeCounts.questions + activeCounts.jobs;
 
   useEffect(() => {
     if (!open) return;
-    const currentCount = activeCounts[activeTab];
-    if (currentCount > 0) return;
-    const preferred = ACTIVITY_TABS.map((tab) => tab.key).find(
-      (key) => activeCounts[key] > 0,
-    );
-    setActiveTab(preferred ?? "todos");
-  }, [open]);
+    if (!selectedWorkbenchTab) return;
+    const coreKinds: WorkbenchTabKind[] = ["agents", "jobs"];
+    if (!coreKinds.includes(selectedWorkbenchTab.kind)) return;
+
+    const preferredKind: WorkbenchTabKind | null = activeCounts.subagents > 0
+      ? "agents"
+      : activeCounts.jobs > 0
+        ? "jobs"
+        : null;
+    if (!preferredKind) return;
+    const preferredTab = selectedWorkbenchTabs.tabs.find((tab) => tab.kind === preferredKind);
+    if (preferredTab && preferredTab.id !== selectedWorkbenchTab.id) {
+      applyWorkbenchAction({ type: "select", id: preferredTab.id });
+    }
+  }, [
+    open,
+    selectedWorkbenchTab?.id,
+    selectedWorkbenchTab?.kind,
+    selectedWorkbenchTabs.tabs,
+    activeCounts.subagents,
+    activeCounts.jobs,
+  ]);
 
   useEffect(() => {
     if (!open) return;
+    if (!selectedWorkbenchTab) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey)) return;
       const key = event.key.toLowerCase();
@@ -174,7 +179,7 @@ export function RightRail({
       } else if (key === "t") {
         event.preventDefault();
         if (selectedWorkbenchTab.kind === "browser") addWorkbenchTab("browser");
-        else setAddMenuOpen(true);
+        else openAddWorkbenchMenu();
       } else if (/^[1-9]$/.test(key)) {
         const tab = selectedWorkbenchTabs.tabs[Number(key) - 1];
         if (!tab) return;
@@ -186,78 +191,54 @@ export function RightRail({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [open, selectedWorkbenchTab, selectedWorkbenchTabs]);
 
-  const activityContent = (
-    <div className="flex min-h-0 flex-1 flex-col">
-      {attentionSessions.length > 0 && (
-        <AttentionQueue
-          sessions={attentionSessions}
-          alertKindsBySession={alertKindsBySession}
-          onOpenSession={(sessionId) => {
-            navigateToSession(sessionId);
-            onOpenChange(false);
-          }}
-        />
-      )}
-
-      {flaggedFiles.length > 0 && <PinnedContext files={flaggedFiles} />}
-
-      <div
-        role="tablist"
-        aria-label="Activity sections"
-        className="flex min-w-0 flex-wrap gap-1 border-b border-border px-3 py-2"
-      >
-        {ACTIVITY_TABS.map(({ key, label, icon: Icon }) => (
-          <TabButton
-            key={key}
-            id={`activity-tab-${key}`}
-            label={label}
-            icon={Icon}
-            count={activeCounts[key]}
-            active={activeTab === key}
-            onClick={() => setActiveTab(key)}
-          />
-        ))}
-      </div>
-
-      <div
-        id={`activity-panel-${activeTab}`}
-        role="tabpanel"
-        aria-labelledby={`activity-tab-${activeTab}`}
-        className="min-h-0 flex-1 overflow-y-auto p-3"
-      >
-        {activeTab === "todos" && <TodoRailPanel todos={todos} />}
-        {activeTab === "subagents" && <SubagentRailPanel subagents={subagents} />}
-        {activeTab === "questions" && <QuestionsRailPanel questions={questions} />}
-        {activeTab === "jobs" && <JobsRailPanel jobs={jobs} />}
-      </div>
-    </div>
-  );
-
   const workbenchContent = (
     <div className="flex min-h-0 flex-1 flex-col">
-      <WorkbenchHeader
-        totalActive={totalActive}
-        attentionCount={attentionCount}
-        onClose={() => onOpenChange(false)}
-      />
       <Tabs
-        value={selectedWorkbenchTab.id}
+        value={selectedWorkbenchTab?.id ?? ""}
         onValueChange={(id) => applyWorkbenchAction({ type: "select", id })}
-        className="flex min-h-0 flex-1 flex-col"
+        className={cn(
+          "flex min-h-0 flex-1 flex-col",
+          selectedWorkbenchTab?.kind === "browser" && "bg-background",
+        )}
       >
         <div className="flex min-w-0 shrink-0 items-center border-b border-border">
-          <TabsList aria-label="Workbench sections" className="h-11 min-w-0 flex-1 justify-start gap-0 overflow-x-auto rounded-none border-0 bg-transparent p-0">
+          <TabsList
+            aria-label="Workbench tabs"
+            className={cn(
+              "min-w-0 flex-1 justify-start gap-0 overflow-x-auto rounded-none border-0 bg-transparent p-0",
+              selectedWorkbenchTab?.kind === "browser" ? "h-10 px-1" : "h-11",
+            )}
+          >
             {selectedWorkbenchTabs.tabs.map((tab) => {
               const meta = workbenchTabMeta(tab.kind);
               const Icon = meta.icon;
-              const count = tab.kind === "activity" ? totalActive : tab.kind === "changes" ? gitStatus.length : 0;
+              const count = tab.kind === "agents"
+                ? activeCounts.subagents
+                : tab.kind === "jobs"
+                  ? activeCounts.jobs
+                  : tab.kind === "changes"
+                    ? gitStatus.length
+                    : 0;
+              const isBrowserChrome = selectedWorkbenchTab?.kind === "browser";
               return (
-                <div key={tab.id} className={cn("group flex h-full shrink-0 items-center border-b-2", tab.id === selectedWorkbenchTab.id ? "border-primary" : "border-transparent")}>
+                <div
+                  key={tab.id}
+                  className={cn(
+                    "group flex h-full shrink-0 items-center",
+                    !isBrowserChrome && "border-b-2",
+                    !isBrowserChrome && (tab.id === selectedWorkbenchTab?.id ? "border-primary" : "border-transparent"),
+                  )}
+                >
                   <TabsTrigger
                     value={tab.id}
                     aria-label={tab.title}
                     onClick={() => applyWorkbenchAction({ type: "select", id: tab.id })}
-                    className="h-full gap-1.5 rounded-none border-0 border-transparent px-2.5 text-[11px] font-medium text-muted-foreground shadow-none transition-colors duration-150 data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                    className={cn(
+                      "gap-1.5 border-0 border-transparent px-2.5 text-[11px] font-medium text-muted-foreground shadow-none transition-colors duration-150 data-[state=active]:text-foreground data-[state=active]:shadow-none",
+                      isBrowserChrome
+                        ? "my-1 h-8 rounded-lg data-[state=active]:bg-muted/80"
+                        : "h-full rounded-none data-[state=active]:bg-transparent",
+                    )}
                   >
                     <Icon className="h-3.5 w-3.5" aria-hidden="true" />
                     <span className="max-w-32 truncate">{tab.title}</span>
@@ -281,75 +262,106 @@ export function RightRail({
           <div className="relative shrink-0">
             <button
               type="button"
-              onClick={() => setAddMenuOpen((value) => !value)}
+              onClick={openAddWorkbenchMenu}
               className="motion-pressable ml-1 rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               aria-label="Add workbench tab"
               title="Add workbench tab"
-              aria-expanded={addMenuOpen}
-              aria-haspopup="menu"
+              aria-expanded={surfacePickerOpen}
+              aria-haspopup="dialog"
             >
               <Plus className="h-3.5 w-3.5" />
             </button>
-            {addMenuOpen && <div role="menu" aria-label="Add workbench tab" className="motion-enter absolute right-0 top-full z-50 mt-1 min-w-36 rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-lg">
-              {(["browser", "terminal", "file", "changes", "review"] as WorkbenchTabKind[]).map((kind) => {
-                const meta = workbenchTabMeta(kind);
-                const Icon = meta.icon;
-                return (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    key={kind}
-                    onClick={() => {
-                      addWorkbenchTab(kind);
-                      setAddMenuOpen(false);
-                    }}
-                    className="motion-pressable flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs outline-none hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground"
-                  >
-                    <Icon className="h-4 w-4" />
-                    {meta.label}
-                  </button>
-                );
-              })}
-            </div>}
           </div>
+          <button
+            type="button"
+            onClick={() => onOpenChange(false)}
+            className="motion-pressable mr-1 rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label="Close workbench"
+            title="Close workbench"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
         <div className="min-h-0 flex-1 overflow-hidden">
-          {selectedWorkbenchTabs.tabs.map((tab) => (
+          {selectedWorkbenchTabs.tabs.length === 0 ? (
+            <EmptyState
+              icon={<Plus className="h-4 w-4" />}
+              title="No workbench tabs"
+              description="Use + to add a browser, terminal, file, change, review, agent, or job surface."
+            />
+          ) : selectedWorkbenchTabs.tabs.map((tab) => (
             <TabsContent
               key={tab.id}
               value={tab.id}
               forceMount
-              hidden={tab.id !== selectedWorkbenchTab.id}
+              hidden={tab.id !== selectedWorkbenchTab?.id}
               className={cn(
                 "mt-0 h-full min-h-0 overflow-hidden focus-visible:outline-none",
-                tab.id !== selectedWorkbenchTab.id && "hidden",
+                tab.id !== selectedWorkbenchTab?.id && "hidden",
               )}
             >
-              {renderWorkbenchSurface(tab, tab.id === selectedWorkbenchTab.id)}
+              {renderWorkbenchSurface(tab, tab.id === selectedWorkbenchTab?.id)}
             </TabsContent>
           ))}
         </div>
       </Tabs>
+      <CommandDialog open={surfacePickerOpen} onOpenChange={setSurfacePickerOpen}>
+        <CommandInput autoFocus placeholder="Choose a workbench surface…" />
+        <CommandList className="max-h-[min(28rem,65vh)] p-2">
+          <CommandEmpty>No matching surfaces.</CommandEmpty>
+          <CommandGroup heading="Open in workbench">
+            {WORKBENCH_SURFACES.map((surface) => {
+              const Icon = surface.icon;
+              return (
+                <CommandItem
+                  key={surface.kind}
+                  value={`${surface.label} ${surface.description}`}
+                  onSelect={() => {
+                    addWorkbenchTab(surface.kind);
+                    setSurfacePickerOpen(false);
+                  }}
+                  className="min-h-12 gap-3 rounded-lg px-3 py-2.5"
+                >
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                    <Icon className="h-4 w-4" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-medium">{surface.label}</span>
+                    <span className="block truncate text-xs text-muted-foreground">{surface.description}</span>
+                  </span>
+                  {surface.shortcut && <CommandShortcut>{surface.shortcut}</CommandShortcut>}
+                </CommandItem>
+              );
+            })}
+          </CommandGroup>
+        </CommandList>
+      </CommandDialog>
     </div>
   );
 
   function renderWorkbenchSurface(tab: WorkbenchTab, active: boolean) {
     switch (tab.kind) {
-      case "activity":
-        return <div className="flex h-full min-h-0 flex-col">{activityContent}</div>;
+      case "agents":
+        return renderActivitySurface("agents");
+      case "jobs":
+        return renderActivitySurface("jobs");
       case "browser":
+        return <BrowserPanel
+          client={getClient()}
+          connected={connected}
+          active={open && active}
+          tab={tab}
+          onTabChange={(patch) => applyWorkbenchAction({ type: "update", id: tab.id, patch })}
+        />;
+      case "file":
         return (
-          <div className="h-full min-h-0 p-3">
-            <BrowserPanel
-              client={getClient()}
-              active={open && active}
-              tab={tab}
-              onTabChange={(patch) => applyWorkbenchAction({ type: "update", id: tab.id, patch })}
-            />
+          <div className="flex h-full min-h-0 flex-col">
+            {flaggedFiles.length > 0 && <PinnedContext files={flaggedFiles} />}
+            <div className="min-h-0 flex-1">
+              <FileTreePanel hasWorkspace={sessionHasWorkspace} />
+            </div>
           </div>
         );
-      case "file":
-        return <div className="h-full min-h-0 overflow-y-auto p-3"><FileTreePanel hasWorkspace={sessionHasWorkspace} /></div>;
       case "changes":
         return <div className="h-full min-h-0 overflow-y-auto p-3"><ChangesPanel gitStatus={gitStatus} hasWorkspace={sessionHasWorkspace} /></div>;
       case "review":
@@ -357,6 +369,15 @@ export function RightRail({
       case "terminal":
         return <TerminalWorkbenchPanel jobs={jobs} />;
     }
+  }
+
+  function renderActivitySurface(kind: "agents" | "jobs") {
+    return (
+      <div className="flex h-full min-h-0 flex-col overflow-y-auto p-3">
+        {kind === "agents" && <SubagentRailPanel subagents={subagents} />}
+        {kind === "jobs" && <JobsRailPanel jobs={jobs} />}
+      </div>
+    );
   }
 
   if (mode === "dock" && !isMobile) {
@@ -381,53 +402,6 @@ export function RightRail({
         {workbenchContent}
       </SheetContent>
     </Sheet>
-  );
-}
-
-function WorkbenchHeader({
-  totalActive,
-  attentionCount,
-  onClose,
-}: {
-  totalActive: number;
-  attentionCount: number;
-  onClose: () => void;
-}) {
-  return (
-    <div className="flex shrink-0 items-start gap-3 border-b border-border px-4 py-3">
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <Activity className="h-3.5 w-3.5 text-primary" />
-          <h2 className="text-sm font-semibold text-foreground">Workbench</h2>
-        </div>
-        <p className="mt-1 text-[11px] text-muted-foreground">
-          {totalActive > 0
-            ? `${totalActive} active ${totalActive === 1 ? "item" : "items"}`
-            : "Your coding workspace, in context"}
-        </p>
-      </div>
-      <div className="flex shrink-0 items-center gap-1.5">
-        {totalActive > 0 && (
-          <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground">
-            {totalActive}
-          </span>
-        )}
-        {attentionCount > 0 && (
-          <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-amber-500/15 px-1.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300" aria-label={`${attentionCount} sessions need attention`}>
-            {attentionCount}
-          </span>
-        )}
-        <button
-          type="button"
-          onClick={onClose}
-          className="motion-pressable rounded-md p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          aria-label="Close workbench"
-          title="Close workbench"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-    </div>
   );
 }
 
@@ -523,8 +497,10 @@ function workbenchTabMeta(kind: WorkbenchTabKind): {
   icon: LucideIcon;
 } {
   switch (kind) {
-    case "activity":
-      return { label: "Activity", icon: Activity };
+    case "agents":
+      return { label: "Agents", icon: Loader2 };
+    case "jobs":
+      return { label: "Jobs", icon: Terminal };
     case "browser":
       return { label: "Browser", icon: Globe };
     case "terminal":
@@ -555,201 +531,6 @@ function TerminalWorkbenchPanel({ jobs }: { jobs: Map<string, JobInfo> }) {
       </div>
     </div>
   );
-}
-
-function TabButton({
-  id,
-  label,
-  icon: Icon,
-  count,
-  active,
-  onClick,
-}: {
-  id: string;
-  label: string;
-  icon: LucideIcon;
-  count: number;
-  active: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      id={id}
-      type="button"
-      role="tab"
-      aria-selected={active}
-      aria-controls={id.replace("tab", "panel")}
-      onClick={onClick}
-      className={cn(
-        "relative flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        active
-          ? "bg-accent text-accent-foreground"
-          : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-      )}
-    >
-      <Icon className="h-3.5 w-3.5" aria-hidden="true" />
-      <span>{label}</span>
-      {count > 0 && (
-        <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary/10 px-1 text-[9px] text-primary" aria-label={`${count} active`}>
-          {count}
-        </span>
-      )}
-    </button>
-  );
-}
-
-function AttentionQueue({
-  sessions,
-  alertKindsBySession,
-  onOpenSession,
-}: {
-  sessions: SessionInfo[];
-  alertKindsBySession: ReadonlyMap<string, readonly AlertKind[]>;
-  onOpenSession: (sessionId: string) => void;
-}) {
-  return (
-    <section className="motion-enter border-b border-amber-500/20 bg-amber-500/[0.06] px-3 py-3" aria-labelledby="needs-attention-heading">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div>
-          <h2 id="needs-attention-heading" className="text-[11px] font-semibold text-foreground">Needs attention</h2>
-          <p className="mt-0.5 text-[10px] text-muted-foreground">Resolve these before they can continue.</p>
-        </div>
-        <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300">
-          {sessions.length}
-        </span>
-      </div>
-      <div className="space-y-1.5">
-        {sessions.map((session) => {
-          const attention = getSessionAttention(session, alertKindsBySession.get(session.session_id));
-          const primary = attention[0];
-          if (!primary) return null;
-          return (
-            <button
-              key={session.session_id}
-              type="button"
-              onClick={() => onOpenSession(session.session_id)}
-              className="motion-pressable group flex w-full items-start gap-2 rounded-lg border border-amber-500/20 bg-background/70 px-2.5 py-2 text-left hover:border-amber-500/40 hover:bg-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              aria-label={`${primary.label} in ${sessionTitle(session)}`}
-            >
-              <AttentionIcon kind={primary.kind} />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-xs font-medium text-foreground">{sessionTitle(session)}</span>
-                <span className="mt-0.5 flex items-center gap-1 text-[10px] font-medium text-amber-700 dark:text-amber-300">
-                  {primary.label}{primary.count > 1 ? ` · ${primary.count}` : ""}
-                  {attention.length > 1 && <span className="text-muted-foreground">+{attention.length - 1} more</span>}
-                </span>
-              </span>
-              <ArrowUpRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/60 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" aria-hidden="true" />
-            </button>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function AttentionIcon({ kind }: { kind: SessionAttention["kind"] }) {
-  const Icon = kind === "permission" ? ShieldAlert : kind === "question" ? MessageCircleQuestion : CircleAlert;
-  return <Icon className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />;
-}
-
-function sessionTitle(session: SessionInfo): string {
-  return session.summary ?? session.first_message ?? session.model?.split("/").pop() ?? session.session_id.slice(0, 8);
-}
-
-function TodoRailPanel({ todos }: { todos: TodoItem[] }) {
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-
-  if (todos.length === 0) {
-    return (
-      <EmptyState
-        icon={<CheckCircle2 className="h-4 w-4" />}
-        title="No plan yet"
-        description="Plans and task progress will appear here."
-      />
-    );
-  }
-
-  return (
-    <div className="space-y-0.5">
-      <div className="mb-1.5 flex items-center justify-between text-[10px] uppercase tracking-wide text-muted-foreground">
-        <span>Plan</span>
-        <span>
-          {todos.filter((t) => t.status === "done").length}/{todos.length} done
-        </span>
-      </div>
-      {todos.map((todo) => (
-        <TodoRailRow
-          key={todo.id}
-          todo={todo}
-          todos={todos}
-          expanded={expandedId === todo.id}
-          onToggle={() => setExpandedId(expandedId === todo.id ? null : todo.id)}
-        />
-      ))}
-    </div>
-  );
-}
-
-function TodoRailRow({
-  todo,
-  todos,
-  expanded,
-  onToggle,
-}: {
-  todo: TodoItem;
-  todos: TodoItem[];
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  const { icon, color } = todoStatusMeta(todo.status);
-  const deps = todo.dependsOn
-    .map((id) => todos.find((t) => t.id === id))
-    .filter(Boolean) as TodoItem[];
-
-  return (
-    <div className="rounded-md border border-transparent hover:border-border hover:bg-muted/30">
-      <button
-        onClick={onToggle}
-        className="flex w-full items-start gap-2 px-2 py-1.5 text-left"
-      >
-        <span className={cn("mt-0.5 shrink-0", color)}>{icon}</span>
-        <span
-          className={cn(
-            "flex-1 text-xs",
-            todo.status === "done" && "text-muted-foreground line-through",
-            todo.status === "blocked" && "text-destructive",
-            todo.status === "in_progress" && "font-medium text-foreground",
-          )}
-        >
-          {todo.content}
-        </span>
-      </button>
-      {expanded && deps.length > 0 && (
-        <div className="pb-2 pl-7 pr-2">
-          <div className="relative border-l-2 border-border pl-3 text-[10px] text-muted-foreground">
-            <span className="mb-1 block">Depends on:</span>
-            {deps.map((d) => (
-              <div key={d.id} className="truncate">· {d.content}</div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function todoStatusMeta(status: TodoItem["status"]) {
-  switch (status) {
-    case "done":
-      return { icon: <CheckCircle2 className="h-3.5 w-3.5" />, color: "text-green-500" };
-    case "in_progress":
-      return { icon: <Loader2 className="h-3.5 w-3.5 animate-spin" />, color: "text-blue-500" };
-    case "blocked":
-      return { icon: <AlertCircle className="h-3.5 w-3.5" />, color: "text-destructive" };
-    default:
-      return { icon: <PlayCircle className="h-3.5 w-3.5" />, color: "text-muted-foreground" };
-  }
 }
 
 function SubagentRailPanel({ subagents }: { subagents: Map<string, SubagentInfo> }) {
@@ -806,36 +587,6 @@ function SubagentRailRow({ sub }: { sub: SubagentInfo }) {
           {sub.outcome.reason}
         </div>
       )}
-    </div>
-  );
-}
-
-function QuestionsRailPanel({ questions }: { questions: PendingAskUser[] }) {
-  const resolveAskUser = useSessionStore((s) => s.resolveAskUser);
-
-  if (questions.length === 0) {
-    return (
-      <EmptyState
-        icon={<HelpCircle className="h-4 w-4" />}
-        title="No pending questions"
-        description="When mew needs a decision, it will appear here."
-      />
-    );
-  }
-
-  return (
-    <div className="space-y-3">
-      {questions.map((req) => (
-        <AskUserForm
-          key={req.requestId}
-          req={req}
-          onSubmit={(answers) => {
-            const client = getClient();
-            if (client) client.respondToAskUser(req.requestId, answers);
-            resolveAskUser(req.requestId);
-          }}
-        />
-      ))}
     </div>
   );
 }

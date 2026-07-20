@@ -48,7 +48,7 @@ export function MarkdownBody({
   };
 
   return (
-    <div className="prose prose-sm dark:prose-invert max-w-none">
+    <div className="prose prose-sm min-w-0 max-w-full overflow-x-hidden break-words [overflow-wrap:anywhere] dark:prose-invert">
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ code: codeComponent }}>
         {children}
       </ReactMarkdown>

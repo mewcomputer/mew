@@ -315,75 +315,112 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
 
     return (
       <div
-        className="shrink-0 border-t border-border/60 bg-background/95 px-3 pb-2 pt-2 sm:px-4 sm:pb-3"
+        className="shrink-0 px-3 pb-2 pt-2 sm:px-4 sm:pb-3"
       >
-        <div className="mx-auto max-w-3xl space-y-2">
+        <div className="mx-auto max-w-3xl">
           <div className="relative">
             <div
+              data-testid="composer-surface"
               onDrop={handleDrop}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               className={cn(
-                "flex items-end gap-2 rounded-xl border bg-muted/40 px-3 py-2 transition-[background-color,border-color] duration-150 ease-out",
+                "pointer-events-auto rounded-xl border bg-background px-3 py-2 shadow-md transition-[background-color,border-color,box-shadow] duration-150 ease-out",
                 focused ? "border-ring bg-muted" : "border-border",
                 isDragging && "border-primary border-2",
               )}
             >
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={!connected}
-                className="motion-pressable flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
-                title="Attach file"
-                aria-label="Attach file"
-              >
-                <Paperclip className="h-4 w-4" />
-              </button>
+              <div className="flex items-end gap-2">
 
-              <textarea
-                ref={textareaRef}
-                value={text}
-                onChange={(e) => handleChange(e.target.value)}
-                onKeyDown={handleKeyDown}
-                onPaste={handlePaste}
-                onFocus={() => setFocused(true)}
-                onBlur={() => setFocused(false)}
-                placeholder={connected ? "Ask mew anything…" : "Connecting…"}
-                aria-label="Message prompt"
-                disabled={!connected}
-                rows={1}
-                className="flex-1 resize-none bg-transparent py-1.5 text-sm leading-5 text-foreground placeholder:text-muted-foreground focus:outline-hidden"
-              />
+                <textarea
+                  ref={textareaRef}
+                  value={text}
+                  onChange={(e) => handleChange(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  onPaste={handlePaste}
+                  onFocus={() => setFocused(true)}
+                  onBlur={() => setFocused(false)}
+                  placeholder={connected ? "Ask mew anything…" : "Connecting…"}
+                  aria-label="Message prompt"
+                  disabled={!connected}
+                  rows={1}
+                  className="min-w-0 flex-1 resize-none bg-transparent py-1.5 text-sm leading-5 text-foreground placeholder:text-muted-foreground focus:outline-hidden"
+                />
 
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(e) => handleAttach(e.target.files)}
-              />
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => handleAttach(e.target.files)}
+                />
+              </div>
 
-              {hasStreaming ? (
-                <button
-                  onClick={onCancel}
-                  className="motion-pressable flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-destructive/50 text-destructive hover:bg-destructive/10"
-                  title="Cancel"
-                  aria-label="Cancel response"
-                >
-                  <Square className="h-4 w-4" />
-                </button>
-              ) : (
-                <button
-                  onClick={handleSubmit}
-                  disabled={!text.trim() || !connected || isSending}
-                  className={cn(
-                    "motion-pressable flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50",
+              {(attachmentError || files.length > 0) && (
+                <div className="mt-1.5 flex min-w-0 flex-wrap items-center gap-1.5 border-t border-border/50 pt-1.5">
+                  {attachmentError && (
+                    <span className="text-[10px] text-destructive">
+                      {attachmentError}
+                    </span>
                   )}
-                  title="Send"
-                  aria-label="Send prompt"
-                >
-                  <CornerDownLeft className="h-4 w-4" />
-                </button>
+                  {files.map((f, i) => (
+                    <span
+                      key={`${f.name}-${i}`}
+                      className="flex max-w-full items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                    >
+                      <span className="truncate">{f.name}</span>
+                      <button
+                        onClick={() => removeFile(f)}
+                        className="shrink-0 rounded-full hover:text-foreground"
+                        title="Remove"
+                        aria-label={"Remove " + f.name}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
               )}
+
+              <div className="mt-1.5 flex items-center justify-between gap-1">
+                <div className="mt-1.5 flex items-center gap-1">
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={!connected}
+                  className="motion-pressable flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-50"
+                  title="Attach file"
+                  aria-label="Attach file"
+                >
+                  <Paperclip className="h-4 w-4" />
+                </button>
+                  <PersonaPill />
+                </div>
+                <div className="mt-1.5 flex items-center gap-1">
+                <ModelPill />
+                {hasStreaming ? (
+                  <button
+                    onClick={onCancel}
+                    className="motion-pressable flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-destructive/50 text-destructive hover:bg-destructive/10"
+                    title="Cancel"
+                    aria-label="Cancel response"
+                  >
+                    <Square className="h-4 w-4" />
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleSubmit}
+                    disabled={!text.trim() || !connected || isSending}
+                    className={cn(
+                      "motion-pressable flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50",
+                    )}
+                    title="Send"
+                    aria-label="Send prompt"
+                  >
+                    <CornerDownLeft className="h-4 w-4" />
+                  </button>
+                  )}
+                  </div>
+              </div>
             </div>
 
             {menuOpen === "slash" && filteredSlash.length > 0 && (
@@ -414,39 +451,6 @@ export const InputArea = forwardRef<HTMLTextAreaElement, InputAreaProps>(
             )}
           </div>
 
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex flex-col gap-1">
-              {attachmentError && (
-                <span className="text-[10px] text-destructive">
-                  {attachmentError}
-                </span>
-              )}
-              {files.length > 0 ? (
-                <div className="flex flex-wrap gap-1.5">
-                  {files.map((f, i) => (
-                    <span
-                      key={`${f.name}-${i}`}
-                      className="flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
-                    >
-                      {f.name}
-                      <button
-                        onClick={() => removeFile(f)}
-                        className="rounded-full hover:text-foreground"
-                        title="Remove"
-                        aria-label={"Remove " + f.name}
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <PersonaPill />
-            <ModelPill />
-          </div>
         </div>
       </div>
     );

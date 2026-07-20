@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { useRouter } from "@tanstack/react-router";
 import type { MewClient, SessionInfo, GroupInfo, ProjectInfo, AlertKind } from "@mew/web-client";
+import type { DirEntry } from "@mew/web-client";
 import { useSessionStore } from "../stores/session";
 import { cn } from "../lib/utils";
 import { compareSessionsByAttention, getSessionAttention, type SessionAttention } from "../lib/attention";
@@ -53,7 +54,10 @@ import {
   ShieldAlert,
   MessageCircleQuestion,
   CircleAlert,
+  ChevronUp,
+  ArrowUp,
 } from "lucide-react";
+import { getClient } from "../lib/client-ref";
 
 interface SessionRailProps {
   client: MewClient | null;
@@ -870,7 +874,7 @@ function swatchClass(color: string): string {
   return map[color] ?? "bg-muted-foreground";
 }
 
-function ProjectPickerModal({
+export function ProjectPickerModal({
   open,
   onOpenChange,
   projects,
@@ -882,6 +886,26 @@ function ProjectPickerModal({
   onSelect: (cwd: string) => void;
 }) {
   const [manualPath, setManualPath] = useState("");
+  const [browseOpen, setBrowseOpen] = useState(false);
+  const [browsePath, setBrowsePath] = useState<string | null>(null);
+  const [browseHome, setBrowseHome] = useState<string | null>(null);
+  const [browseEntries, setBrowseEntries] = useState<DirEntry[]>([]);
+  const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!browseOpen) return;
+    const activeClient = getClient();
+    if (!activeClient) return;
+    const onListing = (data: { path: string; entries: DirEntry[] }) => {
+      setBrowsePath(data.path);
+      setBrowseHome((home) => home ?? data.path);
+      setBrowseEntries(data.entries);
+      setSelectedFolder(data.path);
+    };
+    activeClient.on("filesystem-dir-listing", onListing);
+    activeClient.listFilesystemDir(browsePath ?? undefined);
+    return () => activeClient.off("filesystem-dir-listing", onListing);
+  }, [browseOpen]);
 
   const sortedProjects = useMemo(
     () =>
@@ -898,6 +922,65 @@ function ProjectPickerModal({
           <DialogTitle>New session from project</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
+          <div className="rounded-md border border-border">
+            <button
+              type="button"
+              className="flex w-full items-center justify-between px-3 py-2 text-left text-sm"
+              onClick={() => setBrowseOpen((open) => !open)}
+            >
+              <span className="flex items-center gap-2"><Folder className="h-4 w-4" /> Browse folders</span>
+              {browseOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+            </button>
+            {browseOpen && (
+              <div className="border-t border-border p-2">
+                <div className="mb-2 flex items-center gap-1">
+                  <button
+                    type="button"
+                    className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+                    aria-label="Go to parent folder"
+                    disabled={!browsePath || !browseHome || browsePath === browseHome}
+                    onClick={() => {
+                      if (!browsePath || !browseHome || browsePath === browseHome) return;
+                      const parent = browsePath.slice(0, browsePath.lastIndexOf("/")) || "/";
+                      if (parent === browseHome || parent.startsWith(`${browseHome}/`)) {
+                        getClient()?.listFilesystemDir(parent);
+                      }
+                    }}
+                  >
+                    <ArrowUp className="h-3.5 w-3.5" />
+                  </button>
+                  <div className="truncate text-xs text-muted-foreground">{browsePath ?? "Loading…"}</div>
+                </div>
+                <div className="max-h-48 space-y-1 overflow-y-auto">
+                  {browseEntries.map((entry) => {
+                    const path = `${browsePath}/${entry.name}`;
+                    return (
+                      <button
+                        key={path}
+                        type="button"
+                        className={cn("flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted/50", selectedFolder === path && "bg-muted")}
+                        onClick={() => {
+                          setSelectedFolder(path);
+                          getClient()?.listFilesystemDir(path);
+                        }}
+                      >
+                        <Folder className="h-3.5 w-3.5 text-muted-foreground" />
+                        <span className="truncate">{entry.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <Button
+                  className="mt-2 w-full"
+                  size="sm"
+                  disabled={!selectedFolder}
+                  onClick={() => selectedFolder && onSelect(selectedFolder)}
+                >
+                  Use this folder
+                </Button>
+              </div>
+            )}
+          </div>
           {sortedProjects.length > 0 && (
             <div className="space-y-1">
               <p className="text-xs font-medium text-muted-foreground">Recent projects</p>

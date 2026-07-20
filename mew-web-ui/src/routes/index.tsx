@@ -74,12 +74,14 @@ function HomeComponent() {
           {connectionState === "connected" && showResumeFailure && (
             <HomeStatus icon={<CircleAlert className="h-5 w-5 text-amber-500" />} title="couldn’t reopen that session" detail="It may have been removed or belongs to another daemon." />
           )}
-          {connectionState === "connected" && !showResumeFailure && resumeState !== "loading" && (
+          {connectionState === "connected" && resumeState !== "loading" && (
             <>
               <div className="space-y-2">
                 <h1 className="text-xl font-semibold tracking-tight">start a coding session</h1>
                 <p className="text-sm text-muted-foreground">
-                  Open a local workspace, inspect a codebase, and keep the daemon working beside you.
+                  {showResumeFailure
+                    ? "Your previous session is unavailable. Start a new workspace to continue."
+                    : "Open a local workspace, inspect a codebase, and keep the daemon working beside you."}
                 </p>
               </div>
               <Button onClick={createNew} disabled={busy} size="lg" className="w-full">

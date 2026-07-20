@@ -161,6 +161,8 @@ pub struct Agent {
     /// `denied_tool_names`); `Some(set)` = only tools whose name is in the
     /// set are sent to the provider.
     pub active_tool_names: Option<HashSet<String>>,
+    /// Capability gate for the desktop-only browser tools.
+    pub browser_enabled: bool,
     /// Active persona's tool denylist. Always applied, even when
     /// `active_tool_names` is `None` (so "all tools except X" works).
     /// Empty by default.
@@ -329,6 +331,7 @@ impl Agent {
             reasoning: None,
             persona_prompt: None,
             active_tool_names: None,
+            browser_enabled: false,
             denied_tool_names: HashSet::new(),
             skill_filter: Arc::new(tokio::sync::RwLock::new(None)),
             template_ctx: Arc::new(tokio::sync::RwLock::new(None)),
@@ -600,6 +603,37 @@ impl Agent {
     pub fn set_system(&mut self, system: String) {
         self.base_system = system.clone();
         self.system = system;
+    }
+
+    pub fn set_browser_enabled(&mut self, enabled: bool) {
+        self.browser_enabled = enabled;
+    }
+
+    /// Append a persisted system-level session notice. This is conversation
+    /// history, deliberately separate from the static system prompt.
+    pub async fn append_system_message(&self, text: impl Into<String>) {
+        let message_id = ulid::Ulid::new();
+        let session_id = self.session_id;
+        let message = mew_message::Message {
+            id: message_id,
+            session_id,
+            role: mew_message::Role::System,
+            parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id,
+                    session_id,
+                },
+                text: text.into(),
+                synthetic: true,
+            })],
+            time: mew_message::Time {
+                created: chrono::Utc::now().timestamp_millis(),
+                completed: Some(chrono::Utc::now().timestamp_millis()),
+            },
+            assistant: None,
+        };
+        self.append_message(message).await;
     }
 
     /// Discover tools registered by plugins (via `on_register_tools`) and

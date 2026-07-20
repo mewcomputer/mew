@@ -1,5 +1,6 @@
 pub mod ask_user;
 pub mod bash;
+pub mod browser;
 pub mod echo;
 pub mod edit_hashline;
 pub mod edit_plan;

@@ -57,9 +57,13 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
     app.theme = mew_tui::theme::Theme::load(theme_name);
     app.status.model = "daemon".to_string();
     app.status.provider = "mewd".to_string();
+    app.recent_models = state.recent_models.clone();
 
     // Request the session list so the sidebar rail is populated immediately.
     client.list_sessions().await;
+    // Request the model list so the model picker and thinking-variant
+    // picker are populated in daemon mode.
+    client.list_models().await;
 
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -421,6 +425,7 @@ pub(crate) async fn run_tui(
         Some(session_writer),
         None,
         None,
+        false,
         dispatcher.clone(),
         todos_path.clone(),
         &discovered,
@@ -499,6 +504,7 @@ pub(crate) async fn run_tui(
         &cfg.tui.theme
     };
     app.theme = mew_tui::theme::Theme::load(theme_name);
+    app.recent_models = state.recent_models.clone();
 
     // Seed the sidebar's todos pane from whatever was loaded at startup.
     app.todos = agent.todos.lock().await.items.clone();

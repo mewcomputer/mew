@@ -13,7 +13,9 @@ const target =
 const release = process.argv.includes("--release");
 const profile = release ? "release" : "debug";
 const binaryName = process.platform === "win32" ? "mew.exe" : "mew";
-const cargoArgs = ["build", "-p", "mew"];
+// Ship the optional remote transport in desktop builds so the settings toggle
+// can enable it without requiring a separate daemon installation.
+const cargoArgs = ["build", "-p", "mew", "--features", "iroh"];
 
 if (release) {
   cargoArgs.push("--release");

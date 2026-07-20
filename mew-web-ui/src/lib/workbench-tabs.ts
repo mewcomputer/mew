@@ -1,5 +1,6 @@
 export type WorkbenchTabKind =
-  | "activity"
+  | "agents"
+  | "jobs"
   | "browser"
   | "terminal"
   | "file"
@@ -34,16 +35,23 @@ export type WorkbenchTabsAction =
   | { type: "close"; id: string }
   | { type: "update"; id: string; patch: Partial<WorkbenchTab> };
 
-export const DEFAULT_ACTIVITY_TAB: WorkbenchTab = {
-  id: "activity-1",
-  kind: "activity",
-  title: "Activity",
-  closable: false,
+export const OPTIONAL_AGENTS_TAB: WorkbenchTab = {
+  id: "agents-1",
+  kind: "agents",
+  title: "Agents",
+  closable: true,
+};
+
+export const OPTIONAL_JOBS_TAB: WorkbenchTab = {
+  id: "jobs-1",
+  kind: "jobs",
+  title: "Jobs",
+  closable: true,
 };
 
 export const DEFAULT_WORKBENCH_TABS: WorkbenchTabsState = {
-  tabs: [DEFAULT_ACTIVITY_TAB],
-  activeTabId: DEFAULT_ACTIVITY_TAB.id,
+  tabs: [],
+  activeTabId: "",
 };
 
 export function createWorkbenchTab(
@@ -94,12 +102,13 @@ export function workbenchTabsReducer(
   }
 }
 
-export function getActiveWorkbenchTab(state: WorkbenchTabsState): WorkbenchTab {
-  return state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0] ?? DEFAULT_ACTIVITY_TAB;
+export function getActiveWorkbenchTab(state: WorkbenchTabsState): WorkbenchTab | undefined {
+  return state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0];
 }
 
 export function isWorkbenchTabKind(value: unknown): value is WorkbenchTabKind {
-  return value === "activity"
+  return value === "agents"
+    || value === "jobs"
     || value === "browser"
     || value === "terminal"
     || value === "file"
@@ -110,31 +119,33 @@ export function isWorkbenchTabKind(value: unknown): value is WorkbenchTabKind {
 export function normalizeWorkbenchTabs(value: unknown): WorkbenchTabsState {
   if (!isRecord(value) || !Array.isArray(value.tabs)) return DEFAULT_WORKBENCH_TABS;
 
-  const tabs = value.tabs.filter(isWorkbenchTab).map((tab) => ({
-    ...tab,
-    closable: tab.kind === "activity" ? false : tab.closable,
-  }));
-  const withActivity = tabs.some((tab) => tab.kind === "activity")
-    ? tabs
-    : [DEFAULT_ACTIVITY_TAB, ...tabs];
+  const tabs = value.tabs
+    .filter(isPersistedWorkbenchTab)
+    .filter((tab): tab is WorkbenchTab => isWorkbenchTabKind(tab.kind));
+  const withCore = tabs.filter((tab) => !isLegacyDefaultActivityTab(tab));
   const activeTabId = typeof value.activeTabId === "string"
-    && withActivity.some((tab) => tab.id === value.activeTabId)
+    && withCore.some((tab) => tab.id === value.activeTabId)
     ? value.activeTabId
-    : withActivity[0]!.id;
+    : withCore[0]?.id ?? "";
 
-  return { tabs: withActivity, activeTabId };
+  return { tabs: withCore, activeTabId };
 }
 
 export function workbenchTabsFromLegacyKind(value: unknown): WorkbenchTabsState {
-  if (!isWorkbenchTabKind(value) || value === "activity") return DEFAULT_WORKBENCH_TABS;
+  if (!isWorkbenchTabKind(value)) return DEFAULT_WORKBENCH_TABS;
   const tab = createWorkbenchTab(value, { id: `${value}-1` });
-  return { tabs: [DEFAULT_ACTIVITY_TAB, tab], activeTabId: tab.id };
+  return {
+    tabs: [...DEFAULT_WORKBENCH_TABS.tabs, tab],
+    activeTabId: tab.id,
+  };
 }
 
 function defaultTabForKind(kind: WorkbenchTabKind): WorkbenchTab {
   switch (kind) {
-    case "activity":
-      return DEFAULT_ACTIVITY_TAB;
+    case "agents":
+      return { id: "agents-1", kind, title: "Agents", closable: true };
+    case "jobs":
+      return { id: "jobs-1", kind, title: "Jobs", closable: true };
     case "browser":
       return {
         id: "browser-1",
@@ -154,12 +165,26 @@ function defaultTabForKind(kind: WorkbenchTabKind): WorkbenchTab {
   }
 }
 
-function isWorkbenchTab(value: unknown): value is WorkbenchTab {
+function isPersistedWorkbenchTab(value: unknown): value is PersistedWorkbenchTab {
   if (!isRecord(value)) return false;
   return typeof value.id === "string"
-    && isWorkbenchTabKind(value.kind)
+    && isPersistedWorkbenchTabKind(value.kind)
     && typeof value.title === "string"
     && typeof value.closable === "boolean";
+}
+
+type PersistedWorkbenchTabKind = WorkbenchTabKind | "activity" | "plan" | "questions";
+
+type PersistedWorkbenchTab = Omit<WorkbenchTab, "kind"> & {
+  kind: PersistedWorkbenchTabKind;
+};
+
+function isPersistedWorkbenchTabKind(value: unknown): value is PersistedWorkbenchTabKind {
+  return isWorkbenchTabKind(value) || value === "activity" || value === "plan" || value === "questions";
+}
+
+function isLegacyDefaultActivityTab(tab: WorkbenchTab): boolean {
+  return (tab.id === OPTIONAL_AGENTS_TAB.id || tab.id === OPTIONAL_JOBS_TAB.id) && !tab.closable;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

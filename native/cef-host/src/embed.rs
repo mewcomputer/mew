@@ -12,8 +12,8 @@ pub type BrowserEventCallback = Arc<dyn Fn(BrowserEvent) + Send + Sync + 'static
 
 #[cfg(target_os = "macos")]
 mod mac_impl {
-    use crate::mac;
     use super::{BrowserEvent, BrowserEventCallback};
+    use crate::mac;
     use cef::*;
     use objc2_app_kit::NSView;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -179,6 +179,12 @@ mod mac_impl {
             }))
         }
 
+        /// The current CEF child view handle, or 0 before `on_after_created`.
+        /// Lets the host reorder the view beneath the WKWebView.
+        pub fn native_view_handle(&self) -> usize {
+            self.state.native_view.load(Ordering::Acquire)
+        }
+
         pub fn set_rect_on_main_thread(&self, rect: BrowserRect) {
             if let Ok(mut last_rect) = self.state.last_rect.lock() {
                 *last_rect = Some(rect);
@@ -239,7 +245,6 @@ mod mac_impl {
         pub fn do_message_loop_work() {
             cef::do_message_loop_work();
         }
-
     }
 
     impl Drop for CefEmbedController {
@@ -287,14 +292,13 @@ mod mac_impl {
             browser_event: Arc::new(|_| {}),
         });
         let helper_pump: PumpCallback = Arc::new(|_| {});
-        let mut helper_app =
-            MewCefApp::new(
-                0,
-                CefString::from("about:blank"),
-                helper_state,
-                helper_pump,
-                Arc::new(|_| {}),
-            );
+        let mut helper_app = MewCefApp::new(
+            0,
+            CefString::from("about:blank"),
+            helper_state,
+            helper_pump,
+            Arc::new(|_| {}),
+        );
         let exit_code = cef::execute_process(
             Some(args.as_main_args()),
             Some(&mut helper_app),
@@ -476,10 +480,14 @@ mod mac_impl {
                 let client = MewBrowserClient::new(self.state.clone());
                 let mut client = Some(client);
                 let bounds = Rect { x: 0, y: 0, width: 1, height: 1 };
-                let window_info = WindowInfo::default().set_as_child(
+                // Create the browser hidden so no window flashes before React
+                // claims it; `on_after_created` keeps it hidden until the
+                // first visible rect arrives.
+                let mut window_info = WindowInfo::default().set_as_child(
                     self.parent_view as *mut c_void,
                     &bounds,
                 );
+                window_info.hidden = 1;
                 let settings = BrowserSettings::default();
                 let created = browser_host_create_browser(
                     Some(&window_info),
@@ -569,6 +577,11 @@ mod mac_impl {
                 if let Some(host) = browser.host() {
                     let handle = host.window_handle() as usize;
                     self.state.native_view.store(handle, Ordering::Release);
+                    // The browser is created before React has had a chance to
+                    // claim an active workbench tab. Keep the child hidden
+                    // until the first visible bounds update arrives.
+                    let view = unsafe { &*(handle as *const NSView) };
+                    view.setHidden(true);
                     if let Ok(last_rect) = self.state.last_rect.lock()
                         && let Some(rect) = *last_rect
                     {
@@ -643,6 +656,9 @@ mod non_macos {
             Ok(None)
         }
 
+        pub fn native_view_handle(&self) -> usize {
+            0
+        }
         pub fn set_rect_on_main_thread(&self, _rect: BrowserRect) {}
         pub fn set_visible_on_main_thread(&self, _visible: bool) {}
         pub fn navigate_on_main_thread(&self, _url: &str) {}

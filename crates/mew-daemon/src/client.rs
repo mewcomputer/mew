@@ -247,6 +247,15 @@ impl DaemonClient {
         let _ = self.state.ws_out.send(json).await;
     }
 
+    /// Request the list of available models from the daemon. The response
+    /// arrives as `ServerMessage::ModelList`, which populates the TUI's
+    /// model picker and thinking-variants map.
+    pub async fn list_models(&self) {
+        let msg = ClientMessage::ListModels;
+        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
+        let _ = self.state.ws_out.send(json).await;
+    }
+
     /// Create a new session in the given cwd.
     pub async fn new_session_in(&self, cwd: &str) {
         let msg = ClientMessage::NewSession {
@@ -331,6 +340,7 @@ async fn translate_server_message(
     state: &Arc<ClientState>,
 ) -> Vec<AgentEvent> {
     match msg {
+        ServerMessage::RemoteReady { .. } => Vec::new(),
         ServerMessage::SessionReady { .. } => Vec::new(),
 
         ServerMessage::Error { message } => {
@@ -704,7 +714,8 @@ async fn translate_server_message(
         | ServerMessage::PersonaList { .. }
         | ServerMessage::PersonaSwitched { .. }
         | ServerMessage::Pong { .. }
-        | ServerMessage::ProjectList { .. } => {
+        | ServerMessage::ProjectList { .. }
+        | ServerMessage::FilesystemDirListing { .. } => {
             let _ = state.notify_tx.send(msg.clone()).await;
             Vec::new()
         }

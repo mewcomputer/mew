@@ -428,6 +428,23 @@ impl Adapter {
         input: &mut Vec<serde_json::Value>,
     ) {
         match m.role {
+            Role::System => {
+                let text = m
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        Part::Text(text) => Some(text.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                if !text.is_empty() {
+                    input.push(json!({
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": text}],
+                    }));
+                }
+            }
             Role::User => {
                 let mut text_content: Vec<serde_json::Value> = Vec::new();
                 let mut tool_results: Vec<serde_json::Value> = Vec::new();

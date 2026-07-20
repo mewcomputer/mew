@@ -25,6 +25,7 @@ export function isDesktopHost(): boolean {
   );
 }
 
+
 export function browserWebSocketUrl(location: WebLocation): string {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   return `${protocol}://${location.host}/ws`;
@@ -66,6 +67,18 @@ export function getWebSocketUrl(): string {
   }
 
   throw new Error("mew desktop host is not initialized");
+}
+
+export function desktopRemoteEnabled(): Promise<boolean> {
+  if (!isDesktopHost()) return Promise.resolve(false);
+  return invoke<boolean>("desktop_remote_enabled");
+}
+
+export function setDesktopRemoteEnabled(enabled: boolean): Promise<string> {
+  if (!isDesktopHost()) {
+    return Promise.reject(new Error("desktop remote access is only available in the desktop app"));
+  }
+  return invoke<string>("set_desktop_remote_enabled", { enabled });
 }
 
 export function cefBrowserAvailable(): Promise<boolean> {

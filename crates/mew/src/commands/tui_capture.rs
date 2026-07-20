@@ -1140,6 +1140,9 @@ fn agent_event_name(ev: &mew_agent::AgentEvent) -> &'static str {
 /// Human-readable type name for a `ServerMessage` variant (no payload).
 fn server_message_type(msg: &mew_protocol::ServerMessage) -> &'static str {
     match msg {
+        // Remote authentication is a daemon/web concern; the standalone TUI
+        // never renders this handshake acknowledgement.
+        mew_protocol::ServerMessage::RemoteReady { .. } => "RemoteReady",
         mew_protocol::ServerMessage::SessionReady { .. } => "SessionReady",
         mew_protocol::ServerMessage::Error { .. } => "Error",
         mew_protocol::ServerMessage::Provider { .. } => "Provider",
@@ -1190,6 +1193,8 @@ fn server_message_type(msg: &mew_protocol::ServerMessage) -> &'static str {
         mew_protocol::ServerMessage::GroupList { .. } => "GroupList",
         mew_protocol::ServerMessage::GroupsChanged { .. } => "GroupsChanged",
         mew_protocol::ServerMessage::DirListing { .. } => "DirListing",
+        // Folder browsing is a web/desktop concern and has no TUI state.
+        mew_protocol::ServerMessage::FilesystemDirListing { .. } => "FilesystemDirListing",
         mew_protocol::ServerMessage::FilePreview { .. } => "FilePreview",
         mew_protocol::ServerMessage::GitStatusResult { .. } => "GitStatusResult",
         mew_protocol::ServerMessage::FsChanged { .. } => "FsChanged",

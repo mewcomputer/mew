@@ -116,18 +116,24 @@ fn main() -> Result<()> {
         port,
         #[cfg(feature = "iroh")]
         iroh,
+        #[cfg(feature = "iroh")]
+        remote,
         ..
     }) = &cli.command
     {
         #[cfg(feature = "iroh")]
         let is_iroh = *iroh;
+        #[cfg(feature = "iroh")]
+        let is_remote = *remote;
         #[cfg(not(feature = "iroh"))]
         let is_iroh = false;
+        #[cfg(not(feature = "iroh"))]
+        let is_remote = false;
 
         // Pre-daemonize socket liveness check — error reaches the terminal.
         // Only guard the Unix socket if this daemon will actually bind one;
         // `--iroh` and TCP-only (`--port` without `--socket`) modes do not.
-        if !is_iroh && (socket.is_some() || port.is_none()) {
+        if (!is_iroh || is_remote) && (socket.is_some() || port.is_none()) {
             let socket_path = socket
                 .clone()
                 .unwrap_or_else(commands::daemon::default_socket_path);
@@ -281,6 +287,8 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             dangerously_skip_permissions,
             #[cfg(feature = "iroh")]
             iroh,
+            #[cfg(feature = "iroh")]
+            remote,
         }) => {
             // --background and --stop are handled before the tokio runtime
             // starts (in main()). By the time we reach here, we're already
@@ -289,8 +297,26 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             let model = resolve_model_opt(model, &state, &cfg);
             let mode = resolve_mode(permissive, auto, auto_plus, dangerously_skip_permissions);
             #[cfg(feature = "iroh")]
+            if iroh && remote {
+                anyhow::bail!("--iroh and --remote are mutually exclusive; use --remote for local plus authenticated remote access");
+            }
+            #[cfg(feature = "iroh")]
             if iroh {
                 return commands::daemon::run_daemon_iroh(
+                    fake_provider,
+                    &provider,
+                    model,
+                    raw,
+                    mode,
+                    false,
+                )
+                .await;
+            }
+            #[cfg(feature = "iroh")]
+            if remote {
+                return commands::daemon::run_daemon_remote(
+                    socket,
+                    port,
                     fake_provider,
                     &provider,
                     model,

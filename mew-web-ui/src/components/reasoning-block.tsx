@@ -18,7 +18,7 @@ export function ReasoningBlock({ text, streaming }: ReasoningBlockProps) {
   const countText = streaming ? `${steps.length} steps · live` : `${steps.length} steps`;
 
   return (
-    <div className="max-w-[85%]">
+    <div className="min-w-0 max-w-[85%]">
       <button
         onClick={() => setExpanded((e) => !e)}
         className={cn(
@@ -37,7 +37,7 @@ export function ReasoningBlock({ text, streaming }: ReasoningBlockProps) {
       </button>
 
       {expanded && (
-        <div className="motion-enter mt-2 rounded-lg border border-border bg-card p-3">
+        <div className="motion-enter mt-2 min-w-0 max-w-full rounded-lg border border-border bg-card p-3">
           <div className="relative space-y-3">
             {steps.map((step, i) => (
               <div key={i} className="flex gap-3">

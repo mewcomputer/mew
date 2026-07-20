@@ -19,10 +19,11 @@ export function VirtualChatSurface() {
     estimateSize: () => 100,
     getItemKey: (index) => messages[index]?.id ?? index,
     overscan: 6,
-    // End-anchoring: keeps viewport pinned to latest message during
-    // streaming, and keeps scroll stable when prepending history.
-    // followOnAppend auto-scrolls to new messages only when already at bottom.
+    // End-anchoring keeps the viewport pinned to the latest message during
+    // streaming and keeps scroll stable when prepending history.
+    anchorTo: "end",
     followOnAppend: true,
+    useAnimationFrameWithResizeObserver: true,
   });
 
   // Start at the latest message on mount / session switch.
@@ -44,9 +45,10 @@ export function VirtualChatSurface() {
   return (
     <div
       ref={parentRef}
-      className="min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-4"
+      className="chat-scroll-container min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-32 pt-4 sm:px-4 sm:pb-28"
     >
       <div
+        className="min-w-0 max-w-full"
         style={{
           height: `${virtualizer.getTotalSize()}px`,
           width: "100%",
@@ -69,7 +71,7 @@ export function VirtualChatSurface() {
                 transform: `translateY(${virtualItem.start}px)`,
               }}
             >
-              <div className="mx-auto max-w-3xl pb-4">
+              <div className="mx-auto min-w-0 max-w-3xl pb-4">
                 <ErrorBoundary
                   title="Message failed to render"
                   fallback={

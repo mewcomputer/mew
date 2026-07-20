@@ -80,7 +80,7 @@ export function ModelPill() {
       </button>
 
       {open && (
-        <div className="absolute bottom-full left-0 z-50 mb-1 w-72 rounded-lg border border-border bg-popover shadow-lg">
+        <div className="absolute bottom-full right-0 z-50 mb-1 w-72 rounded-lg border border-border bg-popover shadow-lg">
           {variants.length > 0 && (
             <div className="border-b border-border p-1">
               <button

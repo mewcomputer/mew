@@ -10,7 +10,7 @@ runtime `state.toml`. This page covers every configurable field.
 
 | File | Path | Purpose |
 |------|------|---------|
-| `config.toml` | `~/.config/mew/config.toml` (Linux), `~/Library/Application Support/computer.mew.mew/config.toml` (macOS) | Main config: providers, permissions, secrets, workspace |
+| `config.toml` | `~/.config/mew/config.toml` | Main config: providers, permissions, secrets, workspace |
 | `state.toml` | Same directory | Runtime state: last model, sidebar state, disabled plugins |
 | `credentials.json` | Same directory | Credential fallback (keyring and env vars preferred) |
 | `.env` | Working directory | Loaded at startup via dotenvy (for `RUST_LOG`, `MEW_CRED_*`) |

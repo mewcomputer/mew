@@ -3,12 +3,31 @@ use objc2::{
     ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, extern_methods,
     msg_send,
     rc::Retained,
-    runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject},
+    runtime::{AnyObject, Bool, Imp, NSObject, NSObjectProtocol, ProtocolObject, Sel},
+    sel,
 };
 use objc2_app_kit::{
     NSApp, NSApplication, NSApplicationDelegate, NSApplicationTerminateReply, NSEvent,
 };
 use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static EXISTING_APPLICATION_HANDLING_SEND_EVENT: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "C-unwind" fn existing_application_is_handling_send_event(
+    _this: &AnyObject,
+    _cmd: Sel,
+) -> Bool {
+    Bool::from(EXISTING_APPLICATION_HANDLING_SEND_EVENT.load(Ordering::Acquire))
+}
+
+unsafe extern "C-unwind" fn existing_application_set_handling_send_event(
+    _this: &AnyObject,
+    _cmd: Sel,
+    value: Bool,
+) {
+    EXISTING_APPLICATION_HANDLING_SEND_EVENT.store(value.as_bool(), Ordering::Release);
+}
 
 define_class! {
     #[unsafe(super(NSObject))]
@@ -96,7 +115,28 @@ pub fn setup_application() {
 #[allow(dead_code)]
 pub fn setup_existing_application() {
     let mtm = MainThreadMarker::new().expect("CEF must initialize on the main thread");
-    let _ = NSApp(mtm);
+    let app = NSApp(mtm);
+    let class = (app.as_ref() as &AnyObject).class();
+    let class = class as *const _ as *mut _;
+    unsafe {
+        let get_imp: Imp = std::mem::transmute(
+            existing_application_is_handling_send_event as unsafe extern "C-unwind" fn(_, _) -> _,
+        );
+        let set_imp: Imp = std::mem::transmute(
+            existing_application_set_handling_send_event as unsafe extern "C-unwind" fn(_, _, _),
+        );
+        // CEF's macOS message loop asks NSApp for these two methods. Tauri
+        // owns the application instance, so add the narrow protocol methods
+        // to its concrete class instead of replacing the application class.
+        let _ =
+            objc2::ffi::class_addMethod(class, sel!(isHandlingSendEvent), get_imp, c"B@:".as_ptr());
+        let _ = objc2::ffi::class_addMethod(
+            class,
+            sel!(setHandlingSendEvent:),
+            set_imp,
+            c"v@:B".as_ptr(),
+        );
+    }
 }
 
 pub fn setup_application_delegate() -> Retained<MewCefAppDelegate> {

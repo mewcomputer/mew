@@ -34,6 +34,8 @@ export class MewClient {
     url;
     socketFactory;
     debug;
+    clientKind;
+    remoteAuth;
     ws = null;
     listeners = new Map();
     /** Promise resolved when the WebSocket opens. */
@@ -46,6 +48,8 @@ export class MewClient {
         this.url = url;
         this.socketFactory = opts.socketFactory ?? defaultSocketFactory;
         this.debug = opts.debug ?? false;
+        this.clientKind = opts.clientKind ?? "web";
+        this.remoteAuth = opts.remoteAuth;
     }
     /** Open the WebSocket connection. Idempotent. */
     connect() {
@@ -58,10 +62,32 @@ export class MewClient {
             ws.addEventListener("open", () => {
                 if (this.debug)
                     console.debug("[mew] open");
-                settled = true;
                 this.emit("open");
+                if (this.clientKind === "remote") {
+                    this.send({
+                        type: "remote_hello",
+                        token: this.remoteAuth?.token,
+                        device_name: this.remoteAuth?.deviceName ?? "remote client",
+                    });
+                    return;
+                }
+                settled = true;
                 resolve();
             });
+            if (this.clientKind === "remote") {
+                this.on("remote-ready", () => {
+                    if (!settled) {
+                        settled = true;
+                        resolve();
+                    }
+                });
+                this.on("errorMessage", (message) => {
+                    if (!settled) {
+                        settled = true;
+                        reject(new Error(message.message));
+                    }
+                });
+            }
             ws.addEventListener("message", (ev) => {
                 try {
                     const msg = JSON.parse(ev.data);
@@ -134,7 +160,7 @@ export class MewClient {
                 };
                 this.on("session-ready", onReady);
                 this.on("errorMessage", onError);
-                this.send({ type: "new_session", cwd, client_kind: "web" });
+                this.send({ type: "new_session", cwd, client_kind: this.clientKind });
             });
         });
     }
@@ -200,7 +226,7 @@ export class MewClient {
                 };
                 this.on("session-ready", onReady);
                 this.on("errorMessage", onError);
-                this.send({ type: "attach_session", session_id, client_kind: "web" });
+                this.send({ type: "attach_session", session_id, client_kind: this.clientKind });
             });
         });
     }
@@ -336,6 +362,9 @@ export class MewClient {
     listDir(sessionId, path) {
         this.send({ type: "list_dir", session_id: sessionId, path });
     }
+    listFilesystemDir(path) {
+        this.send({ type: "list_filesystem_dir", ...(path ? { path } : {}) });
+    }
     readFilePreview(sessionId, path, maxBytes) {
         this.send({ type: "read_file_preview", session_id: sessionId, path, max_bytes: maxBytes });
     }
@@ -415,6 +444,9 @@ export class MewClient {
                     provider: msg.provider,
                     permission_mode: msg.permission_mode,
                 });
+                break;
+            case "remote_ready":
+                this.emit("remote-ready", { scope: msg.scope });
                 break;
             case "provider":
                 this.emit("provider", msg.event);
@@ -590,6 +622,9 @@ export class MewClient {
                 break;
             case "dir_listing":
                 this.emit("dir-listing", { path: msg.path, entries: msg.entries });
+                break;
+            case "filesystem_dir_listing":
+                this.emit("filesystem-dir-listing", { path: msg.path, entries: msg.entries });
                 break;
             case "file_preview":
                 this.emit("file-preview", {

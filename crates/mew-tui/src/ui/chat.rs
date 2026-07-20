@@ -264,6 +264,9 @@ pub(crate) fn build_chat_lines(
     };
 
     for (msg_idx, msg) in app.messages.iter().enumerate() {
+        if msg.role == Role::System {
+            continue;
+        }
         let is_last = msg_idx + 1 == msg_count;
         let is_streaming = app.streaming && is_last;
         let (prefix, prefix_color, content_style) = match msg.role {
@@ -277,6 +280,7 @@ pub(crate) fn build_chat_lines(
                 app.theme.resolve("text.muted"),
                 Style::default().fg(app.theme.resolve("foreground")),
             ),
+            Role::System => unreachable!("system messages are hidden above"),
         };
 
         let mut message_had_content = false;

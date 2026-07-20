@@ -30,7 +30,7 @@ import type {
 
 export interface ChatMessage {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   parts: MessagePart[];
   timestamp: number;
   assistantMeta?: AssistantMeta;
@@ -458,11 +458,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 (p) => p.type === "text" && p.streaming,
               );
               if (!hasStreaming) {
-                last.parts.push({
-                  type: "text" as const,
-                  text: "",
-                  streaming: true,
-                });
+                msgs[msgs.length - 1] = {
+                  ...last,
+                  parts: [
+                    ...last.parts,
+                    {
+                      type: "text" as const,
+                      text: "",
+                      streaming: true,
+                    },
+                  ],
+                };
               }
             }
             return { messages: msgs };
@@ -485,11 +491,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               last.role === "assistant" &&
               last.parts.some((p) => (p.type === "text" || p.type === "reasoning") && p.streaming);
             if (isActiveAssistant) {
-              last.parts.push({
-                type: "reasoning" as const,
-                text: "",
-                streaming: true,
-              });
+              msgs[msgs.length - 1] = {
+                ...last,
+                parts: [
+                  ...last.parts,
+                  {
+                    type: "reasoning" as const,
+                    text: "",
+                    streaming: true,
+                  },
+                ],
+              };
             } else {
               // New turn — create a fresh assistant message.
               msgs.push({
@@ -513,13 +525,19 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               last.role === "assistant" &&
               last.parts.some((p) => (p.type === "text" || p.type === "reasoning") && p.streaming);
             if (isActiveAssistant) {
-              last.parts.push({
-                type: "tool-call",
-                toolName: tc.tool_name,
-                callId: tc.call_id,
-                input: tc.state.input,
-                state: "pending",
-              });
+              msgs[msgs.length - 1] = {
+                ...last,
+                parts: [
+                  ...last.parts,
+                  {
+                    type: "tool-call",
+                    toolName: tc.tool_name,
+                    callId: tc.call_id,
+                    input: tc.state.input,
+                    state: "pending",
+                  },
+                ],
+              };
             } else {
               // New turn — create a fresh assistant message.
               msgs.push({
@@ -951,7 +969,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       messages: messages
         .map((m) => ({
           id: m.id,
-          role: m.role as "user" | "assistant",
+          role: m.role as "user" | "assistant" | "system",
           parts: m.parts
             .map(wirePartToMessagePart)
             .filter((p): p is MessagePart => p !== null),

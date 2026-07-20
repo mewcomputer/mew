@@ -11,7 +11,6 @@ import { StatusFooter } from "@/components/status-footer";
 import { PermissionToast } from "@/components/permission-toast";
 import { AskUserCard } from "@/components/ask-user-card";
 import { PlanApprovalCard } from "@/components/plan-approval-card";
-import { useSidebar } from "@/components/ui/sidebar";
 
 export const Route = createFileRoute("/session/$sessionId")({
   component: SessionRouteComponent,
@@ -57,26 +56,30 @@ function SessionRouteComponent() {
   return (
     <>
       <FakeHeader />
-      <VirtualChatSurface />
-      <MobileAskUser />
-      <PlanApprovalCard />
-      <div className="shrink-0">
-        <InputArea
-          ref={inputRef}
-          onSend={handleSend}
-          onSlash={handleSlash}
-          onCancel={handleCancel}
-          connected={connected}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <VirtualChatSurface />
+      </div>
+      <StatusFooter />
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20">
+        <div
+          aria-hidden="true"
+          className="absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-background via-background/85 to-transparent"
         />
-        <StatusFooter />
+        <div className="relative flex flex-col">
+          <div className="pointer-events-auto">
+            <AskUserCard />
+            <PlanApprovalCard />
+          </div>
+          <InputArea
+            ref={inputRef}
+            onSend={handleSend}
+            onSlash={handleSlash}
+            onCancel={handleCancel}
+            connected={connected}
+          />
+        </div>
       </div>
       <PermissionToast onResolve={handlePermission} />
     </>
   );
-}
-
-function MobileAskUser() {
-  const { isMobile } = useSidebar();
-  if (!isMobile) return null;
-  return <AskUserCard />;
 }

@@ -4,6 +4,10 @@ export interface Attachment {
 }
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
 export type ClientMessage = {
+    type: "remote_hello";
+    token?: string;
+    device_name: string;
+} | {
     type: "new_session";
     cwd: string | null;
     client_kind: string;
@@ -124,6 +128,9 @@ export type ClientMessage = {
     type: "ping";
 } | {
     type: "list_projects";
+} | {
+    type: "list_filesystem_dir";
+    path?: string;
 } | {
     type: "browser_open";
     url: string;
@@ -390,7 +397,7 @@ export interface GitEntry {
     status: GitFileStatus;
 }
 /** A message role. */
-export type Role = "user" | "assistant";
+export type Role = "user" | "assistant" | "system";
 /** Timestamp metadata for a message. */
 export interface Time {
     created: number;
@@ -444,6 +451,9 @@ export interface Segment {
     children: Segment[];
 }
 export type ServerMessage = {
+    type: "remote_ready";
+    scope: "observe" | "collaborate" | "control";
+} | {
     type: "session_ready";
     session_id: string;
     cwd?: string;
@@ -601,6 +611,10 @@ export type ServerMessage = {
     groups: GroupInfo[];
 } | {
     type: "dir_listing";
+    path: string;
+    entries: DirEntry[];
+} | {
+    type: "filesystem_dir_listing";
     path: string;
     entries: DirEntry[];
 } | {
@@ -832,6 +846,10 @@ export interface MewClientEvents {
         path: string;
         entries: DirEntry[];
     }) => void;
+    "filesystem-dir-listing": (data: {
+        path: string;
+        entries: DirEntry[];
+    }) => void;
     "file-preview": (data: {
         path: string;
         content: string;
@@ -902,6 +920,9 @@ export interface MewClientEvents {
         message: string;
         tabId?: string;
     }) => void;
+    "remote-ready": (data: {
+        scope: "observe" | "collaborate" | "control";
+    }) => void;
 }
 export type MewEventName = keyof MewClientEvents;
 export interface MewClientOptions {
@@ -909,6 +930,13 @@ export interface MewClientOptions {
     socketFactory?: SocketFactory;
     /** If true, log every wire message to the console. Useful for debugging. */
     debug?: boolean;
+    /** Client identity used for capability-gated daemon features. */
+    clientKind?: "web" | "desktop" | "remote";
+    /** Pairing credentials for a client connecting to an explicit remote daemon. */
+    remoteAuth?: {
+        token: string;
+        deviceName: string;
+    };
 }
 /**
  * Client for the mew daemon wire protocol. One client == one connection ==
@@ -919,6 +947,8 @@ export declare class MewClient {
     private readonly url;
     private readonly socketFactory;
     private readonly debug;
+    private readonly clientKind;
+    private readonly remoteAuth?;
     private ws;
     private listeners;
     /** Promise resolved when the WebSocket opens. */
@@ -1008,6 +1038,7 @@ export declare class MewClient {
      *  The daemon broadcasts `session-title-changed` when done. */
     regenerateTitle(sessionId: string): void;
     listDir(sessionId: string, path?: string): void;
+    listFilesystemDir(path?: string): void;
     readFilePreview(sessionId: string, path: string, maxBytes?: number): void;
     gitStatus(sessionId: string): void;
     watchWorkspace(sessionId: string, enabled: boolean): void;

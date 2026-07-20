@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+mod native_layering;
 mod supervisor;
 
 use std::sync::{
@@ -9,8 +11,8 @@ use anyhow::anyhow;
 use mew_cef_host::embed::{
     BrowserEvent, BrowserEventCallback, BrowserRect, CefEmbedController, PumpCallback,
 };
-use serde::Serialize;
 use serde::Deserialize;
+use serde::Serialize;
 use supervisor::DaemonSupervisor;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -19,6 +21,8 @@ struct CefEmbedState {
     pump: Mutex<Option<CefPump>>,
     controller: Mutex<Option<CefEmbedController>>,
     owner: Arc<Mutex<Option<String>>>,
+    #[cfg(target_os = "macos")]
+    layering: Option<native_layering::NativeLayeringGuard>,
 }
 
 impl CefEmbedState {
@@ -29,9 +33,18 @@ impl CefEmbedState {
     ) -> Self {
         Self {
             pump: Mutex::new(pump),
+            #[cfg(target_os = "macos")]
+            layering: controller
+                .is_some()
+                .then(native_layering::NativeLayeringGuard::default),
             controller: Mutex::new(controller),
             owner,
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn layering_guard(&self) -> Option<&native_layering::NativeLayeringGuard> {
+        self.layering.as_ref()
     }
 
     fn controller(&self) -> Result<CefEmbedController, String> {
@@ -84,6 +97,29 @@ impl Drop for CefEmbedState {
 struct CefPump {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct CefPumpGate {
+    running: AtomicBool,
+}
+
+impl CefPumpGate {
+    fn try_enter(&self) -> bool {
+        !self.running.swap(true, Ordering::AcqRel)
+    }
+
+    fn leave(&self) {
+        self.running.store(false, Ordering::Release);
+    }
+}
+
+fn run_cef_pump_turn(gate: &CefPumpGate) {
+    if !gate.try_enter() {
+        return;
+    }
+    CefEmbedController::do_message_loop_work();
+    gate.leave();
 }
 
 impl CefPump {
@@ -185,6 +221,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             daemon_ws_url,
+            desktop_remote_enabled,
+            set_desktop_remote_enabled,
             cef_browser_available,
             cef_browser_set_rect,
             cef_browser_set_visible,
@@ -222,9 +260,8 @@ fn initialize_cef<R: tauri::Runtime>(
             let development_framework = if development_framework.exists() {
                 Some(development_framework)
             } else {
-                let fallback = manifest_dir.join(
-                    "cef/Chromium Embedded Framework.framework/Chromium Embedded Framework",
-                );
+                let fallback = manifest_dir
+                    .join("cef/Chromium Embedded Framework.framework/Chromium Embedded Framework");
                 fallback.exists().then_some(fallback)
             };
             if let Some(framework) = bundled_framework.or(development_framework) {
@@ -257,8 +294,10 @@ fn initialize_cef<R: tauri::Runtime>(
             .map_err(|error| anyhow!("get the Tauri content view: {error}"))?;
         let pending_pump = Arc::new(AtomicBool::new(false));
         let pump_active = Arc::new(AtomicBool::new(true));
+        let pump_gate = Arc::new(CefPumpGate::default());
         let app_handle = app.handle().clone();
         let pump_active_for_callback = pump_active.clone();
+        let pump_gate_for_callback = pump_gate.clone();
         let pump: PumpCallback = Arc::new(move |_delay_ms| {
             if !pump_active_for_callback.load(Ordering::Acquire) {
                 return;
@@ -269,19 +308,24 @@ fn initialize_cef<R: tauri::Runtime>(
             let pending_pump = pending_pump.clone();
             let closure_pump = pending_pump.clone();
             let pump_active = pump_active_for_callback.clone();
-            if app_handle
-                .run_on_main_thread(move || {
-                    closure_pump.store(false, Ordering::Release);
-                    if !pump_active.load(Ordering::Acquire) {
-                        return;
+            let pump_gate = pump_gate_for_callback.clone();
+            let dispatch_pump = pending_pump.clone();
+            let dispatch_handle = app_handle.clone();
+            let scheduled = std::thread::Builder::new()
+                .name("cef-pump-dispatch".to_owned())
+                .spawn(move || {
+                    let result = dispatch_handle.run_on_main_thread(move || {
+                        closure_pump.store(false, Ordering::Release);
+                        if !pump_active.load(Ordering::Acquire) {
+                            return;
+                        }
+                        run_cef_pump_turn(&pump_gate);
+                    });
+                    if result.is_err() {
+                        dispatch_pump.store(false, Ordering::Release);
                     }
-                    CefEmbedController::do_message_loop_work();
-                })
-                .is_err()
-            {
-                // The queue dropped the callback; clear the flag so the next
-                // scheduled work can queue a fresh pump instead of stalling
-                // CEF's message loop permanently.
+                });
+            if scheduled.is_err() {
                 pending_pump.store(false, Ordering::Release);
             }
         });
@@ -295,28 +339,21 @@ fn initialize_cef<R: tauri::Runtime>(
                     CefBrowserEventPayload::AddressChanged { owner, url }
                 }
                 BrowserEvent::TitleChanged { title, url } => {
-                    CefBrowserEventPayload::TitleChanged {
-                        owner,
-                        title,
-                        url,
-                    }
+                    CefBrowserEventPayload::TitleChanged { owner, title, url }
                 }
             };
             let _ = app_handle.emit("cef-browser-event", payload);
         });
-        let controller = CefEmbedController::try_initialize(
-            parent_view as usize,
-            &url,
-            pump,
-            browser_event,
-        )
-        .map_err(|error| anyhow!(error))?;
+        let controller =
+            CefEmbedController::try_initialize(parent_view as usize, &url, pump, browser_event)
+                .map_err(|error| anyhow!(error))?;
         if controller.is_some() {
             // CEF does not always schedule its first external-pump turn until
             // after initialization returns. Seed one turn after Tauri has
             // re-entered its event loop, never from inside CefInitialize.
-            let _ = app.handle().run_on_main_thread(|| {
-                CefEmbedController::do_message_loop_work();
+            let initial_pump_gate = pump_gate.clone();
+            let _ = app.handle().run_on_main_thread(move || {
+                run_cef_pump_turn(&initial_pump_gate);
             });
 
             // Backstop the on-demand pump: a dropped run_on_main_thread
@@ -325,6 +362,7 @@ fn initialize_cef<R: tauri::Runtime>(
             // progress). The cadence matches cefclient's own pump timer.
             let timer_handle = app.handle().clone();
             let timer_active = pump_active.clone();
+            let timer_gate = pump_gate.clone();
             let thread = std::thread::Builder::new()
                 .name("cef-pump".to_owned())
                 .spawn(move || loop {
@@ -333,10 +371,11 @@ fn initialize_cef<R: tauri::Runtime>(
                         break;
                     }
                     let callback_active = timer_active.clone();
+                    let callback_gate = timer_gate.clone();
                     if timer_handle
                         .run_on_main_thread(move || {
                             if callback_active.load(Ordering::Acquire) {
-                                CefEmbedController::do_message_loop_work();
+                                run_cef_pump_turn(&callback_gate);
                             }
                         })
                         .is_err()
@@ -363,6 +402,21 @@ fn daemon_ws_url(state: State<'_, DaemonSupervisor>) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn desktop_remote_enabled(state: State<'_, DaemonSupervisor>) -> bool {
+    state.remote_enabled()
+}
+
+#[tauri::command]
+fn set_desktop_remote_enabled(
+    enabled: bool,
+    state: State<'_, DaemonSupervisor>,
+) -> Result<String, String> {
+    state
+        .set_remote_enabled(enabled)
+        .map_err(|error| format!("{error:#}"))
+}
+
+#[tauri::command]
 fn cef_browser_available(state: State<'_, CefEmbedState>) -> bool {
     state
         .controller
@@ -379,19 +433,53 @@ fn cef_browser_set_rect(
 ) -> Result<(), String> {
     let controller = state.controller()?;
     let owner = rect.owner.clone();
-    if rect.visible {
+    let visible = rect.visible;
+    if visible {
         state.claim_owner(&owner)?;
     } else if !state.owns_owner(&owner)? {
         return Ok(());
     }
+    let layering_handle = if visible {
+        #[cfg(target_os = "macos")]
+        {
+            let handle = controller.native_view_handle();
+            if handle == 0 {
+                None
+            } else if let Some(guard) = state.layering_guard() {
+                // Record the first pass for each fresh CEF view handle so a
+                // recreated view is distinguishable in diagnostics; every
+                // pass re-asserts the layering regardless.
+                if guard.needs_ordering(handle).is_some() {
+                    guard.mark_ordered(handle);
+                }
+                Some(handle)
+            } else {
+                None
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    } else {
+        None
+    };
     let owner_state = state.owner.clone();
     let scheduled_owner = owner.clone();
+    let ordering_app = app.clone();
     let result = app.run_on_main_thread(move || {
         let owns = owner_state
             .lock()
             .map(|current| current.as_deref() == Some(owner.as_str()))
             .unwrap_or(false);
         if owns {
+            // React claiming the browser is the steady-state moment that
+            // owns the layering: keep CEF composited above the WKWebView on
+            // every visible update, since CEF re-adds its view on top.
+            #[cfg(target_os = "macos")]
+            if let Some(handle) = layering_handle {
+                native_layering::ensure_cef_on_top(&ordering_app, handle);
+            }
             controller.set_rect_on_main_thread(rect.into());
         }
     });
@@ -506,7 +594,7 @@ fn cef_browser_close(
 
 #[cfg(test)]
 mod tests {
-    use super::{CefEmbedState, CefPump};
+    use super::{CefEmbedState, CefPump, CefPumpGate};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -567,6 +655,17 @@ mod tests {
 
         assert!(observed.load(Ordering::Acquire));
         assert!(pump.thread.is_none());
+    }
+
+    #[test]
+    fn reentrant_pump_work_is_skipped_until_the_active_turn_returns() {
+        let gate = CefPumpGate::default();
+
+        assert!(gate.try_enter());
+        assert!(!gate.try_enter());
+
+        gate.leave();
+        assert!(gate.try_enter());
     }
 
     fn test_state() -> CefEmbedState {

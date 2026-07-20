@@ -174,6 +174,7 @@ async fn test_action_variant_table() {
                 Action::CancelMostRecentSubagent("task_123".into())
             }
             Action::PersonaSwitchConfirmed(_) => Action::PersonaSwitchConfirmed("test".into()),
+            Action::CyclePersona(_) => Action::CyclePersona(1),
             Action::SetPermissionMode(_) => {
                 Action::SetPermissionMode(mew_hooks::PermissionMode::Standard)
             }
@@ -518,4 +519,162 @@ async fn test_set_permission_mode_not_dropped() {
         target.calls.contains(&"set_permission_mode"),
         "target.set_permission_mode should have been called"
     );
+}
+
+// -----------------------------------------------------------------------
+// Persona cycling: Shift+Tab (CyclePersona(+1)) and Ctrl+Shift+Tab
+// (CyclePersona(-1)) walk the persona list and wrap through "default".
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_cycle_persona_forward_through_list() {
+    let mut app = mew_tui::App::new();
+    app.personas = vec![
+        ("planner".into(), "plan".into()),
+        ("builder".into(), "build".into()),
+    ];
+    let personas = mk_personas(&["planner", "builder"]);
+    // No active persona → "default" slot. Forward should land on "planner".
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        session_id: String::new(),
+        model: String::new(),
+        provider: String::new(),
+        workspace: String::new(),
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &personas,
+        plugin_info: &plugin_info,
+    };
+    let _ = runtime::handle_action(&mut cx, Action::CyclePersona(1)).await;
+    assert_eq!(app.active_persona.as_deref(), Some("planner"));
+}
+
+#[tokio::test]
+async fn test_cycle_persona_forward_wraps_to_default() {
+    let mut app = mew_tui::App::new();
+    app.personas = vec![
+        ("planner".into(), "plan".into()),
+        ("builder".into(), "build".into()),
+    ];
+    let personas = mk_personas(&["planner", "builder"]);
+    // Active is the last persona → forward wraps to "default" (None).
+    app.active_persona = Some("builder".into());
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        session_id: String::new(),
+        model: String::new(),
+        provider: String::new(),
+        workspace: String::new(),
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &personas,
+        plugin_info: &plugin_info,
+    };
+    let _ = runtime::handle_action(&mut cx, Action::CyclePersona(1)).await;
+    assert!(
+        app.active_persona.is_none(),
+        "forward from last persona should wrap to default"
+    );
+}
+
+#[tokio::test]
+async fn test_cycle_persona_backward_from_default_wraps_to_last() {
+    let mut app = mew_tui::App::new();
+    app.personas = vec![
+        ("planner".into(), "plan".into()),
+        ("builder".into(), "build".into()),
+    ];
+    let personas = mk_personas(&["planner", "builder"]);
+    // No active persona (default) → backward should wrap to "builder".
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        session_id: String::new(),
+        model: String::new(),
+        provider: String::new(),
+        workspace: String::new(),
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &personas,
+        plugin_info: &plugin_info,
+    };
+    let _ = runtime::handle_action(&mut cx, Action::CyclePersona(-1)).await;
+    assert_eq!(
+        app.active_persona.as_deref(),
+        Some("builder"),
+        "backward from default should wrap to the last persona"
+    );
+}
+
+#[tokio::test]
+async fn test_cycle_persona_empty_list_sets_alert() {
+    let mut app = mew_tui::App::new();
+    // No personas loaded → should set an alert, not crash or dispatch.
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        session_id: String::new(),
+        model: String::new(),
+        provider: String::new(),
+        workspace: String::new(),
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    let _ = runtime::handle_action(&mut cx, Action::CyclePersona(1)).await;
+    assert!(
+        app.alert.is_some(),
+        "empty persona list should set an alert"
+    );
+    assert!(
+        !target.calls.contains(&"switch_persona"),
+        "should not call switch_persona when no personas loaded"
+    );
+}
+
+/// Build a minimal `Persona` list for the given names, so
+/// `handle_switch_persona` can find them and update display state.
+fn mk_personas(names: &[&str]) -> Vec<mew_personas::Persona> {
+    names
+        .iter()
+        .map(|n| mew_personas::Persona {
+            name: (*n).into(),
+            description: format!("{} persona", n),
+            body: String::new(),
+            path: std::path::PathBuf::new(),
+            config: mew_personas::PersonaConfig::default(),
+        })
+        .collect()
 }

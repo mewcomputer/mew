@@ -7,21 +7,61 @@ use super::*;
 
 impl App {
     pub fn open_model_picker(&mut self) {
-        let items: Vec<PickerItem> = self
-            .models
-            .iter()
-            .map(|(id, desc)| PickerItem {
-                id: id.clone(),
-                label: id.clone(),
-                description: desc.clone(),
-            })
-            .collect();
+        let mut items: Vec<PickerItem> = Vec::new();
+
+        // Prepend a "Recent" section when there are recent models and no
+        // filter is active yet. The items are deduplicated against the full
+        // model list and capped at 6.
+        if !self.recent_models.is_empty() {
+            let all_ids: std::collections::HashSet<&str> =
+                self.models.iter().map(|(id, _)| id.as_str()).collect();
+            let recent: Vec<&String> = self
+                .recent_models
+                .iter()
+                .filter(|m| all_ids.contains(m.as_str()))
+                .take(6)
+                .collect();
+            if !recent.is_empty() {
+                items.push(PickerItem {
+                    label: "Recent".into(),
+                    header: true,
+                    ..Default::default()
+                });
+                for id in &recent {
+                    let desc = self
+                        .models
+                        .iter()
+                        .find(|(mid, _)| mid == *id)
+                        .map(|(_, d)| d.as_str())
+                        .unwrap_or("");
+                    items.push(PickerItem {
+                        id: id.to_string(),
+                        label: id.to_string(),
+                        description: desc.to_string(),
+                        ..Default::default()
+                    });
+                }
+                items.push(PickerItem {
+                    label: "All Models".into(),
+                    header: true,
+                    ..Default::default()
+                });
+            }
+        }
+
+        items.extend(self.models.iter().map(|(id, desc)| PickerItem {
+            id: id.clone(),
+            label: id.clone(),
+            description: desc.clone(),
+            ..Default::default()
+        }));
+
         self.mode = Mode::CommandPalette;
         self.picker = Some(PickerState {
             kind: "model".into(),
             items,
             filter: String::new(),
-            selected: 0,
+            selected: if !self.recent_models.is_empty() { 1 } else { 0 },
             cursor: 0,
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
@@ -71,7 +111,8 @@ impl App {
                     id: s.session_id.clone(),
                     label,
                     description: desc,
-                }
+                    ..Default::default()
+}
             })
             .collect();
         self.mode = Mode::CommandPalette;
@@ -101,6 +142,7 @@ impl App {
                 id: mew_hooks::PermissionMode::Standard.id().into(),
                 label: format!("Standard{}", marker(mew_hooks::PermissionMode::Standard)),
                 description: "Prompts for Mutating/Dangerous tools. Default.".into(),
+            ..Default::default()
             },
             PickerItem {
                 id: mew_hooks::PermissionMode::Permissive.id().into(),
@@ -112,7 +154,8 @@ impl App {
                               Still prompts for bash and respects your deny rules, \
                               ask rules, and secret-file guard."
                     .into(),
-            },
+                ..Default::default()
+},
             PickerItem {
                 id: mew_hooks::PermissionMode::Auto.id().into(),
                 label: format!("Auto{}", marker(mew_hooks::PermissionMode::Auto)),
@@ -122,7 +165,8 @@ impl App {
                               prompts — let the model decide. Requires a \
                               classifier provider to be configured."
                     .into(),
-            },
+                ..Default::default()
+},
             PickerItem {
                 id: mew_hooks::PermissionMode::AutoPlus.id().into(),
                 label: format!("Auto+{}", marker(mew_hooks::PermissionMode::AutoPlus)),
@@ -133,7 +177,8 @@ impl App {
                               own attention but don't want a provider outage \
                               to silently run destructive tools."
                     .into(),
-            },
+                ..Default::default()
+},
             PickerItem {
                 id: mew_hooks::PermissionMode::Dangerous.id().into(),
                 label: format!("Dangerous!{}", marker(mew_hooks::PermissionMode::Dangerous)),
@@ -142,7 +187,8 @@ impl App {
                               you've said \"don't ask me anything, even the things I \
                               said don't do.\" Output redaction still applies."
                     .into(),
-            },
+                ..Default::default()
+},
         ];
         // Pre-select the active mode so Enter on an unchanged picker is a no-op.
         let pre_selected = match active {
@@ -171,10 +217,22 @@ impl App {
     }
 
     pub fn open_thinking_variant_picker(&mut self) {
+        self.open_thinking_variant_picker_for(None);
+    }
+
+    /// Open the thinking variant picker for a specific model. When `model` is
+    /// None, uses the active model. The `model` param is a bare model id or a
+    /// "provider/model" pair; the provider prefix is stripped since
+    /// `thinking_variants` is keyed by bare model id.
+    pub fn open_thinking_variant_picker_for(&mut self, model: Option<&str>) {
+        let bare_model = model
+            .map(|m| m.rsplit('/').next().unwrap_or(m))
+            .unwrap_or_else(|| self.status.model.as_str());
         let mut items = vec![PickerItem {
             id: "off".into(),
             label: "Off".into(),
             description: "Disable thinking/reasoning".into(),
+            ..Default::default()
         }];
         // Variant names come from the catalog (populated into
         // `thinking_variants` at startup), keyed by model slug. This holds the
@@ -182,7 +240,7 @@ impl App {
         // low/medium/high/xhigh/max/ultra — rather than a hardcoded list.
         let variant_names = self
             .thinking_variants
-            .get(&self.status.model)
+            .get(bare_model)
             .cloned()
             .unwrap_or_default();
         for name in variant_names {
@@ -190,6 +248,7 @@ impl App {
                 id: name.clone(),
                 label: name.clone(),
                 description: format!("{} reasoning effort", name),
+                ..Default::default()
             });
         }
         self.mode = Mode::CommandPalette;
@@ -218,6 +277,7 @@ impl App {
                     n.clone()
                 },
                 description: format!("Switch to {} theme", n),
+                ..Default::default()
             })
             .collect();
         let pre_selected = names.iter().position(|n| n == current).unwrap_or(0);
@@ -248,6 +308,7 @@ impl App {
                         name.clone()
                     },
                     description: desc.clone(),
+                    ..Default::default()
                 }
             })
             .collect();
@@ -276,6 +337,7 @@ impl App {
                 let role = match msg.role {
                     mew_message::Role::User => "user",
                     mew_message::Role::Assistant => "asst",
+                    mew_message::Role::System => "sys",
                 };
                 let snippet: String = msg
                     .parts
@@ -292,6 +354,7 @@ impl App {
                     id: i.to_string(),
                     label: format!("[{}] {}: {}", i, role, snippet),
                     description: format!("Keep messages 0..={}", i),
+            ..Default::default()
                 }
             })
             .collect();
@@ -333,17 +396,14 @@ impl App {
 
     pub fn picker_down(&mut self) {
         if let Some(ref mut p) = self.picker {
-            let count = p.filtered().len();
-            if count > 0 {
-                p.selected = (p.selected + 1).min(count - 1);
-                p.adjust_scroll();
-            }
+            p.move_selection(1);
+            p.adjust_scroll();
         }
     }
 
     pub fn picker_up(&mut self) {
         if let Some(ref mut p) = self.picker {
-            p.selected = p.selected.saturating_sub(1);
+            p.move_selection(-1);
             p.adjust_scroll();
         }
     }
@@ -380,6 +440,7 @@ impl App {
                     id: name.clone(),
                     label: format!("@{} [subagent]", name),
                     description: description.clone(),
+            ..Default::default()
                 });
             }
         }
@@ -417,6 +478,7 @@ impl App {
                 } else {
                     format!("{} B", size)
                 },
+                ..Default::default()
             });
         }
 
@@ -444,26 +506,31 @@ impl App {
                 id: "switch-model".into(),
                 label: "Switch Model".into(),
                 description: "Change the active LLM".into(),
+            ..Default::default()
             },
             PickerItem {
                 id: "thinking-variant".into(),
                 label: "Thinking Variant".into(),
                 description: "Set reasoning effort (high, max, off)".into(),
+            ..Default::default()
             },
             PickerItem {
                 id: "settings".into(),
                 label: "Settings".into(),
                 description: "Configure mew (providers, plugins)".into(),
+            ..Default::default()
             },
             PickerItem {
                 id: "clear".into(),
                 label: "Clear Chat".into(),
                 description: "Remove all messages from the current session".into(),
+            ..Default::default()
             },
             PickerItem {
                 id: "quit".into(),
                 label: "Quit".into(),
                 description: "Exit mew".into(),
+            ..Default::default()
             },
         ];
         // Add all built-in slash commands as palette items. Selecting one
@@ -481,6 +548,7 @@ impl App {
                 id: cmd.name.clone(),
                 label: cmd.name,
                 description: cmd.description,
+            ..Default::default()
             });
         }
         self.mode = Mode::CommandPalette;

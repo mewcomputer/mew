@@ -121,15 +121,21 @@ impl Default for Config {
                 ..Default::default()
             },
         );
-        // Kimi (Moonshot AI) coding endpoint — Anthropic-compatible.
-        // Base URL includes /v1 so the adapter hits /v1/messages.
+        // Kimi (Moonshot AI) coding endpoint — OpenAI-compatible.
+        // Base URL includes /v1 so the adapter hits /v1/chat/completions.
         // Models: k3 (Kimi K3, thinking-capable), kimi-for-coding (Kimi K2.7
         // Code), kimi-for-coding-highspeed (Kimi K2.7 Code HighSpeed).
         // Docs: https://platform.kimi.ai/docs/guide/coding
+        //
+        // Kimi also exposes an Anthropic-compatible endpoint, but its thinking
+        // (reasoning) stream is unreliable there — Moonshot's OpenAI surface is
+        // their primary, fully-tested API, so we use it. k3 thinking is driven
+        // by a top-level `reasoning_effort` param (low/high/max), which the
+        // catalog produces and the OpenAI adapter forwards as-is.
         providers.insert(
             "kimi".into(),
             ProviderConfig {
-                shape: "anthropic".into(),
+                shape: "openai".into(),
                 base_url: "https://api.kimi.com/coding/v1".into(),
                 credential_ref: "kimi".into(),
                 ..Default::default()
@@ -366,6 +372,11 @@ pub fn load() -> Result<Config, ConfigError> {
 }
 
 pub fn config_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".config").join("mew");
+    }
+
     directories::ProjectDirs::from("computer", "mew", "mew")
         .map(|d| d.config_dir().to_path_buf())
         .unwrap_or_else(|| {
@@ -404,6 +415,10 @@ pub struct State {
     /// Active theme name (overrides config when set via /theme command).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub theme: String,
+    /// Recently used models (most recent first), capped at 6.
+    /// Stored as "provider/model" IDs matching the model picker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_models: Vec<String>,
 }
 
 /// Reads state from the standard location.
@@ -622,7 +637,7 @@ mod tests {
             .providers
             .get("kimi")
             .expect("kimi built-in provider should be present");
-        assert_eq!(kimi.shape, "anthropic");
+        assert_eq!(kimi.shape, "openai");
         assert_eq!(kimi.base_url, "https://api.kimi.com/coding/v1");
         assert_eq!(kimi.credential_ref, "kimi");
         assert_eq!(kimi.kind, "direct");
@@ -718,6 +733,13 @@ values = ["sk_test_deadbeef"]
         let cred = get_credential("opencode-zen").unwrap();
         assert_eq!(cred, "test-key-123");
         std::env::remove_var("MEW_CRED_OPENCODE_ZEN");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_config_dir_uses_xdg_style_location() {
+        let home = std::env::var_os("HOME").expect("HOME should be set on macOS");
+        assert_eq!(config_dir(), PathBuf::from(home).join(".config/mew"));
     }
 
     #[test]

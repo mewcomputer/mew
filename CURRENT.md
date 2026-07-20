@@ -1,3 +1,278 @@
+# 2026-07-19 — Switch Kimi to OpenAI adapter + fix reasoning_content deserialization
+
+## Summary
+
+Kimi K3 thinking was silently dropped. Two issues, both fixed:
+
+1. **Kimi was wired to the Anthropic adapter**, but Kimi's Anthropic-compatible
+   endpoint doesn't reliably stream thinking content blocks. Moonshot's OpenAI
+   surface is their primary, fully-tested API. Switched the `kimi` provider
+   shape from `"anthropic"` to `"openai"`. Base URL unchanged
+   (`https://api.kimi.com/coding/v1`); the OpenAI adapter appends
+   `/chat/completions`, which matches.
+
+2. **The OpenAI adapter only deserialized `reasoning` in streaming deltas**,
+   but Kimi K3 (and DeepSeek) emit reasoning under `reasoning_content`. Added
+   `#[serde(alias = "reasoning_content")]` to the `Delta.reasoning` field so
+   both field names are accepted. The outbound path already wrote both names.
+
+## Changes
+
+- `crates/mew-config/src/lib.rs`: kimi provider `shape` → `"openai"`, comment
+  updated, test assertion updated.
+- `crates/mew/src/setup/providers.rs`: removed `"kimi"` from the anthropic arm
+  of `provider_name_to_shape` (falls through to default `"openai"`), shape test
+  and fallback description updated.
+- `crates/mew-provider-openai/src/lib.rs`: `#[serde(alias = "reasoning_content")]`
+  on `Delta.reasoning`. New test `test_fixture_reasoning_content_alias` with
+  fixture `src/testdata/reasoning-content.sse` verifying reasoning is captured
+  from `reasoning_content` deltas.
+
+## Additional fix: model picker Right-arrow now switches the model
+
+When pressing Right on a model in the picker to open the thinking variant
+picker, the agent's active model wasn't switched. So `set_thinking` resolved
+the variant against the *old* model, failing with "unknown thinking variant
+for model". Now Right fires a `SwitchModel` action alongside opening the
+variant picker; since actions are processed sequentially, the model switch
+completes before the user selects a variant.
+
+- `crates/mew-tui/src/events.rs`: `handle_picker_key` Right handler returns
+  `Action::SwitchModel(id)` instead of `None`.
+
+## Additional feature: "Recent Models" section in model picker
+
+The model picker now shows a "Recent" section at the top with up to 6
+previously used models, followed by an "All Models" section with the full
+list. Recent models are persisted in `state.toml` and survive restarts.
+
+- `crates/mew-config/src/lib.rs`: added `recent_models: Vec<String>` to `State`.
+- `crates/mew-tui/src/app/mod.rs`: added `recent_models` field to `App`,
+  `header` field to `PickerItem` (with `Default` derive), `move_selection()`
+  on `PickerState` to skip headers, and updated `filtered()` to hide headers
+  when a filter is active.
+- `crates/mew-tui/src/app/pickers.rs`: `open_model_picker` prepends recent
+  models with section headers; `picker_up`/`picker_down` use `move_selection`.
+- `crates/mew-tui/src/ui/overlays.rs`: section headers render as muted, dimmed,
+  non-selectable lines.
+- `crates/mew/src/runtime/dispatch.rs`: `handle_switch_model` records the
+  switched model in `recent_models` (move to front, dedupe, cap at 6) and
+  persists to state.
+- `crates/mew/src/commands/tui.rs`: loads `recent_models` from state at
+  startup in both daemon and standalone modes.
+- 6 new tests covering recent section rendering, empty state, unknown model
+  filtering, header-skipping navigation, and filter behavior.
+
+## Verification
+
+- `cargo test -p mew-provider-openai` — 7/7 pass (including new test).
+- `cargo test -p mew-config test_default_kimi_provider` — pass.
+- `cargo test -p mew setup::providers::tests` — 45/45 pass.
+- `cargo test -p mew-tui` — 156/156 pass + 5 golden tests pass.
+- `cargo clippy -p mew-provider-openai -p mew-config -p mew-tui` — clean.
+- Pre-existing clippy dead-code error in `crates/mew/src/commands/daemon.rs`
+  (`remote_invite_payload`) is unrelated to this change.
+
+---
+
+# 2026-07-18 — Surface real credential diagnostics instead of bare "get credential"
+
+## Summary
+
+Running `mew` with no credential env vars but a `credentials.json` present
+failed with an unhelpful two-line error:
+
+```
+Error: build provider
+
+Caused by:
+    get credential
+```
+
+Root cause: `build_direct_provider` called `get_credential(...).ok()`,
+discarding the rich `CredentialNotFound` error that `get_credential` returns
+(an error that already names the exact env var, the keyring command, and the
+`credentials.json` path). Each API-key shape arm then replaced the swallowed
+error with a bare `.context("get credential")?`, producing a causeless
+"get credential" string with no diagnostic. The user couldn't tell whether
+the lookup missed the key, read a malformed file, or referenced the wrong
+`credential_ref`.
+
+Fix: stop swallowing the error. `get_credential` now returns the `Result`
+directly into the match. The `openai` and `anthropic` arms propagate it with
+`?`, so the full `CredentialNotFound` message reaches the user. The
+`responses` arm keeps the OAuth-first behavior (a missing API key is
+non-fatal there) but captures the credential error message and appends it to
+the final "no credentials for codex" error when every auth path fails.
+
+## Changes
+
+- `crates/mew/src/setup/providers.rs`: `build_direct_provider` holds the
+  `Result<String, ConfigError>` instead of `.ok()`; `openai`/`anthropic`
+  arms use `?` to propagate the cause; `responses` arm captures the error
+  message for the all-paths-failed diagnostic.
+- Added two tests guarding the regression for both `openai` and `anthropic`
+  shapes: `build_provider_missing_credential_surfaces_diagnostic` and
+  `build_provider_missing_credential_anthropic_shape_surfaces_diagnostic`.
+  They assert the error chain contains the env var name, "credentials.json",
+  and "credential not found" — the swallowed-error regression produced none
+  of these.
+
+## Verification
+
+- `cargo test -p mew --bin mew setup::providers::tests` — 44 passed.
+- `cargo clippy -p mew --all-targets -- -D warnings` — clean.
+- `cargo fmt -p mew -- --check` — clean.
+- `cargo test -p mew-config` — 118 passed (no downstream breakage).
+
+## k3 reasoning verification
+
+Traced the full Kimi K3 thinking path end-to-end and confirmed it is correct:
+
+1. Catalog (`mew-catalog`) produces variants `low`/`high`/`max` for any model
+   id containing `k3`, each with `params: {"reasoning_effort": <effort>}`.
+   `default_thinking` selects `high`.
+2. `resolve_reasoning` returns the variant's params as a `ReasoningConfig`.
+3. The agent clones it into the `Request.reasoning` field each turn.
+4. The Anthropic adapter's `build_request_body` iterates `reasoning.params`
+   and inserts each key at the top level of the JSON body — so
+   `reasoning_effort` lands top-level, which is where Kimi's API reads it.
+5. The `thinking.budget_tokens` bump does not fire for k3 (no such key), so
+   no Anthropic-style thinking block is injected.
+
+Added `test_anthropic_adapter_forwards_reasoning_effort_top_level` in
+`mew-provider-anthropic` to lock in steps 4–5: asserts `reasoning_effort`
+appears top-level in the wire body and that no `thinking` object is injected.
+
+## Kimi tool-call ID sanitization
+
+Kimi's Anthropic-compatible API emits tool-call IDs containing spaces and
+colons (e.g. `"handoff plan:29"` — tool name + space + colon + counter).
+Anthropic's `tool_use` ID format rules reject these on the next-turn replay,
+producing:
+
+```
+an assistant message with 'toolcalls' must be followed by tool messages
+responding to each 'toolcallid'. The following toolcallids did not have
+response messages: handoff plan:29
+```
+
+The API generates the non-conformant ID itself, then rejects its own ID when
+we replay it. Both mew adapters previously took the provider's call ID
+verbatim with no sanitization.
+
+Fix: in the Anthropic adapter's `tool_use` ingest arm, replace every incoming
+`content_block.id` with a fresh `toolu_`-prefixed ULID before storing it in
+`ToolCallPart.call_id`. The fresh ID round-trips consistently — the agent
+matches tool results to calls by `call_id`, and `build_request_body`
+serializes both `tool_use.id` and `tool_result.tool_use_id` from that same
+field, so the pair always matches.
+
+The OpenAI adapter is unaffected (Kimi uses the `anthropic` shape).
+
+### Changes
+
+- `crates/mew-provider-anthropic/src/lib.rs`: `tool_use` ingest arm now
+  assigns `call_id: format!("toolu_{}", ulid::Ulid::new())` instead of
+  copying `event.content_block.id`. The `ContentBlock.id` field is still
+  deserialized (for raw-dump mode) but marked `#[allow(dead_code)]`.
+- `crates/mew-provider-anthropic/src/testdata/tool-call-nonconformant-id.sse`:
+  fixture with a `"handoff plan:29"` tool-call ID.
+- `test_fixture_tool_call_nonconformant_id_is_sanitized`: asserts the
+  resulting `call_id` is `toolu_`-prefixed and contains no spaces or colons.
+
+### Verification
+
+- `cargo test -p mew-provider-anthropic` — 16 passed.
+- `cargo clippy -p mew-provider-anthropic --all-targets -- -D warnings` —
+  clean.
+- `cargo fmt -p mew-provider-anthropic -- --check` — clean.
+- `cargo build -p mew` — clean (one pre-existing unrelated warning in
+  `daemon.rs::remote_invite_payload`).
+
+## Shift+Tab / Ctrl+Shift+Tab persona cycling
+
+Added keyboard cycling for personas in the TUI:
+
+- **Shift+Tab** — cycle forward through loaded personas, wrapping through
+  "default" (no persona) at the end.
+- **Ctrl+Shift+Tab** — cycle backward.
+
+Terminals deliver Shift+Tab as `BackTab` and Ctrl+Shift+Tab as `BackTab` with
+the `CONTROL` modifier. The normal-mode key handler maps these to
+`Action::CyclePersona(+1)` / `Action::CyclePersona(-1)`, which dispatches
+through `handle_cycle_persona` → `handle_switch_persona` — reusing the
+existing switch path so model pinning, accent color, and the synthetic
+display message all fire identically to `/persona <name>`.
+
+The keybinding is suppressed when the input box has text (BackTab is a no-op
+there anyway) and in slash-command mode (where Tab does completion). When no
+personas are loaded, it sets an "no personas loaded" alert.
+
+### Changes
+
+- `crates/mew-tui/src/events.rs`: `CyclePersona(i32)` Action variant;
+  `BackTab` handler in `handle_normal_key`.
+- `crates/mew/src/runtime/dispatch.rs`: `handle_cycle_persona` computes the
+  next persona from `app.personas` + `app.active_persona` and dispatches
+  through `handle_switch_persona`.
+- `crates/mew-tui/src/harness.rs`: `parse_key` now supports `shift+` prefix
+  and maps `shift+tab` / `ctrl+shift+tab` to `BackTab` for test input.
+- `crates/mew/src/dispatch_table_tests.rs`: `CyclePersona` arm in the
+  variant table; four new tests covering forward, wrap-to-default,
+  backward-from-default, and empty-list alert.
+- `crates/mew-tui/src/ui/overlays.rs`: help overlay entry for Shift+Tab.
+
+### Verification
+
+- `cargo test -p mew --bin mew dispatch_table_tests` — 12 passed.
+- `cargo test -p mew-tui` — 5 passed + 1 doc test.
+- `cargo clippy -p mew-tui --all-targets -- -D warnings` — clean.
+- `cargo fmt -p mew -p mew-tui -- --check` — clean.
+
+## Fix: Right key not opening thinking variant picker from model picker
+
+Pressing Right in the model picker to open the thinking variant picker was
+silently failing. Two bugs:
+
+1. **Key mismatch (standalone mode):** The model picker uses `provider/model`
+   format IDs (e.g. `opencode-zen/claude-sonnet-4-6`), but the
+   `thinking_variants` HashMap is keyed by the bare model id (e.g.
+   `claude-sonnet-4-6`). The Right-key handler's `contains_key(&selected.id)`
+   always missed because of the provider prefix.
+
+2. **Daemon mode never populated:** `ModelList` messages from the daemon were
+   forwarded to the notification channel but never parsed into `app.models`
+   or `app.thinking_variants`. The model picker was empty in daemon mode.
+
+### Changes
+
+- `crates/mew-tui/src/app/pickers.rs`: Added `open_thinking_variant_picker_for`
+  which accepts an optional model id (in `provider/model` format), strips the
+  provider prefix via `rsplit('/')`, and looks up that model's variants — not
+  the current active model's. The old `open_thinking_variant_picker` delegates
+  to it with `None` (uses `self.status.model`).
+- `crates/mew-tui/src/events.rs`: Right-key handler now strips the provider
+  prefix before the `contains_key` check, and passes the selected model id to
+  `open_thinking_variant_picker_for` so the picker shows variants for the
+  highlighted model, not the current one.
+- `crates/mew-tui/src/app/mod.rs`: `apply_daemon_notification` now handles
+  `ModelList` — populates `app.models` (picker items) and
+  `app.thinking_variants` (keyed by bare model id from `ModelInfo.model`).
+- `crates/mew-daemon/src/client.rs`: Added `list_models()` method.
+- `crates/mew/src/commands/tui.rs`: Daemon-mode TUI now calls
+  `client.list_models()` on startup.
+- Tests: `test_thinking_variant_picker_strips_provider_prefix` and
+  `test_thinking_variant_picker_for_bare_model_id`.
+
+### Verification
+
+- `cargo test -p mew-tui` — 7 passed (5 existing + 2 new).
+- `cargo test -p mew-daemon` — 5 passed.
+- `cargo test -p mew-protocol` — 106 passed.
+- `cargo clippy -p mew-tui --all-targets -- -D warnings` — clean.
+- `cargo fmt -p mew-tui -- --check` — clean.
+
 # 2026-07-17 — Fix dev CEF Mach-port rendezvous by anchoring a main bundle
 
 ## Summary
@@ -1176,6 +1451,38 @@ packaged launch/relaunch, `pnpm desktop:verify:cef` with all 7 checks passing,
 Verified: 101 web UI tests, UI TypeScript check, production UI build, and
 `git diff --check`.
 
+## 2026-07-18 — Browser workbench chrome cleanup
+
+- Removed the generic Workbench title/subtitle when a browser tab is active so
+  the surface reads like an actual browser window.
+- Restyled the shared workbench tab strip into compact browser chrome with
+  rounded active tabs, while keeping Activity, Files, Changes, Review, and
+  Terminal tabs in the same registry.
+- Made the URL and page-action rows browser-like, centered the page identity,
+  and let the native browser viewport fill the remaining surface without a
+  nested card inset.
+- Kept the generic workbench summary header for non-browser surfaces.
+
+Verified: 101 web UI tests, TypeScript build, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — CEF navigation pump re-entrancy fix
+
+- Diagnosed the Google navigation freeze from a live debug process: the CEF
+  renderer helpers stayed alive, but `curl http://127.0.0.1:9223/json/version`
+  connected and then hung. A macOS process sample showed CEF recursively
+  entering `do_message_loop_work` through Tauri's inline
+  `run_on_main_thread`, while CEF already held its browser-process mutex.
+- Added a pump gate so nested CEF turns are skipped, and dispatch on-demand
+  pump callbacks from a worker before handing them back to the Tauri main
+  thread. This prevents callbacks raised during native view visibility or
+  navigation work from re-entering CEF synchronously.
+- Kept the 30 ms backstop for callbacks coalesced during an active turn and
+  added a regression test for the pump gate.
+
+Verified: 12 Tauri host tests, cargo formatting check, and `git diff --check`.
+The running debug process must be restarted to load this fix.
+
 ## 2026-07-18 — iOS motion and surface parity
 
 - Added native motion tokens for press feedback, disclosures, and surface
@@ -1193,3 +1500,808 @@ Verified: arm64 iOS Simulator `xcodebuild` succeeded with
 `CODE_SIGNING_ALLOWED=NO`, and `git diff --check` passed. The default
 multi-architecture simulator build remains blocked by the checked-in
 `mew_mobile_core.xcframework` missing an x86_64 simulator slice.
+
+## 2026-07-18 — Native Tauri workbench menu boundary
+
+- Added a macOS AppKit `NSMenu` path for the workbench `+` menu. It is
+  anchored to the React control and renders above the native CEF child view,
+  while the regular web host keeps the existing HTML menu and does not expose
+  a built-in browser.
+- Kept workbench tab state and surface selection in React. Native menu actions
+  return through a Tauri event, so Browser, Terminal, Files, Changes, and
+  Review continue to share the same tab registry.
+- Added native-menu lifecycle commands, close events, and a web-host no-op
+  test. Failed native menu setup falls back to the HTML menu.
+- Hardened the CEF/Tauri boundary by installing the two CEF macOS application
+  selectors onto Tauri's existing `TaoApp` instead of replacing its
+  `NSApplication` class. CEF child views now start hidden until an active tab
+  claims and sizes them.
+
+Verified: 102 web UI tests, UI TypeScript check, native CEF tests, 12 Tauri
+host tests, `cargo fmt --all -- --check`, and `git diff --check`. A debug
+desktop launch stayed alive after the selector and initial-visibility fixes;
+the native popup click still needs a clean single-instance desktop smoke run.
+
+## 2026-07-18 — Browser connection lifecycle guard
+
+- Fixed restored browser tabs throwing `not connected` during the first render
+  while the websocket client was still connecting.
+- Browser daemon commands now wait for the shared connection state, and the
+  browser controls stay disabled while disconnected instead of surfacing a
+  React error boundary.
+- Native macOS CEF navigation now takes precedence once CEF availability is
+  resolved, so a disconnected daemon does not block the embedded browser.
+- Added a regression test for restored browser tabs during daemon disconnect.
+
+Verified: 103 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`. A desktop smoke launch was blocked by an existing Vite
+process already listening on port 5173; the active Tauri host did stay alive
+and spawned a daemon on port 25566.
+
+## 2026-07-18 — Browser navigation deduplication guard
+
+- Kept restored-tab recovery tied to connection changes without making normal
+  URL submission navigate twice.
+- Added an assertion covering the single-send web browser open path.
+
+Verified: 103 web UI tests, UI TypeScript check, and `git diff --check`.
+
+## 2026-07-18 — Chat rendering stability and overflow guard
+
+- End-anchored the virtualized conversation and batched resize observations so
+  measured message heights stop pulling the viewport around during streaming.
+- Limited live-store subscriptions to the currently streaming message and
+  memoized message rows, reducing token-by-token rerenders across the visible
+  conversation.
+- Added stable scrollbar space and min-width/overflow boundaries across chat,
+  markdown, code, reasoning, and tool surfaces so the conversation cannot
+  create page-level horizontal scrolling.
+- Added regression coverage for completed rows staying stable during live
+  streaming updates.
+
+Verified: 105 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — macOS XDG-style config directory
+
+- Changed macOS global configuration storage to `~/.config/mew`, matching the
+  Linux-style location used by other CLI tools.
+- Kept the change non-migrating: existing Application Support data remains in
+  place and is no longer selected by the default resolver.
+- Updated configuration and session path documentation and added a macOS path
+  regression test.
+
+Verified: 118 `mew-config` tests, Rust formatting, and `git diff --check`.
+
+## 2026-07-18 — Files root navigation
+
+- Fixed the Files surface sending `/` to the daemon when navigating back to
+  the workspace root.
+- Kept root navigation represented as an omitted relative path, preserving the
+  daemon’s absolute-path safety check.
+- Added regression coverage for parent and join path handling.
+
+Verified: 107 web UI tests, UI TypeScript check, and `git diff --check`.
+
+## 2026-07-18 — Workbench surface picker
+
+- Replaced the web add-tab dropdown with a searchable shadcn command picker
+  showing every workbench surface, icon, description, and shortcut.
+- Preserved the native macOS picker for the CEF host so the menu stays above
+  the native browser surface, while adding the same complete option set.
+- Added jsdom layout shims and picker coverage for keyboard-oriented cmdk
+  behavior.
+
+Verified: 105 web UI tests, UI TypeScript check, production UI build, Rust
+formatting, and `git diff --check`.
+
+## 2026-07-18 — Browser omnibox and native tools menu
+
+- Combined the browser URL and page chrome into one omnibox-style row with a
+  single submit affordance and loading state.
+- Moved snapshots, screenshots, selector interaction, and hide-page controls
+  into a secondary Browser tools surface so the browser viewport keeps its
+  height.
+- Added an AppKit browser-tools menu for macOS, routing native menu actions to
+  the active CEF tab so the controls stay above the native browser view.
+- Kept the web popover fallback for non-native browser rendering and covered
+  the new one-row and tools interactions.
+
+Verified: 105 web UI tests, UI TypeScript check, production UI build, Tauri
+`cargo check`, Rust formatting, and `git diff --check`.
+
+## 2026-07-18 — Composer surface simplification
+
+- Flattened the composer into one bounded surface, keeping the message field,
+  attachment state, persona/model controls, and send/cancel action in a single
+  visual hierarchy inspired by the Codex composer.
+- Kept session telemetry in the separate status footer so connection and token
+  information does not compete with message composition.
+- Added a regression test ensuring the composer controls remain inside the
+  primary surface.
+
+Verified: 106 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Floating dock scroll containment fix
+
+- Restored flex-column containment around the session chat after moving the
+  composer to the full-surface overlay.
+- This gives the virtualized and fallback scroll containers a bounded height
+  again, preserving chat scrolling while keeping the dock independently
+  positioned.
+
+Verified: 106 web UI tests, UI TypeScript check, and `git diff --check`.
+
+## 2026-07-18 — Unified modular workbench tabs
+
+- Promoted Plan, Agents, Questions, and Jobs into first-class workbench tabs
+  alongside Browser, Terminal, Files, Changes, and Review.
+- Removed the nested Activity tablist and its duplicate tab state, leaving one
+  modular tab interface for every right-rail surface.
+- Kept core activity tabs pinned, migrated persisted legacy Activity tabs to
+  Plan, and preserved actionable-tab selection when the workbench opens.
+- Updated tab, persistence, and right-rail regression coverage.
+
+Verified: 107 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Workbench header removal
+
+- Removed the redundant Workbench title/subtitle header so the tab strip is the
+  first visible workbench surface.
+- Moved the close action into the tab row, preserving access without restoring
+  another explanatory panel.
+
+Verified: 106 web UI tests, UI TypeScript check, and `git diff --check`.
+
+## 2026-07-18 — Composer containing-block correction
+
+- Restored explicit parent-relative height on the workspace row and both
+  conversation insets so the bottom dock resolves against the full app surface
+  instead of a content-sized containing block.
+- Kept the earlier full-surface fade and bottom dock positioning intact.
+
+Verified: 106 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Full-surface composer anchoring
+
+- Re-anchored the floating composer to the complete session surface instead of
+  the chat column, so it reaches the actual bottom edge beneath the footer.
+- Added a non-interactive bottom fade that eases the underlying chat and status
+  details into the page background without adding another panel row.
+
+Verified: 106 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Floating composer treatment
+
+- Removed the full-width composer panel border and background so the chat
+  surface continues behind it.
+- Kept the composer itself elevated with a focused border and restrained
+  shadow, preserving the single-surface hierarchy and all existing controls.
+
+Verified: 106 web UI tests, UI TypeScript check, and `git diff --check`.
+
+## 2026-07-18 — Positioned floating composer
+
+- Moved the composer into an absolute bottom dock inside the session surface,
+  removing it from normal chat layout flow while keeping the status footer
+  independent below it.
+- Added transparent pointer-through space around the dock so only the composer
+  and pending interaction cards capture input.
+- Added bottom scroll clearance to both virtualized and fallback chat surfaces,
+  keeping the latest message visible above the floating dock.
+
+Verified: 106 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Workspace shell sizing correction
+
+- Changed the conversation inset from viewport-relative `h-screen` sizing to
+  parent-relative `h-full` sizing in both mobile and desktop layouts.
+- Preserved the rounded inset surface while keeping it inside the enclosing
+  `h-svh` workspace frame, preventing the inner shell from becoming taller
+  than the outer app surface.
+
+Verified: 105 web UI tests, UI TypeScript check, and `git diff --check`.
+
+## 2026-07-18 — On-demand workbench tabs
+
+- Removed Agents and Jobs from the default workbench so the rail opens as an
+  intentional empty tool area until the pinned summary exists.
+- Kept Agents and Jobs available as explicit optional tabs through both the web
+  and native macOS add-tab menus.
+- Migrated the previous pinned Agents/Jobs defaults out of persisted state and
+  added an empty-workbench affordance instead of rendering a blank surface.
+
+Verified: 105 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Main request flow and focused workbench tabs
+
+- Kept Plan approval and Questions in the main session interface, including
+  desktop AskUser rendering beside the composer.
+- Reduced the workbench to Agents, Jobs, Browser, Terminal, Files, Changes,
+  and Review. Browser retains its own internal browser-tab model.
+- Migrated persisted Activity, Plan, and Questions rail tabs out of the active
+  tab model while preserving Agents and Jobs as pinned core tabs.
+- Moved pinned file context into the Files surface and removed duplicate plan,
+  question, and cross-session attention panels from the workbench.
+
+Verified: 105 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Read-only Files workbench
+
+- Replaced the narrow Files inspector with a lightweight editor workbench:
+  resizable explorer, lazy directory expansion, file filtering, and internal
+  read-only document tabs.
+- Kept workspace paths relative at the UI boundary and preserved the existing
+  external-editor action.
+- Added focused behavior coverage for directory expansion, relative file
+  opening, filtering, empty states, and document tabs.
+- Kept dotfiles hidden until the daemon preview path is routed through the
+  secret-file permission checks.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Bound file viewer code width
+
+- Constrained the inner Shiki `<pre>` element, which was still able to impose
+  its intrinsic width on the surrounding workbench.
+- Made wrapped lines the default for file previews so long JSON and generated
+  files cannot create a horizontal layout jump. The toggle remains available
+  for intentional horizontal inspection inside the viewer.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Isolate unwrapped file code
+
+- Prevented the highlighted surface and nested token code from contributing
+  intrinsic width to the surrounding flex layout.
+- Moved unwrapped horizontal scrolling to the highlighted `<pre>` itself so
+  disabling wrapping cannot move the workbench.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Flush file preview surface
+
+- Removed the stacked horizontal insets around file contents so the code
+  surface reaches the workbench edges.
+- Kept chat code block spacing unchanged and retained a small inset for the
+  truncated-preview notice.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Fill file preview height
+
+- Let the file code surface use the available editor height instead of ending
+  at the last line of a short preview.
+- Kept the viewer scrollable and left chat code blocks content-sized.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Tighten file code leading
+
+- Reduced the file viewer line box from 1.55 to 1.35 and applied it directly
+  to each highlighted line so dense source files stay compact.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Restore live response streaming
+
+- Fixed provider part appends to replace the assistant message and parts
+  immutably instead of mutating an object already held by memoized message
+  rows.
+- Kept newly started empty text parts renderable so their live stream buffer
+  is visible before the completed text is committed.
+- Added a regression test for text streaming that begins after reasoning.
+
+Verified: 111 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Restore configured provider models
+
+- Matched catalog provider aliases such as `opencode`/`opencode-zen` and
+  `zai`/`z-ai` when building the daemon model list.
+- Kept the configured provider id in the picker and switch request so the
+  selected model uses the correct endpoint.
+- Added coverage for the alias matching boundary.
+
+Verified: targeted Rust provider test, `cargo fmt --all`, and
+`git diff --check`.
+
+## 2026-07-18 — Bound file viewer code width
+
+- Constrained the inner Shiki `<pre>` element, which was still able to impose
+  its intrinsic width on the surrounding workbench.
+- Made wrapped lines the default for file previews so long JSON and generated
+  files cannot create a horizontal layout jump. The toggle remains available
+  for intentional horizontal inspection inside the viewer.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Bounded file viewer
+
+- Separated file previews from chat code blocks so the editor uses a compact,
+  full-height viewer rather than a card that can dictate the workbench width.
+- Added editor-style line numbers and preserved syntax highlighting without
+  changing message code-block rendering.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — File viewer line wrapping
+
+- Added a per-file Wrap toggle for long lines.
+- Kept horizontal overflow contained by default for code readability, with
+  wrapped mode available for prose and configuration files.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — File viewer overflow containment
+
+- Added min-width and overflow boundaries across the nested explorer/editor
+  flex surfaces so long highlighted files cannot push the entire workbench
+  horizontally.
+- Kept horizontal scrolling local to the file viewer when wrapping is off.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Nested file pane sizing
+
+- Forced the editor column and highlighted code surface onto shrinkable flex
+  bases so files such as large JSON manifests cannot move the whole workbench
+  horizontally.
+- Kept overflow local to the viewer while preserving the Wrap toggle.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Restore file viewer width
+
+- Corrected the containment pass so vertical editor children retain full
+  width while the surrounding horizontal flex boundaries remain shrinkable.
+- Restored visible file content without reintroducing workbench-wide overflow.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Bound file viewer code width
+
+- Constrained the inner Shiki `<pre>` element, which was still able to impose
+  its intrinsic width on the surrounding workbench.
+- Made wrapped lines the default for file previews so long JSON and generated
+  files cannot create a horizontal layout jump. The toggle remains available
+  for intentional horizontal inspection inside the viewer.
+
+Verified: 110 web UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Add desktop install and daemon cleanup recipes
+
+- Added `just desktop-install` to build and copy the release app into
+  `/Applications/mew.app` on macOS.
+- Added `just stop-all-daemons` to stop mew bridges and daemon processes on
+  the development ports, including stale desktop sidecars.
+
+Verified: justfile dry-run checks and `git diff --check`.
+
+## 2026-07-18 — Add in-app workspace folder browser
+
+- Replaced the native directory dialog with a shared web/Tauri folder browser
+  in the new-session project picker.
+- Added a daemon filesystem-listing request that starts at the user’s home
+  directory, returns directories only, and rejects protected macOS locations
+  such as `/System`, `/Library`, `/private`, and `/Volumes`.
+- Kept manual path entry for deliberate paths outside the picker’s normal
+  browsing boundary.
+
+Verified: protocol and daemon checks, web-client build, UI TypeScript check,
+and `git diff --check`.
+
+## 2026-07-18 — Ignore filesystem browsing in TUI capture
+
+- Added the new filesystem directory listing to the TUI capture message
+  naming table as an explicit no-op. Folder browsing is owned by the web and
+  desktop surfaces and does not change TUI state.
+
+Verified: `cargo check -p mew`, format check, and `git diff --check`.
+
+## 2026-07-18 — Harden folder picker review findings
+
+- Fixed the trailing comma in the Tauri capability manifest.
+- Added filesystem boundary tests, protocol round-trip coverage, and a picker
+  interaction test covering folder navigation and the parent-folder action.
+- Added an in-app up-arrow control that stays within the picker’s home root.
+
+Verified: daemon and protocol tests, picker tests, UI TypeScript check, JSON
+validation, and `git diff --check`.
+
+## 2026-07-18 — Recover from unavailable remembered sessions
+
+- Kept the unavailable-session explanation visible while restoring the
+  start-new-session action on the home route.
+- A stale or daemon-mismatched remembered session can no longer strand the
+  production app before the project/folder flow is reachable.
+
+Verified: 112 UI tests, UI TypeScript check, production UI build, and
+`git diff --check`.
+
+## 2026-07-18 — Persist desktop daemon logs
+
+- Stopped discarding stdout and stderr from daemons launched by the Tauri
+  host.
+- Release and configured daemon launches now append to
+  `~/.config/mew/logs/desktop-daemon.log` for provider/config/session startup
+  diagnostics.
+
+Verified: Tauri cargo check, Rust formatting, and `git diff --check`.
+
+## 2026-07-19 — Preserve full daemon provider errors
+
+- Session creation and resume failures now log the complete anyhow error chain
+  and return it to the frontend, instead of collapsing failures to only
+  `build provider`.
+
+Verified: daemon cargo check, Tauri cargo check, formatting, and
+`git diff --check`.
+
+## 2026-07-19 — Avoid blocking on an uncredentialed remembered provider
+
+- Provider credential lookup now tries the configured credential reference,
+  then the provider id for aliased providers such as `opencode-go`.
+- Implicit daemon startup falls back to another configured provider with valid
+  credentials when the remembered provider is unavailable.
+- Explicit provider selections continue to return a clear credential error.
+
+Verified: provider-resolution tests, `cargo check -p mew`, and
+`git diff --check`.
+
+## 2026-07-19 — Gate in-app browser tools to desktop sessions
+
+- Added a distinct desktop client kind and made the shared React client
+  advertise it only when running inside Tauri.
+- Added explicit browser tools backed by the existing `agent-browser`/CDP
+  session, with execution-time capability checks and untrusted-page output
+  labeling.
+- Browser protocol commands now reject TUI, web, CLI, and mobile clients.
+- Desktop attachment enables browser tools for the session; detaching the
+  final desktop client disables them again.
+- Added a persisted system-level capability notice when desktop browser
+  access is introduced to an existing session. Notices are deduplicated by a
+  capability marker in the persisted message history.
+- Added a `System` message role and provider translation for OpenAI,
+  Anthropic, and Responses adapters. TUI rendering hides these notices.
+
+Verified: focused Rust tests for message, protocol, tools, agent, daemon
+library, and TUI packages; web-client TypeScript build; formatting and
+`git diff --check`. The first combined test attempt hit the machine disk
+limit while compiling daemon integration tests, so generated Cargo artifacts
+were cleaned before the focused rerun.
+
+## 2026-07-19 — Load the bundled web fonts
+
+- Added `@font-face` declarations for the bundled MiSans, Banga, and
+  IoskeleyMono assets.
+- Pointed Tailwind, body text, headings, code, and typeset typography at those
+  real families instead of unbundled placeholder names.
+- Added the missing typeset heading fallback token.
+
+Verified: production UI build, UI TypeScript check, and `git diff --check`.
+
+## 2026-07-19 — Add iOS-matched font preferences to web and desktop
+
+- Added the iOS font choices to web settings: System, Mi Sans, Junicode, and
+  OFL Goudy.
+- Mi Sans remains the default; the selection persists in local storage and
+  applies immediately through the shared typography variables.
+- Added the matching Junicode and OFL Goudy assets to the web bundle.
+
+Verified: 112 UI tests, production UI build, UI TypeScript check, and
+`git diff --check`.
+
+## 2026-07-19 — Add explicit remote daemon and desktop remote modes
+
+- Added a navigable settings surface with a dedicated Remote access section
+  and a prominent warning describing remote filesystem, command, session, and
+  relay exposure.
+- Added `mew daemon --remote`, which keeps the local Unix/TCP listener and
+  runs an authenticated iroh listener beside it. The existing `--iroh` path
+  remains available for mobile compatibility.
+- Added remote protocol authentication, explicit `RemoteScope` enforcement,
+  `client_kind=remote` validation, pairing-token loading, and restrictive
+  permissions for persisted pairing material.
+- Added desktop supervisor support for enabling/disabling app-lifetime remote
+  access and shipped the iroh feature in desktop sidecar builds.
+
+Verified: `cargo clippy -p mew-daemon -p mew --features iroh -- -D warnings`,
+focused daemon scope tests, iroh integration-test compilation, Tauri host
+check, UI TypeScript check, 112 UI tests, production UI build, and
+`git diff --check`.
+
+## 2026-07-19 — Harden remote pairing and settings lifecycle
+
+- Reused the existing `RemoteAccessStore` as the pairing boundary instead of
+  introducing a second raw-token store. Pairing tokens are short-lived,
+  single-use, and persisted only as SHA-256 digests.
+- Remote iroh connections can now resolve their granted scope from a pairing
+  token or an already paired device. The daemon rejects protocol messages
+  until the remote handshake succeeds.
+- `mew pair` now creates an invite without binding a second iroh endpoint, so it
+  works while `mew daemon --remote` is already running.
+- The settings toggle is wired to the Tauri supervisor and refuses to enable
+  desktop remote access when the app is attached to an externally owned
+  daemon.
+
+Verified: `cargo check -p mew --features iroh`, `cargo test -p mew-daemon`,
+`cargo clippy -p mew-daemon -p mew --features iroh -- -D warnings`, Tauri
+`cargo check`, UI TypeScript check, focused UI tests, and `git diff --check`.
+
+The final smoke pass also completed `cargo test --manifest-path
+mew-web-ui/src-tauri/Cargo.toml supervisor --quiet`, the full web production
+build, and `cargo test -p mew-protocol`.
+
+## 2026-07-19 — Close remote lifecycle and protocol review gaps
+
+- Removed the obsolete raw remote-token persistence path. Pairing now has one
+  state store, one-time hashed invites, device metadata, expiry, revocation,
+  and explicit hosting state.
+- Added protocol roundtrip coverage for the remote handshake and made the
+  desktop supervisor restore its prior setting if a remote-mode restart fails.
+- Desktop-launched remote daemons now persist desktop ownership mode, while
+  the CLI remains the long-lived daemon mode. `--iroh` and `--remote` are
+  mutually exclusive and their user-facing guidance is distinct.
+
+Verified: focused daemon, iroh, protocol, mobile-core, Tauri, web-client, and
+React UI tests/builds; formatting and `git diff --check`.
+
+Final review follow-up:
+
+- Legacy allowlisted iroh clients can no longer claim the desktop-only client
+  kind, and control-scope authorization is an explicit current-message list
+  that fails closed for future protocol additions.
+- Remote state mutations use a short-lived cross-process lock and refresh from
+  disk before read-modify-write operations. Pairing readiness, listener failure
+  cleanup, and private key/allowlist permission hardening are covered in the
+  implementation path.
+
+Verified: daemon checks, iroh integration tests, protocol tests, Tauri check,
+formatting, and `git diff --check` after the final review fixes.
+
+## 2026-07-19 — Fix live remote pairing invites
+
+- Included the one-time pairing token in the QR URL consumed by mobile and
+  remote clients.
+- Refreshed the daemon's file-backed access state during authorization so a
+  `mew pair` run can authorize a live `--remote` daemon without a restart.
+- Removed the legacy iroh allowlist bypass from explicit remote mode; it now
+  requires a pairing token or an active paired device.
+- Added regression coverage for invite payloads and cross-process pairing
+  refresh.
+
+Verified: focused iroh, daemon, and CLI tests; Tauri check; formatting; and
+`git diff --check`.
+
+## 2026-07-19 — Repair daemon listener structure and observe scope
+
+- Restored the missing close for the Unix daemon accept loop after the remote
+  capability guard was misplaced during the lifecycle pass.
+- Kept observe-only remote access read-only by rejecting `NewSession` and added
+  a regression test for that boundary.
+
+Verified: daemon remote tests, iroh integration tests, daemon and CLI clippy,
+Tauri check, TypeScript, 112 React tests, and `git diff --check`.
+
+# 2026-07-19 — Invert CEF/WKWebView layering, delete AppKit menus
+
+## Summary
+
+The embedded CEF browser used to paint above the Tauri WKWebView, so any HTML
+overlay (settings dialog, cmd+k palette, surface picker, browser-tools
+popover) was clipped by the browser rect, and the two menus that had to sit
+above the browser were AppKit `NSMenu`s. Implemented PLAN.md: CEF now sits
+permanently below a transparent WKWebView, the React app leaves a transparent
+hole where the CEF viewport lives, and the native menu paths are deleted in
+favor of the existing HTML surfaces on every host.
+
+## What changed
+
+- `mew-web-ui/src-tauri/src/native_layering.rs` (new): `NativeLayeringGuard`
+  (pure, unit-tested — orders each CEF native view handle exactly once,
+  re-orders when CEF recreates the view) and `order_cef_below_webview`, which
+  resolves the WKWebView via Tauri's `with_webview` and the content view via
+  `ns_view()`, verifies they share a superview, and calls
+  `addSubview_positioned_relativeTo(cef, Below, wkwebview)`. Failures are
+  logged, never fatal.
+- `native/cef-host/src/embed.rs`: added `CefEmbedController::native_view_handle()`
+  (macOS impl + non-macOS stub returning 0).
+- `mew-web-ui/src-tauri/src/lib.rs`: ordering is folded into
+  `cef_browser_set_rect` with `visible: true` (the owner-claim moment). The
+  guard decision and `mark_ordered` both run outside AppKit calls; the guard
+  pointer is captured by the main-thread closure as a raw address of the
+  managed `CefEmbedState` field, which outlives scheduled callbacks. Deleted
+  the 6 `native_*_menu_*` commands, their impl shims, and
+  `NativeMenuRectPayload`; removed `mod native_workbench_menu;` and deleted
+  `native_workbench_menu.rs`.
+- `mew-web-ui/src-tauri/tauri.conf.json`: `"transparent": true` on the main
+  window and `"macOSPrivateApi": true` under `app` (required by Tauri for
+  macOS webview transparency; blocks Mac App Store distribution, which is
+  fine since mew ships directly). `Cargo.toml` gained the matching
+  `macos-private-api` tauri feature; `objc2-app-kit` features trimmed to just
+  `NSView` (NSMenu/NSMenuItem/NSResponder went away with the menus).
+- Frontend: `host.ts` sets `data-host="desktop"|"web"` on `<html>` during
+  `initializeHost()` and lost all 8 native-menu wrappers plus the two event
+  types. `index.css` makes `body` transparent only under `[data-host="desktop"]`.
+- `browser-panel.tsx`: viewport div is `bg-transparent` once CEF reports
+  available (muted placeholder otherwise), the closed-browser empty state
+  carries its own `bg-muted/20`, and a comment marks the hole as untouchable.
+  The native browser-tools path (state, listener effect, button ref) is gone;
+  the tools button always toggles the HTML popover.
+- `right-rail.tsx`: the "+" button always opens the `CommandDialog` surface
+  picker; native menu state/listener/ref deleted.
+- `__tests__/host.test.ts`: dropped the native-menu no-op test, added a
+  `data-host` attribute test. `right-rail.test.tsx` needed no changes — the
+  picker was already the tested path.
+
+## Verification
+
+- `cargo test` on `mew-web-ui/src-tauri`: 15 passed (3 new layering-guard
+  tests). `mew-cef-host`: 1 passed. Clippy `-D warnings` clean on both;
+  `cargo fmt --check` clean.
+- `pnpm --filter mew-web-ui test`: 112/112. `pnpm --filter mew-web-ui build`
+  and `tsc --noEmit` clean.
+- Not yet done: the live desktop smoke (`just desktop-dev`; hit-testing
+  through the transparent hole is the open risk — if WKWebView swallows
+  clicks over the hole, the fallback is dynamic ordering for the browser
+  region, per PLAN.md risk #1) and `pnpm desktop:verify:cef`. If a desktop
+  flash-through shows during resize, paint the NSWindow background to the
+  theme color (PLAN.md step 2 contingency).
+
+# 2026-07-19 — Fix inverted transparency: opaque chrome, truly see-through WKWebView
+
+## Summary
+
+First pass at the layering inversion got the transparency backwards: the
+body was made transparent so genuine gaps in the page chrome (margins around
+the floating session rail and inset panels) showed the desktop, while the
+CEF hole itself stayed opaque white because wry's `transparent` flag only
+sets the private `drawsBackground` config key — it never sets
+`opaque = false` on the WKWebView or clears its layer background (verified
+in wry 0.55.1 `wkwebview/mod.rs`; the `setOpaque(false)` +
+`setBackgroundColor` path only runs for `background_color`, not
+`transparent`).
+
+Fix, both directions:
+
+- `native_layering.rs::make_webview_transparent` (called at the start of
+  `initialize_cef`) uses `with_webview` to set `setOpaque(false)` via
+  msg_send (WKWebView responds to it; not a public NSView property) and
+  clears the layer background color. Now the view composites nothing where
+  the page doesn't paint, so the CEF view below shows through the hole.
+- CSS: removed the `[data-host="desktop"] body { background: transparent }`
+  rule; the body keeps `var(--background)`. The sidebar wrapper in
+  `ui/sidebar.tsx` gained an explicit `bg-background` since it was relying
+  on the body paint behind it. Only the `browser-panel` viewport hole is
+  transparent, so only the CEF rect shows through.
+
+The `data-host` attribute stays (harmless, tested hook for future
+host-specific CSS).
+
+## Verification
+
+- mew-desktop: 15/15 tests, clippy `-D warnings` clean, fmt clean.
+- mew-web-ui: 112/112 vitest, `tsc --noEmit` clean.
+- Still owed: live `just desktop-dev` smoke — the hole should now show the
+  CEF page, the rest of the window should be fully opaque, and clicks in the
+  hole must reach CEF (PLAN.md risk #1).
+
+# 2026-07-19 — WKWebView transparency take 3: drawsBackground on the view instance
+
+## Summary
+
+After the opaque-chrome fix, the window background looked right but the CEF
+hole still painted the webview's default background. Cause: wry only sets
+`drawsBackground = NO` on the WKWebViewConfiguration at construction; on the
+live view the property that matters is the same private KVC key set on the
+WKWebView *instance* (exactly what wry's own `set_background_color` runtime
+path does in `wkwebview/mod.rs`: "On the webview instance (vs config) for
+runtime changes"). The previous `setOpaque(false)` msg_send was a no-op.
+
+`make_webview_transparent` now mirrors wry's runtime path: cast the handle to
+`WKWebView`, `setValue:forKey:` `drawsBackground = NO` on the instance,
+`setUnderPageBackgroundColor(clearColor)`, and clear the layer background
+color. Added `objc2-web-kit` 0.3 and the `NSColor`/`NSString` features to the
+desktop crate for this.
+
+## Verification
+
+- mew-desktop: 15/15 tests, clippy `-D warnings` clean, fmt clean.
+- Still owed: live `just desktop-dev` smoke — hole should finally show the
+  CEF page; clicks in the hole must reach CEF (PLAN.md risk #1).
+
+# 2026-07-19 — Re-assert CEF layering on every visible claim
+
+## Summary
+
+Instance-level `drawsBackground = NO` at setup still wasn't enough: WebKit
+re-enables background drawing as the page renders, so the hole went opaque
+again after the first paint. The layering pass is now a steady-state
+re-assertion instead of a one-shot:
+
+- `native_layering::ensure_cef_layering` (renamed from
+  `order_cef_below_webview`) re-applies webview transparency AND the
+  CEF-below-WKWebView ordering on every call; all AppKit calls inside are
+  idempotent.
+- `cef_browser_set_rect` with `visible: true` now runs it on every claim
+  (React's ResizeObserver fires these continuously while the browser tab is
+  visible), not just once per CEF view handle. The `NativeLayeringGuard` is
+  retained only as a record of which handles have been seen (and its unit
+  tests); it no longer gates the pass.
+- `make_webview_transparent` at setup stays as the initial pass before the
+  first claim.
+
+## Verification
+
+- mew-desktop: 15/15 tests, clippy `-D warnings` clean, fmt clean.
+- Still owed: live smoke — hole should stay transparent while the page
+  renders; clicks in the hole must reach CEF.
+
+# 2026-07-19 — Layering inversion abandoned: CEF stays on top (WebKit composites opaque)
+
+## Summary
+
+The PLAN.md goal — CEF below a transparent WKWebView with a transparent React
+hole — is **not viable on this WebKit build**. Proven via live hierarchy
+dumps: CEF reorders below the WKWebView correctly (`drawsBackground=0`, layer
+bg null, CEF at subview [0]), yet the browser stays invisible until the
+WKWebView is moved below CEF — at which point CEF composites fine. The
+WebContent process paints an opaque background into the webview's remote
+layer tree, and no AppKit-level transparency on the view punches through it.
+`setDrawsBackground:` is gone from this WebKit (unrecognized selector), and
+`setValue:forKey: drawsBackground` only writes wry's KVO subclass mirror.
+
+What shipped instead (the stable baseline):
+
+- `native_layering.rs`: stripped to `ensure_cef_on_top` — asserts CEF is the
+  content view's topmost subview on every visible claim (CEF adds new views
+  on top; nothing reorders it back). Guard + tests retained.
+- `embed.rs`: browser is now created with `window_info.hidden = 1` so no
+  window flashes before React claims it (kept from the underlay experiment —
+  harmless, and CEF composites on top regardless).
+- Reverted everything transparency-related: `tauri.conf.json` back to no
+  `transparent`/`macOSPrivateApi`, Cargo back to no `macos-private-api`
+  feature, `objc2-app-kit` trimmed to just `NSView`, dropped the
+  `objc2`/`objc2-foundation`/`objc2-web-kit` deps. Frontend viewport hole,
+  `data-host` hook, CSS transparency, sidebar-wrapper change all reverted.
+- The AppKit-menu deletion from the earlier step stands (HTML popover +
+  CommandDialog are the only menu implementations).
+
+## Verified
+
+- mew-desktop: 15/15 tests. mew-cef-host: 1/1. Clippy `-D warnings` both.
+  fmt both.
+- mew-web-ui: 111/111 vitest, `tsc --noEmit`, build. All green.
+- App launches clean (the earlier panic was objc2's bool→BOOL encode check
+  aborting across the FFI boundary; gone with the transparency code).
+
+## Still open (the real overlay problem)
+
+HTML overlays that overlap the browser rect (browser-tools popover, surface
+picker, cmd-K palette, settings, sheets, toasts) are still under CEF. The
+working approach, when prioritized: a native click-through NSView shield
+above CEF that React drives via IPC with overlay rects/open state. Simpler
+intermediate: hide the CEF surface while full-window modals (settings,
+palette) are open, since only the tools popover + surface picker overlap the
+browser during normal use.

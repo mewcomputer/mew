@@ -22,6 +22,15 @@ export interface ThemeDef {
 
 export const THEMES: ThemeDef[] = themes as ThemeDef[];
 
+export const FONT_CHOICES = [
+  { id: "system", name: "System", description: "Use the platform font." },
+  { id: "mi-sans", name: "Mi Sans", description: "mew's default sans-serif." },
+  { id: "junicode", name: "Junicode", description: "A literary serif face." },
+  { id: "goudy", name: "OFL Goudy", description: "A warm classic serif face." },
+] as const;
+
+export type FontChoiceId = (typeof FONT_CHOICES)[number]["id"];
+
 // ---------------------------------------------------------------------------
 // Color utilities (for light/dark detection only)
 // ---------------------------------------------------------------------------
@@ -53,12 +62,16 @@ interface ThemeContextValue {
   theme: ThemeDef;
   /** Whether the current theme is light or dark. */
   mode: ResolvedMode;
+  fontId: FontChoiceId;
+  setFontId: (id: FontChoiceId) => void;
 }
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 const STORAGE_KEY = "mew-theme-id";
 const DEFAULT_THEME = "catppuccin-mocha";
+const FONT_STORAGE_KEY = "mew-font-choice";
+const DEFAULT_FONT: FontChoiceId = "mi-sans";
 
 function getInitialThemeId(): string {
   if (typeof window === "undefined") return DEFAULT_THEME;
@@ -67,8 +80,17 @@ function getInitialThemeId(): string {
   return DEFAULT_THEME;
 }
 
+function getInitialFontId(): FontChoiceId {
+  if (typeof window === "undefined") return DEFAULT_FONT;
+  const stored = localStorage.getItem(FONT_STORAGE_KEY);
+  return FONT_CHOICES.some((font) => font.id === stored)
+    ? (stored as FontChoiceId)
+    : DEFAULT_FONT;
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [themeId, setThemeIdState] = useState<string>(getInitialThemeId);
+  const [fontId, setFontIdState] = useState<FontChoiceId>(getInitialFontId);
 
   const theme = THEMES.find((t) => t.id === themeId) ?? THEMES[0]!;
   const mode: ResolvedMode =
@@ -79,12 +101,21 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     localStorage.setItem(STORAGE_KEY, id);
   };
 
+  const setFontId = (id: FontChoiceId) => {
+    setFontIdState(id);
+    localStorage.setItem(FONT_STORAGE_KEY, id);
+  };
+
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme.id);
   }, [theme]);
 
+  useEffect(() => {
+    document.documentElement.setAttribute("data-font", fontId);
+  }, [fontId]);
+
   return (
-    <ThemeContext.Provider value={{ themeId, setThemeId, theme, mode }}>
+    <ThemeContext.Provider value={{ themeId, setThemeId, theme, mode, fontId, setFontId }}>
       {children}
     </ThemeContext.Provider>
   );

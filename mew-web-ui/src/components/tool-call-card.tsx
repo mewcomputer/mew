@@ -88,14 +88,14 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
   return (
     <div
       className={cn(
-        "max-w-[85%] rounded-lg border bg-card",
+        "min-w-0 max-w-[85%] rounded-lg border bg-card",
         state === "error" && "border-destructive",
         state !== "error" && "border-border",
       )}
     >
       <button
         onClick={() => setExpanded(!expanded)}
-        className="motion-pressable flex w-full items-center gap-2 px-4 py-2 text-left"
+        className="motion-pressable flex min-w-0 w-full items-center gap-2 px-4 py-2 text-left"
       >
         {expanded ? (
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -104,9 +104,9 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
         )}
         <StateIcon state={state} />
         <Terminal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        <span className="font-mono text-sm">{part.toolName}</span>
+        <span className="min-w-0 shrink truncate font-mono text-sm">{part.toolName}</span>
         {summary && (
-          <span className="truncate text-xs text-muted-foreground">{summary}</span>
+          <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{summary}</span>
         )}
         <span className={cn("ml-auto shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium uppercase", sens.className)}>
           {sens.label}
@@ -135,7 +135,7 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
             >
               {copied ? <CheckCircle2 className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
             </button>
-            <pre className="max-h-32 overflow-auto px-4 py-2 text-xs text-muted-foreground">
+            <pre className="max-h-32 max-w-full overflow-auto px-4 py-2 text-xs text-muted-foreground">
               {toolOutput}
             </pre>
           </div>
@@ -143,7 +143,7 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
       )}
 
       {expanded && (
-        <div className="border-t border-border px-4 py-2">
+        <div className="min-w-0 border-t border-border px-4 py-2">
           {part.input != null && (
             <div className="mb-2">
               <div className="flex items-center justify-between">
@@ -160,7 +160,7 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
               {(part.toolName === "edit" || part.toolName === "write") && part.input && typeof part.input === "object" ? (
                 <ToolInputDiff toolName={part.toolName} input={part.input as Record<string, unknown>} />
               ) : (
-                <pre className="mt-1 overflow-x-auto rounded bg-muted p-2 text-xs">
+                <pre className="mt-1 max-w-full overflow-x-auto rounded bg-muted p-2 text-xs">
                   {JSON.stringify(part.input, null, 2)}
                 </pre>
               )}
@@ -180,7 +180,7 @@ export function ToolCallCard({ part }: { part: Extract<MessagePart, { type: "too
                   {copied ? "copied" : "copy"}
                 </button>
               </div>
-              <pre className="mt-1 max-h-64 overflow-auto rounded bg-muted p-2 text-xs">
+              <pre className="mt-1 max-h-64 max-w-full overflow-auto rounded bg-muted p-2 text-xs">
                 {toolOutput}
               </pre>
             </div>
@@ -229,13 +229,13 @@ function ToolInputDiff({ toolName, input }: { toolName: string; input: Record<st
           <FilePlus className="h-3.5 w-3.5" />
           <span>Write {text.length} characters</span>
         </div>
-        <pre className="max-h-40 overflow-auto rounded bg-muted p-2 text-[10px]">{text}</pre>
+        <pre className="max-h-40 max-w-full overflow-auto rounded bg-muted p-2 text-[10px]">{text}</pre>
       </div>
     );
   }
 
   return (
-    <pre className="mt-1 overflow-x-auto rounded bg-muted p-2 text-xs">
+    <pre className="mt-1 max-w-full overflow-x-auto rounded bg-muted p-2 text-xs">
       {JSON.stringify(input, null, 2)}
     </pre>
   );

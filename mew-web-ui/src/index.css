@@ -1,8 +1,100 @@
 @import "tailwindcss";
+@import "./typeset.css";
 @import "generated-themes.css";
 
 @custom-variant dark (&:is(.dark *));
 @plugin "tailwindcss-animate";
+
+/* These files are bundled with the shared web and Tauri builds. Keep the
+   family names in one place so Tailwind, typeset, and handwritten CSS resolve
+   to the same actual faces instead of silently falling back to system fonts. */
+@font-face {
+  font-family: "MiSans";
+  src: url("/fonts/MiSansLatin-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "MiSans";
+  src: url("/fonts/MiSansLatin-Medium.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "MiSans";
+  src: url("/fonts/MiSansLatin-Semibold.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "MiSans";
+  src: url("/fonts/MiSansLatin-Bold.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Banga";
+  src: url("/fonts/Banga-VF.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IoskeleyMono";
+  src: url("/fonts/IoskeleyMono-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Junicode";
+  src: url("/fonts/JunicodeVF-Roman.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Junicode";
+  src: url("/fonts/JunicodeVF-Italic.ttf") format("truetype");
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "OFLGoudy";
+  src: url("/fonts/OFLGoudyStMTT.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "OFLGoudy";
+  src: url("/fonts/OFLGoudyStMTT-Italic.ttf") format("truetype");
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IoskeleyMono";
+  src: url("/fonts/IoskeleyMono-Bold.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
 
 /* Context inspector color palette — shared across all themes. */
 :root {
@@ -28,12 +120,13 @@
 }
 
 @theme inline {
-  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
-  --font-serif: "Cormorant Variable", ui-serif, Georgia, serif;
-  --font-display: "Valley Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "MiSans", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: ui-serif, Georgia, serif;
+  --font-display: "Banga", "MiSans", ui-sans-serif, system-ui, sans-serif;
   --font-mono:
-    "Maple Mono", ui-monospace, SF Mono, SF Mono Regular, Consolas,
+    "IoskeleyMono", ui-monospace, SF Mono, SF Mono Regular, Consolas,
     "Liberation Mono", Menlo, Courier, monospace;
+  --font-heading: var(--font-sans);
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -96,6 +189,36 @@
   --color-markdown-link-text: var(--markdown-link-text);
 }
 
+/* The choices mirror the iOS app. Mi Sans is the shared default. */
+[data-font="system"] {
+  --font-sans: ui-sans-serif, system-ui, sans-serif;
+  --font-display: ui-sans-serif, system-ui, sans-serif;
+}
+
+[data-font="mi-sans"] {
+  --font-sans: "MiSans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Banga", "MiSans", ui-sans-serif, system-ui, sans-serif;
+}
+
+[data-font="junicode"] {
+  --font-sans: "Junicode", ui-serif, Georgia, serif;
+  --font-display: "Junicode", ui-serif, Georgia, serif;
+}
+
+[data-font="goudy"] {
+  --font-sans: "OFLGoudy", ui-serif, Georgia, serif;
+  --font-display: "OFLGoudy", ui-serif, Georgia, serif;
+}
+
+.typeset-docs {
+  --typeset-font-body: var(--font-sans);
+  --typeset-font-heading: var(--font-sans);
+  --typeset-font-mono: var(--font-mono);
+  --typeset-size: 15px;
+  --typeset-leading: 1.75;
+  --typeset-flow: 1.25em;
+}
+
 h1,
 h2,
 h3 {
@@ -110,6 +233,10 @@ body {
   background-color: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
+}
+
+.chat-scroll-container {
+  scrollbar-gutter: stable;
 }
 
 button:not(:disabled) {
@@ -130,6 +257,75 @@ button:focus-visible,
 
 .motion-pressable:not(:disabled):active {
   transform: scale(0.97);
+}
+
+.shiki niccookadsacode {
+  line-height: 0.75em;
+  padding-top: 0.75em;
+}
+
+.file-viewer-code {
+  counter-reset: file-line;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+  contain: inline-size;
+}
+
+.file-viewer-code .line {
+  display: block;
+  counter-increment: file-line;
+}
+
+.file-viewer-code .line::before {
+  content: counter(file-line);
+  display: inline-block;
+  width: 2.5rem;
+  margin-right: 1rem;
+  color: color-mix(in oklch, var(--muted-foreground) 58%, transparent);
+  user-select: none;
+  text-align: right;
+}
+
+.file-viewer-code-wrapped,
+.file-viewer-code-wrapped .line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Shiki owns the inner <pre>. Keep its intrinsic width from resizing the
+   workbench, and make the default file view safe for long generated lines. */
+.file-viewer-code > pre {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  overflow-x: auto;
+}
+
+.file-viewer-code-fill > pre {
+  min-height: 100%;
+  flex: 1 1 auto;
+}
+
+.file-viewer-code > pre > code {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.file-viewer-code-wrapped > pre,
+.file-viewer-code-wrapped > pre > code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.file-viewer-code-wrapped > pre {
+  overflow-x: hidden;
 }
 
 .motion-enter {

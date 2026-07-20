@@ -77,6 +77,7 @@ impl std::error::Error for CoreError {}
 pub struct DialInfo {
     pub node_id: String,
     pub name: Option<String>,
+    pub pairing_token: Option<String>,
 }
 
 /// Per spec notes #2 and #11: keep dial-info parsing behind this one
@@ -84,13 +85,17 @@ pub struct DialInfo {
 #[uniffi::export]
 pub fn parse_dial_info(payload: String) -> Result<DialInfo, CoreError> {
     parse_dial_info_impl(&payload)
-        .map(|(node_id, name)| DialInfo { node_id, name })
+        .map(|(node_id, name, pairing_token)| DialInfo {
+            node_id,
+            name,
+            pairing_token,
+        })
         .map_err(|e| CoreError::ParseFailed {
             reason: e.to_string(),
         })
 }
 
-fn parse_dial_info_impl(payload: &str) -> Result<(String, Option<String>)> {
+fn parse_dial_info_impl(payload: &str) -> Result<(String, Option<String>, Option<String>)> {
     let payload = payload.trim();
 
     // URL-scheme format: computer.mew.mew://<node_id>
@@ -99,10 +104,14 @@ fn parse_dial_info_impl(payload: &str) -> Result<(String, Option<String>)> {
         if rest.is_empty() {
             return Err(anyhow::anyhow!("computer.mew.mew:// payload is empty"));
         }
+        let (node_id, pairing_token) = rest
+            .split_once("?token=")
+            .map(|(node_id, token)| (node_id, Some(token.to_string())))
+            .unwrap_or((rest, None));
         // Validate it's a real NodeId.
-        iroh::PublicKey::from_str(rest)
+        iroh::PublicKey::from_str(node_id)
             .map_err(|e| anyhow::anyhow!("invalid NodeId in URL scheme: {e}"))?;
-        return Ok((rest.to_string(), None));
+        return Ok((node_id.to_string(), None, pairing_token));
     }
 
     // Legacy versioned format: mew001:<node_id> or mew001:{json}
@@ -113,18 +122,19 @@ fn parse_dial_info_impl(payload: &str) -> Result<(String, Option<String>)> {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("mew001 payload missing node_id field"))?;
             let name = json.get("name").and_then(|v| v.as_str()).map(String::from);
-            return Ok((node_id.to_string(), name));
+            let token = json.get("token").and_then(|v| v.as_str()).map(String::from);
+            return Ok((node_id.to_string(), name, token));
         }
         if rest.is_empty() {
             return Err(anyhow::anyhow!("mew001 payload is empty"));
         }
-        return Ok((rest.to_string(), None));
+        return Ok((rest.to_string(), None, None));
     }
 
     // Raw NodeId — validate it parses as a PublicKey.
     iroh::PublicKey::from_str(payload)
         .map_err(|e| anyhow::anyhow!("invalid NodeId '{payload}': {e}"))?;
-    Ok((payload.to_string(), None))
+    Ok((payload.to_string(), None, None))
 }
 
 use std::str::FromStr;
@@ -248,6 +258,15 @@ impl MobileCore {
         self.registry.lock().unwrap().add(node_id, name)
     }
 
+    /// Add a daemon from an invite payload and retain its pairing credential
+    /// for reconnects.
+    pub fn add_daemon_with_token(&self, node_id: String, name: String, token: String) -> DaemonId {
+        self.registry
+            .lock()
+            .unwrap()
+            .add_with_token(node_id, name, token)
+    }
+
     /// Remove a daemon from the registry and disconnect.
     pub fn remove_daemon(&self, id: DaemonId) {
         self.registry.lock().unwrap().remove(&id);
@@ -281,6 +300,7 @@ impl MobileCore {
         let endpoint = self.endpoint.clone();
         let daemon_id = id.node_id.clone();
         let node_id = entry.node_id.clone();
+        let pairing_token = entry.pairing_token.clone();
 
         // Sync the listener into ConnState so the background task reads
         // it per-event (supports set_listener after connect).
@@ -300,6 +320,7 @@ impl MobileCore {
                     &endpoint,
                     &daemon_id,
                     &node_id,
+                    pairing_token.as_deref(),
                     &mut rx,
                     &conn_state_for_task,
                 )
@@ -701,6 +722,7 @@ async fn connect_and_run(
     endpoint: &Endpoint,
     daemon_id: &str,
     node_id: &str,
+    pairing_token: Option<&str>,
     rx: &mut mpsc::UnboundedReceiver<ClientMessage>,
     conn_state: &Arc<ConnState>,
 ) -> Result<ConnOutcome> {
@@ -745,6 +767,16 @@ async fn connect_and_run(
         daemon: daemon_id.to_string(),
         status: DaemonStatus::Connected,
     });
+
+    // Iroh connections must complete the daemon's transport-level handshake
+    // before sending normal protocol messages. Existing paired mobile nodes
+    // authenticate through the daemon's trusted-node record, so they do not
+    // need a user token here.
+    let hello = mew_protocol::encode_json(&ClientMessage::RemoteHello {
+        token: pairing_token.map(str::to_owned),
+        device_name: "mew mobile".to_string(),
+    })?;
+    ws.send(Message::Text(hello)).await?;
 
     // Send Ping to get daemon version.
     let ping = mew_protocol::encode_json(&ClientMessage::Ping)?;
@@ -1683,10 +1715,16 @@ fn translate_message(
         | ServerMessage::GroupList { .. }
         | ServerMessage::GroupsChanged { .. }
         | ServerMessage::FilePreview { .. }
+        | ServerMessage::FilesystemDirListing { .. }
         | ServerMessage::GitStatusResult { .. }
         | ServerMessage::FsChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }
-        | ServerMessage::FlaggedFilesChanged { .. } => {}
+        | ServerMessage::FlaggedFilesChanged { .. }
+        | ServerMessage::RemoteReady { .. }
+        | ServerMessage::BrowserSnapshot { .. }
+        | ServerMessage::BrowserScreenshot { .. }
+        | ServerMessage::BrowserState { .. }
+        | ServerMessage::BrowserError { .. } => {}
     }
 
     events
@@ -1760,9 +1798,10 @@ mod tests {
     fn test_parse_dial_info_raw_node_id() {
         let key = iroh::SecretKey::generate();
         let node_id = key.public().to_string();
-        let (parsed, name) = parse_dial_info_impl(&node_id).unwrap();
+        let (parsed, name, token) = parse_dial_info_impl(&node_id).unwrap();
         assert_eq!(parsed, node_id);
         assert!(name.is_none());
+        assert!(token.is_none());
     }
 
     #[test]
@@ -1770,9 +1809,10 @@ mod tests {
         let key = iroh::SecretKey::generate();
         let node_id = key.public().to_string();
         let payload = format!("mew001:{node_id}");
-        let (parsed, name) = parse_dial_info_impl(&payload).unwrap();
+        let (parsed, name, token) = parse_dial_info_impl(&payload).unwrap();
         assert_eq!(parsed, node_id);
         assert!(name.is_none());
+        assert!(token.is_none());
     }
 
     #[test]
@@ -1780,9 +1820,10 @@ mod tests {
         let key = iroh::SecretKey::generate();
         let node_id = key.public().to_string();
         let payload = format!(r#"mew001:{{"node_id":"{node_id}","name":"Homelab"}}"#);
-        let (parsed, name) = parse_dial_info_impl(&payload).unwrap();
+        let (parsed, name, token) = parse_dial_info_impl(&payload).unwrap();
         assert_eq!(parsed, node_id);
         assert_eq!(name.as_deref(), Some("Homelab"));
+        assert!(token.is_none());
     }
 
     #[test]
@@ -1811,9 +1852,21 @@ mod tests {
         let key = iroh::SecretKey::generate();
         let node_id = key.public().to_string();
         let payload = format!("computer.mew.mew://{node_id}");
-        let (parsed, name) = parse_dial_info_impl(&payload).unwrap();
+        let (parsed, name, token) = parse_dial_info_impl(&payload).unwrap();
         assert_eq!(parsed, node_id);
         assert!(name.is_none());
+        assert!(token.is_none());
+    }
+
+    #[test]
+    fn test_parse_dial_info_url_scheme_extracts_pairing_token() {
+        let key = iroh::SecretKey::generate();
+        let node_id = key.public().to_string();
+        let payload = format!("computer.mew.mew://{node_id}?token=invite-123");
+        let (parsed, name, token) = parse_dial_info_impl(&payload).unwrap();
+        assert_eq!(parsed, node_id);
+        assert!(name.is_none());
+        assert_eq!(token.as_deref(), Some("invite-123"));
     }
 
     #[test]

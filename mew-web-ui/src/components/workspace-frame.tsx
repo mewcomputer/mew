@@ -86,11 +86,11 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
           } as CSSProperties
         }
       >
-        <div className="flex min-h-0 flex-1">
+        <div className="flex h-full min-h-0 flex-1">
           <SessionRail client={getClient()} />
           {isMobile ? (
             <>
-              <SidebarInset className="flex h-screen min-w-0 flex-1 flex-col overflow-hidden md:m-2 md:ml-0 md:rounded-[var(--radius-shell)] md:shadow-sm">
+              <SidebarInset className="flex h-full min-w-0 flex-1 flex-col overflow-hidden md:m-2 md:ml-0 md:rounded-[var(--radius-shell)] md:shadow-sm">
                 {children}
               </SidebarInset>
               <RightRail
@@ -124,7 +124,7 @@ export function WorkspaceFrame({ children }: { children: ReactNode }) {
                 minSize="30%"
                 className="motion-panel-size min-w-0"
               >
-                <SidebarInset className="flex h-screen min-w-0 flex-1 flex-col overflow-hidden md:m-2 md:ml-0 md:rounded-[var(--radius-shell)] md:shadow-sm">
+                <SidebarInset className="max-h-screen h-full">
                   {children}
                 </SidebarInset>
               </ResizablePanel>

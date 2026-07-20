@@ -182,16 +182,24 @@ pub enum Commands {
         #[arg(long, short = 'D', env = "MEW_DANGEROUS")]
         dangerously_skip_permissions: bool,
 
-        /// Listen on iroh (P2P) instead of Unix socket / TCP.
-        /// Used for remote/mobile access. Requires the `iroh` feature.
+        /// Listen on iroh for legacy mobile access using the authorized-node
+        /// allowlist. Requires the `iroh` feature.
         #[cfg(feature = "iroh")]
         #[arg(long)]
         iroh: bool,
+
+        /// Keep the local daemon listener and also expose this daemon through
+        /// an authenticated iroh remote endpoint. Requires the `iroh` feature.
+        /// Remote access is full-control and should only be enabled after
+        /// reviewing the warning and pairing a trusted device.
+        #[cfg(feature = "iroh")]
+        #[arg(long)]
+        remote: bool,
     },
     /// Generate a pairing QR code for mobile/remote clients.
     ///
-    /// Prints the daemon's iroh NodeId and enters pairing mode. The next
-    /// iroh connection's peer ID is added to the allowlist automatically.
+    /// Prints a short-lived, single-use invite for a daemon running with
+    /// `mew daemon --remote`. It does not modify the legacy iroh allowlist.
     #[cfg(feature = "iroh")]
     Pair,
     /// Manage authentication for providers

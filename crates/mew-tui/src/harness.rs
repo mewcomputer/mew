@@ -775,20 +775,32 @@ fn parse_size(s: &str) -> Option<(u16, u16)> {
     Some((w, h))
 }
 
-/// Parse a key name into a `KeyEvent`. Supports named keys, `ctrl+`/`alt+`
-/// modifier prefixes, and single characters.
+/// Parse a key name into a `KeyEvent`. Supports named keys, `ctrl+`/`alt+`/
+/// `shift+` modifier prefixes, and single characters.
 pub fn parse_key(name: &str) -> Option<KeyEvent> {
     let name = name.trim();
-    let (mods, key) = if let Some(rest) = name.strip_prefix("ctrl+") {
+    let (mods, key) = if let Some(rest) = name.strip_prefix("ctrl+shift+") {
+        (KeyModifiers::CONTROL, rest)
+    } else if let Some(rest) = name.strip_prefix("ctrl+") {
         (KeyModifiers::CONTROL, rest)
     } else if let Some(rest) = name.strip_prefix("alt+") {
         (KeyModifiers::ALT, rest)
+    } else if let Some(rest) = name.strip_prefix("shift+") {
+        (KeyModifiers::SHIFT, rest)
     } else {
         (KeyModifiers::NONE, name)
     };
     let code = match key.to_ascii_lowercase().as_str() {
         "enter" | "return" => KeyCode::Enter,
         "esc" | "escape" => KeyCode::Esc,
+        // "tab" with the SHIFT modifier (from "shift+tab") or with CONTROL
+        // (from "ctrl+shift+tab") maps to BackTab, matching how terminals
+        // deliver Shift+Tab / Ctrl+Shift+Tab to crossterm. For the CONTROL
+        // case we keep the CONTROL bit so the handler can distinguish the
+        // backward cycle from the forward one.
+        "tab" if mods.contains(KeyModifiers::SHIFT) || mods.contains(KeyModifiers::CONTROL) => {
+            KeyCode::BackTab
+        }
         "tab" => KeyCode::Tab,
         "backtab" => KeyCode::BackTab,
         "backspace" | "bs" => KeyCode::Backspace,

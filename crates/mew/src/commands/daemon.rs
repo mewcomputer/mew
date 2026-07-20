@@ -11,6 +11,10 @@ use tracing::info;
 use mew_agent::Agent;
 use mew_message::SessionId;
 
+fn remote_invite_payload(node_id: &str, token: &str) -> String {
+    format!("computer.mew.mew://{node_id}?token={token}")
+}
+
 /// Build a fully-configured `DaemonServer` with the given provider settings.
 ///
 /// This is the shared server-building logic used by both `run_daemon` (Unix/TCP)
@@ -100,6 +104,7 @@ pub(crate) async fn build_daemon_server(
                 Some(params.writer),
                 session_id,
                 params.cwd,
+                params.browser_enabled,
                 Arc::new(mew_hooks::NopDispatcher),
                 None,
                 &[],
@@ -144,16 +149,22 @@ pub(crate) async fn build_daemon_server(
                 .collect();
 
             if let Some(cat) = cat_lister.as_ref() {
-                for m in cat.models.values() {
-                    if cred_pids.contains(&m.provider) {
+                for provider_id in &cred_pids {
+                    for m in cat.models.values() {
+                        if !crate::setup::providers::catalog_provider_matches(
+                            provider_id,
+                            &m.provider,
+                        ) {
+                            continue;
+                        }
                         let thinking_variants = cat
                             .thinking_variants(&m.id)
                             .into_iter()
                             .map(|v| mew_protocol::ThinkingVariantInfo { name: v.name })
                             .collect();
                         models.push(mew_protocol::ModelInfo {
-                            id: format!("{}/{}", m.provider, m.id),
-                            provider: m.provider.clone(),
+                            id: format!("{}/{}", provider_id, m.id),
+                            provider: provider_id.clone(),
                             model: m.id.clone(),
                             description: Some(format!(
                                 "{} ctx · {}",
@@ -238,6 +249,14 @@ pub(crate) async fn run_daemon(
 ) -> Result<()> {
     let server = build_daemon_server(fake_provider, provider_flag, model_flag, raw, mode).await?;
 
+    run_local_server(server, socket, port).await
+}
+
+async fn run_local_server(
+    server: mew_daemon::DaemonServer,
+    socket: Option<String>,
+    port: Option<String>,
+) -> Result<()> {
     // Default to Unix socket at $XDG_RUNTIME_DIR/mew.sock or /tmp/mew.sock,
     // unless `--port` was given and `--socket` was not (in which case the
     // daemon is TCP-only).
@@ -249,12 +268,7 @@ pub(crate) async fn run_daemon(
             let parsed: std::net::SocketAddr = addr
                 .parse()
                 .with_context(|| format!("invalid --port address: {addr}"))?;
-            let server_unix = mew_daemon::DaemonServer::new(Arc::clone(&server.builder))
-                .with_model_management(
-                    Arc::clone(server.model_switcher.as_ref().unwrap()),
-                    Arc::clone(server.model_lister.as_ref().unwrap()),
-                )
-                .with_thinking_setter(Arc::clone(server.thinking_setter.as_ref().unwrap()));
+            let server_unix = server.clone_for_listener();
             tokio::try_join!(
                 async move { server_unix.run(&socket_path).await },
                 async move { server.run_tcp(parsed).await }
@@ -288,7 +302,11 @@ pub(crate) async fn run_daemon_iroh(
     model_flag: Option<String>,
     raw: bool,
     mode: mew_hooks::PermissionMode,
+    scoped: bool,
 ) -> Result<()> {
+    eprintln!(
+        "WARNING: iroh daemon mode exposes this daemon to paired remote devices. They may access sessions, files, commands, and permission requests."
+    );
     let server = build_daemon_server(fake_provider, provider_flag, model_flag, raw, mode).await?;
 
     let allowlist_path = mew_daemon::iroh_transport::default_allowlist_path();
@@ -296,66 +314,110 @@ pub(crate) async fn run_daemon_iroh(
     info!(allowlist = %allowlist_path.display(), "starting iroh listener");
 
     let secret_key = mew_daemon::iroh_transport::load_or_create_secret_key(&secret_key_path)?;
-
     mew_daemon::iroh_transport::run_iroh(
         server.session_manager,
         server.groups_store,
         server.thinking_setter,
         server.auto_summary_enabled,
-        allowlist_path,
-        secret_key,
+        mew_daemon::iroh_transport::IrohListenerConfig {
+            allowlist_path,
+            secret_key,
+            remote_scope: scoped.then_some(mew_protocol::RemoteScope::Control),
+            remote_token: None,
+            remote_store: None,
+            remote_mode: mew_daemon::remote::RemoteMode::Daemon,
+        },
     )
     .await
 }
 
-/// `mew pair` — print the daemon's iroh NodeId and enter pairing mode.
-///
-/// This starts an iroh endpoint with pairing enabled. The next peer that
-/// connects will be added to the allowlist automatically.
+/// Run the local daemon and an authenticated iroh listener together. This is
+/// the app/VPS remote mode; the local WebSocket remains available throughout.
 #[cfg(feature = "iroh")]
-pub(crate) async fn pair_cmd() -> Result<()> {
-    use iroh::Endpoint;
-
-    println!("Starting mew pairing mode...\n");
-
-    // Load the daemon's persistent secret key so the NodeId shown here
-    // matches the one the daemon will use when running with --iroh.
+pub(crate) async fn run_daemon_remote(
+    socket: Option<String>,
+    port: Option<String>,
+    fake_provider: bool,
+    provider_flag: &str,
+    model_flag: Option<String>,
+    raw: bool,
+    mode: mew_hooks::PermissionMode,
+) -> Result<()> {
+    eprintln!(
+        "WARNING: remote access is enabled. A paired device can reach this daemon over the network; relay connections may be used when direct peer-to-peer access fails."
+    );
+    let server = build_daemon_server(fake_provider, provider_flag, model_flag, raw, mode).await?;
+    let remote_server = server.clone_for_listener();
+    let allowlist_path = mew_daemon::iroh_transport::default_allowlist_path();
     let secret_key_path = mew_daemon::iroh_transport::default_secret_key_path();
     let secret_key = mew_daemon::iroh_transport::load_or_create_secret_key(&secret_key_path)?;
+    let remote_store = Arc::new(mew_daemon::remote::RemoteAccessStore::load(
+        mew_daemon::remote::default_state_path(),
+    )?);
+    let remote_mode = std::env::var("MEW_REMOTE_MODE")
+        .ok()
+        .filter(|mode| mode.eq_ignore_ascii_case("desktop"))
+        .map(|_| mew_daemon::remote::RemoteMode::Desktop)
+        .unwrap_or(mew_daemon::remote::RemoteMode::Daemon);
 
-    let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
-        .secret_key(secret_key)
-        .alpns(vec![mew_daemon::iroh_transport::MEW_ALPN.to_vec()])
-        .bind()
-        .await
-        .context("bind iroh endpoint")?;
+    let local = run_local_server(server, socket, port);
+    let remote = mew_daemon::iroh_transport::run_iroh(
+        remote_server.session_manager,
+        remote_server.groups_store,
+        remote_server.thinking_setter,
+        remote_server.auto_summary_enabled,
+        mew_daemon::iroh_transport::IrohListenerConfig {
+            allowlist_path,
+            secret_key,
+            remote_scope: Some(mew_protocol::RemoteScope::Control),
+            remote_token: None,
+            remote_store: Some(remote_store.clone()),
+            remote_mode,
+        },
+    );
 
-    info!("connecting to iroh relay servers...");
-    tokio::time::timeout(std::time::Duration::from_secs(15), endpoint.online())
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "iroh endpoint failed to come online within 15s — check network connectivity"
-            )
-        })?;
+    let remote_store_for_task = remote_store.clone();
+    let remote_task = tokio::spawn(async move {
+        if let Err(error) = remote.await {
+            tracing::error!(%error, "iroh remote listener stopped; local daemon remains available");
+            let _ = remote_store_for_task.set_hosting(false, remote_mode, None);
+        }
+    });
+    let result = local.await;
+    let _ = remote_store.set_hosting(false, remote_mode, None);
+    remote_task.abort();
+    result
+}
 
-    let node_id = endpoint.id();
-    let node_id_str = node_id.to_string();
+/// `mew pair` — create a short-lived, single-use remote invite.
+///
+/// The daemon must be running with `--remote`; this command only creates the
+/// pairing record and prints a payload. It never opens a second listener or
+/// authorizes the first peer that happens to connect.
+#[cfg(feature = "iroh")]
+pub(crate) async fn pair_cmd() -> Result<()> {
+    eprintln!(
+        "WARNING: this invite grants a remote device control access to the daemon. It expires in 120 seconds and can be used once."
+    );
+    let secret_key_path = mew_daemon::iroh_transport::default_secret_key_path();
+    let secret_key = mew_daemon::iroh_transport::load_or_create_secret_key(&secret_key_path)?;
+    let node_id_str = secret_key.public().to_string();
+    let remote_store = Arc::new(mew_daemon::remote::RemoteAccessStore::load(
+        mew_daemon::remote::default_state_path(),
+    )?);
+    if !remote_store.snapshot().enabled {
+        anyhow::bail!("remote access is not active; start `mew daemon --remote` before creating a pairing invite");
+    }
+    let remote_token = remote_store.create_pairing(
+        mew_protocol::RemoteScope::Control,
+        mew_daemon::remote::unix_now(),
+        120,
+    )?;
 
-    // Print pairing info with QR code
-    println!("╔══════════════════════════════════════════════════════════╗");
-    println!("║  mew pairing mode                                       ║");
-    println!("║                                                         ║");
-    println!("║  Daemon NodeId:                                         ║");
-    println!("║  {node_id_str}  ║");
-    println!("║                                                         ║");
-    println!("║  Scan the QR code below with your mobile client:        ║");
-    println!("╚══════════════════════════════════════════════════════════╝\n");
-
-    // Generate ASCII QR code containing the NodeId.
-    // The payload uses a URL-scheme prefix so iOS camera/QR apps recognize it:
-    // `computer.mew.mew://<node_id>`
-    let payload = format!("computer.mew.mew://{node_id_str}");
+    println!("Daemon NodeId: {node_id_str}");
+    // Keep the mobile QR payload backward-compatible while carrying the
+    // one-time credential required by the explicit remote endpoint.
+    let payload = remote_invite_payload(&node_id_str, &remote_token);
     let qr = qrcode::QrCode::new(payload).context("generate QR code")?;
     let qr_string = qr
         .render::<qrcode::render::unicode::Dense1x2>()
@@ -365,69 +427,7 @@ pub(crate) async fn pair_cmd() -> Result<()> {
     println!("{qr_string}");
 
     eprintln!("\nTo connect manually, use this NodeId: {node_id_str}");
-    eprintln!("Press Ctrl+C to cancel.\n");
-
-    // Load or create allowlist
-    let allowlist_path = mew_daemon::iroh_transport::default_allowlist_path();
-    let allowlist = Arc::new(mew_daemon::iroh_transport::NodeIdAllowlist::load(
-        allowlist_path.clone(),
-    )?);
-    let pairing_mode = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let allowlist_clone = allowlist.clone();
-    let pairing_mode_clone = pairing_mode.clone();
-
-    println!("Listening for connections...");
-
-    // Simple accept loop for pairing. When a peer connects, their NodeId is
-    // added to the allowlist and the pairing completes. Times out after 120s.
-    let mut sig_term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .context("install SIGTERM handler")?;
-
-    loop {
-        tokio::select! {
-            conn_result = endpoint.accept() => {
-                let Some(conn) = conn_result else {
-                    break;
-                };
-                let conn = conn.await.context("accept connection")?;
-                let remote_id = conn.remote_id();
-                let id_str = remote_id.to_string();
-
-                println!("\n✓ Connection from: {id_str}");
-
-                if pairing_mode_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                    match allowlist_clone.add(&id_str) {
-                        Ok(()) => {
-                            println!("  Added to allowlist: {}", allowlist_path.display());
-                            println!("  Pairing complete!");
-                            pairing_mode_clone.store(false, std::sync::atomic::Ordering::Relaxed);
-                            conn.close(0u32.into(), b"pairing complete");
-                            break;
-                        }
-                        Err(e) => {
-                            println!("  Failed to persist allowlist: {e}");
-                            conn.close(1u32.into(), b"pairing failed");
-                            break;
-                        }
-                    }
-                }
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(120)) => {
-                println!("\nPairing timed out after 120s. Run `mew pair` again to retry.");
-                break;
-            }
-            _ = sig_term.recv() => {
-                println!("\nPairing cancelled (SIGTERM).");
-                break;
-            }
-            _ = tokio::signal::ctrl_c() => {
-                println!("\nPairing cancelled.");
-                break;
-            }
-        }
-    }
-
-    endpoint.close().await;
+    eprintln!("The pairing token is embedded in the QR payload and is not persisted in plaintext.");
     Ok(())
 }
 
@@ -537,4 +537,17 @@ pub(crate) fn stop_daemon(pidfile: &str) -> Result<()> {
 
     println!("daemon (PID {pid}) stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_invite_payload;
+
+    #[test]
+    fn remote_invite_payload_carries_the_pairing_token() {
+        assert_eq!(
+            remote_invite_payload("node-1", "mew_invite"),
+            "computer.mew.mew://node-1?token=mew_invite"
+        );
+    }
 }

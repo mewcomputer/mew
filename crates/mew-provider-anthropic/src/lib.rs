@@ -227,8 +227,27 @@ impl Adapter {
             body["max_tokens"] = json!(4096);
         }
 
-        if !req.system.is_empty() {
-            body["system"] = json!(req.system);
+        if !req.system.is_empty() || req.messages.iter().any(|m| m.role == Role::System) {
+            let mut system = req.system.clone();
+            for message in &req.messages {
+                if message.role == Role::System {
+                    let text = message
+                        .parts
+                        .iter()
+                        .filter_map(|part| match part {
+                            Part::Text(text) => Some(text.text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    if !text.is_empty() {
+                        if !system.is_empty() {
+                            system.push_str("\n\n");
+                        }
+                        system.push_str(&text);
+                    }
+                }
+            }
+            body["system"] = json!(system);
         }
 
         if !req.tools.is_empty() {
@@ -268,6 +287,7 @@ impl Adapter {
         let mut content: Vec<serde_json::Value> = Vec::new();
 
         match m.role {
+            Role::System => None,
             Role::User => {
                 for p in &m.parts {
                     match p {
@@ -492,6 +512,9 @@ impl Adapter {
         struct ContentBlock {
             #[serde(rename = "type")]
             typ: String,
+            // Still deserialized for raw-dump mode and future use, but no
+            // longer used to populate `call_id` — see the tool_use arm.
+            #[allow(dead_code)]
             id: Option<String>,
             name: Option<String>,
             // redacted_thinking carries opaque data in content_block_start.
@@ -554,7 +577,19 @@ impl Adapter {
                         session_id: ulid::Ulid::new(),
                     },
                     tool_name: event.content_block.name.unwrap_or_default(),
-                    call_id: event.content_block.id.unwrap_or_default(),
+                    // Some Anthropic-compatible providers (notably Kimi) emit
+                    // tool-call IDs containing spaces and colons (e.g.
+                    // "handoff plan:29"). Anthropic's tool_use ID format
+                    // rules reject these on the next-turn replay, producing
+                    // "toolcallids did not have response messages" errors —
+                    // the API rejects its own ID. We replace every incoming
+                    // ID with a fresh `toolu_`-prefixed ULID. The fresh ID
+                    // round-trips consistently: the agent matches tool
+                    // results to calls by `call_id`, and `build_request_body`
+                    // serializes both `tool_use.id` and
+                    // `tool_result.tool_use_id` from this same field, so the
+                    // pair always matches.
+                    call_id: format!("toolu_{}", ulid::Ulid::new()),
                     state: ToolState::Pending(ToolStatePending {
                         // The API requires tool_use input to be a JSON object,
                         // even when no argument deltas ever arrive. Null here
@@ -1377,6 +1412,77 @@ mod tests {
         );
     }
 
+    // Kimi's Anthropic-compatible API emits tool-call IDs containing spaces
+    // and colons (e.g. "handoff plan:29"). Anthropic rejects these on the
+    // next-turn replay with "toolcallids did not have response messages".
+    // The adapter must replace every incoming ID with a fresh
+    // `toolu_`-prefixed ULID so the round-trip stays compliant.
+    #[tokio::test]
+    async fn test_fixture_tool_call_nonconformant_id_is_sanitized() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let fixture = std::fs::read_to_string("src/testdata/tool-call-nonconformant-id.sse")
+            .expect("read tool-call-nonconformant-id fixture");
+
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(fixture, "text/event-stream"))
+            .mount(&mock_server)
+            .await;
+
+        let adapter = Adapter::new(
+            "kimi".to_string(),
+            mock_server.uri(),
+            "k3".to_string(),
+            "test-key".to_string(),
+        );
+
+        let req = Request {
+            model: "k3".into(),
+            messages: vec![],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: Default::default(),
+        };
+
+        let mut stream = adapter.stream(req).await.expect("stream");
+        let mut events: Vec<ProviderEvent> = Vec::new();
+        while let Some(ev) = futures::StreamExt::next(&mut stream).await {
+            events.push(ev);
+        }
+
+        let call_id = events
+            .iter()
+            .find_map(|e| {
+                if let ProviderEvent::PartStart {
+                    part: Part::ToolCall(tc),
+                } = e
+                {
+                    Some(tc.call_id.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("expected a tool call part start");
+
+        assert!(
+            call_id.starts_with("toolu_"),
+            "call_id should be a toolu_-prefixed ULID, got {call_id}"
+        );
+        assert!(
+            !call_id.contains(' ') && !call_id.contains(':'),
+            "call_id must not contain spaces or colons, got {call_id}"
+        );
+        assert_ne!(
+            call_id, "handoff plan:29",
+            "call_id must not be the raw provider ID"
+        );
+    }
+
     // -- max_output_tokens wire-format tests -------------------------------
     //
     // Verify that the Anthropic adapter actually honours
@@ -1477,6 +1583,47 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body_max_tokens(&body2), Some(68_096));
+    }
+
+    // Kimi K3 sends thinking effort as a top-level `reasoning_effort` field
+    // (not Anthropic's nested `thinking` object). The catalog produces
+    // `{"reasoning_effort": "low"|"high"|"max"}` params for k3, and the
+    // adapter must forward them verbatim to the top level of the request
+    // body — Kimi's API reads them there. This guards against a refactor of
+    // the reasoning-params loop silently dropping or nesting the field.
+    #[tokio::test]
+    async fn test_anthropic_adapter_forwards_reasoning_effort_top_level() {
+        let adapter = Adapter::new(
+            "kimi".into(),
+            "https://api.kimi.com/coding/v1".into(),
+            "k3".into(),
+            "test-key".into(),
+        );
+        let mut reasoning = ReasoningConfig::default();
+        reasoning
+            .params
+            .insert("reasoning_effort".into(), json!("high"));
+        let body = adapter
+            .build_request_body(&sample_request(Some(8192), Some(reasoning)))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // reasoning_effort must be present at the top level, not nested.
+        assert_eq!(
+            v.get("reasoning_effort").and_then(|x| x.as_str()),
+            Some("high"),
+            "reasoning_effort should be forwarded top-level; body: {}",
+            v
+        );
+
+        // Kimi does not use Anthropic-style thinking blocks, so the
+        // thinking-budget bump should not have injected a `thinking` object.
+        assert!(
+            v.get("thinking").is_none(),
+            "k3 reasoning_effort must not trigger Anthropic thinking block; body: {}",
+            v
+        );
     }
 
     #[tokio::test]

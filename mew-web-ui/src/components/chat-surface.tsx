@@ -91,11 +91,11 @@ export function ChatSurface() {
     <div
       ref={scrollRef}
       onScroll={handleScroll}
-      className="flex-1 overflow-y-auto px-3 py-4 sm:px-4"
+      className="chat-scroll-container min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-32 pt-4 sm:px-4 sm:pb-28"
     >
-      <div className="mx-auto max-w-3xl space-y-4">
+      <div className="mx-auto min-w-0 max-w-3xl space-y-4">
         {messages.length === 0 && <EmptyChatSurface />}
-        {messages.map((msg) => (
+        {messages.filter((msg) => msg.role !== "system").map((msg) => (
           <ErrorBoundary
             key={msg.id}
             title="Message failed to render"

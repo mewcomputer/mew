@@ -67,15 +67,36 @@ pub(crate) fn resolve_provider(
     state: &mew_config::State,
     cfg: &Config,
 ) -> String {
-    cli.or_else(|| {
-        let persisted = state.last_provider.as_str();
-        if persisted.is_empty() || !is_known_provider(cfg, persisted) {
-            None
-        } else {
-            Some(persisted.to_string())
-        }
-    })
-    .unwrap_or_else(|| "opencode-zen".to_string())
+    if let Some(provider) = cli {
+        return provider;
+    }
+
+    let remembered = state.last_provider.as_str();
+    let candidate = if !remembered.is_empty() && is_known_provider(cfg, remembered) {
+        remembered.to_string()
+    } else {
+        "opencode-zen".to_string()
+    };
+
+    if provider_available(cfg, &candidate) {
+        return candidate;
+    }
+
+    // A remembered provider without credentials should not prevent the
+    // daemon from starting when another configured provider is usable.
+    [
+        "opencode-zen",
+        "opencode-go",
+        "z-ai",
+        "umans",
+        "deepseek",
+        "kimi",
+        "codex",
+    ]
+    .into_iter()
+    .find(|provider| cfg.providers.contains_key(*provider) && provider_available(cfg, provider))
+    .map(str::to_owned)
+    .unwrap_or(candidate)
 }
 
 /// Resolve the active model from the CLI flag, falling back to the last-used
@@ -384,8 +405,21 @@ pub(crate) fn is_known_provider(cfg: &Config, provider_id: &str) -> bool {
 /// provider.
 pub(crate) fn provider_has_credential(cfg: &Config, provider_id: &str) -> bool {
     match cfg.providers.get(provider_id) {
-        Some(pc) => mew_config::get_credential(&pc.credential_ref).is_ok(),
+        Some(pc) => credential_for_provider(provider_id, pc).is_ok(),
         None => false,
+    }
+}
+
+fn credential_for_provider(
+    provider_id: &str,
+    pc: &ProviderConfig,
+) -> Result<String, mew_config::ConfigError> {
+    match mew_config::get_credential(&pc.credential_ref) {
+        Ok(value) => Ok(value),
+        Err(reference_error) if pc.credential_ref != provider_id => {
+            mew_config::get_credential(provider_id).map_err(|_| reference_error)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -411,10 +445,26 @@ fn codex_logged_in() -> bool {
 pub(crate) fn provider_name_to_shape(pid: &str) -> &'static str {
     match pid {
         "opencode-zen" | "opencode-go" => "openai",
-        "z-ai" | "umans" | "kimi" => "anthropic",
+        "z-ai" | "umans" => "anthropic",
         "codex" => "responses",
         _ => "openai",
     }
+}
+
+/// Return whether a catalog provider id can supply models for a configured
+/// provider. models.dev and mew use different names for a few compatible
+/// endpoints, so exact string equality would hide otherwise usable models.
+pub(crate) fn catalog_provider_matches(configured: &str, catalog: &str) -> bool {
+    configured == catalog
+        || matches!(
+            (configured, catalog),
+            ("opencode-zen", "opencode")
+                | ("z-ai", "zai")
+                | ("z-ai", "zai-coding-plan")
+                | ("kimi", "kimi-for-coding")
+                | ("umans", "umans-ai")
+                | ("umans", "umans-ai-coding-plan")
+        )
 }
 
 /// Build a direct provider adapter from a concrete provider config.
@@ -426,9 +476,12 @@ pub(crate) fn build_direct_provider(
     model_override: &str,
     raw: bool,
 ) -> Result<Arc<dyn Provider>> {
-    // Non-fatal: some providers (codex with OAuth) don't
-    // need an API key. Each shape arm handles the Option as needed.
-    let creds = mew_config::get_credential(&pc.credential_ref).ok();
+    // Non-fatal: some providers (codex with OAuth) don't need an API key, so we
+    // resolve lazily per shape arm. For API-key shapes (`openai`/`anthropic`)
+    // we propagate `get_credential`'s error directly instead of swallowing it
+    // via `.ok()`, so the user sees the real diagnostic (env var, keyring
+    // command, credentials.json path) rather than a bare "get credential".
+    let creds = credential_for_provider(provider_id, pc);
 
     let model = if model_override.is_empty() {
         if cfg.default_model.is_empty() {
@@ -461,7 +514,7 @@ pub(crate) fn build_direct_provider(
 
     match shape.as_str() {
         "openai" => {
-            let creds = creds.context("get credential")?;
+            let creds = creds?;
             let mut adapter = OpenAIAdapter::new(provider_id.to_string(), base_url, model, creds);
             if raw {
                 adapter.set_dump(true);
@@ -469,7 +522,7 @@ pub(crate) fn build_direct_provider(
             Ok(Arc::new(adapter))
         }
         "anthropic" => {
-            let creds = creds.context("get credential")?;
+            let creds = creds?;
             let mut adapter =
                 AnthropicAdapter::new(provider_id.to_string(), base_url, model, creds);
             if raw {
@@ -478,7 +531,13 @@ pub(crate) fn build_direct_provider(
             Ok(Arc::new(adapter))
         }
         "responses" => {
-            // Try OAuth first, then fall back to API key.
+            // Try OAuth first, then fall back to API key. A missing API key
+            // credential is not fatal here because OAuth may succeed, so we
+            // drop the error if auth::resolve finds another path — but we keep
+            // its message around to surface a useful diagnostic if every path
+            // fails.
+            let creds_err_msg = creds.as_ref().err().map(|e| e.to_string());
+            let creds = creds.ok();
             let oauth_provider: std::sync::Arc<dyn mew_provider::auth::OAuthProvider> =
                 std::sync::Arc::new(mew_provider_responses::oauth::CodexOAuth);
             match mew_provider::auth::resolve(oauth_provider.as_ref(), creds) {
@@ -508,10 +567,16 @@ pub(crate) fn build_direct_provider(
                     }
                     Ok(Arc::new(adapter))
                 }
-                Err(e) => Err(anyhow::anyhow!(
-                    "no credentials for codex: {e}. \
-                     Run `mew auth login codex` or set OPENAI_API_KEY."
-                )),
+                Err(e) => {
+                    let mut msg = format!(
+                        "no credentials for codex: {e}. \
+                         Run `mew auth login codex` or set OPENAI_API_KEY."
+                    );
+                    if let Some(ce) = creds_err_msg {
+                        msg.push_str(&format!("\n\n{}", ce));
+                    }
+                    Err(anyhow::anyhow!(msg))
+                }
             }
         }
         _ => anyhow::bail!("unsupported shape {} for provider {}", shape, provider_id),
@@ -699,7 +764,7 @@ pub(crate) async fn discover_models(
         }
         // Only advertise kimi in the fallback list when a credential is set.
         if provider_has_credential(cfg, "kimi") {
-            fallbacks.push(("kimi/k3".into(), "kimi · anthropic".into()));
+            fallbacks.push(("kimi/k3".into(), "kimi · openai".into()));
         }
         for (id, desc) in fallbacks {
             if seen.insert(id.clone()) {
@@ -910,6 +975,14 @@ mod tests {
         let outside = tmp.path().join("catalog_codex.json");
         std::fs::write(&outside, b"{}").unwrap();
         assert_eq!(discover_codex_catalog(&subdir), None);
+    }
+
+    #[test]
+    fn catalog_provider_matches_configured_aliases() {
+        assert!(catalog_provider_matches("opencode-zen", "opencode"));
+        assert!(catalog_provider_matches("z-ai", "zai-coding-plan"));
+        assert!(catalog_provider_matches("kimi", "kimi-for-coding"));
+        assert!(!catalog_provider_matches("deepseek", "opencode"));
     }
 
     #[test]
@@ -1303,12 +1376,125 @@ mod tests {
         assert_eq!(provider_name_to_shape("opencode-go"), "openai");
         assert_eq!(provider_name_to_shape("z-ai"), "anthropic");
         assert_eq!(provider_name_to_shape("umans"), "anthropic");
-        assert_eq!(provider_name_to_shape("kimi"), "anthropic");
+        assert_eq!(provider_name_to_shape("kimi"), "openai");
         assert_eq!(provider_name_to_shape("codex"), "responses");
     }
 
     #[test]
     fn provider_name_to_shape_unknown_defaults_to_openai() {
         assert_eq!(provider_name_to_shape("nonexistent-provider"), "openai");
+    }
+
+    // --- build_provider credential error surfacing ---
+
+    /// When a provider's credential is missing (no env var, no keyring, no
+    /// credentials.json entry), `build_provider` must surface the rich
+    /// `CredentialNotFound` diagnostic — the env var name and credentials.json
+    /// path — rather than a bare "get credential" with no cause.
+    ///
+    /// This guards against the regression where `.ok()` swallowed the
+    /// underlying error and `.context("get credential")` replaced it.
+    #[test]
+    fn build_provider_missing_credential_surfaces_diagnostic() {
+        // Use a credential_ref that is extremely unlikely to be set in the
+        // ambient environment or present in the real credentials.json.
+        let ref_name = "mew-test-missing-cred-ref-7f3a";
+        let env_key = format!(
+            "MEW_CRED_{}",
+            ref_name
+                .to_uppercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>()
+        );
+        // Ensure the env var is genuinely unset for this test.
+        std::env::remove_var(&env_key);
+
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "test-prov".into(),
+            ProviderConfig {
+                shape: "openai".into(),
+                base_url: "https://example.invalid".into(),
+                credential_ref: ref_name.into(),
+                ..Default::default()
+            },
+        );
+
+        let err = match build_provider(&cfg, None, "test-prov", "", false) {
+            Ok(_) => panic!("build_provider should have failed for a missing credential"),
+            Err(e) => e,
+        };
+        let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
+        let joined = chain.join("\n--\n");
+
+        // The bare-context regression produced only "build provider" and
+        // "get credential" with no cause. Assert the real diagnostic leaked.
+        assert!(
+            joined.contains(&env_key),
+            "error should mention the env var {}\ngot: {}",
+            env_key,
+            joined
+        );
+        assert!(
+            joined.contains("credentials.json"),
+            "error should mention credentials.json\ngot: {}",
+            joined
+        );
+        // The swallowed-error regression never included "credential not found".
+        assert!(
+            joined.contains("credential not found"),
+            "error should include the CredentialNotFound message\ngot: {}",
+            joined
+        );
+    }
+
+    /// Same as above but for the `anthropic` shape, which had the identical
+    /// `.ok()` + `.context("get credential")` pattern.
+    #[test]
+    fn build_provider_missing_credential_anthropic_shape_surfaces_diagnostic() {
+        let ref_name = "mew-test-missing-cred-anthropic-7f3a";
+        let env_key = format!(
+            "MEW_CRED_{}",
+            ref_name
+                .to_uppercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>()
+        );
+        std::env::remove_var(&env_key);
+
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "test-prov-anthropic".into(),
+            ProviderConfig {
+                shape: "anthropic".into(),
+                base_url: "https://example.invalid".into(),
+                credential_ref: ref_name.into(),
+                ..Default::default()
+            },
+        );
+
+        let err = match build_provider(&cfg, None, "test-prov-anthropic", "", false) {
+            Ok(_) => panic!("build_provider should have failed for a missing credential"),
+            Err(e) => e,
+        };
+        let joined = err
+            .chain()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n--\n");
+
+        assert!(
+            joined.contains(&env_key),
+            "error should mention the env var {}\ngot: {}",
+            env_key,
+            joined
+        );
+        assert!(
+            joined.contains("credential not found"),
+            "error should include the CredentialNotFound message\ngot: {}",
+            joined
+        );
     }
 }

@@ -260,6 +260,7 @@ fn build_message_segment(msg: &Message, model_id: &str, cache: &TokenCountCache)
     let label = match msg.role {
         mew_message::Role::User => "user".to_string(),
         mew_message::Role::Assistant => "assistant".to_string(),
+        mew_message::Role::System => "system".to_string(),
     };
 
     // Detect compaction summary: synthetic TextPart at index 0 with

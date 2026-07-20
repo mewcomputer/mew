@@ -1,10 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, fireEvent, act, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, act, cleanup, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { SessionInfo } from "@mew/web-client";
 import { useSessionStore } from "../stores/session";
 import { SidebarProvider } from "../components/ui/sidebar";
 import { SessionRail } from "../components/session-rail";
+import { ProjectPickerModal } from "../components/session-rail";
+import { setClient } from "../lib/client-ref";
+import type { DirEntry } from "@mew/web-client";
 
 // Mock TanStack Router — SessionRail calls useRouter().navigate.
 vi.mock("@tanstack/react-router", () => ({
@@ -154,5 +157,44 @@ describe("SessionRail workspace collapse", () => {
     // Click again to expand.
     act(() => { fireEvent.click(folderButton!); });
     expect(container.querySelectorAll("[data-sidebar='group-content']").length).toBeGreaterThan(0);
+  });
+});
+
+describe("ProjectPickerModal folder browser", () => {
+  afterEach(() => {
+    cleanup();
+    setClient(null);
+  });
+
+  it("loads folders, navigates down, and returns to the parent folder", async () => {
+    const listeners = new Set<(data: { path: string; entries: DirEntry[] }) => void>();
+    const listFilesystemDir = vi.fn();
+    const client = {
+      on: vi.fn((_event: string, listener: (data: { path: string; entries: DirEntry[] }) => void) => listeners.add(listener)),
+      off: vi.fn((_event: string, listener: (data: { path: string; entries: DirEntry[] }) => void) => listeners.delete(listener)),
+      listFilesystemDir,
+    };
+    setClient(client as never);
+
+    render(
+      <ProjectPickerModal
+        open
+        onOpenChange={vi.fn()}
+        projects={[]}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    await userEvent.setup().click(screen.getByRole("button", { name: /Browse folders/ }));
+    await waitFor(() => expect(listFilesystemDir).toHaveBeenCalledWith(undefined));
+    listeners.forEach((listener) => listener({ path: "/Users/tester", entries: [{ name: "projects", is_dir: true, size: undefined }] }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "projects" })).toBeTruthy());
+    await userEvent.setup().click(screen.getByRole("button", { name: "projects" }));
+    expect(listFilesystemDir).toHaveBeenCalledWith("/Users/tester/projects");
+
+    listeners.forEach((listener) => listener({ path: "/Users/tester/projects", entries: [] }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Go to parent folder" }).getAttribute("disabled")).toBeNull());
+    await userEvent.setup().click(screen.getByRole("button", { name: "Go to parent folder" }));
+    expect(listFilesystemDir).toHaveBeenCalledWith("/Users/tester");
   });
 });

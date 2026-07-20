@@ -92,12 +92,13 @@ impl Agent {
                 .values()
                 .filter(|t| {
                     let name = t.name();
+                    let browser_allowed = !name.starts_with("browser_") || self.browser_enabled;
                     let allowed = self
                         .active_tool_names
                         .as_ref()
                         .is_none_or(|names| names.contains(name));
                     let not_denied = !self.denied_tool_names.contains(name);
-                    allowed && not_denied
+                    browser_allowed && allowed && not_denied
                 })
                 .map(|t| ToolDef {
                     name: t.name().to_string(),

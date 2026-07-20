@@ -91,6 +91,31 @@ test("connect resolves when the socket opens", async () => {
   assert.equal(client.isConnected(), true);
 });
 
+test("remote clients authenticate before connect resolves", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("iroh://remote", {
+    socketFactory: factory,
+    clientKind: "remote",
+    remoteAuth: { token: "pairing-token", deviceName: "test laptop" },
+  });
+  const connectP = client.connect();
+  const socket = latest();
+  socket.open();
+  assert.deepEqual(socket.sent, [{
+    type: "remote_hello",
+    token: "pairing-token",
+    device_name: "test laptop",
+  }]);
+
+  let resolved = false;
+  void connectP.then(() => { resolved = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resolved, false);
+  socket.peerSend({ type: "remote_ready", scope: "control" });
+  await connectP;
+  assert.equal(client.isConnected(), true);
+});
+
 test("connect can be retried after the socket fails before opening", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });

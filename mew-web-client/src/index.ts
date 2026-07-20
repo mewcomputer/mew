@@ -33,6 +33,7 @@ export interface Attachment {
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
 
 export type ClientMessage =
+  | { type: "remote_hello"; token?: string; device_name: string }
   | { type: "new_session"; cwd: string | null; client_kind: string }
   | { type: "attach_session"; session_id: string; client_kind: string }
   | { type: "list_sessions" }
@@ -93,6 +94,7 @@ export type ClientMessage =
   | { type: "unflag_file"; session_id: string; path: string }
   | { type: "ping" }
   | { type: "list_projects" }
+  | { type: "list_filesystem_dir"; path?: string }
   | { type: "browser_open"; url: string; tab_id?: string }
   | { type: "browser_snapshot"; tab_id?: string }
   | { type: "browser_screenshot"; annotate: boolean; tab_id?: string }
@@ -342,7 +344,7 @@ export interface GitEntry {
 }
 
 /** A message role. */
-export type Role = "user" | "assistant";
+export type Role = "user" | "assistant" | "system";
 
 /** Timestamp metadata for a message. */
 export interface Time {
@@ -403,6 +405,7 @@ export interface Segment {
 }
 
 export type ServerMessage =
+  | { type: "remote_ready"; scope: "observe" | "collaborate" | "control" }
   | { type: "session_ready"; session_id: string; cwd?: string; model?: string; provider?: string; permission_mode?: string }
   | { type: "error"; message: string }
   | { type: "provider"; event: ProviderEventWire }
@@ -490,6 +493,7 @@ export type ServerMessage =
   | { type: "group_list"; groups: GroupInfo[] }
   | { type: "groups_changed"; groups: GroupInfo[] }
   | { type: "dir_listing"; path: string; entries: DirEntry[] }
+  | { type: "filesystem_dir_listing"; path: string; entries: DirEntry[] }
   | {
       type: "file_preview";
       path: string;
@@ -662,6 +666,7 @@ export interface MewClientEvents {
   "group-list": (data: { groups: GroupInfo[] }) => void;
   "groups-changed": (data: { groups: GroupInfo[] }) => void;
   "dir-listing": (data: { path: string; entries: DirEntry[] }) => void;
+  "filesystem-dir-listing": (data: { path: string; entries: DirEntry[] }) => void;
   "file-preview": (data: {
     path: string;
     content: string;
@@ -698,6 +703,7 @@ export interface MewClientEvents {
   "browser-screenshot": (data: { data: string; url: string; tabId?: string }) => void;
   "browser-state": (data: { open: boolean; url?: string; title?: string; tabId?: string }) => void;
   "browser-error": (data: { message: string; tabId?: string }) => void;
+  "remote-ready": (data: { scope: "observe" | "collaborate" | "control" }) => void;
 }
 
 export type MewEventName = keyof MewClientEvents;
@@ -711,6 +717,10 @@ export interface MewClientOptions {
   socketFactory?: SocketFactory;
   /** If true, log every wire message to the console. Useful for debugging. */
   debug?: boolean;
+  /** Client identity used for capability-gated daemon features. */
+  clientKind?: "web" | "desktop" | "remote";
+  /** Pairing credentials for a client connecting to an explicit remote daemon. */
+  remoteAuth?: { token: string; deviceName: string };
 }
 
 /**
@@ -722,6 +732,8 @@ export class MewClient {
   private readonly url: string;
   private readonly socketFactory: SocketFactory;
   private readonly debug: boolean;
+  private readonly clientKind: "web" | "desktop" | "remote";
+  private readonly remoteAuth?: { token: string; deviceName: string };
   private ws: MewWebSocket | null = null;
   private listeners = new Map<
     MewEventName,
@@ -738,6 +750,8 @@ export class MewClient {
     this.url = url;
     this.socketFactory = opts.socketFactory ?? defaultSocketFactory;
     this.debug = opts.debug ?? false;
+    this.clientKind = opts.clientKind ?? "web";
+    this.remoteAuth = opts.remoteAuth;
   }
 
   /** Open the WebSocket connection. Idempotent. */
@@ -749,10 +763,32 @@ export class MewClient {
       this.ws = ws;
       ws.addEventListener("open", () => {
         if (this.debug) console.debug("[mew] open");
-        settled = true;
         this.emit("open");
+        if (this.clientKind === "remote") {
+          this.send({
+            type: "remote_hello",
+            token: this.remoteAuth?.token,
+            device_name: this.remoteAuth?.deviceName ?? "remote client",
+          });
+          return;
+        }
+        settled = true;
         resolve();
       });
+      if (this.clientKind === "remote") {
+        this.on("remote-ready", () => {
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+        });
+        this.on("errorMessage", (message) => {
+          if (!settled) {
+            settled = true;
+            reject(new Error(message.message));
+          }
+        });
+      }
       ws.addEventListener("message", (ev) => {
         try {
           const msg = JSON.parse(ev.data) as ServerMessage;
@@ -828,7 +864,7 @@ export class MewClient {
         };
         this.on("session-ready", onReady);
         this.on("errorMessage", onError);
-        this.send({ type: "new_session", cwd, client_kind: "web" });
+        this.send({ type: "new_session", cwd, client_kind: this.clientKind });
       });
     });
   }
@@ -905,7 +941,7 @@ export class MewClient {
         };
         this.on("session-ready", onReady);
         this.on("errorMessage", onError);
-        this.send({ type: "attach_session", session_id, client_kind: "web" });
+        this.send({ type: "attach_session", session_id, client_kind: this.clientKind });
       });
     });
   }
@@ -1063,6 +1099,10 @@ export class MewClient {
   listDir(sessionId: string, path?: string): void {
     this.send({ type: "list_dir", session_id: sessionId, path });
   }
+
+  listFilesystemDir(path?: string): void {
+    this.send({ type: "list_filesystem_dir", ...(path ? { path } : {}) });
+  }
   readFilePreview(sessionId: string, path: string, maxBytes?: number): void {
     this.send({ type: "read_file_preview", session_id: sessionId, path, max_bytes: maxBytes });
   }
@@ -1153,6 +1193,9 @@ export class MewClient {
           provider: msg.provider,
           permission_mode: msg.permission_mode,
         });
+        break;
+      case "remote_ready":
+        this.emit("remote-ready", { scope: msg.scope });
         break;
       case "provider":
         this.emit("provider", msg.event);
@@ -1340,6 +1383,9 @@ export class MewClient {
         break;
       case "dir_listing":
         this.emit("dir-listing", { path: msg.path, entries: msg.entries });
+        break;
+      case "filesystem_dir_listing":
+        this.emit("filesystem-dir-listing", { path: msg.path, entries: msg.entries });
         break;
       case "file_preview":
         this.emit("file-preview", {

@@ -19,6 +19,7 @@ const DEFAULT_DAEMON_PORT: u16 = 25566;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+const DESKTOP_REMOTE_STATE: &str = "desktop-remote.json";
 
 /// Owns the daemon launched for this desktop application instance.
 ///
@@ -28,6 +29,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 pub struct DaemonSupervisor {
     app: AppHandle,
     daemon: Mutex<Option<ReadyDaemon>>,
+    remote_enabled: Mutex<bool>,
 }
 
 impl DaemonSupervisor {
@@ -35,11 +37,24 @@ impl DaemonSupervisor {
         Self {
             app: app.clone(),
             daemon: Mutex::new(None),
+            remote_enabled: Mutex::new(load_remote_enabled().unwrap_or_else(|| {
+                env::var("MEW_DESKTOP_REMOTE")
+                    .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false)
+            })),
         }
     }
 
     fn start(&self) -> Result<ReadyDaemon> {
+        let remote_enabled = *self
+            .remote_enabled
+            .lock()
+            .map_err(|_| anyhow!("remote setting mutex poisoned"))?;
+
         if let Some(url) = configured_daemon_url()? {
+            if remote_enabled {
+                bail!("desktop remote access requires an app-owned daemon; MEW_DESKTOP_DAEMON_URL is attach-only");
+            }
             return Ok(ReadyDaemon {
                 websocket_url: url,
                 child: None,
@@ -49,7 +64,7 @@ impl DaemonSupervisor {
         let address = daemon_address()?;
         let url = websocket_url(address);
 
-        if probe_daemon(&url).is_ok() {
+        if !remote_enabled && probe_daemon(&url).is_ok() {
             tracing::info!(%url, "attached to an existing mew daemon");
             return Ok(ReadyDaemon {
                 websocket_url: url,
@@ -57,14 +72,14 @@ impl DaemonSupervisor {
             });
         }
 
-        if TcpStream::connect_timeout(&address, PROBE_TIMEOUT).is_ok() {
+        if !remote_enabled && TcpStream::connect_timeout(&address, PROBE_TIMEOUT).is_ok() {
             bail!(
                 "daemon rendezvous port {address} is already in use, but it is not a mew daemon; \
                  set MEW_DESKTOP_DAEMON_URL to attach explicitly or stop the process"
             );
         }
 
-        if let Some((child, binary)) = spawn_configured_daemon(address)? {
+        if let Some((child, binary)) = spawn_configured_daemon(address, remote_enabled)? {
             tracing::info!(binary = %binary.display(), %address, "configured mew daemon is ready");
             return Ok(ReadyDaemon {
                 websocket_url: url,
@@ -72,7 +87,7 @@ impl DaemonSupervisor {
             });
         }
 
-        if let Some((child, binary)) = spawn_bundled_daemon(address)? {
+        if let Some((child, binary)) = spawn_bundled_daemon(address, remote_enabled)? {
             tracing::info!(binary = %binary.display(), %address, "bundled mew daemon is ready");
             return Ok(ReadyDaemon {
                 websocket_url: url,
@@ -80,7 +95,7 @@ impl DaemonSupervisor {
             });
         }
 
-        if let Some(child) = spawn_sidecar(&self.app, address)? {
+        if let Some(child) = spawn_sidecar(&self.app, address, remote_enabled)? {
             tracing::info!(%address, "bundled mew daemon sidecar is ready");
             return Ok(ReadyDaemon {
                 websocket_url: url,
@@ -88,7 +103,7 @@ impl DaemonSupervisor {
             });
         }
 
-        let (child, binary) = spawn_daemon(address)?;
+        let (child, binary) = spawn_daemon(address, remote_enabled)?;
         tracing::info!(binary = %binary.display(), %address, "desktop daemon is ready");
 
         Ok(ReadyDaemon {
@@ -107,6 +122,64 @@ impl DaemonSupervisor {
         let url = daemon.websocket_url.clone();
         *daemon_slot = Some(daemon);
         Ok(url)
+    }
+
+    /// Toggle remote access for the daemon owned by this app. Restarting the
+    /// owned child keeps the daemon's listener lifecycle identical to app
+    /// lifetime and avoids a second in-process remote control plane.
+    pub fn set_remote_enabled(&self, enabled: bool) -> Result<String> {
+        let mut daemon_slot = self.daemon.lock().expect("daemon mutex poisoned");
+        let current = *self
+            .remote_enabled
+            .lock()
+            .map_err(|_| anyhow!("remote setting mutex poisoned"))?;
+        if current == enabled {
+            if let Some(daemon) = daemon_slot.as_ref() {
+                return Ok(daemon.websocket_url.clone());
+            }
+            drop(daemon_slot);
+            return self.websocket_url();
+        }
+
+        if let Some(daemon) = daemon_slot.take() {
+            let Some(child) = daemon.child else {
+                *self
+                    .remote_enabled
+                    .lock()
+                    .map_err(|_| anyhow!("remote setting mutex poisoned"))? = current;
+                return Err(anyhow!(
+                    "desktop remote access requires the app to own its daemon; stop the existing daemon and restart mew"
+                ));
+            };
+            child.kill();
+        }
+
+        *self
+            .remote_enabled
+            .lock()
+            .map_err(|_| anyhow!("remote setting mutex poisoned"))? = enabled;
+
+        let daemon = match self.start() {
+            Ok(daemon) => daemon,
+            Err(error) => {
+                *self
+                    .remote_enabled
+                    .lock()
+                    .map_err(|_| anyhow!("remote setting mutex poisoned"))? = current;
+                return Err(error);
+            }
+        };
+        let url = daemon.websocket_url.clone();
+        *daemon_slot = Some(daemon);
+        save_remote_enabled(enabled)?;
+        Ok(url)
+    }
+
+    pub fn remote_enabled(&self) -> bool {
+        self.remote_enabled
+            .lock()
+            .map(|value| *value)
+            .unwrap_or(false)
     }
 }
 
@@ -163,6 +236,39 @@ fn configured_daemon_url() -> Result<Option<String>> {
     ))
 }
 
+fn remote_state_path() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".config").join("mew").join(DESKTOP_REMOTE_STATE))
+}
+
+fn load_remote_enabled() -> Option<bool> {
+    let path = remote_state_path()?;
+    let data = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<serde_json::Value>(&data)
+        .ok()?
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+}
+
+fn save_remote_enabled(enabled: bool) -> Result<()> {
+    let Some(path) = remote_state_path() else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::json!({ "enabled": enabled }).to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(tmp, path)?;
+    Ok(())
+}
+
 fn daemon_address() -> Result<SocketAddr> {
     let port = env::var(DESKTOP_DAEMON_PORT)
         .ok()
@@ -182,7 +288,11 @@ fn parse_daemon_port(value: &str) -> Result<u16> {
     Ok(port)
 }
 
-fn spawn_sidecar(app: &AppHandle, address: SocketAddr) -> Result<Option<CommandChild>> {
+fn spawn_sidecar(
+    app: &AppHandle,
+    address: SocketAddr,
+    remote: bool,
+) -> Result<Option<CommandChild>> {
     let command = match app.shell().sidecar("mew") {
         Ok(command) => command,
         Err(error) => {
@@ -191,8 +301,12 @@ fn spawn_sidecar(app: &AppHandle, address: SocketAddr) -> Result<Option<CommandC
         }
     };
     let port_arg = format!("127.0.0.1:{}", address.port());
+    let mut command = command.args(["daemon", "--port", &port_arg]);
+    if remote {
+        command = command.arg("--remote");
+        command = command.env("MEW_REMOTE_MODE", "desktop");
+    }
     let (events, child) = command
-        .args(["daemon", "--port", &port_arg])
         .spawn()
         .context("spawn the bundled mew daemon sidecar")?;
     drop(events);
@@ -205,16 +319,16 @@ fn spawn_sidecar(app: &AppHandle, address: SocketAddr) -> Result<Option<CommandC
     bail!("bundled mew daemon sidecar did not bind {address}")
 }
 
-fn spawn_configured_daemon(address: SocketAddr) -> Result<Option<(Child, PathBuf)>> {
+fn spawn_configured_daemon(address: SocketAddr, remote: bool) -> Result<Option<(Child, PathBuf)>> {
     let Ok(binary) = env::var(DESKTOP_DAEMON_BINARY) else {
         return Ok(None);
     };
     let binary = PathBuf::from(binary);
-    let child = spawn_daemon_binary(address, &binary)?;
+    let child = spawn_daemon_binary(address, &binary, remote)?;
     Ok(Some((child, binary)))
 }
 
-fn spawn_bundled_daemon(address: SocketAddr) -> Result<Option<(Child, PathBuf)>> {
+fn spawn_bundled_daemon(address: SocketAddr, remote: bool) -> Result<Option<(Child, PathBuf)>> {
     let Some(binary) = std::env::current_exe()
         .ok()
         .and_then(|executable| executable.parent().map(|directory| directory.join("mew")))
@@ -223,22 +337,24 @@ fn spawn_bundled_daemon(address: SocketAddr) -> Result<Option<(Child, PathBuf)>>
         return Ok(None);
     };
 
-    let child = spawn_daemon_binary(address, &binary)?;
+    let child = spawn_daemon_binary(address, &binary, remote)?;
     Ok(Some((child, binary)))
 }
 
-fn spawn_daemon(address: SocketAddr) -> Result<(Child, PathBuf)> {
+fn spawn_daemon(address: SocketAddr, remote: bool) -> Result<(Child, PathBuf)> {
     let mut last_error = None;
     let port = address.port().to_string();
     let port_arg = format!("127.0.0.1:{port}");
 
     for binary in daemon_binary_candidates() {
         let mut command = Command::new(&binary);
-        command
-            .args(["daemon", "--port", &port_arg])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        let (stdout, stderr) = daemon_log_stdio()?;
+        command.args(["daemon", "--port", &port_arg]);
+        if remote {
+            command.arg("--remote");
+            command.env("MEW_REMOTE_MODE", "desktop");
+        }
+        command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
         close_inherited_descriptors(&mut command);
 
         let mut child = match command.spawn() {
@@ -280,14 +396,16 @@ fn daemon_binary_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-fn spawn_daemon_binary(address: SocketAddr, binary: &Path) -> Result<Child> {
+fn spawn_daemon_binary(address: SocketAddr, binary: &Path, remote: bool) -> Result<Child> {
     let port_arg = format!("127.0.0.1:{}", address.port());
     let mut command = Command::new(binary);
-    command
-        .args(["daemon", "--port", &port_arg])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    let (stdout, stderr) = daemon_log_stdio()?;
+    command.args(["daemon", "--port", &port_arg]);
+    if remote {
+        command.arg("--remote");
+        command.env("MEW_REMOTE_MODE", "desktop");
+    }
+    command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
     close_inherited_descriptors(&mut command);
     let mut child = command
         .spawn()
@@ -303,6 +421,25 @@ fn spawn_daemon_binary(address: SocketAddr, binary: &Path) -> Result<Child> {
         "configured daemon {} did not bind {address}",
         binary.display()
     )
+}
+
+fn daemon_log_stdio() -> Result<(Stdio, Stdio)> {
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow!("HOME is not set; cannot create daemon log"))?;
+    let log_dir = home.join(".config").join("mew").join("logs");
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("create daemon log directory {}", log_dir.display()))?;
+    let log_path = log_dir.join("desktop-daemon.log");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open daemon log {}", log_path.display()))?;
+    let stderr = file
+        .try_clone()
+        .with_context(|| format!("clone daemon log {}", log_path.display()))?;
+    Ok((Stdio::from(file), Stdio::from(stderr)))
 }
 
 fn close_inherited_descriptors(command: &mut Command) {

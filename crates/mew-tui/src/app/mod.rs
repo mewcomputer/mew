@@ -87,6 +87,9 @@ pub struct App {
     pub models: Vec<(String, String)>,
     pub thinking_variants: HashMap<String, Vec<String>>,
     pub active_thinking_variant: Option<String>,
+    /// Recently used models (most recent first), capped at 6.
+    /// Loaded from persisted state and updated on model switch.
+    pub recent_models: Vec<String>,
     pub picker: Option<PickerState>,
     pub settings: Option<crate::settings::SettingsState>,
     pub slash_selected: usize,
@@ -236,11 +239,15 @@ pub enum Mode {
 }
 
 /// A single item in the command palette.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PickerItem {
     pub id: String,
     pub label: String,
     pub description: String,
+    /// When true, this item renders as a non-selectable section header
+    /// (e.g. "Recent" in the model picker). It is skipped by selection
+    /// and filtered out when the user types a filter.
+    pub header: bool,
 }
 
 /// State for the cmdk-style command palette.
@@ -262,6 +269,10 @@ impl PickerState {
         self.items
             .iter()
             .filter(|i| {
+                // Headers only appear when filter is empty.
+                if i.header {
+                    return f.is_empty();
+                }
                 i.label.to_lowercase().contains(&f) || i.description.to_lowercase().contains(&f)
             })
             .collect()
@@ -270,6 +281,39 @@ impl PickerState {
     pub fn selected_item(&self) -> Option<&PickerItem> {
         let filtered = self.filtered();
         filtered.get(self.selected).copied()
+    }
+
+    /// Move selection by `delta` (positive = down, negative = up),
+    /// skipping over section headers. Wraps around.
+    pub fn move_selection(&mut self, delta: i32) {
+        let filtered = self.filtered();
+        if filtered.is_empty() {
+            return;
+        }
+        let len = filtered.len() as i32;
+        let mut new = self.selected as i32 + delta;
+        // Wrap around.
+        if new < 0 {
+            new = len - 1;
+        } else if new >= len {
+            new = 0;
+        }
+        // Skip headers.
+        let mut attempts = 0;
+        while attempts < len {
+            let item = &filtered[new as usize];
+            if !item.header {
+                break;
+            }
+            new += delta;
+            if new < 0 {
+                new = len - 1;
+            } else if new >= len {
+                new = 0;
+            }
+            attempts += 1;
+        }
+        self.selected = new as usize;
     }
 
     /// Ensure scroll keeps selected item in view.
@@ -425,6 +469,7 @@ impl App {
             models: Vec::new(),
             thinking_variants: HashMap::new(),
             active_thinking_variant: None,
+            recent_models: Vec::new(),
             picker: None,
             settings: None,
             slash_selected: 0,
@@ -627,6 +672,7 @@ impl App {
                     id: name.clone(),
                     label: name,
                     description: format!("{} bytes", size),
+                    ..Default::default()
                 });
             }
         }

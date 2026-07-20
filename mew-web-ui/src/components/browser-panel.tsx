@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Camera, Globe, Loader2, Play, RefreshCw, X } from "lucide-react";
+import { Camera, Globe, Loader2, MoreHorizontal, Play, RefreshCw, X } from "lucide-react";
 import type { MewClient } from "@mew/web-client";
 import type { WorkbenchTab } from "../lib/workbench-tabs";
 import { acceptsBrowserEvent, acceptsNativeBrowserEvent } from "../lib/browser-lifecycle";
@@ -16,11 +16,13 @@ import { cn } from "../lib/utils";
 
 export function BrowserPanel({
   client,
+  connected,
   active = true,
   tab,
   onTabChange,
 }: {
   client: MewClient | null;
+  connected: boolean;
   active?: boolean;
   tab: WorkbenchTab;
   onTabChange: (patch: Partial<WorkbenchTab>) => void;
@@ -33,9 +35,13 @@ export function BrowserPanel({
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [selector, setSelector] = useState("");
   const [fillText, setFillText] = useState("");
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [browserError, setBrowserError] = useState<string | null>(null);
-  const [nativeAvailable, setNativeAvailable] = useState(false);
+  const [nativeAvailable, setNativeAvailable] = useState<boolean | null>(() => (
+    isDesktopHost() ? null : false
+  ));
   const [nativeVisible, setNativeVisible] = useState(false);
   const nativeVisibleRef = useRef(nativeVisible);
   const busyRef = useRef(busy);
@@ -69,16 +75,28 @@ export function BrowserPanel({
     setScreenshot(null);
     setBrowserError(null);
     setBusy(false);
-    setNativeVisible(nativeAvailable && Boolean(tabUrl) && active);
+    setNativeVisible(nativeAvailable === true && Boolean(tabUrl) && active);
 
-    if (!tabUrl || !active) return;
+    if (nativeAvailable === null || !tabUrl || !active) return;
     setBusy(true);
-    if (client) {
-      client.browserOpen(tabUrl, tab.id);
+    if (nativeAvailable) {
+      void navigateCefBrowser(tabUrl, tab.id)
+        .then(() => setBusy(false))
+        .catch((error: unknown) => {
+          setBusy(false);
+          setBrowserError(error instanceof Error ? error.message : String(error));
+        });
+    } else if (client && connected) {
+      try {
+        client.browserOpen(tabUrl, tab.id);
+      } catch (error) {
+        setBusy(false);
+        setBrowserError(error instanceof Error ? error.message : String(error));
+      }
     } else {
-      void navigateCefBrowser(tabUrl, tab.id).finally(() => setBusy(false));
+      setBusy(false);
     }
-  }, [active, nativeAvailable, tab.id]);
+  }, [active, client, connected, nativeAvailable, tab.id]);
 
   useLayoutEffect(() => {
     if (!nativeAvailable || !viewportRef.current) return;
@@ -219,126 +237,170 @@ export function BrowserPanel({
 
   const open = (event: FormEvent) => {
     event.preventDefault();
-    if ((!client && !nativeAvailable) || !url.trim()) return;
+    if (!canUseBrowser || !url.trim()) return;
     setBrowserError(null);
-    if (nativeAvailable) {
+    if (nativeAvailable === true) {
       setNativeVisible(true);
     }
     onTabChange({ title: tabTitleForUrl(url.trim()), payload: { ...tab.payload, url: url.trim() } });
-    if (client) {
-      run(() => client.browserOpen(url.trim(), tab.id));
-    } else {
+    if (nativeAvailable === true) {
       setBusy(true);
-      void navigateCefBrowser(url.trim(), tab.id).finally(() => setBusy(false));
+      void navigateCefBrowser(url.trim(), tab.id)
+        .then(() => setBusy(false))
+        .catch((error: unknown) => {
+          setBusy(false);
+          setBrowserError(error instanceof Error ? error.message : String(error));
+        });
+    } else if (client && connected) {
+      run(() => client.browserOpen(url.trim(), tab.id));
     }
   };
 
   const close = () => {
-    if (nativeAvailable) {
+    setToolsOpen(false);
+    if (nativeAvailable === true) {
       setNativeVisible(false);
       return;
     }
-    if (client) run(() => client.browserClose(tab.id));
+    if (client && connected) run(() => client.browserClose(tab.id));
+  };
+
+  const canUseBrowser = nativeAvailable === true || (
+    nativeAvailable === false && Boolean(client) && connected
+  );
+
+  const closeTools = () => {
+    setToolsOpen(false);
+    setInspectorOpen(false);
+    if (nativeAvailable === true && tabUrl && active) setNativeVisible(true);
+  };
+
+  const openTools = () => {
+    setToolsOpen((value) => !value);
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3">
-      <form onSubmit={open} className="flex items-center gap-1.5">
-        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-border bg-background px-2.5 py-1.5">
-          <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-          <input
-            value={url}
-            onChange={(event) => setUrl(event.target.value)}
-            className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
-            placeholder="https://..."
-            aria-label="Browser URL"
-            spellCheck={false}
-          />
-        </div>
-        <Button type="submit" size="icon" variant="secondary" className="h-8 w-8" disabled={(!client && !nativeAvailable) || busy} aria-label="Open URL">
-          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-        </Button>
-      </form>
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="relative shrink-0 border-b border-border px-3 py-2">
+        <form onSubmit={open} className="flex min-w-0 items-center">
+          <div className="flex min-w-0 flex-1 items-center gap-2 rounded-full border border-border bg-muted/35 px-3 py-1.5 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/20">
+            <Globe className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <input
+              value={url}
+              onChange={(event) => setUrl(event.target.value)}
+              className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+              placeholder={currentUrl || "Search or enter URL"}
+              aria-label="Browser URL"
+              spellCheck={false}
+            />
+            {busy && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />}
+            <Button type="submit" size="icon-sm" variant="ghost" className="shrink-0 rounded-full" disabled={!canUseBrowser || busy} aria-label="Open URL">
+              <Play className="h-3.5 w-3.5" />
+            </Button>
+            <button
+              type="button"
+              className={cn("motion-pressable shrink-0 rounded-full p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground", toolsOpen && "bg-accent text-foreground")}
+              onClick={openTools}
+              aria-label="Open browser tools"
+              aria-expanded={toolsOpen}
+              title="Browser tools"
+            >
+              <MoreHorizontal className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </form>
 
-      {browserError && (
-        <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] text-destructive">
-          {browserError}
-        </div>
-      )}
+        {browserError && (
+          <div role="alert" className="mt-2 rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] text-destructive">
+            {browserError}
+          </div>
+        )}
 
-      <div className="flex min-w-0 items-center gap-2 text-[10px] text-muted-foreground">
-        <span className="min-w-0 flex-1 truncate" title={currentUrl}>{title || currentUrl || "No page open"}</span>
-        <button type="button" className="motion-pressable rounded p-1 hover:bg-accent hover:text-foreground" onClick={() => client && run(() => client.browserSnapshot(tab.id))} aria-label="Refresh page snapshot" title="Refresh text snapshot">
-          <RefreshCw className="h-3 w-3" />
-        </button>
-        <button type="button" className="motion-pressable rounded p-1 hover:bg-accent hover:text-foreground" onClick={() => client && run(() => client.browserScreenshot(false, tab.id))} aria-label="Take browser screenshot" title="Take screenshot">
-          <Camera className="h-3 w-3" />
-        </button>
-        <button type="button" className="motion-pressable rounded p-1 hover:bg-accent hover:text-foreground" onClick={close} aria-label="Hide browser page" title="Hide browser page">
-          <X className="h-3 w-3" />
-        </button>
-      </div>
+        {toolsOpen && (
+          <div className="motion-enter absolute right-3 top-full z-50 mt-2 w-[min(24rem,calc(100vw-1.5rem))] rounded-xl border border-border bg-popover p-2 text-popover-foreground shadow-2xl">
+            <div className="flex items-center justify-between px-2 py-1.5">
+              <div>
+                <p className="text-xs font-medium">Browser tools</p>
+                <p className="text-[10px] text-muted-foreground">Inspect the visible page without taking space from it.</p>
+              </div>
+              <button type="button" className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground" onClick={closeTools} aria-label="Close browser tools">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
 
-      {screenshot && (
-        <div className="overflow-hidden rounded-lg border border-border bg-muted/20">
-          <img src={screenshot} alt={title ? `Screenshot of ${title}` : "Browser screenshot"} className="block h-auto max-h-56 w-full object-contain" />
-        </div>
-      )}
+            <div className="grid grid-cols-2 gap-1.5 p-1">
+              <Button size="sm" variant="ghost" className="justify-start gap-2 text-xs" disabled={!client || !connected} onClick={() => client && connected && run(() => client.browserSnapshot(tab.id))}>
+                <RefreshCw className="h-3.5 w-3.5" />
+                Text snapshot
+              </Button>
+              <Button size="sm" variant="ghost" className="justify-start gap-2 text-xs" disabled={!client || !connected} onClick={() => client && connected && run(() => client.browserScreenshot(false, tab.id))}>
+                <Camera className="h-3.5 w-3.5" />
+                Screenshot
+              </Button>
+            </div>
 
-      {nativeAvailable ? (
-        <>
-          <div ref={viewportRef} className="relative min-h-32 flex-1 overflow-hidden rounded-lg border border-border bg-muted/20">
-            {!nativeVisible && (
-              <div className="flex h-full min-h-32 flex-col items-center justify-center gap-2 px-6 text-center text-[11px] text-muted-foreground">
-                <Globe className="h-5 w-5 opacity-50" />
-                <p>the browser surface is closed. open a URL to bring it back.</p>
+            {(snapshot || screenshot) && (
+              <div className="mt-1 space-y-2 border-t border-border p-2">
+                {snapshot && <details open className="rounded-md border border-border bg-muted/25 text-[10px]">
+                  <summary className="cursor-pointer px-2 py-1.5 font-medium text-muted-foreground">Text snapshot</summary>
+                  <pre className="max-h-40 overflow-auto whitespace-pre-wrap border-t border-border p-2 font-mono leading-relaxed text-foreground/85">{snapshot}</pre>
+                </details>}
+                {screenshot && <img src={screenshot} alt={title ? `Screenshot of ${title}` : "Browser screenshot"} className="max-h-40 w-full rounded-md border border-border object-contain" />}
               </div>
             )}
+
+            <div className="mt-1 border-t border-border pt-1">
+              <button type="button" className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs font-medium hover:bg-accent" onClick={() => setInspectorOpen((value) => !value)} aria-expanded={inspectorOpen}>
+                Inspect and interact
+                <span className="text-[10px] text-muted-foreground">{inspectorOpen ? "Hide" : "Show"}</span>
+              </button>
+              {inspectorOpen && <div className="space-y-1.5 p-2">
+                <input
+                  value={selector}
+                  onChange={(event) => setSelector(event.target.value)}
+                  className="h-8 w-full rounded-md border border-border bg-background px-2.5 text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  placeholder="element ref or selector, e.g. @e3"
+                  aria-label="Browser element selector"
+                />
+                <div className="flex gap-1.5">
+                  <input
+                    value={fillText}
+                    onChange={(event) => setFillText(event.target.value)}
+                    className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2.5 text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    placeholder="text to fill"
+                    aria-label="Browser fill text"
+                  />
+                  <Button size="sm" variant="secondary" className="h-8 px-2.5 text-[11px]" disabled={!client || !connected || !selector.trim()} onClick={() => client && connected && run(() => client.browserFill(selector.trim(), fillText, tab.id))}>Fill</Button>
+                  <Button size="sm" variant="secondary" className="h-8 px-2.5 text-[11px]" disabled={!client || !connected || !selector.trim()} onClick={() => client && connected && run(() => client.browserClick(selector.trim(), tab.id))}>Click</Button>
+                </div>
+              </div>}
+            </div>
+
+            <button type="button" className="mt-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-accent hover:text-foreground" onClick={close}>
+              <X className="h-3.5 w-3.5" />
+              Hide browser page
+            </button>
           </div>
-          {snapshot && (
-            <details className="max-h-44 overflow-auto rounded-lg border border-border bg-muted/20 text-[10px]">
-              <summary className="cursor-pointer px-3 py-2 font-medium text-muted-foreground">text snapshot</summary>
-              <pre className="whitespace-pre-wrap border-t border-border p-3 font-mono leading-relaxed text-foreground/85">{snapshot}</pre>
-            </details>
-          )}
-        </>
-      ) : (
-        <div className="min-h-0 flex-1 overflow-auto rounded-lg border border-border bg-muted/20">
-          {snapshot ? (
-            <pre className="whitespace-pre-wrap p-3 font-mono text-[10px] leading-relaxed text-foreground/85">{snapshot}</pre>
-          ) : (
+        )}
+      </div>
+
+      {nativeAvailable !== false ? (
+        <div ref={viewportRef} className="relative min-h-32 min-w-0 flex-1 overflow-hidden bg-muted/20">
+          {!nativeVisible && (
             <div className="flex h-full min-h-32 flex-col items-center justify-center gap-2 px-6 text-center text-[11px] text-muted-foreground">
               <Globe className="h-5 w-5 opacity-50" />
-              <p>open a page, then inspect its text structure or capture a screenshot.</p>
+              <p>the browser surface is closed. open a URL to bring it back.</p>
             </div>
           )}
         </div>
-      )}
-
-      <div className="grid gap-1.5 border-t border-border pt-3">
-        <input
-          value={selector}
-          onChange={(event) => setSelector(event.target.value)}
-          className="h-8 rounded-md border border-border bg-background px-2.5 text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          placeholder="element ref or selector, e.g. @e3"
-          aria-label="Browser element selector"
-        />
-        <div className="flex gap-1.5">
-          <input
-            value={fillText}
-            onChange={(event) => setFillText(event.target.value)}
-            className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2.5 text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            placeholder="text to fill"
-            aria-label="Browser fill text"
-          />
-          <Button size="sm" variant="secondary" className={cn("h-8 px-2.5 text-[11px]")} disabled={!client || !selector.trim()} onClick={() => client && run(() => client.browserFill(selector.trim(), fillText, tab.id))}>
-            Fill
-          </Button>
-          <Button size="sm" variant="secondary" className="h-8 px-2.5 text-[11px]" disabled={!client || !selector.trim()} onClick={() => client && run(() => client.browserClick(selector.trim(), tab.id))}>
-            Click
-          </Button>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-auto bg-muted/20">
+          <div className="flex h-full min-h-32 flex-col items-center justify-center gap-2 px-6 text-center text-[11px] text-muted-foreground">
+            <Globe className="h-5 w-5 opacity-50" />
+            <p>open a page, then use Browser tools to inspect or capture it.</p>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

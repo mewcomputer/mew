@@ -19,7 +19,12 @@ use iroh::{Endpoint, SecretKey};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
-use crate::{groups::GroupsStore, handle_connection, session::SessionManager, ThinkingSetter};
+use mew_protocol::RemoteScope;
+
+use crate::{
+    groups::GroupsStore, handle_connection_with_authorizer, handle_connection_with_scope,
+    remote::RemoteAccessStore, session::SessionManager, RemoteAuthorizer, ThinkingSetter,
+};
 
 /// ALPN protocol identifier for mew wire protocol over iroh.
 pub const MEW_ALPN: &[u8] = b"mew/wire/0";
@@ -90,6 +95,7 @@ impl NodeIdAllowlist {
     /// the file doesn't exist.
     pub fn load(path: PathBuf) -> Result<Self> {
         let nodes = if path.exists() {
+            harden_private_file(&path)?;
             let bytes = std::fs::read(&path)
                 .with_context(|| format!("read allowlist {}", path.display()))?;
             match serde_json::from_slice::<Vec<String>>(&bytes) {
@@ -152,6 +158,11 @@ impl NodeIdAllowlist {
         let json = serde_json::to_string_pretty(nodes)?;
         let tmp = self.path.with_extension("json.tmp");
         std::fs::write(&tmp, json)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
         std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
@@ -168,6 +179,12 @@ pub struct MewIrohHandler {
     pub groups_store: Arc<GroupsStore>,
     pub thinking_setter: Option<ThinkingSetter>,
     pub auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
+    /// Scope applied to every protocol message after NodeId authentication.
+    pub remote_scope: Option<RemoteScope>,
+    /// Pairing token required by the explicit remote modes. Legacy mobile
+    /// iroh connections leave this unset for compatibility.
+    pub remote_token: Option<String>,
+    pub remote_store: Option<Arc<RemoteAccessStore>>,
 }
 
 impl std::fmt::Debug for MewIrohHandler {
@@ -183,7 +200,7 @@ impl ProtocolHandler for MewIrohHandler {
         let remote_id = connection.remote_id();
         let id_str = remote_id.to_string();
 
-        if !self.allowlist.contains(&id_str) {
+        if !self.allowlist.contains(&id_str) && self.remote_scope.is_none() {
             warn!(peer = %id_str, "rejected iroh connection: not in allowlist");
             connection.close(1u32.into(), b"unauthorized");
             return Ok(());
@@ -197,16 +214,42 @@ impl ProtocolHandler for MewIrohHandler {
             .map_err(|e| AcceptError::from_err(e))?;
         let stream = IrohStream::new(send, recv);
 
-        if let Err(e) = handle_connection(
-            stream,
-            self.session_manager.clone(),
-            self.groups_store.clone(),
-            self.thinking_setter.clone(),
-            // TODO: hook this in properly
-            self.auto_summary_enabled.clone(),
-        )
-        .await
-        {
+        let result = if let Some(store) = &self.remote_store {
+            let store = store.clone();
+            let node_id = id_str.clone();
+            let authorizer: RemoteAuthorizer = Arc::new(move |token, device_name| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                match token {
+                    Some(token) => store.authorize_token(token, &node_id, device_name, now),
+                    None => store.authorize_device(&node_id, now),
+                }
+            });
+            handle_connection_with_authorizer(
+                stream,
+                self.session_manager.clone(),
+                self.groups_store.clone(),
+                self.thinking_setter.clone(),
+                self.auto_summary_enabled.clone(),
+                self.remote_scope,
+                Some(authorizer),
+            )
+            .await
+        } else {
+            handle_connection_with_scope(
+                stream,
+                self.session_manager.clone(),
+                self.groups_store.clone(),
+                self.thinking_setter.clone(),
+                self.auto_summary_enabled.clone(),
+                self.remote_scope,
+                self.remote_token.as_deref(),
+            )
+            .await
+        };
+        if let Err(e) = result {
             if !e.to_string().contains("connection reset") {
                 warn!(peer = %id_str, error = %e, "iroh connection ended with error");
             }
@@ -221,18 +264,26 @@ impl ProtocolHandler for MewIrohHandler {
 ///
 /// Binds an iroh endpoint with the `mew/wire/0` ALPN, prints the NodeId
 /// for pairing, and accepts connections until shutdown.
+pub struct IrohListenerConfig {
+    pub allowlist_path: PathBuf,
+    pub secret_key: SecretKey,
+    pub remote_scope: Option<RemoteScope>,
+    pub remote_token: Option<String>,
+    pub remote_store: Option<Arc<RemoteAccessStore>>,
+    pub remote_mode: crate::remote::RemoteMode,
+}
+
 pub async fn run_iroh(
     session_manager: Arc<SessionManager>,
     groups_store: Arc<GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
     auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
-    allowlist_path: PathBuf,
-    secret_key: SecretKey,
+    config: IrohListenerConfig,
 ) -> Result<()> {
-    let allowlist = Arc::new(NodeIdAllowlist::load(allowlist_path.clone())?);
+    let allowlist = Arc::new(NodeIdAllowlist::load(config.allowlist_path.clone())?);
 
     let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
-        .secret_key(secret_key)
+        .secret_key(config.secret_key)
         .alpns(vec![MEW_ALPN.to_vec()])
         .bind()
         .await
@@ -252,6 +303,10 @@ pub async fn run_iroh(
     let node_id = endpoint.id();
     info!(node_id = %node_id, "mew daemon listening (iroh)");
 
+    if let Some(store) = &config.remote_store {
+        store.set_hosting(true, config.remote_mode, Some(node_id.to_string()))?;
+    }
+
     // Print pairing info to stdout for `mew pair` to capture.
     println!("iroh-node-id:{node_id}");
 
@@ -265,12 +320,16 @@ pub async fn run_iroh(
         });
     }
 
+    let remote_store = config.remote_store.clone();
     let handler = MewIrohHandler {
         allowlist: allowlist.clone(),
         session_manager,
         groups_store,
         thinking_setter,
         auto_summary_enabled,
+        remote_scope: config.remote_scope,
+        remote_token: config.remote_token,
+        remote_store,
     };
 
     let router = Router::builder(endpoint).accept(MEW_ALPN, handler).spawn();
@@ -286,6 +345,10 @@ pub async fn run_iroh(
         _ = tokio::signal::ctrl_c() => {
             info!("received Ctrl+C, shutting down iroh listener");
         }
+    }
+
+    if let Some(store) = &config.remote_store {
+        store.set_hosting(false, config.remote_mode, Some(node_id.to_string()))?;
     }
 
     let _ = router.shutdown().await;
@@ -319,6 +382,7 @@ pub fn default_secret_key_path() -> PathBuf {
 /// or committed to version control.
 pub fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
     if path.exists() {
+        harden_private_file(path)?;
         let bytes = std::fs::read(path)
             .with_context(|| format!("read iroh secret key {}", path.display()))?;
         let key: SecretKey = serde_json::from_slice(&bytes).map_err(|e| {
@@ -337,16 +401,36 @@ pub fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
             std::fs::create_dir_all(parent).ok();
         }
         let json = serde_json::to_string(&key)?;
-        // Write with restrictive permissions (0600 on Unix).
-        std::fs::write(path, json)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).ok();
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new();
+            file.create_new(true).write(true).mode(0o600);
+            use std::io::Write;
+            file.open(path)?.write_all(json.as_bytes())?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(path, json)?;
         }
         info!(path = %path.display(), "generated new iroh secret key");
         Ok(key)
     }
+}
+
+#[cfg(unix)]
+fn harden_private_file(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)?.permissions().mode();
+    if mode & 0o077 != 0 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn harden_private_file(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

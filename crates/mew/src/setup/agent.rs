@@ -665,6 +665,7 @@ pub(crate) fn build_session_agent(
     writer: Option<SessionWriter>,
     session_id: Option<SessionId>,
     session_cwd: Option<std::path::PathBuf>,
+    browser_enabled: bool,
     dispatcher: Arc<dyn Dispatcher>,
     todos_path: Option<std::path::PathBuf>,
     discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
@@ -700,7 +701,7 @@ pub(crate) fn build_session_agent(
     let current_persona_name = Arc::new(tokio::sync::RwLock::new(None));
     let template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>> =
         Arc::new(tokio::sync::RwLock::new(None));
-    let tools = build_tools(
+    let mut tools = build_tools(
         skills.clone(),
         skill_filter.clone(),
         template_ctx.clone(),
@@ -710,6 +711,7 @@ pub(crate) fn build_session_agent(
         crate::commands::config::hashline_enabled_for(cfg, provider_id),
         cfg.plan_path.clone(),
     );
+    tools.extend(mew_tools::tools::browser::tools());
 
     let flagged_files: Arc<tokio::sync::Mutex<Vec<FlaggedFile>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -719,6 +721,7 @@ pub(crate) fn build_session_agent(
     let permission_engine = build_permission_engine(cfg, mode);
 
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
+    agent.set_browser_enabled(browser_enabled);
     agent.set_model_info(model_id, provider_id);
     agent.template_ctx = template_ctx;
     agent.flagged_files = flagged_files;
@@ -781,7 +784,12 @@ pub(crate) fn build_session_agent(
     // tool-library partials, subagent/skill/MCP sections, and conversational
     // depth guidance.
     let base_prompt = {
-        let tool_names: Vec<String> = agent.tools.keys().cloned().collect();
+        let tool_names: Vec<String> = agent
+            .tools
+            .keys()
+            .filter(|name| browser_enabled || !name.starts_with("browser_"))
+            .cloned()
+            .collect();
         let mcp_names: Vec<String> = agent
             .tools
             .values()

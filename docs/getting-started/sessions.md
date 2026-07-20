@@ -18,7 +18,7 @@ Sessions are stored as JSONL files under a per-session directory:
   └── todos.json       # session todo list (if any)
 ```
 
-On macOS the path is `~/Library/Application Support/computer.mew.mew/sessions/`.
+The default path is `~/.config/mew/sessions/` on macOS and Linux.
 You can override the location with the `MEW_SESSION_DIR` environment variable.
 
 Subagent sessions nest under their parent:

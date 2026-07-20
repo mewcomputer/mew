@@ -10,6 +10,7 @@ pub type PartId = Ulid;
 pub enum Role {
     User,
     Assistant,
+    System,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -761,6 +762,11 @@ mod tests {
     #[test]
     fn test_role_assistant_roundtrip() {
         roundtrip("role assistant", &Role::Assistant);
+    }
+
+    #[test]
+    fn test_role_system_roundtrip() {
+        roundtrip("role system", &Role::System);
     }
 
     // -----------------------------------------------------------------------

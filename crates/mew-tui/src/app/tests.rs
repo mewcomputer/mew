@@ -1287,6 +1287,42 @@ fn test_thinking_picker_no_variants_shows_only_off() {
 }
 
 #[test]
+fn test_thinking_variant_picker_strips_provider_prefix() {
+    // The model picker uses "provider/model" IDs (e.g.
+    // "opencode-zen/claude-sonnet-4-6"), but thinking_variants is keyed by
+    // the bare model id. open_thinking_variant_picker_for must strip the
+    // provider prefix to find the variants.
+    let mut app = App::new();
+    app.status.model = "some-other-model".into();
+    app.thinking_variants.insert(
+        "claude-sonnet-4-6".into(),
+        vec!["low".into(), "high".into(), "max".into()],
+    );
+    // Pass the full "provider/model" format, as the model picker would.
+    app.open_thinking_variant_picker_for(Some("opencode-zen/claude-sonnet-4-6"));
+    let picker = app.picker.as_ref().unwrap();
+    assert_eq!(picker.kind, "thinking_variant");
+    // "Off" + 3 variants.
+    assert_eq!(picker.items.len(), 4);
+    let names: Vec<&str> = picker.items[1..].iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(names, vec!["low", "high", "max"]);
+}
+
+#[test]
+fn test_thinking_variant_picker_for_bare_model_id() {
+    // When passed a bare model id (no provider prefix), it should still work.
+    let mut app = App::new();
+    app.status.model = "wrong-model".into();
+    app.thinking_variants
+        .insert("k3".into(), vec!["low".into(), "high".into(), "max".into()]);
+    app.open_thinking_variant_picker_for(Some("k3"));
+    let picker = app.picker.as_ref().unwrap();
+    assert_eq!(picker.items.len(), 4);
+    let names: Vec<&str> = picker.items[1..].iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(names, vec!["low", "high", "max"]);
+}
+
+#[test]
 fn test_model_picker_has_thinking_hint() {
     let mut app = App::new();
     app.open_model_picker();
@@ -1294,6 +1330,129 @@ fn test_model_picker_has_thinking_hint() {
     assert_eq!(picker.kind, "model");
     assert!(picker.hint.is_some());
     assert!(picker.hint.as_ref().unwrap().contains("thinking"));
+}
+
+#[test]
+fn test_model_picker_shows_recent_section() {
+    let mut app = App::new();
+    app.models = vec![
+        ("kimi/k3".into(), "kimi · openai".into()),
+        ("opencode-zen/claude-sonnet-4-6".into(), "anthropic".into()),
+    ];
+    app.recent_models = vec!["kimi/k3".into()];
+
+    app.open_model_picker();
+    let picker = app.picker.as_ref().unwrap();
+
+    // First item should be the "Recent" header.
+    assert!(picker.items[0].header);
+    assert_eq!(picker.items[0].label, "Recent");
+
+    // Second item should be the recent model.
+    assert_eq!(picker.items[1].id, "kimi/k3");
+    assert!(!picker.items[1].header);
+
+    // Third item should be the "All Models" header.
+    assert!(picker.items[2].header);
+    assert_eq!(picker.items[2].label, "All Models");
+
+    // Remaining items should be the full model list.
+    assert_eq!(picker.items[3].id, "kimi/k3");
+    assert_eq!(picker.items[4].id, "opencode-zen/claude-sonnet-4-6");
+
+    // Selection should start on the first recent model (index 1), not the header.
+    assert_eq!(picker.selected, 1);
+}
+
+#[test]
+fn test_model_picker_no_recent_section_when_empty() {
+    let mut app = App::new();
+    app.models = vec![("kimi/k3".into(), "kimi · openai".into())];
+    app.recent_models = vec![];
+
+    app.open_model_picker();
+    let picker = app.picker.as_ref().unwrap();
+
+    // No headers should be present.
+    assert!(!picker.items.iter().any(|i| i.header));
+    assert_eq!(picker.items.len(), 1);
+    assert_eq!(picker.selected, 0);
+}
+
+#[test]
+fn test_model_picker_recent_filters_unknown_models() {
+    let mut app = App::new();
+    app.models = vec![("kimi/k3".into(), "kimi · openai".into())];
+    // Include a model that's no longer available.
+    app.recent_models = vec!["kimi/k3".into(), "old-provider/dead-model".into()];
+
+    app.open_model_picker();
+    let picker = app.picker.as_ref().unwrap();
+
+    // The dead model should not appear in the Recent section.
+    // Count items between the "Recent" header and "All Models" header.
+    let in_recent_section = picker
+        .items
+        .iter()
+        .skip_while(|i| !i.header || i.label != "Recent")
+        .skip(1) // skip the "Recent" header itself
+        .take_while(|i| !i.header) // until "All Models" header
+        .collect::<Vec<_>>();
+    assert_eq!(in_recent_section.len(), 1);
+    assert_eq!(in_recent_section[0].id, "kimi/k3");
+}
+
+#[test]
+fn test_picker_move_selection_skips_headers() {
+    let mut app = App::new();
+    app.models = vec![
+        ("kimi/k3".into(), "desc1".into()),
+        ("opencode-zen/claude".into(), "desc2".into()),
+    ];
+    app.recent_models = vec!["kimi/k3".into()];
+    app.open_model_picker();
+
+    let picker = app.picker.as_ref().unwrap();
+    // Items: [Header: Recent, kimi/k3, Header: All Models, kimi/k3, claude]
+    assert_eq!(picker.items.len(), 5);
+
+    // Selection starts at index 1 (first recent model).
+    assert_eq!(picker.selected, 1);
+
+    // Move down — should skip the "All Models" header and land on kimi/k3 (index 3).
+    app.picker_down();
+    let picker = app.picker.as_ref().unwrap();
+    assert_eq!(picker.selected, 3);
+
+    // Move down again — should land on claude (index 4).
+    app.picker_down();
+    let picker = app.picker.as_ref().unwrap();
+    assert_eq!(picker.selected, 4);
+
+    // Move down — should wrap to index 1 (skipping header at 0).
+    app.picker_down();
+    let picker = app.picker.as_ref().unwrap();
+    assert_eq!(picker.selected, 1);
+}
+
+#[test]
+fn test_picker_filtered_hides_headers() {
+    let mut app = App::new();
+    app.models = vec![("kimi/k3".into(), "desc1".into())];
+    app.recent_models = vec!["kimi/k3".into()];
+    app.open_model_picker();
+
+    // Type a filter — headers should be hidden.
+    if let Some(ref mut p) = app.picker {
+        p.filter = "kimi".into();
+    }
+
+    let picker = app.picker.as_ref().unwrap();
+    let filtered = picker.filtered();
+    // No headers in filtered results.
+    assert!(!filtered.iter().any(|i| i.header));
+    // Both kimi/k3 entries should match the filter.
+    assert_eq!(filtered.len(), 2);
 }
 
 #[test]

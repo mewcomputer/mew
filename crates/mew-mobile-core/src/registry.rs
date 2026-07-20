@@ -27,6 +27,9 @@ pub struct DaemonEntry {
     pub last_known_version: Option<String>,
     /// Whether to keep the connection alive while foregrounded.
     pub keep_connected: bool,
+    /// Pairing credential supplied by an invite, when present.
+    #[serde(default)]
+    pub pairing_token: Option<String>,
 }
 
 /// The registry store. JSON file, loaded at startup, saved on change.
@@ -73,10 +76,27 @@ impl DaemonRegistry {
             last_connected_at: None,
             last_known_version: None,
             keep_connected: false,
+            pairing_token: None,
         };
         self.entries.push(entry);
         let _ = self.save();
         DaemonId { node_id }
+    }
+
+    /// Add a daemon from an invite that includes a pairing credential.
+    pub fn add_with_token(&mut self, node_id: String, name: String, token: String) -> DaemonId {
+        if let Some(existing) = self.entries.iter_mut().find(|e| e.node_id == node_id) {
+            existing.name = name;
+            existing.pairing_token = Some(token);
+            let _ = self.save();
+            return DaemonId { node_id };
+        }
+        let id = self.add(node_id, name);
+        if let Some(existing) = self.entries.iter_mut().find(|e| e.node_id == id.node_id) {
+            existing.pairing_token = Some(token);
+            let _ = self.save();
+        }
+        id
     }
 
     /// Remove a daemon by ID.

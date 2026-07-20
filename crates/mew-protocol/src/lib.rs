@@ -25,6 +25,14 @@ pub use command_registry::{is_known, lookup, CommandDef, CommandLocus, BUILTIN_C
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
+    /// Authenticate an iroh connection before any daemon operation. The
+    /// daemon derives the granted scope from the transport-side pairing
+    /// record; the client never gets to choose its own authority.
+    RemoteHello {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
+        device_name: String,
+    },
     /// Create a new session.
     NewSession {
         /// Working directory for the session. Defaults to the daemon's cwd.
@@ -175,6 +183,10 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
     },
+    /// Browse user-accessible directories before a session exists.
+    ListFilesystemDir {
+        path: Option<String>,
+    },
     ReadFilePreview {
         session_id: String,
         path: String,
@@ -281,13 +293,29 @@ pub enum ClientKind {
     Tui,
     /// Browser-based web UI.
     Web,
+    /// Native desktop app with access to the in-app browser.
+    Desktop,
     /// Headless CLI script.
     Cli,
     /// Mobile app (iOS / Android).
     Mobile,
+    /// A client connected through the opt-in remote daemon transport.
+    Remote,
     /// Unknown / unspecified.
     #[default]
     Unknown,
+}
+
+/// Authority granted to a remote client by the daemon owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteScope {
+    /// Read session state and workspace previews, but do not drive a turn.
+    Observe,
+    /// Send prompts and answer requests, but do not change workspace files.
+    Collaborate,
+    /// Full daemon authority, including mutating tools subject to permissions.
+    Control,
 }
 
 /// Info about a single available model, returned by `ListModels`.
@@ -470,6 +498,10 @@ impl From<PermissionDecision> for mew_hooks::PermissionDecision {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
+    /// Confirms the scope granted to an authenticated remote connection.
+    RemoteReady {
+        scope: RemoteScope,
+    },
     /// Sent after `NewSession` succeeds. The session is ready for prompts.
     /// `model` and `provider` are the daemon's current model, so the
     /// frontend can display it immediately without a separate ListModels round-trip.
@@ -720,6 +752,10 @@ pub enum ServerMessage {
 
     // -- Phase 3: File service responses --
     DirListing {
+        path: String,
+        entries: Vec<DirEntry>,
+    },
+    FilesystemDirListing {
         path: String,
         entries: Vec<DirEntry>,
     },
@@ -1228,6 +1264,29 @@ mod tests {
         decode_json(&json).unwrap()
     }
 
+    #[test]
+    fn remote_auth_messages_roundtrip() {
+        let hello = ClientMessage::RemoteHello {
+            token: Some("one-time-token".into()),
+            device_name: "laptop".into(),
+        };
+        assert!(matches!(
+            round_trip(&hello),
+            ClientMessage::RemoteHello { token: Some(token), device_name }
+                if token == "one-time-token" && device_name == "laptop"
+        ));
+
+        let ready = ServerMessage::RemoteReady {
+            scope: RemoteScope::Collaborate,
+        };
+        assert!(matches!(
+            round_trip(&ready),
+            ServerMessage::RemoteReady {
+                scope: RemoteScope::Collaborate
+            }
+        ));
+    }
+
     fn sample_text_part() -> Part {
         Part::Text(TextPart {
             base: PartBase {
@@ -1325,6 +1384,35 @@ mod tests {
     }
 
     #[test]
+    fn test_filesystem_directory_browse_roundtrip() {
+        let request = ClientMessage::ListFilesystemDir {
+            path: Some("/Users/tester/projects".into()),
+        };
+        match round_trip(&request) {
+            ClientMessage::ListFilesystemDir { path } => {
+                assert_eq!(path.as_deref(), Some("/Users/tester/projects"));
+            }
+            _ => panic!("wrong client variant"),
+        }
+
+        let response = ServerMessage::FilesystemDirListing {
+            path: "/Users/tester/projects".into(),
+            entries: vec![DirEntry {
+                name: "mew".into(),
+                is_dir: true,
+                size: None,
+            }],
+        };
+        match round_trip(&response) {
+            ServerMessage::FilesystemDirListing { path, entries } => {
+                assert_eq!(path, "/Users/tester/projects");
+                assert_eq!(entries[0].name, "mew");
+            }
+            _ => panic!("wrong server variant"),
+        }
+    }
+
+    #[test]
     fn test_roundtrip_ping_pong() {
         let ping = ClientMessage::Ping;
         let j = encode_json(&ping).unwrap();
@@ -1357,6 +1445,23 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn test_client_kind_desktop_roundtrip() {
+        let message = ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Desktop,
+        };
+        let encoded = encode_json(&message).unwrap();
+        let decoded: ClientMessage = decode_json(&encoded).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::NewSession {
+                client_kind: ClientKind::Desktop,
+                ..
+            }
+        ));
     }
 
     // -- ClientMessage: exhaustive variant coverage --------------------------

@@ -973,6 +973,23 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.scroll_down(10);
             None
         }
+        // Shift+Tab: cycle persona forward. Ctrl+Shift+Tab: cycle backward.
+        // Terminals deliver Shift+Tab as BackTab; Ctrl+Shift+Tab as BackTab
+        // with the CONTROL modifier. Ignored when the input box has text
+        // (BackTab would otherwise be a no-op anyway) and in slash-command
+        // mode (where Tab does completion).
+        KeyCode::BackTab if app.mode == crate::app::Mode::Normal => {
+            if app.input.is_empty() && !app.personas.is_empty() {
+                let delta = if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    -1
+                } else {
+                    1
+                };
+                Some(Action::CyclePersona(delta))
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -980,23 +997,17 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
 fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     // Ctrl+P in the thinking variant picker cycles to the next variant.
     if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        if let Some(ref picker) = app.picker {
+        if let Some(ref mut picker) = app.picker {
             if picker.kind == "thinking_variant" {
-                let items_len = picker.items.len();
-                if items_len > 0 {
-                    let next = (picker.selected + 1) % items_len;
-                    if let Some(ref mut picker) = app.picker {
-                        picker.selected = next;
-                        picker.adjust_scroll();
-                    }
-                    // Return the selected variant as an action.
-                    let item = app
-                        .picker
-                        .as_ref()
-                        .and_then(|p| p.selected_item().map(|i| i.id.clone()));
-                    if let Some(variant) = item {
-                        return Some(Action::SetThinkingVariant(variant));
-                    }
+                picker.move_selection(1);
+                picker.adjust_scroll();
+                // Return the selected variant as an action.
+                let item = app
+                    .picker
+                    .as_ref()
+                    .and_then(|p| p.selected_item().map(|i| i.id.clone()));
+                if let Some(variant) = item {
+                    return Some(Action::SetThinkingVariant(variant));
                 }
             }
         }
@@ -1093,12 +1104,22 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         KeyCode::Right => {
             // In the model picker, Right opens the thinking variant picker
             // when the filter is empty and the selected model has variants.
+            // The model picker item IDs are in "provider/model" format, but
+            // thinking_variants is keyed by the bare model id, so we strip
+            // the provider prefix before checking.
+            //
+            // We also fire a SwitchModel action so the agent's active model
+            // matches the one the variants are being selected for. Without
+            // this, set_thinking resolves against the *old* model and fails
+            // with "unknown thinking variant for model".
             if let Some(ref picker) = app.picker {
                 if picker.kind == "model" && picker.filter.is_empty() {
                     if let Some(selected) = picker.selected_item() {
-                        if app.thinking_variants.contains_key(&selected.id) {
-                            app.open_thinking_variant_picker();
-                            return None;
+                        let bare_model = selected.id.rsplit('/').next().unwrap_or(&selected.id);
+                        if app.thinking_variants.contains_key(bare_model) {
+                            let id = selected.id.clone();
+                            app.open_thinking_variant_picker_for(Some(&id));
+                            return Some(Action::SwitchModel(id));
                         }
                     }
                 }
@@ -1144,6 +1165,9 @@ pub enum Action {
     /// User confirmed a persona switch from the confirm modal. The string
     /// is the target persona name.
     PersonaSwitchConfirmed(String),
+    /// Cycle the active persona forward (+1) or backward (-1) through the
+    /// loaded persona list. Fires from Shift+Tab / Ctrl+Shift+Tab.
+    CyclePersona(i32),
     /// Apply a permission mode change. Fires from `/permissions <mode>` and
     /// from the permission-mode picker.
     SetPermissionMode(mew_hooks::PermissionMode),

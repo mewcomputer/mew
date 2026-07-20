@@ -12,8 +12,8 @@ describe("workspace surfaces", () => {
       summaryOpen: true,
       workbenchOpen: false,
       workbenchTabs: {
-        tabs: [{ id: "activity-1", kind: "activity", title: "Activity", closable: false }],
-        activeTabId: "activity-1",
+        tabs: [],
+        activeTabId: "",
       },
       workbenchSize: 28,
     });
@@ -100,7 +100,8 @@ describe("workspace surfaces", () => {
     });
 
     expect(state.workbenchTabs.activeTabId).toBe("browser-1");
-    expect(state.workbenchTabs.tabs[1]?.payload?.url).toBe("https://example.com");
+    expect(state.workbenchTabs.tabs.find((tab) => tab.id === "browser-1")?.payload?.url)
+      .toBe("https://example.com");
   });
 
   it("loads valid surface preferences and ignores malformed values", () => {
@@ -116,7 +117,6 @@ describe("workspace surfaces", () => {
       workbenchOpen: true,
       workbenchTabs: {
         tabs: [
-          { id: "activity-1", kind: "activity", title: "Activity", closable: false },
           { id: "changes-1", kind: "changes", title: "Changes", closable: true },
         ],
         activeTabId: "changes-1",

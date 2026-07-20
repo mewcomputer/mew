@@ -1,11 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { RightRail } from "../components/right-rail";
 import { useSessionStore } from "../stores/session";
 
 const {
   browserListeners,
-  respondToAskUserMock,
   watchWorkspaceMock,
   gitStatusMock,
   browserOpenMock,
@@ -20,7 +19,6 @@ const {
     off: vi.fn((event: string) => {
       listeners.delete(event);
     }),
-    respondToAskUser: vi.fn(),
     watchWorkspace: vi.fn(),
     gitStatus: vi.fn(),
     browserOpen: vi.fn(),
@@ -32,7 +30,6 @@ const {
   };
   return {
     browserListeners: listeners,
-    respondToAskUserMock: mock.respondToAskUser,
     watchWorkspaceMock: mock.watchWorkspace,
     gitStatusMock: mock.gitStatus,
     browserOpenMock: mock.browserOpen,
@@ -57,12 +54,11 @@ describe("RightRail", () => {
   function addWorkbenchTab(label: string) {
     const trigger = screen.getByRole("button", { name: "Add workbench tab" });
     fireEvent.click(trigger);
-    fireEvent.click(screen.getByRole("menuitem", { name: label }));
+    fireEvent.click(screen.getByRole("option", { name: new RegExp(`^${label}\\b`) }));
   }
 
   afterEach(() => {
     cleanup();
-    respondToAskUserMock.mockClear();
     watchWorkspaceMock.mockClear();
     gitStatusMock.mockClear();
     browserOpenMock.mockClear();
@@ -81,7 +77,11 @@ describe("RightRail", () => {
     });
   });
 
-  it("opens on the first actionable section", () => {
+  beforeEach(() => {
+    useSessionStore.setState({ connectionState: "connected" });
+  });
+
+  it("keeps questions in the main interface instead of duplicating them in the rail", () => {
     useSessionStore.setState({
       sessionId: "sess-1",
       pendingAskUser: [{
@@ -92,58 +92,21 @@ describe("RightRail", () => {
     });
 
     render(<RightRail open onOpenChange={vi.fn()} />);
-
-    expect(screen.getByRole("tab", { name: /questions/i }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByText("Which file should I edit?")).toBeTruthy();
-  });
-
-  it("shows explicit cross-session attention at the top of the panel", () => {
-    useSessionStore.setState({
-      availableSessions: [{
-        session_id: "sess-2",
-        state: "idle",
-        created_at: 1,
-        client_count: 0,
-        summary: "api refactor",
-        pending_permissions: 1,
-      }],
-    });
-
-    render(<RightRail open onOpenChange={vi.fn()} />);
-
-    expect(screen.getByRole("heading", { name: "Needs attention" })).toBeTruthy();
-    expect(screen.getByText("Permissions needed")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Permissions needed in api refactor" })).toBeTruthy();
-  });
-
-  it("keeps the panel open after resolving a question", () => {
-    const onOpenChange = vi.fn();
-    useSessionStore.setState({
-      sessionId: "sess-1",
-      pendingAskUser: [{
-        requestId: "request-1",
-        callId: "call-1",
-        questions: [{
-          prompt: "Which file should I edit?",
-          options: [{ label: "src/app.ts", description: "The app entrypoint" }],
-        }],
-      }],
-    });
-
-    render(<RightRail open onOpenChange={onOpenChange} />);
-    fireEvent.click(screen.getByRole("button", { name: /src\/app\.ts/i }));
-    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
-
-    expect(respondToAskUserMock).toHaveBeenCalledWith("request-1", ["src/app.ts"]);
-    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole("tab", { name: /questions/i })).toBeNull();
+    expect(screen.queryByText("Which file should I edit?")).toBeNull();
   });
 
   it("exposes every section as a keyboard-navigable tab", () => {
     render(<RightRail open onOpenChange={vi.fn()} />);
 
-    expect(screen.getByRole("tablist", { name: "Workbench sections" })).toBeTruthy();
-    expect(screen.getByRole("tablist", { name: "Activity sections" })).toBeTruthy();
-    expect(screen.getAllByRole("tab")).toHaveLength(5);
+    expect(screen.getByRole("tablist", { name: "Workbench tabs" })).toBeTruthy();
+    expect(screen.queryByRole("tablist", { name: "Activity sections" })).toBeNull();
+    expect(screen.queryAllByRole("tab")).toHaveLength(0);
+    expect(screen.getByText("No workbench tabs")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add workbench tab" }));
+    expect(screen.getAllByRole("option")).toHaveLength(7);
+    expect(screen.getByRole("option", { name: /Browser Open a browser tab/ })).toBeTruthy();
   });
 
   it("switches between workbench surfaces without closing the rail", () => {
@@ -152,6 +115,13 @@ describe("RightRail", () => {
     addWorkbenchTab("Browser");
     expect(screen.getByRole("tab", { name: "New tab" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByRole("textbox", { name: "Browser URL" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Workbench" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Browser element selector" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open browser tools" }));
+    expect(screen.getByRole("button", { name: "Text snapshot" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Inspect and interact/ }));
+    expect(screen.getByRole("textbox", { name: "Browser element selector" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Close browser tools" }));
 
     addWorkbenchTab("Review");
     expect(screen.getByRole("tab", { name: "Review" }).getAttribute("aria-selected")).toBe("true");
@@ -172,10 +142,38 @@ describe("RightRail", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open URL" }));
 
     expect(screen.getByRole("tab", { name: "example.com" }).getAttribute("aria-selected")).toBe("true");
+    expect(browserOpenMock).toHaveBeenCalledTimes(1);
 
     const newTabs = screen.getAllByRole("tab", { name: "New tab" });
     fireEvent.click(newTabs[0]!);
     expect(screen.getAllByRole("tab", { name: "New tab" })[0]!.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("does not send a restored browser tab while the daemon is disconnected", () => {
+    useSessionStore.setState({ connectionState: "disconnected" });
+    const restoredBrowserTab = {
+      id: "browser-restored",
+      kind: "browser" as const,
+      title: "example.com",
+      closable: true,
+      payload: { url: "https://example.com" },
+    };
+
+    render(
+      <RightRail
+        mode="dock"
+        open
+        onOpenChange={vi.fn()}
+        workbenchTabs={{
+          tabs: [restoredBrowserTab],
+          activeTabId: restoredBrowserTab.id,
+        }}
+        onWorkbenchTabsChange={vi.fn()}
+      />,
+    );
+
+    expect(browserOpenMock).not.toHaveBeenCalled();
+    expect((screen.getByRole("button", { name: "Open URL" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("uses Codex-style tab shortcuts for browser tabs and tab selection", () => {
@@ -186,7 +184,7 @@ describe("RightRail", () => {
     expect(screen.getAllByRole("tab", { name: "New tab" })).toHaveLength(2);
 
     fireEvent.keyDown(window, { key: "1", metaKey: true });
-    expect(screen.getByRole("tab", { name: "Activity" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getAllByRole("tab", { name: "New tab" })[0]!.getAttribute("aria-selected")).toBe("true");
   });
 
   it("surfaces browser protocol errors and stops the loading state", async () => {

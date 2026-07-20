@@ -14,3 +14,14 @@ Object.defineProperty(window, "matchMedia", {
     dispatchEvent: () => false,
   }),
 });
+
+// cmdk observes its list even while the command dialog is closed. jsdom has
+// no layout engine, so a no-op observer keeps that behavior testable.
+class TestResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+globalThis.ResizeObserver = TestResizeObserver as typeof ResizeObserver;
+Element.prototype.scrollIntoView = () => {};

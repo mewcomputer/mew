@@ -245,6 +245,19 @@ impl Adapter {
         let mut out: Vec<serde_json::Value> = Vec::new();
 
         match m.role {
+            Role::System => {
+                let text = m
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        Part::Text(pt) => Some(pt.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>();
+                if !text.is_empty() {
+                    out.push(json!({"role": "system", "content": text}));
+                }
+            }
             Role::User => {
                 let mut text_content = String::new();
                 let mut image_blocks: Vec<serde_json::Value> = Vec::new();
@@ -407,8 +420,16 @@ impl Adapter {
 
             let delta = &chunk.choices[0].delta;
 
+            // The first chunk often has {"role":"assistant"} with no content yet.
+            // Don't eagerly create a text part here — if reasoning follows
+            // (either in this delta or the next), the text part would be
+            // registered before the reasoning part, rendering text above
+            // thinking instead of below. The content handler below creates
+            // the text part lazily when actual content arrives.
             if delta.role.as_deref() == Some("assistant")
                 && current_text_part.is_none()
+                && delta.reasoning.is_none()
+                && delta.content.as_deref().map(|c| !c.is_empty()).unwrap_or(false)
                 && delta
                     .tool_calls
                     .as_ref()
@@ -432,6 +453,15 @@ impl Adapter {
                                 part_id: rp.base.id,
                             })
                             .await;
+                    }
+                    if current_text_part.is_none() {
+                        let part = new_text_part();
+                        let _ = tx
+                            .send(ProviderEvent::PartStart {
+                                part: Part::Text(part.clone()),
+                            })
+                            .await;
+                        current_text_part = Some(part);
                     }
                     if let Some(tp) = &current_text_part {
                         let _ = tx
@@ -616,6 +646,7 @@ struct Choice {
 struct Delta {
     role: Option<String>,
     content: Option<String>,
+    #[serde(alias = "reasoning_content")]
     reasoning: Option<String>,
     tool_calls: Option<Vec<ToolCallDelta>>,
 }
@@ -994,6 +1025,87 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, ProviderEvent::PartEnd { .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProviderEvent::MessageEnd {
+                finish: Finish::Stop,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_fixture_reasoning_content_alias() {
+        // Kimi K3 and DeepSeek emit reasoning under `reasoning_content` in the
+        // streaming delta (not `reasoning`). The Delta struct aliases both
+        // field names so reasoning is captured regardless of which the provider
+        // uses. This fixture uses `reasoning_content` exclusively.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let fixture = std::fs::read_to_string("src/testdata/reasoning-content.sse")
+            .expect("read reasoning-content fixture");
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(fixture, "text/event-stream"))
+            .mount(&mock_server)
+            .await;
+
+        let adapter = Adapter::new(
+            "test".to_string(),
+            mock_server.uri(),
+            "k3".to_string(),
+            "test-key".to_string(),
+        );
+
+        let req = Request {
+            model: "k3".into(),
+            messages: vec![],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            ..Default::default()
+        };
+
+        let mut stream = adapter.stream(req).await.expect("stream");
+        let mut events: Vec<ProviderEvent> = Vec::new();
+        while let Some(ev) = futures::StreamExt::next(&mut stream).await {
+            events.push(ev);
+        }
+
+        // Reasoning should be captured from reasoning_content deltas.
+        // PartStart(Reasoning) proves the reasoning_content field was
+        // deserialized and a reasoning part was opened.
+        let has_reasoning_start = events.iter().any(|e| {
+            matches!(e, ProviderEvent::PartStart { part: Part::Reasoning(_) })
+        });
+        assert!(
+            has_reasoning_start,
+            "expected reasoning PartStart from reasoning_content deltas; events: {:?}",
+            events.iter().map(|e| format!("{:?}", e)).collect::<Vec<_>>()
+        );
+
+        // The reasoning part must be closed with a PartEnd, and a text part
+        // must also appear (the fixture has both reasoning_content and content).
+        let part_end_count = events
+            .iter()
+            .filter(|e| matches!(e, ProviderEvent::PartEnd { .. }))
+            .count();
+        assert!(
+            part_end_count >= 2,
+            "expected at least 2 PartEnd events (reasoning + text); got {}",
+            part_end_count
+        );
+
+        let has_text_start = events.iter().any(|e| {
+            matches!(e, ProviderEvent::PartStart { part: Part::Text(_) })
+        });
+        assert!(
+            has_text_start,
+            "expected text PartStart from content deltas"
+        );
         assert!(events.iter().any(|e| matches!(
             e,
             ProviderEvent::MessageEnd {

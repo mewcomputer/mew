@@ -114,6 +114,9 @@ async fn iroh_peer_connects_and_exchanges_protocol() -> Result<()> {
         groups_store: server.groups_store.clone(),
         thinking_setter: None,
         auto_summary_enabled: server.auto_summary_enabled.clone(),
+        remote_scope: None,
+        remote_token: None,
+        remote_store: None,
     };
 
     // Create the daemon (accept) endpoint.
@@ -237,6 +240,9 @@ async fn iroh_unauthorized_peer_is_rejected() -> Result<()> {
         groups_store: server.groups_store.clone(),
         thinking_setter: None,
         auto_summary_enabled: server.auto_summary_enabled.clone(),
+        remote_scope: None,
+        remote_token: None,
+        remote_store: None,
     };
 
     let daemon_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)

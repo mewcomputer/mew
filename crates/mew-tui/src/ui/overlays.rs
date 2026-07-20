@@ -701,6 +701,17 @@ pub(super) fn draw_picker(
 
     let start = picker.scroll;
     for (i, item) in filtered.iter().enumerate().skip(start).take(visible_items) {
+        // Section headers render as a non-selectable muted label.
+        if item.header {
+            list_text.push_line(Line::from(vec![Span::styled(
+                &item.label,
+                Style::default()
+                    .fg(tokens.resolve("text.muted"))
+                    .bg(tokens.resolve("status_bar.background"))
+                    .add_modifier(Modifier::DIM),
+            )]));
+            continue;
+        }
         let is_selected = i == picker.selected;
         let label_style = if is_selected {
             Style::default()
@@ -1217,6 +1228,10 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect, tokens: &crate::theme::Theme
         Line::from(vec![
             Span::styled("  /persona   ", key_style),
             Span::styled("switch persona", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Shift+Tab  ", key_style),
+            Span::styled("cycle persona (Ctrl+Shift+Tab = back)", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  /rewind    ", key_style),

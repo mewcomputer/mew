@@ -47,6 +47,15 @@ describe("InputArea", () => {
     switchPersonaMock.mockClear();
   });
 
+  it("keeps composer controls inside the primary composer surface", () => {
+    renderInputArea();
+
+    const surface = screen.getByTestId("composer-surface");
+    expect(surface.contains(screen.getByTitle("Persona"))).toBe(true);
+    expect(surface.contains(screen.getByTitle("Switch model"))).toBe(true);
+    expect(surface.contains(screen.getByTitle("Send"))).toBe(true);
+  });
+
   it("shows store personas in @ menu", () => {
     useSessionStore.setState({ availablePersonas: mockPersonas, currentPersona: null });
     const { container } = renderInputArea();

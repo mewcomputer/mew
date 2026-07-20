@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { ChevronRight, Terminal } from "lucide-react";
 import { useSessionStore, type ChatMessage, type MessagePart } from "../stores/session";
 import { ToolCallCard } from "./tool-call-card";
@@ -59,14 +59,14 @@ function ToolCallGroup({
   const uniqueNames = [...new Set(toolNames)];
 
   return (
-    <div className="max-w-[85%]">
+    <div className="min-w-0 max-w-[85%]">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="motion-pressable flex w-full items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-left"
+        className="motion-pressable flex min-w-0 w-full items-center gap-2 rounded-lg border border-border bg-card px-4 py-2 text-left"
       >
         <Terminal className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         <span className="text-sm font-medium">{parts.length} tool calls</span>
-        <span className="truncate text-xs text-muted-foreground">
+        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
           {uniqueNames.join(", ")}
         </span>
         <ChevronRight
@@ -87,13 +87,15 @@ function ToolCallGroup({
   );
 }
 
-export function MessageItem({
+export const MessageItem = memo(function MessageItem({
   message,
 }: {
   message: ChatMessage;
 }) {
-  const streamingText = useSessionStore((s) => s.streamingText);
-  const streamingReasoningText = useSessionStore((s) => s.streamingReasoningText);
+  const hasStreamingText = message.parts.some((part) => part.type === "text" && part.streaming);
+  const hasStreamingReasoning = message.parts.some((part) => part.type === "reasoning" && part.streaming);
+  const streamingText = useSessionStore((s) => hasStreamingText ? s.streamingText : "");
+  const streamingReasoningText = useSessionStore((s) => hasStreamingReasoning ? s.streamingReasoningText : "");
   const isUser = message.role === "user";
   const copyText = message.parts
     .filter(
@@ -105,7 +107,7 @@ export function MessageItem({
   return (
     <div
       className={cn(
-        "group flex flex-col gap-2",
+        "group flex min-w-0 max-w-full flex-col gap-2 typeset",
         isUser ? "items-end" : "items-start",
       )}
     >
@@ -118,8 +120,9 @@ export function MessageItem({
       {groupParts(message.parts).map((group, i) => {
         if (group.kind === "single") {
           const part = group.parts[0];
-          // Skip empty text parts — they create blank bubbles.
-          if (part.type === "text" && !part.text?.trim()) return null;
+          // Empty streaming parts still render the live text buffer. Only
+          // completed empty parts should be omitted.
+          if (part.type === "text" && !part.streaming && !part.text?.trim()) return null;
           return (
             <PartRenderer
               key={i}
@@ -138,7 +141,7 @@ export function MessageItem({
       )}
     </div>
   );
-}
+});
 
 function PartRenderer({
   part,
@@ -156,7 +159,7 @@ function PartRenderer({
       return (
         <div
           className={cn(
-            "max-w-[85%] rounded-lg py-2.5",
+            "min-w-0 max-w-full rounded-lg py-2.5",
             isUser ? "bg-primary text-primary-foreground px-4" : "",
           )}
         >

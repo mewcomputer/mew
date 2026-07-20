@@ -36,6 +36,8 @@ pub struct ToolCtxShared {
     pub shell_session: Option<crate::tools::shell_session::SharedShellSession>,
     /// Shared snapshot store for hashline tag binding and recovery.
     pub snapshot_store: std::sync::Arc<dyn mew_hashline::SnapshotStore>,
+    /// Whether this turn is attached to the native desktop browser.
+    pub browser_enabled: bool,
 }
 
 impl Default for ToolCtxShared {
@@ -47,6 +49,7 @@ impl Default for ToolCtxShared {
             secrets: Arc::new(SecretSet::default()),
             shell_session: None,
             snapshot_store: std::sync::Arc::new(mew_hashline::InMemorySnapshotStore::new()),
+            browser_enabled: false,
         }
     }
 }

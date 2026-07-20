@@ -169,6 +169,47 @@ desktop-dev:
 desktop-build:
     pnpm --filter mew-web-ui desktop:build
 
+# Build and install the macOS app into /Applications.
+desktop-install: desktop-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "$(uname -s)" != "Darwin" ]; then
+        echo "desktop-install currently supports macOS only" >&2
+        exit 1
+    fi
+    app="{{justfile_directory()}}/mew-web-ui/src-tauri/target/release/bundle/macos/mew.app"
+    destination="/Applications/mew.app"
+    if [ ! -d "$app" ]; then
+        echo "release app not found at $app" >&2
+        exit 1
+    fi
+    rm -rf "$destination"
+    ditto "$app" "$destination"
+    echo "✓ installed $destination"
+
+# Stop mew bridges and daemon processes, including desktop sidecars.
+stop-all-daemons:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pids=$(ps -axo pid=,command= | awk '$2 ~ /(^|\/)mew-web$/ || $2 ~ /(^|\/)mew$/ { for (i = 3; i <= NF; i++) if ($i == "daemon") { print $1; break } }')
+    bridge_pids=$(lsof -ti :9847 2>/dev/null || true)
+    tcp_pids=$(lsof -ti :25566 2>/dev/null || true)
+    all_pids=$(printf '%s\n%s\n%s\n' "$pids" "$bridge_pids" "$tcp_pids" | awk 'NF && !seen[$1]++ { print $1 }')
+    if [ -z "$all_pids" ]; then
+        echo "no mew daemon processes found"
+        exit 0
+    fi
+    echo "stopping mew processes: $(echo "$all_pids" | tr '\n' ' ')"
+    echo "$all_pids" | xargs kill -TERM 2>/dev/null || true
+    sleep 1
+    remaining=$(printf '%s\n' "$all_pids" | while read -r pid; do kill -0 "$pid" 2>/dev/null && echo "$pid"; done)
+    if [ -n "$remaining" ]; then
+        echo "force-stopping: $(echo "$remaining" | tr '\n' ' ')"
+        echo "$remaining" | xargs kill -KILL 2>/dev/null || true
+    fi
+    rm -f /tmp/mew.sock 2>/dev/null || true
+    echo "✓ mew daemons stopped"
+
 # Full watch dev mode: Vite dev server + cargo-watch for the Rust stack.
 # Rebuilds and restarts the bridge/daemon whenever Rust sources change.
 # Flags are forwarded to the bridge; use --open to launch the browser.

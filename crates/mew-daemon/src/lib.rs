@@ -31,7 +31,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use mew_agent::{Agent, AgentEvent, PlanDecision};
-use mew_protocol::{ClientMessage, Question, QuestionOption, ServerMessage, SessionState};
+use mew_protocol::{
+    ClientKind, ClientMessage, Question, QuestionOption, RemoteScope, ServerMessage, SessionState,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::mpsc;
@@ -44,6 +46,7 @@ pub mod browser;
 pub mod client;
 pub mod files;
 pub mod groups;
+pub mod remote;
 pub mod session;
 
 #[cfg(feature = "iroh")]
@@ -57,6 +60,7 @@ pub struct AgentBuildParams {
     pub session_id: String,
     pub writer: mew_session::Writer,
     pub cwd: Option<std::path::PathBuf>,
+    pub browser_enabled: bool,
 }
 
 /// Type alias for the agent-builder closure. The daemon calls this once
@@ -166,6 +170,20 @@ impl DaemonServer {
     pub fn with_thinking_setter(mut self, setter: ThinkingSetter) -> Self {
         self.thinking_setter = Some(setter);
         self
+    }
+
+    /// Clone the listener-facing handles while keeping the same session
+    /// manager. Used when local and remote transports run concurrently.
+    pub fn clone_for_listener(&self) -> Self {
+        Self {
+            builder: self.builder.clone(),
+            model_switcher: self.model_switcher.clone(),
+            model_lister: self.model_lister.clone(),
+            thinking_setter: self.thinking_setter.clone(),
+            session_manager: self.session_manager.clone(),
+            groups_store: self.groups_store.clone(),
+            auto_summary_enabled: self.auto_summary_enabled.clone(),
+        }
     }
 
     /// Run the daemon, listening on the given Unix socket path.
@@ -305,12 +323,167 @@ impl DaemonServer {
 // Per-connection handler
 // ---------------------------------------------------------------------------
 
+fn remote_scope_label(scope: RemoteScope) -> &'static str {
+    match scope {
+        RemoteScope::Observe => "observe",
+        RemoteScope::Collaborate => "collaborate",
+        RemoteScope::Control => "control",
+    }
+}
+
+fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
+    if scope == RemoteScope::Control {
+        return matches!(
+            message,
+            ClientMessage::RemoteHello { .. }
+                | ClientMessage::NewSession { .. }
+                | ClientMessage::AttachSession { .. }
+                | ClientMessage::ListSessions
+                | ClientMessage::DeleteSession { .. }
+                | ClientMessage::RenameSession { .. }
+                | ClientMessage::SetAutoTitle { .. }
+                | ClientMessage::SetAutoSummary { .. }
+                | ClientMessage::Prompt { .. }
+                | ClientMessage::Cancel
+                | ClientMessage::PermissionResponse { .. }
+                | ClientMessage::AskUserResponse { .. }
+                | ClientMessage::PlanApprovalResponse { .. }
+                | ClientMessage::SlashCommand { .. }
+                | ClientMessage::ListModels
+                | ClientMessage::SwitchModel { .. }
+                | ClientMessage::SetThinkingVariant { .. }
+                | ClientMessage::SetPermissionMode { .. }
+                | ClientMessage::YieldControl { .. }
+                | ClientMessage::CreateGroup { .. }
+                | ClientMessage::UpdateGroup { .. }
+                | ClientMessage::DeleteGroup { .. }
+                | ClientMessage::AssignSessionGroup { .. }
+                | ClientMessage::ArchiveSession { .. }
+                | ClientMessage::PinSession { .. }
+                | ClientMessage::ListDir { .. }
+                | ClientMessage::ListFilesystemDir { .. }
+                | ClientMessage::ReadFilePreview { .. }
+                | ClientMessage::GitStatus { .. }
+                | ClientMessage::WatchWorkspace { .. }
+                | ClientMessage::OpenPath { .. }
+                | ClientMessage::UnflagFile { .. }
+                | ClientMessage::ListPersonas
+                | ClientMessage::SwitchPersona { .. }
+                | ClientMessage::ListProjects
+                | ClientMessage::RegenerateTitle { .. }
+                | ClientMessage::Ping
+                | ClientMessage::BrowserOpen { .. }
+                | ClientMessage::BrowserSnapshot { .. }
+                | ClientMessage::BrowserScreenshot { .. }
+                | ClientMessage::BrowserClick { .. }
+                | ClientMessage::BrowserFill { .. }
+                | ClientMessage::BrowserPress { .. }
+                | ClientMessage::BrowserClose { .. }
+        );
+    }
+
+    let observe = matches!(
+        message,
+        ClientMessage::RemoteHello { .. }
+            | ClientMessage::AttachSession { .. }
+            | ClientMessage::ListSessions
+            | ClientMessage::ListProjects
+            | ClientMessage::ListModels
+            | ClientMessage::Ping
+            | ClientMessage::ListDir { .. }
+            | ClientMessage::ListFilesystemDir { .. }
+            | ClientMessage::ReadFilePreview { .. }
+            | ClientMessage::GitStatus { .. }
+            | ClientMessage::WatchWorkspace { .. }
+    );
+    if observe {
+        return true;
+    }
+
+    scope == RemoteScope::Collaborate
+        && matches!(
+            message,
+            ClientMessage::Prompt { .. }
+                | ClientMessage::Cancel
+                | ClientMessage::PermissionResponse { .. }
+                | ClientMessage::AskUserResponse { .. }
+                | ClientMessage::PlanApprovalResponse { .. }
+                | ClientMessage::YieldControl { .. }
+        )
+}
+
 pub async fn handle_connection<S>(
     stream: S,
     session_manager: Arc<SessionManager>,
     groups_store: Arc<groups::GroupsStore>,
     thinking_setter: Option<ThinkingSetter>,
     auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    handle_connection_with_scope(
+        stream,
+        session_manager,
+        groups_store,
+        thinking_setter,
+        auto_summary_enabled,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Handle a connection with an optional daemon-enforced remote scope.
+///
+/// The local transports pass `None`. Iroh remote transports must pass a scope
+/// so a connected peer cannot turn a transport-level identity check into full
+/// daemon authority by sending handcrafted protocol messages.
+pub async fn handle_connection_with_scope<S>(
+    stream: S,
+    session_manager: Arc<SessionManager>,
+    groups_store: Arc<groups::GroupsStore>,
+    thinking_setter: Option<ThinkingSetter>,
+    auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
+    remote_scope: Option<RemoteScope>,
+    remote_token: Option<&str>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let authorizer = match (remote_scope, remote_token) {
+        (Some(scope), Some(expected)) => {
+            let expected = expected.to_owned();
+            Some(Arc::new(move |token: Option<&str>, _device_name: &str| {
+                Ok((token == Some(expected.as_str())).then_some(scope))
+            }) as RemoteAuthorizer)
+        }
+        _ => None,
+    };
+    handle_connection_with_authorizer(
+        stream,
+        session_manager,
+        groups_store,
+        thinking_setter,
+        auto_summary_enabled,
+        remote_scope,
+        authorizer,
+    )
+    .await
+}
+
+/// Resolve a remote connection's scope from its first protocol message.
+pub type RemoteAuthorizer =
+    Arc<dyn Fn(Option<&str>, &str) -> Result<Option<RemoteScope>> + Send + Sync>;
+
+pub async fn handle_connection_with_authorizer<S>(
+    stream: S,
+    session_manager: Arc<SessionManager>,
+    groups_store: Arc<groups::GroupsStore>,
+    thinking_setter: Option<ThinkingSetter>,
+    auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
+    mut remote_scope: Option<RemoteScope>,
+    remote_authorizer: Option<RemoteAuthorizer>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -325,6 +498,7 @@ where
     let mut attached_session: Option<Arc<Session>> = None;
     let mut client_id: Option<u64> = None;
     let mut auto_title_enabled = true;
+    let mut remote_ready = remote_scope.is_none() && remote_authorizer.is_none();
 
     // auto_summary_enabled is passed in from the daemon (daemon-wide task
     // is spawned once in run()/run_tcp(), not per-connection).
@@ -370,7 +544,92 @@ where
             }
         };
 
+        if remote_scope.is_some() || remote_authorizer.is_some() {
+            if !remote_ready {
+                match &client_msg {
+                    ClientMessage::RemoteHello { token, device_name }
+                        if !device_name.trim().is_empty() =>
+                    {
+                        let authorized_scope = if let Some(authorizer) = &remote_authorizer {
+                            authorizer(token.as_deref(), device_name)?
+                        } else {
+                            remote_scope
+                        };
+                        if let Some(authorized_scope) = authorized_scope {
+                            remote_scope = Some(authorized_scope);
+                            remote_ready = true;
+                            reply(ServerMessage::RemoteReady {
+                                scope: authorized_scope,
+                            });
+                        } else {
+                            reply(ServerMessage::Error {
+                                message: "remote pairing credentials were rejected".into(),
+                            });
+                        }
+                        continue;
+                    }
+                    ClientMessage::RemoteHello { .. } => {
+                        reply(ServerMessage::Error {
+                            message: "remote pairing credentials were rejected".into(),
+                        });
+                        continue;
+                    }
+                    _ => {
+                        reply(ServerMessage::Error {
+                            message: "remote connection must authenticate before use".into(),
+                        });
+                        continue;
+                    }
+                }
+            }
+            let Some(scope) = remote_scope else {
+                reply(ServerMessage::Error {
+                    message: "remote connection has no granted scope".into(),
+                });
+                continue;
+            };
+            if !remote_message_allowed(scope, &client_msg) {
+                reply(ServerMessage::Error {
+                    message: format!(
+                        "remote access scope `{}` does not allow this operation",
+                        remote_scope_label(scope)
+                    ),
+                });
+                continue;
+            }
+            if matches!(
+                &client_msg,
+                ClientMessage::NewSession { client_kind, .. }
+                    | ClientMessage::AttachSession { client_kind, .. }
+                    if *client_kind != ClientKind::Remote
+            ) {
+                reply(ServerMessage::Error {
+                    message: "remote connections must identify as client_kind=remote".into(),
+                });
+                continue;
+            }
+        } else if matches!(
+            &client_msg,
+            ClientMessage::NewSession {
+                client_kind: ClientKind::Desktop,
+                ..
+            } | ClientMessage::AttachSession {
+                client_kind: ClientKind::Desktop,
+                ..
+            }
+        ) {
+            reply(ServerMessage::Error {
+                message: "legacy iroh connections cannot use desktop-only capabilities".into(),
+            });
+            continue;
+        }
+
         match client_msg {
+            ClientMessage::RemoteHello { .. } => {
+                reply(ServerMessage::Error {
+                    message: "remote authentication is only available over iroh".into(),
+                });
+            }
             ClientMessage::NewSession { cwd, client_kind } => {
                 // A web client may not know the host's filesystem cwd. Keep
                 // the session useful for workspace tools by binding it to the
@@ -396,9 +655,9 @@ where
                         continue;
                     }
                 }
-                match session_manager.create(cwd.clone()).await {
+                match session_manager.create(cwd.clone(), client_kind).await {
                     Ok(session) => {
-                        let (cid, was_first) =
+                        let (cid, was_first, _) =
                             session.attach_client(client_tx.clone(), client_kind).await;
                         client_id = Some(cid);
                         attached_session = Some(session.clone());
@@ -441,8 +700,9 @@ where
                         }
                     }
                     Err(e) => {
+                        tracing::error!(error = %e, error_chain = %format!("{e:#}"), "failed to create session");
                         reply(ServerMessage::Error {
-                            message: format!("failed to create session: {e}"),
+                            message: format!("failed to create session: {e:#}"),
                         });
                     }
                 }
@@ -453,8 +713,11 @@ where
             } => {
                 match session_manager.attach(&session_id).await {
                     Ok(session) => {
-                        let (cid, was_first) =
+                        let (cid, was_first, browser_activated) =
                             session.attach_client(client_tx.clone(), client_kind).await;
+                        if browser_activated {
+                            session.append_browser_capability_notice().await;
+                        }
                         client_id = Some(cid);
                         attached_session = Some(session.clone());
 
@@ -535,8 +798,9 @@ where
                         });
                     }
                     Err(AttachError::BuildAgent(e)) => {
+                        tracing::error!(error = %e, error_chain = %format!("{e:#}"), "failed to resume session");
                         reply(ServerMessage::Error {
-                            message: format!("failed to resume session: {e}"),
+                            message: format!("failed to resume session: {e:#}"),
                         });
                     }
                 }
@@ -696,6 +960,14 @@ where
             ClientMessage::ListProjects => {
                 let projects = list_projects(&session_manager).await;
                 reply(ServerMessage::ProjectList { projects });
+            }
+            ClientMessage::ListFilesystemDir { path } => {
+                match crate::files::handle_list_filesystem_dir(path).await {
+                    Ok(listing) => reply(listing),
+                    Err(e) => reply(ServerMessage::Error {
+                        message: format!("list_filesystem_dir: {e}"),
+                    }),
+                }
             }
             ClientMessage::PermissionResponse {
                 request_id,
@@ -1148,6 +1420,13 @@ where
                     });
                     continue;
                 };
+                if !session.browser_enabled().await {
+                    reply(ServerMessage::BrowserError {
+                        message: "in-app browser is available only in the mew desktop app".into(),
+                        tab_id,
+                    });
+                    continue;
+                }
                 match crate::browser::open(&session.id, &url).await {
                     Ok((url, title, _)) => reply(ServerMessage::BrowserState {
                         open: true,
@@ -1169,6 +1448,13 @@ where
                     });
                     continue;
                 };
+                if !session.browser_enabled().await {
+                    reply(ServerMessage::BrowserError {
+                        message: "in-app browser is available only in the mew desktop app".into(),
+                        tab_id,
+                    });
+                    continue;
+                }
                 match crate::browser::snapshot(&session.id).await {
                     Ok((snapshot, url, title)) => reply(ServerMessage::BrowserSnapshot {
                         snapshot,
@@ -1190,6 +1476,13 @@ where
                     });
                     continue;
                 };
+                if !session.browser_enabled().await {
+                    reply(ServerMessage::BrowserError {
+                        message: "in-app browser is available only in the mew desktop app".into(),
+                        tab_id,
+                    });
+                    continue;
+                }
                 match crate::browser::screenshot(&session.id, annotate).await {
                     Ok((data, url)) => {
                         reply(ServerMessage::BrowserScreenshot { data, url, tab_id })
@@ -1208,6 +1501,13 @@ where
                     });
                     continue;
                 };
+                if !session.browser_enabled().await {
+                    reply(ServerMessage::BrowserError {
+                        message: "in-app browser is available only in the mew desktop app".into(),
+                        tab_id,
+                    });
+                    continue;
+                }
                 match crate::browser::click(&session.id, &selector).await {
                     Ok((url, title, _)) => reply(ServerMessage::BrowserState {
                         open: true,
@@ -1233,6 +1533,13 @@ where
                     });
                     continue;
                 };
+                if !session.browser_enabled().await {
+                    reply(ServerMessage::BrowserError {
+                        message: "in-app browser is available only in the mew desktop app".into(),
+                        tab_id,
+                    });
+                    continue;
+                }
                 match crate::browser::fill(&session.id, &selector, &text).await {
                     Ok((url, title, _)) => reply(ServerMessage::BrowserState {
                         open: true,
@@ -1254,6 +1561,13 @@ where
                     });
                     continue;
                 };
+                if !session.browser_enabled().await {
+                    reply(ServerMessage::BrowserError {
+                        message: "in-app browser is available only in the mew desktop app".into(),
+                        tab_id,
+                    });
+                    continue;
+                }
                 match crate::browser::press(&session.id, &key).await {
                     Ok((url, title, _)) => reply(ServerMessage::BrowserState {
                         open: true,
@@ -1275,6 +1589,13 @@ where
                     });
                     continue;
                 };
+                if !session.browser_enabled().await {
+                    reply(ServerMessage::BrowserError {
+                        message: "in-app browser is available only in the mew desktop app".into(),
+                        tab_id,
+                    });
+                    continue;
+                }
                 match crate::browser::close(&session.id).await {
                     Ok(()) => reply(ServerMessage::BrowserState {
                         open: false,
@@ -2303,5 +2624,67 @@ mod tests {
 
         let result = check_socket_liveness(socket_path.to_str().unwrap());
         assert!(result.is_ok(), "missing socket should be fine: {result:?}");
+    }
+
+    #[test]
+    fn remote_observe_scope_rejects_turns_and_mutations() {
+        assert!(remote_message_allowed(
+            RemoteScope::Observe,
+            &ClientMessage::ListSessions
+        ));
+        assert!(!remote_message_allowed(
+            RemoteScope::Observe,
+            &ClientMessage::NewSession {
+                cwd: None,
+                client_kind: ClientKind::Remote,
+            }
+        ));
+        assert!(!remote_message_allowed(
+            RemoteScope::Observe,
+            &ClientMessage::Prompt {
+                text: "run tests".into(),
+                attachments: Vec::new(),
+            }
+        ));
+        assert!(!remote_message_allowed(
+            RemoteScope::Observe,
+            &ClientMessage::DeleteSession {
+                session_id: "sess_1".into()
+            }
+        ));
+    }
+
+    #[test]
+    fn remote_collaborate_scope_can_drive_turns_but_not_mutating_commands() {
+        assert!(remote_message_allowed(
+            RemoteScope::Collaborate,
+            &ClientMessage::Prompt {
+                text: "hello".into(),
+                attachments: Vec::new(),
+            }
+        ));
+        assert!(remote_message_allowed(
+            RemoteScope::Collaborate,
+            &ClientMessage::PermissionResponse {
+                request_id: "req_1".into(),
+                decision: mew_protocol::PermissionDecision::Deny,
+            }
+        ));
+        assert!(!remote_message_allowed(
+            RemoteScope::Collaborate,
+            &ClientMessage::DeleteSession {
+                session_id: "sess_1".into()
+            }
+        ));
+    }
+
+    #[test]
+    fn remote_control_scope_allows_protocol_commands() {
+        assert!(remote_message_allowed(
+            RemoteScope::Control,
+            &ClientMessage::DeleteSession {
+                session_id: "sess_1".into()
+            }
+        ));
     }
 }

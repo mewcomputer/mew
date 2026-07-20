@@ -119,6 +119,10 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             handle_switch_persona(cx, &name).await;
             Flow::Continue
         }
+        Action::CyclePersona(delta) => {
+            handle_cycle_persona(cx, delta).await;
+            Flow::Continue
+        }
         Action::SetPermissionMode(mode) => {
             handle_set_permission_mode(cx, mode).await;
             Flow::Continue
@@ -333,6 +337,14 @@ async fn handle_switch_model<T: CommandTarget>(cx: &mut Ctx<'_, T>, spec: &str) 
             state.last_model = switched.model_id.clone();
             state.last_provider = switched.provider_id.clone();
             state.sidebar_collapsed = cx.app.sidebar_collapsed.clone();
+            // Record in recent models: move to front, dedupe, cap at 6.
+            let full_id = format!("{}/{}", switched.provider_id, switched.model_id);
+            cx.app.recent_models.retain(|m| m != &full_id);
+            cx.app.recent_models.insert(0, full_id);
+            if cx.app.recent_models.len() > 6 {
+                cx.app.recent_models.truncate(6);
+            }
+            state.recent_models = cx.app.recent_models.clone();
             if let Err(e) = mew_config::save_state(&state) {
                 tracing::warn!("failed to save state: {}", e);
             }
@@ -444,6 +456,34 @@ async fn handle_switch_persona<T: CommandTarget>(cx: &mut Ctx<'_, T>, name: &str
         }
     }
     cx.target.on_persona_change(old.as_deref(), name).await;
+}
+
+/// Cycle the active persona by `delta` (+1 forward, -1 backward) through
+/// the loaded persona list. The cycle includes "default" (no persona) as the
+/// last position, so Shift+Tab from the last persona returns to default.
+/// Reuses `handle_switch_persona` so model pinning, accent color, and the
+/// synthetic display message all fire identically to `/persona <name>`.
+async fn handle_cycle_persona<T: CommandTarget>(cx: &mut Ctx<'_, T>, delta: i32) {
+    if cx.app.personas.is_empty() {
+        cx.app.set_alert("no personas loaded");
+        return;
+    }
+    // Build the cycle list: loaded persona names, then "default".
+    let mut names: Vec<String> = cx.app.personas.iter().map(|(n, _)| n.clone()).collect();
+    names.push("default".into());
+    let len = names.len();
+
+    // Current position in the cycle. Active persona maps to its index;
+    // None (no active persona) maps to the "default" slot at the end.
+    let current_idx = match &cx.app.active_persona {
+        Some(active) => names.iter().position(|n| n == active).unwrap_or(len - 1),
+        None => len - 1, // "default"
+    };
+
+    // Wrap around in both directions. delta is +1 or -1.
+    let next_idx = (current_idx as i32 + delta).rem_euclid(len as i32) as usize;
+    let next_name = names[next_idx].clone();
+    handle_switch_persona(cx, &next_name).await;
 }
 
 /// Handle `ResumeSession` — load a previous session.

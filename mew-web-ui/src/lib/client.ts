@@ -1,13 +1,16 @@
 import { MewClient } from "@mew/web-client";
 import { bridgeClientToStore } from "../stores/session";
 import { setClient } from "./client-ref";
-import { getWebSocketUrl } from "./host";
+import { getWebSocketUrl, isDesktopHost } from "./host";
 
 let clientInstance: MewClient | null = null;
 
 export function getClient(): MewClient {
   if (!clientInstance) {
-    clientInstance = new MewClient(getWebSocketUrl(), { debug: false });
+    clientInstance = new MewClient(getWebSocketUrl(), {
+      debug: false,
+      clientKind: isDesktopHost() ? "desktop" : "web",
+    });
     setClient(clientInstance);
     bridgeClientToStore(clientInstance);
   }
