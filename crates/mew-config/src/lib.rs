@@ -10,6 +10,9 @@ pub type SidebarState = HashMap<String, bool>;
 
 pub mod permissions;
 pub mod shell;
+pub mod paths;
+
+pub use paths::{cache_dir, config_dir, data_dir, state_path};
 
 /// Top-level user configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,25 +372,6 @@ pub fn load() -> Result<Config, ConfigError> {
     settings
         .try_deserialize()
         .map_err(|e| ConfigError::Build(e.to_string()))
-}
-
-pub fn config_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".config").join("mew");
-    }
-
-    directories::ProjectDirs::from("computer", "mew", "mew")
-        .map(|d| d.config_dir().to_path_buf())
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".config").join("mew"))
-                .unwrap_or_else(|| PathBuf::from(".").join(".config").join("mew"))
-        })
-}
-
-fn state_path() -> PathBuf {
-    config_dir().join("state.toml")
 }
 
 /// Path to the on-disk state file. Useful for diagnostics and the

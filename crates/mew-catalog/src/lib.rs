@@ -1074,13 +1074,7 @@ pub fn write_codex_cache(body: &str) -> Result<(), CatalogError> {
 /// Returns the directory used for caching catalog files (main models.dev +
 /// umans model info). Exposed so CLI commands can show or clear the cache.
 pub fn cache_dir() -> PathBuf {
-    directories::ProjectDirs::from("computer", "mew", "mew")
-        .map(|d| d.config_dir().to_path_buf())
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".config").join("mew"))
-                .unwrap_or_else(|| PathBuf::from(".").join(".config").join("mew"))
-        })
+    mew_config::cache_dir()
 }
 
 /// Removes all on-disk catalog cache files (main models.dev catalog + ETag +

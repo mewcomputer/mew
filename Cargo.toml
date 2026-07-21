@@ -90,6 +90,7 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 # config
 toml = "0.8"
 directories = "5"
+etcetera = "0.8"
 dotenvy = "0.15"
 config = { version = "0.15", default-features = false, features = ["toml"] }
 

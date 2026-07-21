@@ -332,22 +332,8 @@ impl Theme {
     }
 
     fn config_themes_dir() -> Option<std::path::PathBuf> {
-        let base = if cfg!(target_os = "macos") {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| std::path::PathBuf::from(h).join("Library/Application Support/ai.mew.mew"))
-        } else {
-            std::env::var("XDG_CONFIG_HOME")
-                .ok()
-                .map(std::path::PathBuf::from)
-                .or_else(|| {
-                    std::env::var("HOME")
-                        .ok()
-                        .map(|h| std::path::PathBuf::from(h).join(".config"))
-                })
-                .map(|p| p.join("mew"))
-        };
-        base.map(|p| p.join("themes"))
+        // Themes are config — they live in the config directory.
+        Some(mew_config::config_dir().join("themes"))
     }
 
     fn collect_theme_names(dir: &std::path::Path, names: &mut Vec<String>) {

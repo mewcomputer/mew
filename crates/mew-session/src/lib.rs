@@ -511,23 +511,8 @@ pub fn session_dir() -> PathBuf {
     if let Some(p) = std::env::var_os("MEW_SESSION_DIR") {
         return PathBuf::from(p);
     }
-    directories::ProjectDirs::from("computer", "mew", "mew")
-        .map(|d| d.config_dir().join("sessions"))
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| {
-                    PathBuf::from(h)
-                        .join(".config")
-                        .join("mew")
-                        .join("sessions")
-                })
-                .unwrap_or_else(|| {
-                    PathBuf::from(".")
-                        .join(".config")
-                        .join("mew")
-                        .join("sessions")
-                })
-        })
+    // Sessions are persistent user data — use the data directory.
+    mew_config::data_dir().join("sessions")
 }
 
 /// Reads messages and metadata from session files.
