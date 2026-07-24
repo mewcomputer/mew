@@ -1061,12 +1061,20 @@ mod tests {
         // PartStart(Reasoning) proves the reasoning_content field was
         // deserialized and a reasoning part was opened.
         let has_reasoning_start = events.iter().any(|e| {
-            matches!(e, ProviderEvent::PartStart { part: Part::Reasoning(_) })
+            matches!(
+                e,
+                ProviderEvent::PartStart {
+                    part: Part::Reasoning(_)
+                }
+            )
         });
         assert!(
             has_reasoning_start,
             "expected reasoning PartStart from reasoning_content deltas; events: {:?}",
-            events.iter().map(|e| format!("{:?}", e)).collect::<Vec<_>>()
+            events
+                .iter()
+                .map(|e| format!("{:?}", e))
+                .collect::<Vec<_>>()
         );
 
         // The reasoning part must be closed with a PartEnd, and a text part
@@ -1082,7 +1090,12 @@ mod tests {
         );
 
         let has_text_start = events.iter().any(|e| {
-            matches!(e, ProviderEvent::PartStart { part: Part::Text(_) })
+            matches!(
+                e,
+                ProviderEvent::PartStart {
+                    part: Part::Text(_)
+                }
+            )
         });
         assert!(
             has_text_start,

@@ -329,9 +329,7 @@ impl std::fmt::Debug for AgentEvent {
                 .field("count", &files.len())
                 .finish(),
             AgentEvent::GoalProposed {
-                call_id,
-                objective,
-                ..
+                call_id, objective, ..
             } => f
                 .debug_struct("GoalProposed")
                 .field("call_id", call_id)

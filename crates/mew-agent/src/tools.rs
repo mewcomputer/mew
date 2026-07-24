@@ -1590,7 +1590,10 @@ impl Agent {
             .to_string();
 
         let (output, success) = if objective.is_empty() {
-            ("propose_goal requires an \"objective\" field".to_string(), false)
+            (
+                "propose_goal requires an \"objective\" field".to_string(),
+                false,
+            )
         } else {
             let (tx, rx) = oneshot::channel();
             let _ = ev_tx
@@ -1620,9 +1623,7 @@ impl Agent {
                         true,
                     )
                 }
-                Ok(GoalDecision::Rejected) => {
-                    ("Goal rejected by user.".to_string(), false)
-                }
+                Ok(GoalDecision::Rejected) => ("Goal rejected by user.".to_string(), false),
                 Err(_) => (
                     "propose_goal cancelled (no response received)".to_string(),
                     false,

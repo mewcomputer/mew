@@ -728,6 +728,12 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::META) => {
             return Some(Action::PasteClipboardImage);
         }
+        // Ctrl+V (no Shift): terminal paste isn't available, so route to
+        // the clipboard image paste path. If there's no image, the alert
+        // tells the user. This prevents a literal 'v' from being inserted.
+        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Some(Action::PasteClipboardImage);
+        }
         // Ctrl+Shift+V: paste image from system clipboard.
         KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             return Some(Action::PasteClipboardImage);

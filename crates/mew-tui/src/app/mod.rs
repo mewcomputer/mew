@@ -36,7 +36,10 @@ pub enum SlashResult {
     Compact,
     Todo,
     Rewind(usize),
-    PluginCommand { name: String, args: String },
+    PluginCommand {
+        name: String,
+        args: String,
+    },
     PermissionModeMenu,
     SetPermissionMode(mew_hooks::PermissionMode),
     SetThinkingVariant(String),
@@ -2137,9 +2140,10 @@ impl App {
                 false
             }
             // selected 2 (Submit) or 1 (Request changes) with feedback: send it.
-            Some(pa) if (pa.selected == 1 || pa.selected == 2)
-                && pa.editing_feedback
-                && pa.feedback.trim().is_empty() =>
+            Some(pa)
+                if (pa.selected == 1 || pa.selected == 2)
+                    && pa.editing_feedback
+                    && pa.feedback.trim().is_empty() =>
             {
                 // Stay in the editor until there's something to send.
                 false

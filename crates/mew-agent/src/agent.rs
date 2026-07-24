@@ -320,10 +320,12 @@ impl Agent {
             context_window: 0,
             compaction_threshold: 0.95,
             keep_turns: 4,
-            max_turns: Some(std::env::var("MEW_MAX_TURNS")
-                .ok()
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(100)),
+            max_turns: Some(
+                std::env::var("MEW_MAX_TURNS")
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(100),
+            ),
             max_subagent_depth: 3,
             subagent_defs: Vec::new(),
             // Defaults to enabled with the 5k-token threshold recommended

@@ -44,7 +44,10 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         };
         // Truncate the preview to fit the available width minus prefix/badge.
         let prefix_str = "⏳ ";
-        let available = area.width.saturating_sub(prefix_str.len() as u16).saturating_sub(badge.len() as u16);
+        let available = area
+            .width
+            .saturating_sub(prefix_str.len() as u16)
+            .saturating_sub(badge.len() as u16);
         let preview: String = oldest.chars().take(available as usize).collect();
         let line = Line::from(vec![
             Span::styled(prefix_str, badge_style),

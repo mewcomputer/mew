@@ -112,7 +112,7 @@ impl App {
                     label,
                     description: desc,
                     ..Default::default()
-}
+                }
             })
             .collect();
         self.mode = Mode::CommandPalette;
@@ -142,7 +142,7 @@ impl App {
                 id: mew_hooks::PermissionMode::Standard.id().into(),
                 label: format!("Standard{}", marker(mew_hooks::PermissionMode::Standard)),
                 description: "Prompts for Mutating/Dangerous tools. Default.".into(),
-            ..Default::default()
+                ..Default::default()
             },
             PickerItem {
                 id: mew_hooks::PermissionMode::Permissive.id().into(),
@@ -155,7 +155,7 @@ impl App {
                               ask rules, and secret-file guard."
                     .into(),
                 ..Default::default()
-},
+            },
             PickerItem {
                 id: mew_hooks::PermissionMode::Auto.id().into(),
                 label: format!("Auto{}", marker(mew_hooks::PermissionMode::Auto)),
@@ -166,7 +166,7 @@ impl App {
                               classifier provider to be configured."
                     .into(),
                 ..Default::default()
-},
+            },
             PickerItem {
                 id: mew_hooks::PermissionMode::AutoPlus.id().into(),
                 label: format!("Auto+{}", marker(mew_hooks::PermissionMode::AutoPlus)),
@@ -178,7 +178,7 @@ impl App {
                               to silently run destructive tools."
                     .into(),
                 ..Default::default()
-},
+            },
             PickerItem {
                 id: mew_hooks::PermissionMode::Dangerous.id().into(),
                 label: format!("Dangerous!{}", marker(mew_hooks::PermissionMode::Dangerous)),
@@ -188,7 +188,7 @@ impl App {
                               said don't do.\" Output redaction still applies."
                     .into(),
                 ..Default::default()
-},
+            },
         ];
         // Pre-select the active mode so Enter on an unchanged picker is a no-op.
         let pre_selected = match active {
@@ -354,7 +354,7 @@ impl App {
                     id: i.to_string(),
                     label: format!("[{}] {}: {}", i, role, snippet),
                     description: format!("Keep messages 0..={}", i),
-            ..Default::default()
+                    ..Default::default()
                 }
             })
             .collect();
@@ -440,7 +440,7 @@ impl App {
                     id: name.clone(),
                     label: format!("@{} [subagent]", name),
                     description: description.clone(),
-            ..Default::default()
+                    ..Default::default()
                 });
             }
         }
@@ -506,31 +506,31 @@ impl App {
                 id: "switch-model".into(),
                 label: "Switch Model".into(),
                 description: "Change the active LLM".into(),
-            ..Default::default()
+                ..Default::default()
             },
             PickerItem {
                 id: "thinking-variant".into(),
                 label: "Thinking Variant".into(),
                 description: "Set reasoning effort (high, max, off)".into(),
-            ..Default::default()
+                ..Default::default()
             },
             PickerItem {
                 id: "settings".into(),
                 label: "Settings".into(),
                 description: "Configure mew (providers, plugins)".into(),
-            ..Default::default()
+                ..Default::default()
             },
             PickerItem {
                 id: "clear".into(),
                 label: "Clear Chat".into(),
                 description: "Remove all messages from the current session".into(),
-            ..Default::default()
+                ..Default::default()
             },
             PickerItem {
                 id: "quit".into(),
                 label: "Quit".into(),
                 description: "Exit mew".into(),
-            ..Default::default()
+                ..Default::default()
             },
         ];
         // Add all built-in slash commands as palette items. Selecting one
@@ -548,7 +548,7 @@ impl App {
                 id: cmd.name.clone(),
                 label: cmd.name,
                 description: cmd.description,
-            ..Default::default()
+                ..Default::default()
             });
         }
         self.mode = Mode::CommandPalette;

@@ -980,8 +980,7 @@ pub(super) fn draw_goal_proposal(
 
     let inner = popup.inner(Margin::new(2, 1));
 
-    let objective_wrapped =
-        crate::ui::chat::wrap_text_to_width(&state.objective, inner.width);
+    let objective_wrapped = crate::ui::chat::wrap_text_to_width(&state.objective, inner.width);
     let obj_lines: Vec<Line> = objective_wrapped
         .iter()
         .map(|c| {

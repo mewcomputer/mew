@@ -1233,10 +1233,7 @@ mod tests {
             );
             // The last span (padding) must carry the chat bg.
             let has_bg = line.spans.iter().any(|s| s.style.bg == Some(chat_bg));
-            assert!(
-                has_bg,
-                "line {i} has no span with chat surface bg"
-            );
+            assert!(has_bg, "line {i} has no span with chat surface bg");
         }
     }
 }
