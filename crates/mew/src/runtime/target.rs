@@ -95,4 +95,18 @@ pub trait CommandTarget: Send {
     /// Cancel the most recently started running subagent. Returns true if
     /// a cancellation was requested.
     async fn cancel_subagent(&mut self, task_id: &str) -> Result<bool, Unsupported>;
+
+    /// Manage the session goal. Returns a status string for display.
+    async fn manage_goal(&mut self, action: GoalAction) -> Result<String, Unsupported>;
+}
+
+/// Goal management actions for `CommandTarget::manage_goal`.
+#[derive(Debug, Clone)]
+pub enum GoalAction {
+    Set(String),
+    Status,
+    Pause,
+    Resume,
+    Clear,
+    Complete,
 }

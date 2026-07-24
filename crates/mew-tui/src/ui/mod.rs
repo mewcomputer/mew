@@ -231,6 +231,12 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    if app.mode == Mode::GoalProposal {
+        if let Some(ref state) = app.goal_proposal {
+            overlays::draw_goal_proposal(f, state, area, &app.theme);
+        }
+    }
+
     if app.mode == Mode::CommandPalette {
         if let Some(ref mut picker) = app.picker {
             overlays::draw_picker(f, picker, area, &app.theme);

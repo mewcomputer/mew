@@ -2305,3 +2305,40 @@ above CEF that React drives via IPC with overlay rects/open state. Simpler
 intermediate: hide the CEF surface while full-window modals (settings,
 palette) are open, since only the tools popover + surface picker overlap the
 browser during normal use.
+
+# 2026-01-21 — hidden `mew funfact` easter egg
+
+Implemented the hidden `mew funfact` CLI subcommand per PLAN.md.
+
+Files touched:
+- `crates/mew/src/cli.rs` — added `Commands::Funfact` with `#[command(hide = true)]`.
+- `crates/mew/src/commands/funfact.rs` — new module with 8 fun facts, `pick_fact()` using `SystemTime`, and `funfact_cmd()`; includes tests for output membership, CLI parsing, and hidden help.
+- `crates/mew/src/commands/mod.rs` — registered `pub mod funfact`.
+- `crates/mew/src/main.rs` — imported `funfact_cmd` and dispatched the `Funfact` variant.
+
+Verification:
+- `cargo build -p mew` succeeded.
+- `cargo run -p mew -- funfact` printed a random fact.
+- `cargo run -p mew -- --help` does not list `funfact`.
+- `cargo test -p mew` passed (118 unit tests + 3 integration tests).
+- `cargo clippy -p mew` only reports the pre-existing `remote_invite_payload` dead-code warning; our new code is clean.
+
+Notes:
+- No new dependencies were added.
+- The command uses `SystemTime` for low-quality randomness as specified.
+- The `None` default arm was already placed in the middle of the match in `main.rs`, so the `Funfact` arm was inserted right before it there rather than at the end of the match.
+
+# 2026-07-24 — hashline test + fun facts refresh
+
+Tested the hashline patch editor on the hidden `mew funfact` easter egg.
+
+Changes:
+- `crates/mew/src/commands/funfact.rs` — replaced the frisbee fact with a technical one about the first computer bug, and added three more technical facts (ARPANET `LOGIN`, IPv6 address size, `sudo` etymology). Used `edit_hashline` for the patches; the first insert landed after the closing `];`, so a second patch corrected the array structure.
+
+Verification:
+- `cargo test -p mew-hashline` — 56 passed.
+- `cargo test -p mew funfact` — 3 passed (membership, CLI parsing, hidden help).
+- `cargo run -p mew -- funfact` — printed one of the new technical facts.
+
+Notes:
+- The only compiler warning is the pre-existing `remote_invite_payload` dead-code warning in `crates/mew/src/commands/daemon.rs`, unrelated to this work.

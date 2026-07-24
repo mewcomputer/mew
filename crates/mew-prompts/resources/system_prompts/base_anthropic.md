@@ -1,11 +1,5 @@
-{%- if has_tool("bash") %}
-{%- if has_tool("glob") %}
-
-## Tool Example
-
-For file discovery, use `glob` with `pattern: "rs/**/*.rs"` instead of `find . -name '*.rs'`.
-{%- endif %}
-{%- endif %}
+When a structured file-discovery tool is available, prefer it over shell
+commands such as `find` for locating files.
 
 ## Visible Response Text
 

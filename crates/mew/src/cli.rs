@@ -232,6 +232,9 @@ pub enum Commands {
         #[command(subcommand)]
         command: ExtCommands,
     },
+    /// Print a random fun fact.
+    #[command(hide = true)]
+    Funfact,
     /// Capture the TUI as PNG screenshots or MP4 video using the headless
     /// harness. Runs a `.tape`-style script against a FakeProvider-backed
     /// app — no network, no credentials, fully deterministic.

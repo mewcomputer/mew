@@ -5,8 +5,8 @@ use mew_hooks::NopDispatcher;
 use mew_hooks::ToolOutput;
 
 use mew_message::{
-    Finish, Message, Part, PartBase, Role, TextPart, Time, Tokens, ToolCallPart, ToolState,
-    ToolStatePending, ToolTime,
+    Finish, Message, Part, PartBase, Role, TextPart, Time, Tokens, ToolCallPart, ToolResultPart,
+    ToolState, ToolStateCompleted, ToolStatePending, ToolTime,
 };
 use mew_provider::{EventStream, Provider, ProviderError, ProviderEvent, Request};
 use mew_provider_fake::FakeProvider;
@@ -360,6 +360,208 @@ async fn test_flagged_files_re_injected_after_compaction() {
         has_flagged_content,
         "flagged file content should be re-injected into the request after compaction"
     );
+}
+
+#[tokio::test]
+async fn test_compaction_keeps_tool_call_with_result() {
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "ok",
+    )]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.context_window = 100;
+    agent.keep_turns = 2;
+
+    let old_id = ulid::Ulid::new();
+    let old = Message {
+        id: old_id,
+        session_id: agent.session_id,
+        role: Role::User,
+        parts: vec![Part::Text(TextPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: old_id,
+                session_id: agent.session_id,
+            },
+            text: "old context".into(),
+            synthetic: false,
+        })],
+        time: Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    };
+    let call_id = "call-1".to_string();
+    let call_message_id = ulid::Ulid::new();
+    let call = Message {
+        id: call_message_id,
+        session_id: agent.session_id,
+        role: Role::Assistant,
+        parts: vec![Part::ToolCall(ToolCallPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: call_message_id,
+                session_id: agent.session_id,
+            },
+            tool_name: "echo".into(),
+            call_id: call_id.clone(),
+            state: ToolState::Completed(ToolStateCompleted {
+                input: serde_json::json!({"input": "hello"}),
+                output: "hello".into(),
+                metadata: None,
+                diff: None,
+                time: ToolTime {
+                    start: 0,
+                    end: Some(0),
+                },
+            }),
+            raw_input: "{\"input\":\"hello\"}".into(),
+        })],
+        time: Time {
+            created: 0,
+            completed: Some(0),
+        },
+        assistant: None,
+    };
+    let result = Message {
+        id: ulid::Ulid::new(),
+        session_id: agent.session_id,
+        role: Role::User,
+        parts: vec![Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: ulid::Ulid::new(),
+                session_id: agent.session_id,
+            },
+            call_id,
+        })],
+        time: Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    };
+    agent.load_messages(vec![old, call, result]).await;
+    agent.force_compact().await;
+
+    let mut rx = agent.run("next".into());
+    while rx.recv().await.is_some() {}
+
+    let captured = provider.captured.lock().unwrap();
+    let request_messages = &captured[0].messages;
+    assert!(!request_messages.iter().any(|message| message.id == old_id));
+    assert!(request_messages.iter().any(|message| {
+        message
+            .parts
+            .iter()
+            .any(|part| matches!(part, Part::ToolCall(_)))
+    }));
+    assert!(request_messages.iter().any(|message| {
+        message
+            .parts
+            .iter()
+            .any(|part| matches!(part, Part::ToolResult(_)))
+    }));
+}
+
+#[tokio::test]
+async fn test_compaction_marker_preserves_prefix_across_turns_and_resume() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let session_id = format!("compaction-test-{}", ulid::Ulid::new());
+    let writer = mew_session::Writer::open_at(tmp.path(), &session_id)
+        .await
+        .expect("open session");
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![
+        FakeProvider::text_response("first"),
+        FakeProvider::text_response("second"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        std::sync::Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        None,
+    );
+    agent.context_window = 100;
+    agent.keep_turns = 1;
+
+    let old_id = ulid::Ulid::new();
+    agent
+        .append_message(Message {
+            id: old_id,
+            session_id: agent.session_id,
+            role: Role::User,
+            parts: vec![Part::Text(TextPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: old_id,
+                    session_id: agent.session_id,
+                },
+                text: "old context".into(),
+                synthetic: false,
+            })],
+            time: Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        })
+        .await;
+    agent.force_compact().await;
+
+    let mut first_rx = agent.run("first prompt".into());
+    while first_rx.recv().await.is_some() {}
+    let mut second_rx = agent.run("second prompt".into());
+    while second_rx.recv().await.is_some() {}
+
+    {
+        let captured = provider.captured.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].messages[0], captured[1].messages[0]);
+        assert!(captured[0].messages[0]
+            .parts
+            .iter()
+            .any(|part| matches!(part, Part::Compaction(_))));
+    }
+
+    let raw = mew_session::Reader::load_from(tmp.path(), &session_id)
+        .await
+        .expect("load session");
+    assert!(raw.iter().any(|message| {
+        message
+            .parts
+            .iter()
+            .any(|part| matches!(part, Part::Compaction(_)))
+    }));
+
+    let resumed = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    resumed.load_messages(raw).await;
+    let resumed_messages = resumed.messages.lock().await;
+    assert!(!resumed_messages.iter().any(|message| message.id == old_id));
+    assert!(resumed_messages.iter().any(|message| {
+        message
+            .parts
+            .iter()
+            .any(|part| matches!(part, Part::Compaction(_)))
+    }));
+    assert!(resumed_messages.iter().any(|message| {
+        message
+            .parts
+            .iter()
+            .any(|part| matches!(part, Part::Text(text) if text.text == "first prompt"))
+    }));
 }
 
 #[test]
@@ -1988,6 +2190,123 @@ fn test_set_skills_rebuilds_system_with_filter() {
     // No filter yet — both skills appear in the system prompt.
     assert!(agent.system.contains("git-release"));
     assert!(agent.system.contains("code-review"));
+}
+
+#[tokio::test]
+async fn system_prompt_refresh_waits_for_compaction_when_retention_is_unknown() {
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![
+        FakeProvider::text_response("first"),
+        FakeProvider::text_response("second"),
+        FakeProvider::text_response("third"),
+        FakeProvider::text_response("fourth"),
+        FakeProvider::text_response("fifth"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.set_system("base prompt".into());
+
+    let skill_a = mew_skills::Skill {
+        name: "skill-a".into(),
+        description: "first skill".into(),
+        body: "...".into(),
+        path: std::path::PathBuf::new(),
+        template: false,
+    };
+    let skill_b = mew_skills::Skill {
+        name: "skill-b".into(),
+        description: "second skill".into(),
+        body: "...".into(),
+        path: std::path::PathBuf::new(),
+        template: false,
+    };
+
+    agent.set_skills(vec![skill_a]);
+    let mut rx = agent.run("first turn".into());
+    while let Some(event) = rx.recv().await {
+        if matches!(
+            event,
+            AgentEvent::Provider(ProviderEvent::MessageEnd { .. })
+        ) {
+            break;
+        }
+    }
+
+    agent.set_skills(vec![skill_b]);
+    let mut rx = agent.run("second turn".into());
+    while let Some(event) = rx.recv().await {
+        if matches!(
+            event,
+            AgentEvent::Provider(ProviderEvent::MessageEnd { .. })
+        ) {
+            break;
+        }
+    }
+
+    agent.keep_turns = 0;
+    agent.force_compact().await;
+    let mut rx = agent.run("third turn".into());
+    while let Some(event) = rx.recv().await {
+        if matches!(
+            event,
+            AgentEvent::Provider(ProviderEvent::MessageEnd { .. })
+        ) {
+            break;
+        }
+    }
+
+    {
+        let requests = provider.captured.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].system.contains("skill-a"));
+        assert!(requests[1].system.contains("skill-a"));
+        assert!(!requests[1].system.contains("skill-b"));
+        assert!(requests[2].system.contains("skill-b"));
+        assert!(!requests[2].system.contains("skill-a"));
+    }
+
+    agent.keep_turns = 4;
+    agent.set_skills(vec![mew_skills::Skill {
+        name: "skill-c".into(),
+        description: "third skill".into(),
+        body: "...".into(),
+        path: std::path::PathBuf::new(),
+        template: false,
+    }]);
+    let mut rx = agent.run("fourth turn".into());
+    while let Some(event) = rx.recv().await {
+        if matches!(
+            event,
+            AgentEvent::Provider(ProviderEvent::MessageEnd { .. })
+        ) {
+            break;
+        }
+    }
+
+    {
+        let requests = provider.captured.lock().unwrap();
+        assert!(requests[3].system.contains("skill-b"));
+        assert!(!requests[3].system.contains("skill-c"));
+    }
+
+    agent.force_compact().await;
+    let mut rx = agent.run("fifth turn".into());
+    while let Some(event) = rx.recv().await {
+        if matches!(
+            event,
+            AgentEvent::Provider(ProviderEvent::MessageEnd { .. })
+        ) {
+            break;
+        }
+    }
+
+    let requests = provider.captured.lock().unwrap();
+    assert!(requests[4].system.contains("skill-c"));
+    assert!(!requests[4].system.contains("skill-b"));
 }
 
 #[test]

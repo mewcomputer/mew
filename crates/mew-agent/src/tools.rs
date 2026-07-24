@@ -9,7 +9,7 @@ use mew_message::{
 use mew_tools::{Sensitivity, ToolCtx, ToolProgress};
 
 use crate::agent::{Agent, ShellJobState, ToolInput};
-use crate::AgentEvent;
+use crate::{AgentEvent, GoalDecision, GoalState, GoalStatus};
 use mew_subagents::SubagentRunOptions;
 
 // Track whether the subagent tool returned an error, not whether the
@@ -208,6 +208,24 @@ impl Agent {
 
             if tc.tool_name == "handoff_plan" {
                 self.execute_handoff_plan(tc, assistant_msg, ev_tx, &mut result_parts)
+                    .await;
+                continue;
+            }
+
+            if tc.tool_name == "propose_goal" {
+                self.execute_propose_goal(tc, assistant_msg, ev_tx, &mut result_parts)
+                    .await;
+                continue;
+            }
+
+            if tc.tool_name == "complete_goal" {
+                self.execute_complete_goal(tc, assistant_msg, ev_tx, &mut result_parts)
+                    .await;
+                continue;
+            }
+
+            if tc.tool_name == "block_goal" {
+                self.execute_block_goal(tc, assistant_msg, ev_tx, &mut result_parts)
                     .await;
                 continue;
             }
@@ -1489,6 +1507,308 @@ impl Agent {
                     "handoff_plan cancelled (no response received)".to_string(),
                     false,
                 ),
+            }
+        };
+
+        let final_state = if success {
+            ToolState::Completed(ToolStateCompleted {
+                input: input.clone(),
+                output,
+                metadata: None,
+                diff: None,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        } else {
+            ToolState::Error(ToolStateError {
+                input: input.clone(),
+                error: output,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        };
+
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, final_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: final_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::ToolEnd {
+                call_id: call_id.clone(),
+                success,
+            })
+            .await;
+
+        result_parts.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            call_id: tc.call_id.clone(),
+        }));
+    }
+
+    /// Intercept a `propose_goal` tool call: send the objective to the
+    /// frontend as a `GoalProposed` event and block until the user accepts
+    /// or rejects. On acceptance the goal becomes active. On rejection the
+    /// tool returns an error so the agent knows the user declined.
+    async fn execute_propose_goal(
+        &self,
+        tc: &ToolCallPart,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        result_parts: &mut Vec<Part>,
+    ) {
+        let call_id = tc.call_id.clone();
+        let part_id = tc.base.id;
+        let input = tc.input().clone();
+        let assistant_id = match assistant_msg {
+            Some(ref msg) => msg.id,
+            None => return,
+        };
+
+        let objective = input
+            .get("objective")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let (output, success) = if objective.is_empty() {
+            ("propose_goal requires an \"objective\" field".to_string(), false)
+        } else {
+            let (tx, rx) = oneshot::channel();
+            let _ = ev_tx
+                .send(AgentEvent::GoalProposed {
+                    call_id: call_id.clone(),
+                    objective: objective.clone(),
+                    tx,
+                })
+                .await;
+
+            match rx.await {
+                Ok(GoalDecision::Accepted) => {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    *self.goal.lock().await = Some(GoalState {
+                        objective: objective.clone(),
+                        status: GoalStatus::Active,
+                        continuation_count: 0,
+                        started_at: now,
+                    });
+                    (
+                        format!(
+                            "Goal accepted and activated. The agent will continue working \
+                             across turns until the goal is complete. Call complete_goal \
+                             when done, or block_goal if user input is needed.\n\n\
+                             Objective: {objective}"
+                        ),
+                        true,
+                    )
+                }
+                Ok(GoalDecision::Rejected) => {
+                    ("Goal rejected by user.".to_string(), false)
+                }
+                Err(_) => (
+                    "propose_goal cancelled (no response received)".to_string(),
+                    false,
+                ),
+            }
+        };
+
+        let final_state = if success {
+            ToolState::Completed(ToolStateCompleted {
+                input: input.clone(),
+                output,
+                metadata: None,
+                diff: None,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        } else {
+            ToolState::Error(ToolStateError {
+                input: input.clone(),
+                error: output,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        };
+
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, final_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: final_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::ToolEnd {
+                call_id: call_id.clone(),
+                success,
+            })
+            .await;
+
+        result_parts.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            call_id: tc.call_id.clone(),
+        }));
+    }
+
+    /// Intercept a `complete_goal` tool call: mark the active goal as
+    /// complete, stopping turn-loop continuation.
+    async fn execute_complete_goal(
+        &self,
+        tc: &ToolCallPart,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        result_parts: &mut Vec<Part>,
+    ) {
+        let call_id = tc.call_id.clone();
+        let part_id = tc.base.id;
+        let input = tc.input().clone();
+        let assistant_id = match assistant_msg {
+            Some(ref msg) => msg.id,
+            None => return,
+        };
+
+        let (output, success) = {
+            let mut goal_guard = self.goal.lock().await;
+            match &mut *goal_guard {
+                Some(goal) => {
+                    let reason = input
+                        .get("terminal_reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("completed")
+                        .to_string();
+                    let objective = goal.objective.clone();
+                    goal.status = GoalStatus::Complete;
+                    (
+                        format!("Goal marked complete: {objective}\nReason: {reason}"),
+                        true,
+                    )
+                }
+                None => ("No active goal to complete.".to_string(), false),
+            }
+        };
+
+        let final_state = if success {
+            ToolState::Completed(ToolStateCompleted {
+                input: input.clone(),
+                output,
+                metadata: None,
+                diff: None,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        } else {
+            ToolState::Error(ToolStateError {
+                input: input.clone(),
+                error: output,
+                time: ToolTime {
+                    start: Utc::now().timestamp_millis(),
+                    end: Some(Utc::now().timestamp_millis()),
+                },
+            })
+        };
+
+        if let Some(ref mut msg) = assistant_msg {
+            self.update_tool_call(msg, part_id, final_state.clone());
+        }
+        let _ = ev_tx
+            .send(AgentEvent::PartUpdated {
+                part_id,
+                part: Part::ToolCall(ToolCallPart {
+                    base: tc.base.clone(),
+                    tool_name: tc.tool_name.clone(),
+                    call_id: tc.call_id.clone(),
+                    state: final_state,
+                    raw_input: tc.raw_input.clone(),
+                }),
+            })
+            .await;
+        let _ = ev_tx
+            .send(AgentEvent::ToolEnd {
+                call_id: call_id.clone(),
+                success,
+            })
+            .await;
+
+        result_parts.push(Part::ToolResult(ToolResultPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: assistant_id,
+                session_id: self.session_id,
+            },
+            call_id: tc.call_id.clone(),
+        }));
+    }
+
+    /// Intercept a `block_goal` tool call: pause the active goal, stopping
+    /// turn-loop continuation without clearing the goal.
+    async fn execute_block_goal(
+        &self,
+        tc: &ToolCallPart,
+        assistant_msg: &mut Option<Message>,
+        ev_tx: &mpsc::Sender<AgentEvent>,
+        result_parts: &mut Vec<Part>,
+    ) {
+        let call_id = tc.call_id.clone();
+        let part_id = tc.base.id;
+        let input = tc.input().clone();
+        let assistant_id = match assistant_msg {
+            Some(ref msg) => msg.id,
+            None => return,
+        };
+
+        let (output, success) = {
+            let mut goal_guard = self.goal.lock().await;
+            match &mut *goal_guard {
+                Some(goal) => {
+                    let reason = input
+                        .get("terminal_reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("blocked")
+                        .to_string();
+                    let objective = goal.objective.clone();
+                    goal.status = GoalStatus::Paused;
+                    (
+                        format!("Goal blocked: {objective}\nReason: {reason}\n\nThe user can resume with /goal resume."),
+                        true,
+                    )
+                }
+                None => ("No active goal to block.".to_string(), false),
             }
         };
 

@@ -29,6 +29,38 @@ pub enum PlanDecision {
     ChangesRequested(String),
 }
 
+/// The user's decision on a `propose_goal` request. Sent back through the
+/// `oneshot` channel carried by `AgentEvent::GoalProposed`. On `Accepted`
+/// the goal becomes active and the turn loop will auto-continue; on
+/// `Rejected` the agent receives a tool result indicating the user declined.
+#[derive(Debug, Clone)]
+pub enum GoalDecision {
+    Accepted,
+    Rejected,
+}
+
+/// Status of an active session goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalStatus {
+    /// The goal is active — the turn loop will inject continuation prompts.
+    Active,
+    /// The goal is paused — the turn loop will not continue.
+    Paused,
+    /// The goal is complete — the turn loop will not continue.
+    Complete,
+}
+
+/// A persistent session goal that drives turn-loop continuation.
+#[derive(Debug, Clone)]
+pub struct GoalState {
+    pub objective: String,
+    pub status: GoalStatus,
+    /// How many continuation prompts have been injected for this goal.
+    pub continuation_count: u32,
+    /// Wall-clock timestamp (millis) when the goal was created.
+    pub started_at: i64,
+}
+
 /// One question in an `ask_user_question` request. Carried from the tool
 /// through `AgentEvent::AskUser` to the TUI, which renders the options as
 /// a numbered list and returns the selected answer (label or freeform text).
@@ -150,6 +182,14 @@ pub enum AgentEvent {
     },
     /// The flagged-files set changed (file flagged or unflagged).
     FlaggedFilesChanged { files: Vec<FlaggedFileInfo> },
+    /// The model called `propose_goal`: present the objective to the user
+    /// for approval and block the tool until they respond. On `Accepted`
+    /// the goal becomes active; on `Rejected` the tool returns an error.
+    GoalProposed {
+        call_id: String,
+        objective: String,
+        tx: oneshot::Sender<GoalDecision>,
+    },
 }
 
 /// Info about a flagged file, for the wire protocol.
@@ -288,6 +328,15 @@ impl std::fmt::Debug for AgentEvent {
                 .debug_struct("FlaggedFilesChanged")
                 .field("count", &files.len())
                 .finish(),
+            AgentEvent::GoalProposed {
+                call_id,
+                objective,
+                ..
+            } => f
+                .debug_struct("GoalProposed")
+                .field("call_id", call_id)
+                .field("objective", objective)
+                .finish(),
         }
     }
 }
@@ -295,6 +344,7 @@ impl std::fmt::Debug for AgentEvent {
 mod agent;
 mod events;
 pub mod manifest;
+mod prompt_cache;
 mod reasoning_truncator;
 pub mod runner;
 mod todos;
@@ -304,6 +354,7 @@ mod workspace;
 
 pub use agent::Agent;
 pub use mew_subagents::SubagentOutcome;
+pub use prompt_cache::PromptCacheRetention;
 pub use reasoning_truncator::{
     ReasoningTruncator, DEFAULT_REASONING_TRUNCATION_THRESHOLD, TRUNCATION_ACK_TEXT,
 };

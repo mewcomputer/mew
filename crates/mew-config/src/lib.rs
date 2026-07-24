@@ -8,9 +8,9 @@ use tracing::{debug, warn};
 /// Sidebar section collapsed state: section name → collapsed.
 pub type SidebarState = HashMap<String, bool>;
 
+pub mod paths;
 pub mod permissions;
 pub mod shell;
-pub mod paths;
 
 pub use paths::{cache_dir, config_dir, data_dir, state_path};
 
@@ -187,6 +187,11 @@ pub struct CustomModel {
     /// True for OpenAI Codex models that require the Responses Lite transport.
     #[serde(default)]
     pub responses_lite: bool,
+    /// Prompt-cache retention in seconds when the provider/model documents it.
+    /// Omit this when unknown; mew will wait for compaction before refreshing
+    /// the cacheable system prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention_secs: Option<u64>,
     /// When true and the model already exists in the catalog, fields left
     /// unset here keep the catalog's values (pricing, capability flags, …)
     /// instead of resetting to defaults. When false (default), this entry
@@ -669,6 +674,7 @@ id = "glm-5.3"
 provider = "z-ai"
 shape = "anthropic"
 context_window = 128000
+prompt_cache_retention_secs = 14400
 
 [[models]]
 id = "custom-llama"
@@ -679,6 +685,7 @@ responses_lite = true
         assert_eq!(cfg.models.len(), 2);
         assert_eq!(cfg.models[0].id, "glm-5.3");
         assert_eq!(cfg.models[0].shape, "anthropic");
+        assert_eq!(cfg.models[0].prompt_cache_retention_secs, Some(14_400));
         assert_eq!(cfg.models[1].id, "custom-llama");
         assert!(cfg.models[1].shape.is_empty());
         assert!(cfg.models[1].responses_lite);

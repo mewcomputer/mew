@@ -8,6 +8,8 @@
 /// Renders one `<skill>` element per skill with its name and description,
 /// XML-escaped.
 pub fn build_xml(skills: &[&mew_skills::Skill]) -> String {
+    let mut skills = skills.to_vec();
+    skills.sort_unstable_by(|left, right| left.name.cmp(&right.name));
     let mut buf = String::from("<available_skills>\n");
     for skill in skills {
         buf.push_str(&format!(
@@ -58,6 +60,15 @@ mod tests {
         assert!(xml.contains("<description>the first one</description>"));
         assert!(xml.contains("<name>beta</name>"));
         assert!(xml.contains("<description>the second one</description>"));
+    }
+
+    #[test]
+    fn test_build_xml_sorts_skills() {
+        let first = skill("alpha", "the first one");
+        let second = skill("beta", "the second one");
+        let xml = build_xml(&[&second, &first]);
+
+        assert!(xml.find("<name>alpha</name>").unwrap() < xml.find("<name>beta</name>").unwrap());
     }
 
     #[test]

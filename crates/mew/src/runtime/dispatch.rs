@@ -14,7 +14,7 @@ use mew_tui::app::Mode as TuiMode;
 use mew_tui::events::Action;
 use mew_tui::SlashResult;
 
-use crate::commands::tui::copy_to_clipboard;
+use crate::commands::tui::{copy_to_clipboard, read_clipboard_image};
 use crate::runtime::mentions::process_mentions;
 use crate::runtime::target::{CommandTarget, Unsupported};
 use crate::setup::personas::persona_summary;
@@ -142,6 +142,10 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             handle_submit(cx, text).await;
             Flow::Continue
         }
+        Action::PasteClipboardImage => {
+            handle_paste_clipboard_image(cx).await;
+            Flow::Continue
+        }
     }
 }
 
@@ -165,6 +169,34 @@ async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String) {
     cx.app.streaming = true;
     let rx = cx.target.prompt(enriched, attachments);
     cx.event_loop.forward_agent_events(rx);
+}
+
+/// Handle `Action::PasteClipboardImage` — read image data from the system
+/// clipboard, save it to a temp file, and insert it as an @-mention so the
+/// existing image attachment pipeline picks it up on submit.
+///
+/// On SSH connections the system clipboard is the remote machine's
+/// clipboard, not the user's local one — detect this and warn early.
+async fn handle_paste_clipboard_image<T: CommandTarget>(cx: &mut Ctx<'_, T>) {
+    // SSH detection: if SSH_CONNECTION or SSH_TTY is set, the user is almost
+    // certainly on a remote host whose clipboard is not the one they copied
+    // the image to.
+    if std::env::var("SSH_CONNECTION").is_ok() || std::env::var("SSH_TTY").is_ok() {
+        cx.app
+            .set_alert("clipboard image paste doesn't work over SSH — save the image to a file and @mention it instead");
+        return;
+    }
+
+    match read_clipboard_image() {
+        Ok(path) => {
+            let path_str = path.to_string_lossy().to_string();
+            cx.app.insert_mention(&format!("@{}", path_str));
+            cx.app.set_alert("image pasted from clipboard");
+        }
+        Err(e) => {
+            cx.app.set_alert(e);
+        }
+    }
 }
 
 /// Handle `Action::SlashCommand` — parse and route the slash command.
@@ -279,8 +311,8 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
                 save.theme = cx.app.theme.name.clone();
                 let _ = mew_config::save_state(&save);
             }
-            cx.app
-                .push_synthetic_message(format!("theme: {}", cx.app.theme.name));
+            // cx.app
+            //     .push_synthetic_message(format!("theme: {}", cx.app.theme.name));
             Flow::Continue
         }
         SlashResult::ToggleMouseCapture => {
@@ -324,6 +356,29 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
         }
         SlashResult::OpenHelp => {
             cx.app.mode = mew_tui::app::Mode::Help;
+            Flow::Continue
+        }
+        SlashResult::GoalCommand(cmd) => {
+            let action = match cmd {
+                mew_tui::app::GGoalCommand::Set(text) => {
+                    crate::runtime::target::GoalAction::Set(text)
+                }
+                mew_tui::app::GGoalCommand::Status => crate::runtime::target::GoalAction::Status,
+                mew_tui::app::GGoalCommand::Pause => crate::runtime::target::GoalAction::Pause,
+                mew_tui::app::GGoalCommand::Resume => crate::runtime::target::GoalAction::Resume,
+                mew_tui::app::GGoalCommand::Clear => crate::runtime::target::GoalAction::Clear,
+                mew_tui::app::GGoalCommand::Complete => {
+                    crate::runtime::target::GoalAction::Complete
+                }
+            };
+            match cx.target.manage_goal(action).await {
+                Ok(msg) => {
+                    cx.app.push_synthetic_message(msg);
+                }
+                Err(Unsupported(reason)) => {
+                    cx.app.set_alert(reason);
+                }
+            }
             Flow::Continue
         }
     }

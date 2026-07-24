@@ -20,8 +20,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use mew_agent::{
-    AgentEvent, AskUserQuestion, PlanDecision, QuestionOption as AgentQuestionOption, Todo,
-    TodoStatus,
+    AgentEvent, AskUserQuestion, GoalDecision, PlanDecision, QuestionOption as AgentQuestionOption,
+    Todo, TodoStatus,
 };
 use mew_hooks::{PermissionDecision, ToolCall as HookToolCall};
 use mew_message::Part;
@@ -42,6 +42,8 @@ struct ClientState {
     pending_ask_user: Mutex<HashMap<String, oneshot::Receiver<Vec<String>>>>,
     /// `request_id → receiver` for plan-approval decisions.
     pending_plan_approvals: Mutex<HashMap<String, oneshot::Receiver<PlanDecision>>>,
+    /// `request_id → receiver` for goal-proposal decisions.
+    pending_goal_proposals: Mutex<HashMap<String, oneshot::Receiver<GoalDecision>>>,
     /// The current event sender (set by `prompt()`, cleared when the
     /// receiver is dropped). The background reader uses this to forward
     /// translated AgentEvents.
@@ -98,6 +100,7 @@ impl DaemonClient {
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
             pending_plan_approvals: Mutex::new(HashMap::new()),
+            pending_goal_proposals: Mutex::new(HashMap::new()),
             event_tx: Mutex::new(None),
             notify_tx,
             ws_out: outgoing_tx.clone(),
@@ -527,6 +530,46 @@ async fn translate_server_message(
                 plan_path: plan_path.clone(),
                 plan_markdown: plan_markdown.clone(),
                 persona: persona.clone(),
+                tx,
+            }]
+        }
+
+        ServerMessage::GoalProposed {
+            request_id,
+            call_id,
+            objective,
+        } => {
+            let (tx, rx) = oneshot::channel();
+            state
+                .pending_goal_proposals
+                .lock()
+                .await
+                .insert(request_id.clone(), rx);
+
+            let request_id = request_id.clone();
+            let state = state.clone();
+            tokio::spawn(async move {
+                let rx = {
+                    let mut guard = state.pending_goal_proposals.lock().await;
+                    guard.remove(&request_id)
+                };
+                if let Some(rx) = rx {
+                    if let Ok(decision) = rx.await {
+                        let accepted = matches!(decision, GoalDecision::Accepted);
+                        let msg = ClientMessage::GoalResponse {
+                            request_id,
+                            accepted,
+                        };
+                        if let Ok(json) = mew_protocol::encode_json(&msg) {
+                            let _ = state.ws_out.send(json).await;
+                        }
+                    }
+                }
+            });
+
+            vec![AgentEvent::GoalProposed {
+                call_id: call_id.clone(),
+                objective: objective.clone(),
                 tx,
             }]
         }

@@ -116,6 +116,8 @@ id = "custom-llama"
 provider = "my-provider"
 shape = "openai"
 context_window = 32768
+# Set this only when the provider documents the retention window.
+prompt_cache_retention_secs = 14400
 
 [[models.thinking_variants]]
 name = "high"
@@ -128,6 +130,7 @@ params = { reasoning_effort = "high" }
 | `provider` | string | Provider ID that serves this model |
 | `shape` | string | Adapter shape (optional, inferred from provider if omitted) |
 | `context_window` | integer | Context window in tokens |
+| `prompt_cache_retention_secs` | integer | Known prompt-cache retention in seconds; omit when unknown |
 | `thinking_variants` | array | Named thinking variants with provider-specific params |
 
 ### Secrets

@@ -85,7 +85,7 @@ impl TemplateContext {
         active_tool_names: &Option<HashSet<String>>,
         denied_tool_names: &HashSet<String>,
     ) -> (Vec<String>, Vec<String>) {
-        let effective: Vec<String> = all_tool_names
+        let mut effective: Vec<String> = all_tool_names
             .iter()
             .filter(|name| {
                 let allowed = active_tool_names
@@ -95,7 +95,9 @@ impl TemplateContext {
             })
             .cloned()
             .collect();
-        let denied: Vec<String> = denied_tool_names.iter().cloned().collect();
+        effective.sort_unstable();
+        let mut denied: Vec<String> = denied_tool_names.iter().cloned().collect();
+        denied.sort_unstable();
         (effective, denied)
     }
 
@@ -267,6 +269,17 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_tools_sorts_effective_and_denied_names() {
+        let all = vec!["write".into(), "read".into(), "bash".into()];
+        let denied = ["read".to_string()].into_iter().collect();
+
+        let (effective, denied) = TemplateContext::compute_tools(&all, &None, &denied);
+
+        assert_eq!(effective, vec!["bash", "write"]);
+        assert_eq!(denied, vec!["read"]);
+    }
+
+    #[test]
     fn test_render_has_tool() {
         let body = "{% if has_tool(\"read\") %}has read{% endif %}{% if has_tool(\"bash\") %}has bash{% endif %}";
         let result = render(body, &ctx());
@@ -295,6 +308,31 @@ mod tests {
         let body = "{{ transclude(\"system_prompts/base\") }}";
         let result = render(body, &ctx());
         assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn base_prompt_is_independent_of_runtime_capabilities() {
+        let mut first = ctx();
+        first.provider_id = "anthropic".into();
+        first.tools = vec!["read".into(), "skill".into()];
+        first.skills = vec!["release-checklist".into()];
+        first.mcp_servers = vec!["filesystem".into()];
+        first.available_subagents = vec![SubagentInfo {
+            name: "researcher".into(),
+            description: "researches a bounded question".into(),
+        }];
+
+        let mut second = first.clone();
+        second.tools = vec!["bash".into(), "grep".into(), "mcp__github__search".into()];
+        second.skills = vec!["code-review".into(), "release-checklist".into()];
+        second.mcp_servers = vec!["github".into(), "filesystem".into()];
+        second.available_subagents = vec![SubagentInfo {
+            name: "implementer".into(),
+            description: "implements a bounded change".into(),
+        }];
+
+        let base = crate::vfs::read_builtin("system_prompts/base").unwrap();
+        assert_eq!(render(base, &first), render(base, &second));
     }
 
     #[test]

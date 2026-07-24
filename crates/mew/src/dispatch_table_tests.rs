@@ -145,6 +145,17 @@ impl runtime::target::CommandTarget for RecordingTarget {
             Ok(true)
         }
     }
+    async fn manage_goal(
+        &mut self,
+        _action: runtime::target::GoalAction,
+    ) -> Result<String, runtime::target::Unsupported> {
+        self.record("manage_goal");
+        if self.failing {
+            Err(runtime::target::Unsupported("test"))
+        } else {
+            Ok("goal managed".into())
+        }
+    }
 }
 
 /// Every `Action` variant must produce an observable effect through
@@ -349,6 +360,95 @@ async fn test_daemon_quit() {
         "Quit should return Flow::Quit"
     );
     assert!(should_break, "should_break flag should be set");
+}
+
+// -----------------------------------------------------------------------
+// PasteClipboardImage: SSH detection and error paths.
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_paste_clipboard_image_ssh_warning() {
+    // Set SSH env vars to trigger the SSH guard path.
+    std::env::set_var("SSH_CONNECTION", "fake");
+    let mut app = mew_tui::App::new();
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        session_id: String::new(),
+        model: String::new(),
+        provider: String::new(),
+        workspace: String::new(),
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    let _ = runtime::handle_action(&mut cx, Action::PasteClipboardImage).await;
+    std::env::remove_var("SSH_CONNECTION");
+
+    assert!(
+        app.alert.is_some(),
+        "SSH session should set an alert warning"
+    );
+    let alert_text = app.alert.as_ref().unwrap().0.as_str();
+    assert!(
+        alert_text.contains("SSH"),
+        "alert should mention SSH, got: {alert_text}"
+    );
+    // Nothing should have been inserted into the input.
+    assert!(app.input.is_empty(), "input should remain empty on SSH");
+}
+
+#[tokio::test]
+async fn test_paste_clipboard_image_no_tool_error() {
+    // This test does not touch SSH env vars to avoid racing with
+    // test_paste_clipboard_image_ssh_warning when tests run in parallel.
+    // Both the SSH guard path and the missing-tool error path produce an
+    // alert that is not "image pasted from clipboard", so the assertions
+    // hold regardless of which path fires.
+
+    let mut app = mew_tui::App::new();
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        session_id: String::new(),
+        model: String::new(),
+        provider: String::new(),
+        workspace: String::new(),
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    let _ = runtime::handle_action(&mut cx, Action::PasteClipboardImage).await;
+
+    // Without pngpaste (or equivalent), we should get an error alert,
+    // not a silent no-op.
+    assert!(
+        app.alert.is_some(),
+        "missing clipboard tool should produce an alert"
+    );
+    let alert_text = app.alert.as_ref().unwrap().0.as_str();
+    assert!(
+        !alert_text.contains("image pasted from clipboard"),
+        "should not report success when no clipboard tool is available"
+    );
 }
 
 // -----------------------------------------------------------------------

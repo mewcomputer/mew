@@ -277,6 +277,13 @@ pub(crate) async fn build_and_run(
             mew_agent::AgentEvent::FlaggedFilesChanged { .. } => {
                 // Flagged files visibility is web-UI only.
             }
+            mew_agent::AgentEvent::GoalProposed { tx, .. } => {
+                // Non-interactive mode: no TUI to approve the goal. Dropping
+                // `tx` cancels the call so the model gets a clear "rejected"
+                // result instead of hanging.
+                eprintln!("\n[propose_goal: cancelled — no TUI in non-interactive mode]");
+                drop(tx);
+            }
         }
     }
 

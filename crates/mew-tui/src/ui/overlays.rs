@@ -10,8 +10,8 @@ use ratatui::{
 
 use super::display_width;
 use crate::app::{
-    App, PermissionState, PersonaSummary, PersonaSwitchConfirmState, PickerState,
-    PlanApprovalState, SlashCommand, UserQuestionState, PICKER_VISIBLE_ITEMS,
+    App, GoalProposalState, PermissionState, PersonaSummary, PersonaSwitchConfirmState,
+    PickerState, PlanApprovalState, SlashCommand, UserQuestionState, PICKER_VISIBLE_ITEMS,
 };
 
 pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCommand], area: Rect) {
@@ -952,6 +952,87 @@ pub(super) fn draw_persona_confirm_modal(
     f.render_widget(Paragraph::new(buttons), buttons_area);
 }
 
+/// Draw the goal proposal modal. A centered modal showing the proposed
+/// objective with an accept/reject toggle.
+pub(super) fn draw_goal_proposal(
+    f: &mut Frame,
+    state: &GoalProposalState,
+    area: Rect,
+    tokens: &crate::theme::Theme,
+) {
+    let width = 70u16.min(area.width.saturating_sub(4));
+    let height = 9u16.min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::bordered()
+        .title(Span::styled(
+            " Goal proposed ",
+            Style::default()
+                .fg(tokens.resolve("foreground"))
+                .add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(tokens.resolve("accent")));
+    f.render_widget(block, popup);
+
+    let inner = popup.inner(Margin::new(2, 1));
+
+    let objective_wrapped =
+        crate::ui::chat::wrap_text_to_width(&state.objective, inner.width);
+    let obj_lines: Vec<Line> = objective_wrapped
+        .iter()
+        .map(|c| {
+            Line::from(vec![Span::styled(
+                c.clone(),
+                Style::default().fg(tokens.resolve("foreground")),
+            )])
+        })
+        .collect();
+
+    let accept_selected = state.selected == 0;
+    let accept_style = if accept_selected {
+        Style::default()
+            .bg(tokens.resolve("surface.success"))
+            .fg(tokens.resolve("text.inverse"))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(tokens.resolve("text.placeholder"))
+    };
+    let reject_style = if !accept_selected {
+        Style::default()
+            .bg(tokens.resolve("pill.attention.bg"))
+            .fg(tokens.resolve("text.inverse"))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(tokens.resolve("text.placeholder"))
+    };
+
+    let mut text = Text::default();
+    text.push_line(Line::from(Span::styled(
+        "The agent has proposed a goal:",
+        Style::default().fg(tokens.resolve("text.muted")),
+    )));
+    text.push_line(Line::from(""));
+    for line in obj_lines {
+        text.push_line(line);
+    }
+    text.push_line(Line::from(""));
+    text.push_line(Line::from(vec![
+        Span::styled(" [y] Accept ", accept_style),
+        Span::styled("   ", Style::default()),
+        Span::styled(" [n] Reject ", reject_style),
+    ]));
+    text.push_line(Line::from(Span::styled(
+        "  Tab toggle · Enter confirm · Esc cancel",
+        Style::default().fg(tokens.resolve("text.muted")),
+    )));
+
+    f.render_widget(Paragraph::new(text), inner);
+}
+
 /// Draw the plan-approval modal (`handoff_plan`). A large centered modal with
 /// the plan rendered as markdown, an approve / request-changes footer, and a
 /// feedback input line for the request-changes path.
@@ -989,7 +1070,37 @@ pub(super) fn draw_plan_approval(
     // approve/request-changes line, the (optional) feedback input, and a
     // key-hint line.
     let editing = state.editing_feedback;
-    let footer_height: u16 = if editing { 4 } else { 3 };
+    // Pre-compute word-wrapped feedback lines so footer height is accurate.
+    let feedback_raw: Vec<&str> = if editing {
+        state.feedback.split('\n').collect()
+    } else {
+        Vec::new()
+    };
+    let wrap_w = inner.width.saturating_sub(2) as usize;
+    let label_w = "  feedback: ".len();
+    let cont_w = "            ".len();
+    let feedback_rows: usize = if editing {
+        feedback_raw
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let avail = if i == 0 {
+                    wrap_w.saturating_sub(label_w)
+                } else {
+                    wrap_w.saturating_sub(cont_w)
+                };
+                wrap_feedback_line(line, avail).len().max(1)
+            })
+            .sum()
+    } else {
+        0
+    };
+    // Footer: blank spacer + button row + feedback rows + hint.
+    let footer_height: u16 = if editing {
+        2 + feedback_rows as u16 + 1
+    } else {
+        3
+    };
     let body_height = inner.height.saturating_sub(footer_height);
 
     let body_area = Rect::new(inner.x, inner.y, inner.width, body_height);
@@ -1001,6 +1112,8 @@ pub(super) fn draw_plan_approval(
     // Footer.
     let footer_y = inner.y + body_height;
     let approve_selected = state.selected == 0;
+    let changes_selected = state.selected == 1;
+    let submit_selected = state.selected == 2;
     let approve_style = if approve_selected {
         Style::default()
             .bg(tokens.resolve("surface.success"))
@@ -1009,7 +1122,7 @@ pub(super) fn draw_plan_approval(
     } else {
         Style::default().fg(tokens.resolve("text.placeholder"))
     };
-    let changes_style = if !approve_selected {
+    let changes_style = if changes_selected {
         Style::default()
             .bg(tokens.resolve("pill.attention.bg"))
             .fg(tokens.resolve("text.inverse"))
@@ -1019,26 +1132,54 @@ pub(super) fn draw_plan_approval(
     };
 
     let mut footer = Text::default();
-    footer.push_line(Line::from(vec![
+    let mut button_line = vec![
         Span::styled(" [a] Approve ", approve_style),
         Span::styled("   ", Style::default()),
         Span::styled(" [r] Request changes ", changes_style),
-    ]));
+    ];
     if editing {
-        footer.push_line(Line::from(vec![
-            Span::styled(
-                "  feedback: ",
-                Style::default().fg(tokens.resolve("text.muted")),
-            ),
-            Span::styled(
-                state.feedback.clone(),
-                Style::default().fg(tokens.resolve("foreground")),
-            ),
-            Span::styled("▏", Style::default().fg(tokens.resolve("text.placeholder"))),
-        ]));
+        let submit_style = if submit_selected {
+            Style::default()
+                .bg(tokens.resolve("accent"))
+                .fg(tokens.resolve("text.inverse"))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(tokens.resolve("text.placeholder"))
+        };
+        button_line.push(Span::styled("   ", Style::default()));
+        button_line.push(Span::styled(" [Ctrl+S] Submit ", submit_style));
+    }
+    footer.push_line(Line::from(button_line));
+    if editing {
+        for (i, line) in feedback_raw.iter().enumerate() {
+            let (prefix, avail_w) = if i == 0 {
+                ("  feedback: ", wrap_w.saturating_sub(label_w))
+            } else {
+                ("            ", wrap_w.saturating_sub(cont_w))
+            };
+            let chunks = wrap_feedback_line(line, avail_w);
+            for (j, chunk) in chunks.iter().enumerate() {
+                let p = if j == 0 { prefix } else { "            " };
+                let mut spans = vec![Span::styled(
+                    p,
+                    Style::default().fg(tokens.resolve("text.muted")),
+                )];
+                spans.push(Span::styled(
+                    chunk.clone(),
+                    Style::default().fg(tokens.resolve("foreground")),
+                ));
+                if i == feedback_raw.len() - 1 && j == chunks.len() - 1 {
+                    spans.push(Span::styled(
+                        "▏",
+                        Style::default().fg(tokens.resolve("text.placeholder")),
+                    ));
+                }
+                footer.push_line(Line::from(spans));
+            }
+        }
     }
     let hint = if editing {
-        "type feedback · Enter submit · Esc back"
+        "type feedback · Enter newline · Ctrl+S or Tab→Submit · Esc back"
     } else {
         "↑/↓ scroll · Tab toggle · Enter confirm · Esc cancel"
     };
@@ -1049,6 +1190,43 @@ pub(super) fn draw_plan_approval(
 
     let footer_area = Rect::new(inner.x, footer_y, inner.width, footer_height);
     f.render_widget(Paragraph::new(footer), footer_area);
+}
+
+/// Word-wrap a single line of feedback text to `max_width` display columns.
+/// Returns one or more chunks, each fitting within the width.
+fn wrap_feedback_line(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 || text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    for word in text.split_inclusive(' ') {
+        let word_w = display_width(word);
+        if current_w + word_w > max_width && !current.is_empty() {
+            chunks.push(std::mem::take(&mut current));
+            current_w = 0;
+        }
+        if word_w > max_width {
+            // Hard-break oversized words.
+            for ch in word.chars() {
+                let ch_w = display_width(&ch.to_string());
+                if current_w + ch_w > max_width && !current.is_empty() {
+                    chunks.push(std::mem::take(&mut current));
+                    current_w = 0;
+                }
+                current.push(ch);
+                current_w += ch_w;
+            }
+        } else {
+            current.push_str(word);
+            current_w += word_w;
+        }
+    }
+    if !current.is_empty() || chunks.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 fn format_tools(list: &Option<Vec<String>>) -> String {

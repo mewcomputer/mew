@@ -29,15 +29,40 @@ struct ChatLineCtx<'t> {
     end_col: usize,
     sel_fg: Color,
     sel_bg: Color,
+    chat_bg: Color,
+    chat_width: u16,
 }
 
 impl<'t> ChatLineCtx<'t> {
     fn push_line(&mut self, line: Line<'static>) {
-        let line = if self.has_sel {
+        let mut line = if self.has_sel {
             self.apply_selection(line)
         } else {
             line
         };
+        // Fill bg-less spans with the chat surface background so that
+        // wrapped continuation rows (and trailing cells on any row)
+        // carry the chat bg rather than relying on ratatui's
+        // Paragraph/Block to propagate it — which it does
+        // inconsistently past the second wrapped line.
+        //
+        // Spans that already carry an explicit bg (tool blocks, code
+        // fences, selection, tool edges with Color::Reset) are left
+        // untouched.
+        for span in &mut line.spans {
+            if span.style.bg.is_none() {
+                span.style = span.style.bg(self.chat_bg);
+            }
+        }
+        // Pad to full chat width with the chat surface bg so every
+        // visual row fills the entire width.
+        let used = line.width() as u16;
+        if used < self.chat_width {
+            line.spans.push(Span::styled(
+                " ".repeat((self.chat_width - used) as usize),
+                Style::default().bg(self.chat_bg),
+            ));
+        }
         let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         self.chat_rows.push(plain);
         self.lines.push(line);
@@ -261,6 +286,8 @@ pub(crate) fn build_chat_lines(
         end_col: app.sel_end_col.unwrap_or(0),
         sel_fg: app.theme.resolve("selection.foreground"),
         sel_bg: app.theme.resolve("selection.background"),
+        chat_bg: app.theme.resolve("chat.surface.background"),
+        chat_width,
     };
 
     for (msg_idx, msg) in app.messages.iter().enumerate() {
@@ -1148,6 +1175,67 @@ mod tests {
             assert!(
                 w <= width as usize,
                 "chunk width {w} exceeds {width}: {chunk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_chat_lines_padded_to_full_width_with_bg() {
+        // Every line produced by build_chat_lines must be padded to the
+        // full chat_width so wrapped continuation rows carry the chat
+        // surface background rather than relying on ratatui's Paragraph
+        // to propagate the Block bg (which it does inconsistently past
+        // the second wrapped line).
+        use crate::app::App;
+        use mew_message::{Message, Part, Role, TextPart};
+
+        let mut app = App::new();
+        let chat_width = 40u16;
+        let md_width = chat_width - 2;
+
+        // Long assistant text that will wrap to multiple lines.
+        let long_text = "This is a long paragraph that will definitely wrap across multiple lines when rendered at a narrow width to test background padding on continuation rows.";
+        let msg_id = ulid::Ulid::new();
+        app.push_message(Message {
+            id: msg_id,
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::Text(TextPart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: msg_id,
+                    session_id: ulid::Ulid::new(),
+                },
+                text: long_text.to_string(),
+                synthetic: false,
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        });
+
+        let built = build_chat_lines(&mut app, md_width, chat_width);
+        let chat_bg = app.theme.resolve("chat.surface.background");
+
+        assert!(
+            built.lines.len() > 3,
+            "expected multiple wrapped lines, got {}",
+            built.lines.len()
+        );
+
+        for (i, line) in built.lines.iter().enumerate() {
+            let line_width = line.width();
+            assert_eq!(
+                line_width, chat_width as usize,
+                "line {i} width {line_width} != chat_width {chat_width}"
+            );
+            // The last span (padding) must carry the chat bg.
+            let has_bg = line.spans.iter().any(|s| s.style.bg == Some(chat_bg));
+            assert!(
+                has_bg,
+                "line {i} has no span with chat surface bg"
             );
         }
     }

@@ -112,6 +112,7 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
         crate::app::Mode::PermissionPrompt => handle_permission_key(app, key),
         crate::app::Mode::UserQuestion => handle_user_question_key(app, key),
         crate::app::Mode::PlanApproval => handle_plan_approval_key(app, key),
+        crate::app::Mode::GoalProposal => handle_goal_proposal_key(app, key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
         crate::app::Mode::PersonaSwitchConfirm => handle_persona_confirm_key(app, key),
         crate::app::Mode::Help => handle_help_key(app, key),
@@ -569,8 +570,18 @@ fn handle_plan_approval_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
         .unwrap_or(false);
 
     match key.code {
-        KeyCode::Enter => {
+        KeyCode::Char('s') if editing && key.modifiers.contains(KeyModifiers::CONTROL) => {
+            // Ctrl+S submits the feedback.
             app.plan_approval_confirm();
+            None
+        }
+        KeyCode::Enter => {
+            if editing {
+                // Enter inserts a newline in the feedback editor.
+                app.plan_approval_type_char('\n');
+            } else {
+                app.plan_approval_confirm();
+            }
             None
         }
         KeyCode::Esc => {
@@ -631,6 +642,38 @@ fn handle_plan_approval_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
     }
 }
 
+fn handle_goal_proposal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Enter => {
+            app.goal_proposal_confirm();
+            None
+        }
+        KeyCode::Esc => {
+            app.cancel_goal_proposal();
+            None
+        }
+        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+            app.goal_proposal_toggle();
+            None
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            if let Some(gp) = app.goal_proposal.as_mut() {
+                gp.selected = 0;
+            }
+            app.goal_proposal_confirm();
+            None
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') => {
+            if let Some(gp) = app.goal_proposal.as_mut() {
+                gp.selected = 1;
+            }
+            app.goal_proposal_confirm();
+            None
+        }
+        _ => None,
+    }
+}
+
 fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     // Any key other than Esc dismisses the pending-cancel hint.
     if key.code != KeyCode::Esc {
@@ -676,6 +719,18 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 return Some(Action::CopySelection(text));
             }
             return None;
+        }
+        // Cmd+V (META+v): paste image from system clipboard. Many terminals
+        // pass this through as Char('v') with META modifier when there's no
+        // text to paste. Route it to the clipboard image paste path; if
+        // there's no image (or the tool is missing), the error alert tells
+        // the user what happened.
+        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::META) => {
+            return Some(Action::PasteClipboardImage);
+        }
+        // Ctrl+Shift+V: paste image from system clipboard.
+        KeyCode::Char('V') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Some(Action::PasteClipboardImage);
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.streaming {
@@ -1196,4 +1251,9 @@ pub enum Action {
     /// Cancel the current turn and immediately submit the given text as a
     /// new turn. Fires from Up-Up when there are queued messages.
     SendQueuedNow(String),
+    /// Paste image data from the system clipboard (Ctrl+Shift+V). If the
+    /// clipboard contains a PNG image, it is saved to a temp file and
+    /// inserted as an @-mention so the existing image attachment pipeline
+    /// picks it up on submit.
+    PasteClipboardImage,
 }

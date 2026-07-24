@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -12,9 +13,11 @@ use mew_subagents::{SubagentDef, SubagentRunOptions, SubagentRunner};
 use mew_tools::tools::flag_important::FlaggedFile;
 use mew_tools::SecretSet;
 use mew_tools::Tool;
+
+use crate::GoalState;
 use ulid::Ulid;
 
-use crate::{AgentEvent, SessionWriter};
+use crate::{prompt_cache::PromptCacheState, AgentEvent, PromptCacheRetention, SessionWriter};
 
 /// Session-scoped classifier decision cache. Keyed by
 /// `(tool_name, serialized_input)`; values are the classifier's parsed
@@ -92,6 +95,8 @@ pub struct Agent {
     pub messages: Arc<tokio::sync::Mutex<Vec<Message>>>,
     pub session_id: SessionId,
     pub system: String,
+    prompt_cache_state: Arc<std::sync::Mutex<PromptCacheState>>,
+    prompt_generation: u64,
     pub cancel_token: CancellationToken,
     pub permission_engine: Option<Arc<mew_config::permissions::PermissionEngine>>,
     /// Truncates long reasoning traces and forces a tool call on the
@@ -266,6 +271,11 @@ pub struct Agent {
     /// Cleared on compaction (message list replacement).
     pub token_count_cache:
         Arc<std::sync::Mutex<std::collections::HashMap<mew_message::MessageId, u32>>>,
+    /// Active session goal. When `Some` with `GoalStatus::Active`, the turn
+    /// loop injects a continuation prompt at end of turn and loops back
+    /// instead of returning. Shared via `Arc<Mutex>` so the `propose_goal`,
+    /// `complete_goal`, and `block_goal` tools can mutate it.
+    pub goal: Arc<tokio::sync::Mutex<Option<GoalState>>>,
 }
 
 /// Builds a new provider for a `provider/model` pair. Used by the turn
@@ -297,6 +307,8 @@ impl Agent {
             messages: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             session_id: session_id.unwrap_or_default(),
             system: String::new(),
+            prompt_cache_state: Arc::new(std::sync::Mutex::new(PromptCacheState::default())),
+            prompt_generation: 0,
             cancel_token: CancellationToken::new(),
             permission_engine: None,
             supports_vision: true,
@@ -308,7 +320,10 @@ impl Agent {
             context_window: 0,
             compaction_threshold: 0.95,
             keep_turns: 4,
-            max_turns: None,
+            max_turns: Some(std::env::var("MEW_MAX_TURNS")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(100)),
             max_subagent_depth: 3,
             subagent_defs: Vec::new(),
             // Defaults to enabled with the 5k-token threshold recommended
@@ -355,6 +370,7 @@ impl Agent {
             shell_session: None,
             pending_manifest: Arc::new(std::sync::Mutex::new(None)),
             token_count_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            goal: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -602,7 +618,24 @@ impl Agent {
 
     pub fn set_system(&mut self, system: String) {
         self.base_system = system.clone();
-        self.system = system;
+        self.rebuild_system();
+    }
+
+    /// Set the provider's prompt-cache retention window. `Unknown` is the
+    /// conservative default: prompt refreshes wait for compaction after the
+    /// first request because the provider's cache lifetime is unknown.
+    pub fn set_prompt_cache_retention(&self, retention: PromptCacheRetention) {
+        self.prompt_cache_state
+            .lock()
+            .expect("prompt cache state poisoned")
+            .set_retention(retention);
+    }
+
+    pub fn prompt_cache_retention(&self) -> PromptCacheRetention {
+        self.prompt_cache_state
+            .lock()
+            .expect("prompt cache state poisoned")
+            .retention()
     }
 
     pub fn set_browser_enabled(&mut self, enabled: bool) {
@@ -713,18 +746,89 @@ impl Agent {
     /// automatically by `set_skills`, `apply_persona`, and `clear_persona`.
     /// Exposed for callers that mutate filters out of band.
     pub fn rebuild_system(&mut self) {
+        let should_rebuild = self
+            .prompt_cache_state
+            .lock()
+            .expect("prompt cache state poisoned")
+            .request_rebuild(Instant::now());
+        if !should_rebuild {
+            return;
+        }
+
+        self.rebuild_system_now();
+    }
+
+    fn rebuild_system_now(&mut self) {
         let filter = self.skill_filter.try_read().ok().and_then(|g| g.clone());
         let allowed = filter.as_ref();
-        let visible: Vec<&mew_skills::Skill> = self
+        let mut visible: Vec<&mew_skills::Skill> = self
             .skills
             .iter()
             .filter(|s| allowed.is_none_or(|set| set.contains(&s.name)))
             .collect();
+        visible.sort_unstable_by(|left, right| left.name.cmp(&right.name));
         let mut out = self.base_system.clone();
         if !visible.is_empty() {
             out.push_str(&build_skills_xml(&visible));
         }
-        self.system = out;
+        self.system = out.clone();
+        self.prompt_generation = self
+            .prompt_cache_state
+            .lock()
+            .expect("prompt cache state poisoned")
+            .mark_rebuilt(out);
+    }
+
+    pub(crate) fn sync_system_prompt(&mut self) {
+        let state = self
+            .prompt_cache_state
+            .lock()
+            .expect("prompt cache state poisoned");
+        let generation = state.generation();
+        let rebuild_pending = state.rebuild_pending();
+        let applied_system = (generation != self.prompt_generation)
+            .then(|| state.applied_system())
+            .flatten();
+        drop(state);
+        if generation != self.prompt_generation {
+            if rebuild_pending {
+                if let Some(applied_system) = applied_system {
+                    self.system = applied_system;
+                    self.prompt_generation = generation;
+                }
+            } else {
+                self.rebuild_system_now();
+            }
+        }
+    }
+
+    pub(crate) fn apply_deferred_system_rebuild_if_safe(&mut self) {
+        let should_rebuild = self
+            .prompt_cache_state
+            .lock()
+            .expect("prompt cache state poisoned")
+            .apply_pending_if_safe(Instant::now());
+        if should_rebuild {
+            self.rebuild_system_now();
+        }
+    }
+
+    pub(crate) fn apply_deferred_system_rebuild_after_compaction(&mut self) {
+        let should_rebuild = self
+            .prompt_cache_state
+            .lock()
+            .expect("prompt cache state poisoned")
+            .apply_pending_after_compaction();
+        if should_rebuild {
+            self.rebuild_system_now();
+        }
+    }
+
+    pub(crate) fn mark_prompt_request_sent(&self) {
+        self.prompt_cache_state
+            .lock()
+            .expect("prompt cache state poisoned")
+            .mark_request_sent(Instant::now());
     }
 
     /// Activate a persona. Sets the persona prompt (prepended to `self.system`
@@ -759,7 +863,8 @@ impl Agent {
         // Build the template context once: used for rendering the persona
         // body (if templated) and shared with the Skill tool for templated
         // skills.
-        let tool_names: Vec<String> = self.tools.keys().cloned().collect();
+        let mut tool_names: Vec<String> = self.tools.keys().cloned().collect();
+        tool_names.sort_unstable();
         let (tools, denied_tools) = mew_prompts::template::TemplateContext::compute_tools(
             &tool_names,
             &self.active_tool_names,
@@ -779,14 +884,18 @@ impl Agent {
             denied_tools,
             skills: self.skills.iter().map(|s| s.name.clone()).collect(),
             project_vars: self.project_vars.clone(),
-            available_subagents: self
-                .subagent_defs
-                .iter()
-                .map(|d| mew_prompts::template::SubagentInfo {
-                    name: d.name.clone(),
-                    description: d.description.clone(),
-                })
-                .collect(),
+            available_subagents: {
+                let mut subagents: Vec<_> = self
+                    .subagent_defs
+                    .iter()
+                    .map(|d| mew_prompts::template::SubagentInfo {
+                        name: d.name.clone(),
+                        description: d.description.clone(),
+                    })
+                    .collect();
+                subagents.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+                subagents
+            },
             ..Default::default()
         };
 
@@ -892,9 +1001,11 @@ impl Agent {
     }
 
     pub async fn load_messages(&self, messages: Vec<Message>) {
-        *self.messages.lock().await = messages;
-        // Clear the token count cache — message IDs may have changed
-        // (e.g. on session resume or compaction).
+        // Session history is lossless, while the model-visible context may
+        // start at the latest persisted compaction marker.
+        *self.messages.lock().await = crate::turn::context_from_history(messages);
+        // Clear the token count cache — message IDs may have changed on
+        // session resume or after compaction.
         self.token_count_cache.lock().unwrap().clear();
     }
 
@@ -1043,6 +1154,7 @@ impl Agent {
 
         let (tx, rx) = mpsc::channel(256);
         let mut agent = self.clone();
+        agent.sync_system_prompt();
         agent.cancel_token = cancel_token.unwrap_or_default();
 
         tokio::spawn(async move {

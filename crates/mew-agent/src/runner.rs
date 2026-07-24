@@ -189,7 +189,8 @@ impl SubagentRunner for SimpleRunner {
         // context (subagent_name, tools, model, etc).
         if !def.body.is_empty() {
             let body = if def.template {
-                let tool_names: Vec<String> = agent.tools.keys().cloned().collect();
+                let mut tool_names: Vec<String> = agent.tools.keys().cloned().collect();
+                tool_names.sort_unstable();
                 let ctx = mew_prompts::template::TemplateContext {
                     subagent_name: def.name.clone(),
                     model_id: agent.model_id.clone(),

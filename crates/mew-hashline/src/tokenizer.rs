@@ -250,6 +250,14 @@ fn parse_insert(rest: &str) -> crate::Result<Option<OpTarget>> {
     let after = rest[sub_end..].trim_start();
 
     match sub {
+        // Bare `INS <line>:` without a direction suffix is ambiguous.
+        // Require INS.PRE or INS.POST for line-targeted inserts.
+        s if s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty() => {
+            Err(crate::HashlineError::parse(
+                0,
+                "INS is ambiguous; use INS.PRE <line>: to insert before or INS.POST <line>: to insert after",
+            ))
+        }
         HL_INSERT_BEFORE => {
             let (anchor, tail) = parse_lid_and_tail(after)?;
             require_colon_only(tail)?;
@@ -440,6 +448,24 @@ INS.TAIL:
                 target: OpTarget::Move { .. }
             }
         ));
+    }
+
+    #[test]
+    fn bare_ins_rejected_as_ambiguous() {
+        // `INS 1:` without a .POST/.PRE suffix should be rejected with a
+        // clear error message directing the user to use INS.PRE or INS.POST.
+        let text = "[f#ABCD]\nINS 1:\n+hello\n";
+        let result = tokenize(text);
+        assert!(result.is_err(), "bare INS should be rejected");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("ambiguous"),
+            "error should mention ambiguity: {err}"
+        );
+        assert!(
+            err.contains("INS.PRE") || err.contains("INS.POST"),
+            "error should suggest INS.PRE or INS.POST: {err}"
+        );
     }
 
     #[test]

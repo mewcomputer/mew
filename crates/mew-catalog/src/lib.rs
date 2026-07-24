@@ -76,6 +76,11 @@ pub struct Model {
     /// in the responses adapter.
     #[serde(default)]
     pub responses_lite: bool,
+    /// Provider/model prompt-cache retention in seconds. `None` means the
+    /// provider's retention is unknown and the agent uses its conservative
+    /// compaction-only refresh policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_retention_secs: Option<u64>,
     /// Codex multi-agent schema version, if any. Stored for future use;
     /// the current agent loop does not act on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -227,9 +232,7 @@ impl Catalog {
             return Some(v.clone());
         }
         // Map by effort level. Canonical ordering from lowest to highest.
-        let effort_order = [
-            "none", "low", "medium", "high", "xhigh", "max", "ultra",
-        ];
+        let effort_order = ["none", "low", "medium", "high", "xhigh", "max", "ultra"];
         let source_effort = effort_order.iter().position(|&e| e == variant);
         let target_by_effort: Vec<(usize, &ThinkingVariant)> = variants
             .iter()
@@ -593,6 +596,7 @@ fn parse_models_dev_model(val: &serde_json::Value, provider_id: &str) -> Option<
         pricing,
         thinking_variants: Vec::new(),
         responses_lite: false,
+        prompt_cache_retention_secs: None,
         multi_agent_version: None,
     })
 }
@@ -824,6 +828,7 @@ fn parse_umans(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
             pricing: Pricing::default(),
             thinking_variants: build_umans_thinking_variants(entry.capabilities.reasoning.as_ref()),
             responses_lite: false,
+            prompt_cache_retention_secs: None,
             multi_agent_version: None,
         };
         out.push(model);
@@ -1013,6 +1018,7 @@ pub fn parse_codex(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
             pricing: Pricing::default(),
             thinking_variants,
             responses_lite: m.use_responses_lite,
+            prompt_cache_retention_secs: None,
             multi_agent_version: m.multi_agent_version.clone(),
         });
     }
@@ -1505,6 +1511,19 @@ mod tests {
         let m = cat.lookup("no-price").unwrap();
         assert_eq!(m.pricing.input, 0.0);
         assert_eq!(m.pricing.output, 0.0);
+        assert_eq!(m.prompt_cache_retention_secs, None);
+    }
+
+    #[test]
+    fn test_parse_prompt_cache_retention_when_known() {
+        let json = br#"{"models":[{"id":"known-cache","provider":"test","prompt_cache_retention_secs":14400}]}"#;
+        let cat = parse(json).unwrap();
+        assert_eq!(
+            cat.lookup("known-cache")
+                .unwrap()
+                .prompt_cache_retention_secs,
+            Some(14_400)
+        );
     }
 
     #[test]

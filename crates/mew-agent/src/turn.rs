@@ -5,13 +5,14 @@ use ulid::Ulid;
 
 use mew_hooks::ChatParams;
 use mew_message::{
-    AssistantMeta, ErrorKind, Message, MessageError, Part, PartBase, Role, TextPart, Time, Tokens,
+    AssistantMeta, CompactionPart, ErrorKind, Message, MessageError, Part, PartBase, Role,
+    TextPart, Time, Tokens,
 };
 use mew_provider::{ProviderEvent, Request, ToolDef};
 use mew_tools::tools::flag_important::FlagMode;
 
 use crate::agent::Agent;
-use crate::AgentEvent;
+use crate::{AgentEvent, GoalStatus};
 
 impl Agent {
     pub(crate) async fn run_loop(
@@ -87,7 +88,7 @@ impl Agent {
                 }
             }
             turn_count += 1;
-            let tool_defs: Vec<ToolDef> = self
+            let mut tool_defs: Vec<ToolDef> = self
                 .tools
                 .values()
                 .filter(|t| {
@@ -106,6 +107,7 @@ impl Agent {
                     schema: t.schema().clone(),
                 })
                 .collect();
+            sort_tool_defs(&mut tool_defs);
 
             let mut messages = self.messages.lock().await.clone();
 
@@ -126,43 +128,61 @@ impl Agent {
             let estimated = self.estimated_tokens(&messages);
             let threshold = (self.context_window as f64 * self.compaction_threshold) as u32;
             let should_compact = force || (self.context_window > 0 && estimated > threshold);
-            if should_compact {
+            let compaction_start = compaction_start(&messages, self.keep_turns);
+            let has_removable_history =
+                !messages.is_empty() && (self.keep_turns == 0 || compaction_start > 0);
+            if should_compact && has_removable_history {
                 tracing::info!(
                     estimated,
                     threshold,
                     context_window = self.context_window,
                     force,
+                    compaction_start,
                     "compacting context"
                 );
                 // Notify plugins before compaction so they can capture any
                 // context they want to preserve.
                 self.dispatcher.on_pre_compaction(&messages).await;
-                let keep_count = self.keep_turns.min(messages.len());
-                let compacted = messages.split_off(messages.len() - keep_count);
+                let mut compacted = messages.split_off(compaction_start);
+                compacted.retain(|message| !is_compaction_message(message));
+                let tail_start_id = compacted.first().map(|message| message.id);
+                let compact_id = Ulid::new();
                 let compact_msg = Message {
-                    id: Ulid::new(),
+                    id: compact_id,
                     session_id: self.session_id,
                     role: Role::User,
-                    parts: vec![Part::Text(TextPart {
-                        base: PartBase {
-                            id: Ulid::new(),
-                            message_id: Ulid::new(),
-                            session_id: self.session_id,
-                        },
-                        text: "Previous conversation has been compacted to stay within the context window. Recent turns are preserved below."
-                            .into(),
-                        synthetic: true,
-                    })],
+                    parts: vec![
+                        Part::Text(TextPart {
+                            base: PartBase {
+                                id: Ulid::new(),
+                                message_id: compact_id,
+                                session_id: self.session_id,
+                            },
+                            text: "Previous conversation has been compacted to stay within the context window. Recent turns are preserved below."
+                                .into(),
+                            synthetic: true,
+                        }),
+                        Part::Compaction(CompactionPart {
+                            base: PartBase {
+                                id: Ulid::new(),
+                                message_id: compact_id,
+                                session_id: self.session_id,
+                            },
+                            auto: !force,
+                            overflow: false,
+                            tail_start_id,
+                        }),
+                    ],
                     time: Time {
                         created: chrono::Utc::now().timestamp_millis(),
                         completed: None,
                     },
                     assistant: None,
                 };
-                let len_before = messages.len();
+                let removed_count = messages.len();
                 messages = compacted;
                 // Prepend the summary note.
-                messages.insert(0, compact_msg);
+                messages.insert(0, compact_msg.clone());
 
                 // Re-inject flagged files so they survive compaction. Included
                 // files are inlined as text; referenced files get a pointer.
@@ -219,10 +239,32 @@ impl Agent {
                 }
                 drop(flagged);
 
+                // Replace the active context as soon as compaction happens.
+                // Keeping the old history in self.messages would make every
+                // tool turn compact the same prefix again, repeatedly
+                // invalidating provider-side prompt caches.
+                *self.messages.lock().await = messages.clone();
+                self.token_count_cache.lock().unwrap().clear();
+
+                // The session log remains lossless. The marker records the
+                // boundary from which the compacted context should be
+                // reconstructed on resume.
+                if let Some(session) = &self.session {
+                    let mut session = session.lock().await;
+                    if let Err(e) = session.write_message(&compact_msg).await {
+                        tracing::warn!(error = %e, "failed to persist compaction marker");
+                    }
+                }
+
+                // Compaction is an explicit cache boundary. Apply any
+                // deferred system-prompt rebuild now that the old context
+                // prefix has already been replaced.
+                self.apply_deferred_system_rebuild_after_compaction();
+
                 let _ = ev_tx
                     .send(AgentEvent::Error(format!(
-                        "context compacted: {} turns removed ({} estimated tokens)",
-                        len_before, estimated
+                        "context compacted: {} messages removed ({} estimated tokens)",
+                        removed_count, estimated
                     )))
                     .await;
 
@@ -230,6 +272,10 @@ impl Agent {
                 // resulting (compacted) message list.
                 self.dispatcher.on_post_compaction(&messages).await;
             }
+
+            // A configured retention window may make a deferred refresh safe
+            // without compaction. Unknown retention remains conservative.
+            self.apply_deferred_system_rebuild_if_safe();
 
             let base_system = match &self.persona_prompt {
                 Some(persona) => format!("{}\n\n{}", persona, self.system),
@@ -309,6 +355,7 @@ impl Agent {
                 &self.token_count_cache,
             ));
 
+            self.mark_prompt_request_sent();
             let mut stream = match self.provider.stream(req).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -552,12 +599,104 @@ impl Agent {
                 }
                 let messages = self.messages.lock().await.clone();
                 self.dispatcher.on_turn_end(&messages).await;
+
+                // Goal continuation: if there's an active goal, inject a
+                // continuation prompt as a user message and loop back
+                // instead of ending the turn.
+                let should_continue = {
+                    let mut goal_guard = self.goal.lock().await;
+                    if let Some(ref mut goal) = *goal_guard {
+                        if goal.status == GoalStatus::Active {
+                            let max = std::env::var("MEW_GOAL_MAX_CONTINUATIONS")
+                                .ok()
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .unwrap_or(500);
+                            if goal.continuation_count >= max {
+                                let _ = ev_tx
+                                    .send(AgentEvent::Error(format!(
+                                        "goal auto-continuation stopped after {max} continuations"
+                                    )))
+                                    .await;
+                                goal.status = GoalStatus::Paused;
+                                false
+                            } else {
+                                goal.continuation_count += 1;
+                                let count = goal.continuation_count;
+                                let objective = goal.objective.clone();
+                                let continuation_msg = Message {
+                                    id: Ulid::new(),
+                                    session_id: self.session_id,
+                                    role: Role::User,
+                                    parts: vec![Part::Text(TextPart {
+                                        base: PartBase {
+                                            id: Ulid::new(),
+                                            message_id: Ulid::new(),
+                                            session_id: self.session_id,
+                                        },
+                                        text: format!(
+                                            "<goal_continuation count=\"{count}\">\n\
+                                             Continue working toward the objective below. \
+                                             Avoid repeating work that is already done. \
+                                             Choose the next concrete action.\n\n\
+                                             Objective: {objective}\n\
+                                             </goal_continuation>"
+                                        ),
+                                        synthetic: true,
+                                    })],
+                                    time: Time {
+                                        created: Utc::now().timestamp_millis(),
+                                        completed: None,
+                                    },
+                                    assistant: None,
+                                };
+                                self.append_message(continuation_msg).await;
+                                true
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+                if should_continue {
+                    // Reset the per-turn counter so the max_turns guard
+                    // applies to each continuation independently, not to
+                    // the entire goal session. The goal continuation
+                    // count is tracked separately on GoalState.
+                    turn_count = 0;
+                    continue;
+                }
                 return Ok(());
             }
 
             let result_parts = self
                 .execute_pending_tool_calls(&pending, &mut assistant_msg, &ev_tx)
                 .await;
+
+            // If the turn was cancelled during tool execution, stop now
+            // instead of looping back for another provider call.
+            if self.cancel_token.is_cancelled() {
+                if let Some(ref mut msg) = assistant_msg {
+                    let now = Utc::now().timestamp_millis();
+                    msg.time.completed = Some(now);
+                    msg.assistant = Some(AssistantMeta {
+                        provider_id: String::new(),
+                        model_id: String::new(),
+                        cost: 0.0,
+                        tokens: Tokens::default(),
+                        finish: None,
+                        error: Some(MessageError {
+                            kind: ErrorKind::Aborted,
+                            message: "aborted".into(),
+                        }),
+                        manifest: None,
+                    });
+                    self.append_message(msg.clone()).await;
+                }
+                let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
+                return Ok(());
+            }
 
             // Sync updated assistant message (with tool state transitions)
             // back into self.messages so the next request has the correct state.
@@ -594,6 +733,13 @@ impl Agent {
     }
 }
 
+/// Keep the provider's tool array byte-stable when the registry was built
+/// from a map. Providers include tool definitions in their cacheable prompt
+/// prefix, so map iteration order must never become cache churn.
+fn sort_tool_defs(defs: &mut [ToolDef]) {
+    defs.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+}
+
 /// Strip empty text parts from assistant messages so providers don't choke on
 /// spurious empty content blocks before tool calls.
 pub(crate) fn strip_empty_text_parts(messages: &mut [Message]) {
@@ -607,10 +753,139 @@ pub(crate) fn strip_empty_text_parts(messages: &mut [Message]) {
     }
 }
 
+/// Return the first message that should remain visible after compaction.
+///
+/// The count is a soft lower bound: if it would leave a tool result without
+/// the assistant message that issued its call, the boundary moves backward to
+/// keep that call/result pair together. Orphaned tool-result-only messages are
+/// skipped when older compaction has already removed their call.
+pub(crate) fn compaction_start(messages: &[Message], keep_count: usize) -> usize {
+    let mut start = messages.len().saturating_sub(keep_count);
+
+    loop {
+        if start >= messages.len() {
+            return start;
+        }
+
+        let mut rewind_to = None;
+        let mut orphan_result = false;
+        for message in &messages[start..] {
+            for part in &message.parts {
+                let Part::ToolResult(result) = part else {
+                    continue;
+                };
+
+                if let Some(call_index) = messages[..start]
+                    .iter()
+                    .position(|candidate| has_tool_call(candidate, &result.call_id))
+                {
+                    rewind_to =
+                        Some(rewind_to.map_or(call_index, |index: usize| index.min(call_index)));
+                } else if !messages[start..]
+                    .iter()
+                    .any(|candidate| has_tool_call(candidate, &result.call_id))
+                    && message
+                        .parts
+                        .iter()
+                        .all(|part| matches!(part, Part::ToolResult(_)))
+                {
+                    orphan_result = true;
+                }
+            }
+        }
+
+        if let Some(index) = rewind_to {
+            if index < start {
+                start = index;
+                continue;
+            }
+        }
+
+        if orphan_result {
+            start += 1;
+            continue;
+        }
+
+        return start;
+    }
+}
+
+fn has_tool_call(message: &Message, call_id: &str) -> bool {
+    message
+        .parts
+        .iter()
+        .any(|part| matches!(part, Part::ToolCall(call) if call.call_id == call_id))
+}
+
+fn is_compaction_message(message: &Message) -> bool {
+    message
+        .parts
+        .iter()
+        .any(|part| matches!(part, Part::Compaction(_)))
+}
+
+/// Rebuild the model-visible context from the lossless session history.
+///
+/// Compaction markers are appended after the messages they replace. The
+/// marker's `tail_start_id` identifies the first surviving message, so resume
+/// can keep the complete JSONL log while presenting the same compacted prefix
+/// that was used before shutdown.
+pub(crate) fn context_from_history(history: Vec<Message>) -> Vec<Message> {
+    let Some((marker_index, tail_start_id)) =
+        history
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, message)| {
+                message.parts.iter().find_map(|part| match part {
+                    Part::Compaction(compaction) => Some((index, compaction.tail_start_id)),
+                    _ => None,
+                })
+            })
+    else {
+        return history;
+    };
+
+    let marker = history[marker_index].clone();
+    let mut context = vec![marker];
+
+    if let Some(tail_start_id) = tail_start_id {
+        if let Some(tail_index) = history
+            .iter()
+            .position(|message| message.id == tail_start_id)
+        {
+            if tail_index < marker_index {
+                context.extend(
+                    history[tail_index..marker_index]
+                        .iter()
+                        .filter(|message| !is_compaction_message(message))
+                        .cloned(),
+                );
+                context.extend(history[marker_index + 1..].iter().cloned());
+                return context;
+            }
+
+            context.extend(
+                history[tail_index..]
+                    .iter()
+                    .filter(|message| !is_compaction_message(message))
+                    .cloned(),
+            );
+            return context;
+        }
+    }
+
+    context.extend(history[marker_index + 1..].iter().cloned());
+    context
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mew_message::{PartBase, TextPart, ToolCallPart, ToolState, ToolStateCompleted, ToolTime};
+    use mew_message::{
+        CompactionPart, PartBase, TextPart, ToolCallPart, ToolResultPart, ToolState,
+        ToolStateCompleted, ToolTime,
+    };
 
     fn text_part(text: &str) -> Part {
         Part::Text(TextPart {
@@ -694,5 +969,93 @@ mod tests {
         let mut messages = vec![make_msg(Role::Assistant, vec![])];
         strip_empty_text_parts(&mut messages);
         assert!(messages[0].parts.is_empty());
+    }
+
+    #[test]
+    fn compaction_boundary_keeps_tool_call_with_result() {
+        let tool_call = make_msg(Role::Assistant, vec![tool_call_part()]);
+        let call_id = match &tool_call.parts[0] {
+            Part::ToolCall(part) => part.call_id.clone(),
+            _ => unreachable!(),
+        };
+        let tool_result = make_msg(
+            Role::User,
+            vec![Part::ToolResult(ToolResultPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                call_id,
+            })],
+        );
+        let messages = vec![
+            make_msg(Role::User, vec![text_part("old")]),
+            tool_call,
+            tool_result,
+        ];
+
+        assert_eq!(compaction_start(&messages, 1), 1);
+    }
+
+    #[test]
+    fn rebuilds_context_from_persisted_compaction_marker() {
+        let old = make_msg(Role::User, vec![text_part("old")]);
+        let kept = make_msg(Role::User, vec![text_part("kept")]);
+        let marker = make_msg(
+            Role::User,
+            vec![
+                text_part("summary"),
+                Part::Compaction(CompactionPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    auto: true,
+                    overflow: false,
+                    tail_start_id: Some(kept.id),
+                }),
+            ],
+        );
+        let marker_id = marker.id;
+        let old_id = old.id;
+        let after = make_msg(Role::Assistant, vec![text_part("after")]);
+
+        let context = context_from_history(vec![old, kept.clone(), marker, after.clone()]);
+
+        assert_eq!(context.len(), 3);
+        assert!(context.iter().all(|message| message.id != old_id));
+        assert_eq!(context[0].id, marker_id);
+        assert_eq!(context[1].id, kept.id);
+        assert_eq!(context[2].id, after.id);
+    }
+
+    #[test]
+    fn tool_definitions_are_sorted_by_name() {
+        let mut defs = vec![
+            ToolDef {
+                name: "write".into(),
+                description: String::new(),
+                schema: serde_json::json!({}),
+            },
+            ToolDef {
+                name: "bash".into(),
+                description: String::new(),
+                schema: serde_json::json!({}),
+            },
+            ToolDef {
+                name: "read".into(),
+                description: String::new(),
+                schema: serde_json::json!({}),
+            },
+        ];
+
+        sort_tool_defs(&mut defs);
+
+        assert_eq!(
+            defs.into_iter().map(|def| def.name).collect::<Vec<_>>(),
+            vec!["bash", "read", "write"]
+        );
     }
 }

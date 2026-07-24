@@ -13,8 +13,7 @@ use anyhow::{Context, Result};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use mew_agent::Agent;
-use mew_agent::PlanDecision;
+use mew_agent::{Agent, GoalDecision, PlanDecision};
 use mew_hooks::PermissionDecision;
 use mew_protocol::{ServerMessage, SessionInfo, SessionState};
 
@@ -75,6 +74,8 @@ pub struct Session {
     pub pending_ask_user: Mutex<HashMap<String, oneshot::Sender<Vec<String>>>>,
     /// Pending plan-approval requests (from `handoff_plan`).
     pub pending_plan_approvals: Mutex<HashMap<String, oneshot::Sender<PlanDecision>>>,
+    /// Pending goal-proposal requests (from `propose_goal`).
+    pub pending_goal_proposals: Mutex<HashMap<String, oneshot::Sender<GoalDecision>>>,
     /// Monotonically increasing IDs for both clients and permission requests.
     pub next_id: AtomicU64,
     /// Token for the turn currently in progress, if any.
@@ -106,6 +107,7 @@ impl Session {
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
             pending_plan_approvals: Mutex::new(HashMap::new()),
+            pending_goal_proposals: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             current_turn_cancel: Mutex::new(None),
             model: Mutex::new(model),
@@ -227,13 +229,14 @@ impl Session {
         self.drain_pending().await;
     }
 
-    /// Count of pending requests that need a user answer: `ask_user_question`
-    /// plus `handoff_plan` approvals. Both surface as "questions" in the
-    /// session attention badge.
+    /// Count of pending requests that need a user answer: `ask_user_question`,
+    /// `handoff_plan` approvals, and `propose_goal` approvals. All surface as
+    /// "questions" in the session attention badge.
     pub async fn pending_questions_count(&self) -> u32 {
         let asks = self.pending_ask_user.lock().await.len();
         let plans = self.pending_plan_approvals.lock().await.len();
-        (asks + plans) as u32
+        let goals = self.pending_goal_proposals.lock().await.len();
+        (asks + plans + goals) as u32
     }
 
     /// Drop all pending oneshot senders. Call when the last client detaches
@@ -245,6 +248,8 @@ impl Session {
         asks.clear();
         let mut plans = self.pending_plan_approvals.lock().await;
         plans.clear();
+        let mut goals = self.pending_goal_proposals.lock().await;
+        goals.clear();
     }
 }
 

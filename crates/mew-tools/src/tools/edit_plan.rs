@@ -37,7 +37,9 @@ impl Tool for EditPlan {
         "Replace old_string with new_string in the configured plan file. Exact \
          match required; fails if ambiguous unless replace_all is set. Intended \
          for the planning workflow: use write_plan first, then edit_plan to \
-         revise (e.g. after handoff_plan returns change requests)."
+         revise (e.g. after handoff_plan returns change requests). \
+         Note: editing the plan does NOT re-handoff — call handoff_plan again \
+         to present the revised plan for approval."
     }
 
     fn schema(&self) -> &Value {

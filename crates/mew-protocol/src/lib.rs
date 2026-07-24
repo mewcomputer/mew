@@ -109,6 +109,13 @@ pub enum ClientMessage {
         feedback: Option<String>,
     },
 
+    /// Respond to a `GoalProposed` from the daemon. `accepted = true` activates
+    /// the goal; `accepted = false` rejects it.
+    GoalResponse {
+        request_id: String,
+        accepted: bool,
+    },
+
     /// Run a slash command on the daemon (the ones that mutate agent state).
     SlashCommand {
         command: String,
@@ -595,6 +602,14 @@ pub enum ServerMessage {
         plan_path: String,
         plan_markdown: String,
         persona: String,
+    },
+
+    /// Present a proposed goal for user approval (from `propose_goal`). The
+    /// frontend responds with `GoalResponse`.
+    GoalProposed {
+        request_id: String,
+        call_id: String,
+        objective: String,
     },
 
     // -- Subagent events --

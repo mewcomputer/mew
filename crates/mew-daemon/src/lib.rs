@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
-use mew_agent::{Agent, AgentEvent, PlanDecision};
+use mew_agent::{Agent, AgentEvent, GoalDecision, PlanDecision};
 use mew_protocol::{
     ClientKind, ClientMessage, Question, QuestionOption, RemoteScope, ServerMessage, SessionState,
 };
@@ -1051,6 +1051,38 @@ where
                         .await;
                 }
             }
+            ClientMessage::GoalResponse {
+                request_id,
+                accepted,
+            } => {
+                if let Some(session) = &attached_session {
+                    let tx = session
+                        .pending_goal_proposals
+                        .lock()
+                        .await
+                        .remove(&request_id);
+                    if let Some(tx) = tx {
+                        let decision = if accepted {
+                            GoalDecision::Accepted
+                        } else {
+                            GoalDecision::Rejected
+                        };
+                        let _ = tx.send(decision);
+                    }
+                    session
+                        .broadcast(ServerMessage::RequestResolved { request_id })
+                        .await;
+                    let perm_count = session.pending_permissions.lock().await.len() as u32;
+                    let q_count = session.pending_questions_count().await;
+                    session_manager
+                        .broadcast_all(ServerMessage::SessionAttentionChanged {
+                            session_id: session.id.clone(),
+                            pending_permissions: perm_count,
+                            pending_questions: q_count,
+                        })
+                        .await;
+                }
+            }
             ClientMessage::SlashCommand { command } => {
                 let Some(session) = attached_session.clone() else {
                     reply(ServerMessage::Error {
@@ -1077,6 +1109,66 @@ where
                             "/compact" => {
                                 agent.force_compact().await;
                                 Some("compaction done".to_string())
+                            }
+                            "/goal" => {
+                                use mew_agent::{GoalState, GoalStatus};
+                                let sub = command.strip_prefix("/goal").unwrap_or("").trim();
+                                let mut goal_guard = agent.goal.lock().await;
+                                match sub {
+                                    "" | "status" => match &*goal_guard {
+                                        Some(g) => Some(format!(
+                                            "goal: {}\nstatus: {:?}\ncontinuations: {}",
+                                            g.objective, g.status, g.continuation_count
+                                        )),
+                                        None => Some("no active goal".to_string()),
+                                    },
+                                    "pause" => {
+                                        if let Some(g) = goal_guard.as_mut() {
+                                            g.status = GoalStatus::Paused;
+                                            Some(format!("goal paused: {}", g.objective))
+                                        } else {
+                                            Some("no active goal to pause".to_string())
+                                        }
+                                    }
+                                    "resume" => {
+                                        if let Some(g) = goal_guard.as_mut() {
+                                            g.status = GoalStatus::Active;
+                                            Some(format!("goal resumed: {}", g.objective))
+                                        } else {
+                                            Some("no goal to resume".to_string())
+                                        }
+                                    }
+                                    "clear" => {
+                                        if goal_guard.take().is_some() {
+                                            Some("goal cleared".to_string())
+                                        } else {
+                                            Some("no goal to clear".to_string())
+                                        }
+                                    }
+                                    "complete" => {
+                                        if let Some(g) = goal_guard.as_mut() {
+                                            g.status = GoalStatus::Complete;
+                                            Some(format!("goal marked complete: {}", g.objective))
+                                        } else {
+                                            Some("no active goal to complete".to_string())
+                                        }
+                                    }
+                                    other => {
+                                        let now = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_millis() as i64)
+                                            .unwrap_or(0);
+                                        *goal_guard = Some(GoalState {
+                                            objective: other.to_string(),
+                                            status: GoalStatus::Active,
+                                            continuation_count: 0,
+                                            started_at: now,
+                                        });
+                                        Some(format!(
+                                            "goal set: {other}\nthe agent will continue working until the goal is complete."
+                                        ))
+                                    }
+                                }
                             }
                             "/wiki" => {
                                 let _ = client_tx.send(ServerMessage::SlashResult {
@@ -2566,6 +2658,36 @@ async fn translate_event(
                 session_id: session.id.clone(),
                 files: wire_files,
             }]
+        }
+        AgentEvent::GoalProposed {
+            call_id,
+            objective,
+            tx,
+        } => {
+            let id = session.next_request_id();
+            session
+                .pending_goal_proposals
+                .lock()
+                .await
+                .insert(id.clone(), tx);
+            vec![
+                ServerMessage::GoalProposed {
+                    request_id: id,
+                    call_id,
+                    objective,
+                },
+                ServerMessage::SessionAlert {
+                    session_id: session.id.clone(),
+                    title: session.display_title().await,
+                    kind: mew_protocol::AlertKind::InputNeeded,
+                    detail: None,
+                },
+                ServerMessage::SessionAttentionChanged {
+                    session_id: session.id.clone(),
+                    pending_permissions: session.pending_permissions.lock().await.len() as u32,
+                    pending_questions: session.pending_questions_count().await,
+                },
+            ]
         }
     }
 }

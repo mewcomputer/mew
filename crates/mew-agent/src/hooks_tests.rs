@@ -11,7 +11,7 @@ use mew_provider::ProviderEvent;
 use mew_provider_fake::FakeProvider;
 use mew_tools::{Sensitivity, Tool};
 
-use crate::{Agent, AgentEvent};
+use crate::{Agent, AgentEvent, PromptCacheRetention};
 
 // ------------------------------------------------------------------
 // Recording dispatcher — captures hook calls for assertions
@@ -354,6 +354,7 @@ async fn test_on_system_prompt_called_each_turn() {
 
     let mut agent = Agent::new(provider, dispatcher, None, tools, None);
     agent.set_system("prompt v1".into());
+    agent.set_prompt_cache_retention(PromptCacheRetention::Known(std::time::Duration::ZERO));
 
     // First turn
     let mut rx = agent.run("turn 1".into());

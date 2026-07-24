@@ -12,7 +12,9 @@ use mew_message::Part;
 use mew_personas::Persona;
 use tokio::sync::mpsc::Receiver;
 
-use crate::runtime::target::{CommandTarget, PersonaApplied, SwitchedModel, Unsupported};
+use crate::runtime::target::{
+    CommandTarget, GoalAction, PersonaApplied, SwitchedModel, Unsupported,
+};
 
 /// The daemon-connected command target. Wraps an `Arc<DaemonClient>` and
 /// forwards operations over the WebSocket protocol.
@@ -188,5 +190,23 @@ impl CommandTarget for DaemonTarget {
         Err(Unsupported(
             "subagent cancellation not available in daemon mode",
         ))
+    }
+
+    async fn manage_goal(&mut self, action: GoalAction) -> Result<String, Unsupported> {
+        // Send the goal command to the daemon as a slash command. The
+        // daemon's slash-command handler recognizes /goal and manages the
+        // agent's goal state server-side, returning a status string.
+        let cmd = match action {
+            GoalAction::Set(text) => format!("/goal {text}"),
+            GoalAction::Status => "/goal status".to_string(),
+            GoalAction::Pause => "/goal pause".to_string(),
+            GoalAction::Resume => "/goal resume".to_string(),
+            GoalAction::Clear => "/goal clear".to_string(),
+            GoalAction::Complete => "/goal complete".to_string(),
+        };
+        match self.client.slash_command(cmd).await {
+            Ok(()) => Ok("goal command sent".to_string()),
+            Err(_) => Err(Unsupported("daemon goal command failed")),
+        }
     }
 }

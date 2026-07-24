@@ -198,6 +198,9 @@ fn build_custom_model(
             thinking_variants
         },
         responses_lite: cm.responses_lite || base.responses_lite,
+        prompt_cache_retention_secs: cm
+            .prompt_cache_retention_secs
+            .or(base.prompt_cache_retention_secs),
         ..base
     }
 }
@@ -936,6 +939,7 @@ mod tests {
         assert!(built.reasoning);
         assert!(built.vision);
         assert_eq!(built.shape, "openai");
+        assert_eq!(built.prompt_cache_retention_secs, None);
     }
 
     #[test]
@@ -954,6 +958,35 @@ mod tests {
         // Everything else still falls back to the catalog entry.
         assert_eq!(built.context_window, 128_000);
         assert!(built.tool_call);
+    }
+
+    #[test]
+    fn build_custom_model_merge_preserves_and_overrides_cache_retention() {
+        let mut existing = sample_catalog_model();
+        existing.prompt_cache_retention_secs = Some(300);
+
+        let preserved = mew_config::CustomModel {
+            id: "glm-5.3".into(),
+            provider: "z-ai".into(),
+            merge: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            build_custom_model(&preserved, Some(&existing)).prompt_cache_retention_secs,
+            Some(300)
+        );
+
+        let overridden = mew_config::CustomModel {
+            id: "glm-5.3".into(),
+            provider: "z-ai".into(),
+            prompt_cache_retention_secs: Some(14_400),
+            merge: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            build_custom_model(&overridden, Some(&existing)).prompt_cache_retention_secs,
+            Some(14_400)
+        );
     }
 
     #[test]
@@ -1010,7 +1043,10 @@ mod tests {
     fn catalog_provider_matches_configured_aliases() {
         assert!(catalog_provider_matches("opencode-zen", "opencode"));
         assert!(catalog_provider_matches("z-ai", "zai-coding-plan"));
-        assert!(catalog_provider_matches("kimi-for-coding", "kimi-for-coding"));
+        assert!(catalog_provider_matches(
+            "kimi-for-coding",
+            "kimi-for-coding"
+        ));
         assert!(!catalog_provider_matches("deepseek", "opencode"));
     }
 
@@ -1338,10 +1374,7 @@ mod tests {
             ..Default::default()
         };
         let cfg = cfg_with_default_providers();
-        assert_eq!(
-            resolve_model_opt(None, &state, &cfg),
-            Some("k3".into())
-        );
+        assert_eq!(resolve_model_opt(None, &state, &cfg), Some("k3".into()));
     }
 
     #[test]

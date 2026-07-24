@@ -19,9 +19,24 @@ impl Tool for EditHashline {
 
     fn description(&self) -> &str {
         "Edit files using the hashline format: line-numbered operations with \
-         file-hash staleness detection. Supports SWAP/DEL/INS, SWAP.BLK/\
-         DEL.BLK/INS.BLK.POST, REM, and MV across one or more [path#hash] \
-         sections. The file hash comes from the most recent `read` output."
+         file-hash staleness detection.\n\n\
+         Patch syntax:\n\
+         - Start with a section header: [path#hash] (hash from read output)\n\
+         - SWAP start.=end: — replace lines start through end with +payload lines\n\
+         - DEL line — delete a single line\n\
+         - INS.PRE line: — insert before the given line\n\
+         - INS.POST line: — insert after the given line\n\
+         - INS.HEAD: — insert at top of file\n\
+         - INS.TAIL: — insert at end of file\n\
+         - REM — remove the file\n\
+         - MV dest — rename/move the file\n\n\
+         Payload lines start with +. Multiple ops can appear in one section.\n\
+         Example:\n\
+         [src/main.rs#A1B2]\n\
+         SWAP 5.=5:\n\
+         +fn updated() {}\n\
+         INS.POST 10:\n\
+         +// new line"
     }
 
     fn schema(&self) -> &Value {

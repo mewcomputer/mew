@@ -145,8 +145,7 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
                 if app.pending_queued_send {
                     app.pending_queued_send = false;
                     if let Some(text) = app.pop_queued_message() {
-                        let mut target =
-                            crate::runtime::daemon::DaemonTarget::new(client.clone());
+                        let mut target = crate::runtime::daemon::DaemonTarget::new(client.clone());
                         let mut cx = crate::runtime::Ctx {
                             app: &mut app,
                             target: &mut target,
@@ -156,7 +155,11 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
                             loaded_personas: &[],
                             plugin_info: &plugin_info,
                         };
-                        crate::runtime::handle_action(&mut cx, mew_tui::events::Action::Submit(text)).await;
+                        crate::runtime::handle_action(
+                            &mut cx,
+                            mew_tui::events::Action::Submit(text),
+                        )
+                        .await;
                     }
                 }
             }
@@ -498,17 +501,16 @@ pub(crate) async fn run_tui(
     let state = mew_config::load_state().unwrap_or_default();
 
     // Apply reasoning variant: CLI flag > persisted state > catalog default.
-    let variant_source = variant_flag
+    let variant_source = variant_flag.as_deref().map(|_| "cli").or_else(|| {
+        if state.last_thinking_variant.is_some() {
+            Some("state")
+        } else {
+            None
+        }
+    });
+    let variant_name = variant_flag
         .as_deref()
-        .map(|_| "cli")
-        .or_else(|| {
-            if state.last_thinking_variant.is_some() {
-                Some("state")
-            } else {
-                None
-            }
-        });
-    let variant_name = variant_flag.as_deref().or(state.last_thinking_variant.as_deref());
+        .or(state.last_thinking_variant.as_deref());
     let reasoning = if let Some(name) = variant_name {
         if name == "off" || name == "none" {
             None
@@ -945,6 +947,174 @@ pub(crate) fn copy_to_clipboard(text: &str) {
             ])
             .output();
     }
+}
+
+/// Read image data from the system clipboard and save it to a temporary
+/// PNG file. Returns the path to the temp file on success.
+///
+/// Returns `Err(message)` with a human-readable explanation when no image
+/// is available or the platform tool is missing.
+pub(crate) fn read_clipboard_image() -> Result<std::path::PathBuf, String> {
+    let png_data = read_clipboard_image_bytes()?;
+    let temp_dir = std::env::temp_dir();
+    let filename = format!("mew-clipboard-{}.png", ulid::Ulid::new());
+    let path = temp_dir.join(filename);
+    std::fs::write(&path, &png_data).map_err(|e| format!("failed to write temp file: {e}"))?;
+    Ok(path)
+}
+
+/// Platform-specific extraction of raw PNG bytes from the clipboard.
+fn read_clipboard_image_bytes() -> Result<Vec<u8>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        read_clipboard_image_macos()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        read_clipboard_image_linux()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        read_clipboard_image_windows()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err("clipboard image paste is not supported on this platform".to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_clipboard_image_macos() -> Result<Vec<u8>, String> {
+    // Try `pngpaste` first — it's a clean, single-purpose tool.
+    if let Ok(output) = std::process::Command::new("pngpaste").args(["-"]).output() {
+        if output.status.success() && !output.stdout.is_empty() {
+            return Ok(output.stdout);
+        }
+    }
+
+    // Fall back to `osascript` which is always available on macOS.
+    // The AppleScript reads the clipboard's PNG data («class PNGf»)
+    // and writes the raw bytes to a temp file, which we then read back.
+    let script = r#"
+set tmpPath to (POSIX path of (path to temporary items)) & "mew-clip-" & (do shell script "uuidgen") & ".png"
+set pngData to the clipboard as «class PNGf»
+set fh to open for access tmpPath as «class furl» with write permission
+try
+    set eof fh to 0
+    write pngData to fh
+    close access fh
+    return tmpPath
+on error
+    try
+        close access fh
+    end try
+    error "no image in clipboard"
+end try
+"#;
+    let output = std::process::Command::new("osascript")
+        .args(["-e", script])
+        .output()
+        .map_err(|e| format!("osascript failed: {e}"))?;
+    if !output.status.success() {
+        return Err("no image in clipboard".to_string());
+    }
+    let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path_str.is_empty() {
+        return Err("no image in clipboard".to_string());
+    }
+    let path = std::path::PathBuf::from(&path_str);
+    let data =
+        std::fs::read(&path).map_err(|e| format!("failed to read clipboard temp file: {e}"))?;
+    let _ = std::fs::remove_file(&path);
+    Ok(data)
+}
+
+#[cfg(target_os = "linux")]
+fn read_clipboard_image_linux() -> Result<Vec<u8>, String> {
+    // Try tools in order: wl-paste (Wayland), xclip (X11), xsel (X11).
+    // Each outputs raw image bytes to stdout when available.
+    let mut tried = Vec::new();
+
+    // wl-paste
+    if let Ok(output) = std::process::Command::new("wl-paste")
+        .args(["-t", "image/png"])
+        .output()
+    {
+        tried.push("wl-paste");
+        if output.status.success() && !output.stdout.is_empty() {
+            return Ok(output.stdout);
+        }
+    } else {
+        tried.push("wl-paste");
+    }
+
+    // xclip
+    if let Ok(output) = std::process::Command::new("xclip")
+        .args(["-selection", "clipboard", "-t", "image/png", "-o"])
+        .output()
+    {
+        tried.push("xclip");
+        if output.status.success() && !output.stdout.is_empty() {
+            return Ok(output.stdout);
+        }
+    } else {
+        tried.push("xclip");
+    }
+
+    // xsel — unlike xclip, xsel can't target a specific content type,
+    // so it returns whatever is in the clipboard selection.  We guard
+    // with a PNG magic-number check to avoid treating text as image data.
+    if let Ok(output) = std::process::Command::new("xsel")
+        .args(["--clipboard", "--output"])
+        .output()
+    {
+        tried.push("xsel");
+        if output.status.success()
+            && !output.stdout.is_empty()
+            && output.stdout.starts_with(b"\x89PNG")
+        {
+            return Ok(output.stdout);
+        }
+    } else {
+        tried.push("xsel");
+    }
+
+    Err(format!(
+        "no image in clipboard (tried {})",
+        tried.join(", ")
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn read_clipboard_image_windows() -> Result<Vec<u8>, String> {
+    // PowerShell: read clipboard image, save to temp as PNG, read back.
+    // This is a two-step dance because PowerShell's clipboard API only
+    // deals with files or streams, not raw stdout bytes easily.
+    let ps = r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$img = [System.Windows.Forms.Clipboard]::GetImage()
+if ($img -eq $null) { exit 1 }
+$temp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "mew-clip-" + [guid]::NewGuid().ToString() + ".png")
+$img.Save($temp, [System.Drawing.Imaging.ImageFormat]::Png)
+Write-Output $temp
+"#;
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", ps])
+        .output()
+        .map_err(|e| format!("powershell failed: {e}"))?;
+    if !output.status.success() {
+        return Err("no image in clipboard".to_string());
+    }
+    let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path_str.is_empty() {
+        return Err("no image in clipboard".to_string());
+    }
+    let path = std::path::PathBuf::from(path_str);
+    let data =
+        std::fs::read(&path).map_err(|e| format!("failed to read clipboard temp file: {e}"))?;
+    let _ = std::fs::remove_file(&path);
+    Ok(data)
 }
 
 /// Produce a short display label for a context file path.

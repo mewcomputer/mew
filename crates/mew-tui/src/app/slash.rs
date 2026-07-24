@@ -89,6 +89,10 @@ impl App {
                 name: "/autosummary".into(),
                 description: "toggle auto session summaries (daemon mode)".into(),
             },
+            SlashCommand {
+                name: "/goal".into(),
+                description: "set or manage a goal (e.g. /goal fix the bug, /goal pause)".into(),
+            },
         ]
     }
 
@@ -189,6 +193,38 @@ impl App {
                     }
                 } else {
                     SlashResult::OpenRewindPicker
+                }
+            }
+            "/goal" => {
+                let sub = arg.unwrap_or("").trim();
+                if sub.is_empty() {
+                    SlashResult::GoalCommand(GGoalCommand::Status)
+                } else if let Some(rest) = sub.strip_prefix("pause") {
+                    if rest.is_empty() || rest.starts_with(' ') {
+                        SlashResult::GoalCommand(GGoalCommand::Pause)
+                    } else {
+                        SlashResult::GoalCommand(GGoalCommand::Set(sub.to_string()))
+                    }
+                } else if let Some(rest) = sub.strip_prefix("resume") {
+                    if rest.is_empty() || rest.starts_with(' ') {
+                        SlashResult::GoalCommand(GGoalCommand::Resume)
+                    } else {
+                        SlashResult::GoalCommand(GGoalCommand::Set(sub.to_string()))
+                    }
+                } else if let Some(rest) = sub.strip_prefix("clear") {
+                    if rest.is_empty() || rest.starts_with(' ') {
+                        SlashResult::GoalCommand(GGoalCommand::Clear)
+                    } else {
+                        SlashResult::GoalCommand(GGoalCommand::Set(sub.to_string()))
+                    }
+                } else if let Some(rest) = sub.strip_prefix("complete") {
+                    if rest.is_empty() || rest.starts_with(' ') {
+                        SlashResult::GoalCommand(GGoalCommand::Complete)
+                    } else {
+                        SlashResult::GoalCommand(GGoalCommand::Set(sub.to_string()))
+                    }
+                } else {
+                    SlashResult::GoalCommand(GGoalCommand::Set(sub.to_string()))
                 }
             }
             _ => {

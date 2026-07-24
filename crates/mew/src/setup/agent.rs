@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use mew_agent::Agent;
+use mew_agent::{Agent, PromptCacheRetention};
 use mew_catalog::Catalog;
 use mew_config::Config;
 use mew_ext_broker::ExtensionBroker;
@@ -22,10 +22,15 @@ use mew_hooks::{Dispatcher, NopDispatcher, PluginHost};
 
 /// Apply catalog pricing for `model_id` onto `agent`.
 ///
-/// Sets `input_price`, `output_price`, `cache_read_price`, `cache_write_price`,
-/// and `reasoning_price` from the catalog entry, if found. Does nothing when
-/// the catalog or model is absent.
+/// Sets catalog-derived pricing and prompt-cache retention on the agent. An
+/// absent catalog entry resets retention to `Unknown` while leaving pricing
+/// unchanged, preserving the existing pricing fallback behavior.
 pub(crate) fn apply_catalog_pricing(agent: &mut Agent, cat: Option<&Catalog>, model_id: &str) {
+    let retention = cat
+        .and_then(|catalog| catalog.lookup(model_id))
+        .and_then(|model| model.prompt_cache_retention_secs);
+    agent.set_prompt_cache_retention(PromptCacheRetention::from_secs(retention));
+
     if let Some(c) = cat {
         if let Some(m) = c.lookup(model_id) {
             agent.input_price = m.pricing.input;
@@ -48,6 +53,7 @@ use mew_tools::tools::edit_str_replace::EditStrReplace;
 use mew_tools::tools::exit_tool::ExitTool;
 use mew_tools::tools::flag_important::{FlagImportant, FlaggedFile};
 use mew_tools::tools::glob::Glob;
+use mew_tools::tools::goal::{BlockGoal, CompleteGoal, ProposeGoal};
 use mew_tools::tools::grep::Grep;
 use mew_tools::tools::handoff_plan::HandoffPlan;
 use mew_tools::tools::jobs::{JobBlock, JobCancel, JobStatus, ShellBackground, ShellMonitor};
@@ -104,6 +110,9 @@ pub(crate) fn build_tools(
         Arc::new(WritePlan::new(plan_path.clone())),
         Arc::new(EditPlan::new(plan_path)),
         Arc::new(HandoffPlan),
+        Arc::new(ProposeGoal),
+        Arc::new(CompleteGoal),
+        Arc::new(BlockGoal),
     ];
     if hashline_enabled {
         tools.insert(3, Arc::new(EditHashline));
@@ -561,7 +570,8 @@ pub(crate) fn render_templated_context_files(
     }
 
     // Build a template context from the agent's current state.
-    let tool_names: Vec<String> = agent.tools.keys().cloned().collect();
+    let mut tool_names: Vec<String> = agent.tools.keys().cloned().collect();
+    tool_names.sort_unstable();
     let ctx = mew_prompts::template::TemplateContext {
         model_id: agent.model_id.clone(),
         provider_id: agent.provider_id.clone(),
@@ -779,18 +789,18 @@ pub(crate) fn build_session_agent(
     let project_vars = mew_context::load_project_vars(&cwd);
     agent.project_vars = project_vars;
 
-    // Build the base system prompt by rendering base.md through minijinja
-    // with the agent's current state. This includes model-variant bases,
-    // tool-library partials, subagent/skill/MCP sections, and conversational
-    // depth guidance.
+    // Build the stable system scaffold by rendering base.md through minijinja.
+    // Runtime capability names and schemas are carried by the provider request
+    // instead of being repeated in this cacheable instruction block.
     let base_prompt = {
-        let tool_names: Vec<String> = agent
+        let mut tool_names: Vec<String> = agent
             .tools
             .keys()
             .filter(|name| browser_enabled || !name.starts_with("browser_"))
             .cloned()
             .collect();
-        let mcp_names: Vec<String> = agent
+        tool_names.sort_unstable();
+        let mut mcp_names: Vec<String> = agent
             .tools
             .values()
             .filter_map(|t| {
@@ -807,7 +817,8 @@ pub(crate) fn build_session_agent(
                 }
             })
             .collect();
-        let subagent_infos: Vec<mew_prompts::template::SubagentInfo> = agent
+        mcp_names.sort_unstable();
+        let mut subagent_infos: Vec<mew_prompts::template::SubagentInfo> = agent
             .subagent_defs
             .iter()
             .map(|d| mew_prompts::template::SubagentInfo {
@@ -815,6 +826,7 @@ pub(crate) fn build_session_agent(
                 description: d.description.clone(),
             })
             .collect();
+        subagent_infos.sort_unstable_by(|left, right| left.name.cmp(&right.name));
         let ctx = mew_prompts::template::TemplateContext {
             supports_vision: agent.supports_vision,
             model_id: agent.model_id.clone(),
@@ -959,6 +971,7 @@ mod tests {
                     cache_write: 2.25,
                     reasoning: 9.0,
                 },
+                prompt_cache_retention_secs: Some(14_400),
                 ..Default::default()
             },
         );
@@ -968,6 +981,10 @@ mod tests {
         assert_eq!(agent.cache_read_price, 0.15);
         assert_eq!(agent.cache_write_price, 2.25);
         assert_eq!(agent.reasoning_price, 9.0);
+        assert_eq!(
+            agent.prompt_cache_retention(),
+            mew_agent::PromptCacheRetention::Known(std::time::Duration::from_secs(14_400))
+        );
     }
 
     #[test]
@@ -977,6 +994,10 @@ mod tests {
         // Prices should remain at their default 0.0
         assert_eq!(agent.input_price, 0.0);
         assert_eq!(agent.output_price, 0.0);
+        assert_eq!(
+            agent.prompt_cache_retention(),
+            mew_agent::PromptCacheRetention::Unknown
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod edit_plan;
 pub mod edit_str_replace;
 pub mod exit_tool;
 pub mod flag_important;
+pub mod goal;
 pub mod glob;
 pub mod grep;
 pub mod handoff_plan;

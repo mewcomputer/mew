@@ -48,6 +48,26 @@ pub enum SlashResult {
     OpenRewindPicker,
     OpenSessionPickerFromDisk,
     OpenHelp,
+    /// Set, pause, resume, clear, or complete a goal.
+    GoalCommand(GGoalCommand),
+}
+
+/// Goal management commands from `/goal`.
+#[derive(Debug, Clone, Default)]
+pub enum GGoalCommand {
+    /// `/goal <text>` — set a goal directly (no approval needed).
+    Set(String),
+    /// `/goal` — show status.
+    #[default]
+    Status,
+    /// `/goal pause`
+    Pause,
+    /// `/goal resume`
+    Resume,
+    /// `/goal clear`
+    Clear,
+    /// `/goal complete`
+    Complete,
 }
 
 pub struct App {
@@ -62,6 +82,7 @@ pub struct App {
     pub permission: Option<PermissionState>,
     pub user_question: Option<UserQuestionState>,
     pub plan_approval: Option<PlanApprovalState>,
+    pub goal_proposal: Option<GoalProposalState>,
     pub persona_switch_confirm: Option<PersonaSwitchConfirmState>,
     pub pending_persona_switch_apply: Option<String>,
     pub todos: Vec<mew_agent::Todo>,
@@ -247,6 +268,7 @@ pub enum Mode {
     Help,
     HistorySearch,
     PasteConfirm,
+    GoalProposal,
 }
 
 /// A single item in the command palette.
@@ -413,6 +435,17 @@ pub struct UserQuestionState {
     pub tx: Option<tokio::sync::oneshot::Sender<Vec<String>>>,
 }
 
+/// A pending `propose_goal` approval. Shown as a centered modal with the
+/// objective text and an accept/reject toggle.
+#[derive(Debug)]
+pub struct GoalProposalState {
+    pub call_id: String,
+    pub objective: String,
+    /// 0 = accept, 1 = reject.
+    pub selected: usize,
+    pub tx: Option<tokio::sync::oneshot::Sender<mew_agent::GoalDecision>>,
+}
+
 /// A pending `handoff_plan` approval. Shown as a large centered modal with
 /// the full plan rendered as markdown, an approve / request-changes toggle,
 /// and a feedback editor for the request-changes path.
@@ -455,6 +488,7 @@ impl App {
             permission: None,
             user_question: None,
             plan_approval: None,
+            goal_proposal: None,
             persona_switch_confirm: None,
             pending_persona_switch_apply: None,
             todos: Vec::new(),
@@ -1836,6 +1870,19 @@ impl App {
             AgentEvent::FlaggedFilesChanged { .. } => {
                 // Flagged files visibility is handled by web frontends.
             }
+            AgentEvent::GoalProposed {
+                call_id,
+                objective,
+                tx,
+            } => {
+                self.mode = Mode::GoalProposal;
+                self.goal_proposal = Some(GoalProposalState {
+                    call_id,
+                    objective,
+                    selected: 0,
+                    tx: Some(tx),
+                });
+            }
         }
     }
 
@@ -2054,7 +2101,11 @@ impl App {
     /// Toggle between the approve (0) and request-changes (1) options.
     pub fn plan_approval_toggle(&mut self) {
         if let Some(pa) = self.plan_approval.as_mut() {
-            if !pa.editing_feedback {
+            if pa.editing_feedback {
+                // Cycle: Approve (0) → Request changes (1) → Submit (2) → Approve (0)
+                pa.selected = (pa.selected + 1) % 3;
+            } else {
+                // Toggle between Approve (0) and Request changes (1) only.
                 pa.selected = if pa.selected == 0 { 1 } else { 0 };
             }
         }
@@ -2085,7 +2136,11 @@ impl App {
                 pa.editing_feedback = true;
                 false
             }
-            Some(pa) if pa.selected == 1 && pa.feedback.trim().is_empty() => {
+            // selected 2 (Submit) or 1 (Request changes) with feedback: send it.
+            Some(pa) if (pa.selected == 1 || pa.selected == 2)
+                && pa.editing_feedback
+                && pa.feedback.trim().is_empty() =>
+            {
                 // Stay in the editor until there's something to send.
                 false
             }
@@ -2113,6 +2168,36 @@ impl App {
     /// cancelled tool result.
     pub fn cancel_plan_approval(&mut self) {
         self.plan_approval = None;
+        self.mode = Mode::Normal;
+    }
+
+    /// Toggle between accept (0) and reject (1) in the goal proposal modal.
+    pub fn goal_proposal_toggle(&mut self) {
+        if let Some(gp) = self.goal_proposal.as_mut() {
+            gp.selected = if gp.selected == 0 { 1 } else { 0 };
+        }
+    }
+
+    /// Confirm the goal proposal. Accept sends `GoalDecision::Accepted`;
+    /// reject sends `GoalDecision::Rejected`.
+    pub fn goal_proposal_confirm(&mut self) {
+        if let Some(gp) = self.goal_proposal.take() {
+            if let Some(tx) = gp.tx {
+                let decision = if gp.selected == 0 {
+                    mew_agent::GoalDecision::Accepted
+                } else {
+                    mew_agent::GoalDecision::Rejected
+                };
+                let _ = tx.send(decision);
+            }
+        }
+        self.mode = Mode::Normal;
+    }
+
+    /// Cancel the goal proposal. Dropping `tx` without sending makes the
+    /// agent's `rx.await` return `Err`, treated as a rejection.
+    pub fn cancel_goal_proposal(&mut self) {
+        self.goal_proposal = None;
         self.mode = Mode::Normal;
     }
 }

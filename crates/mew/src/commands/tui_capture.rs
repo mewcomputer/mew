@@ -1134,6 +1134,7 @@ fn agent_event_name(ev: &mew_agent::AgentEvent) -> &'static str {
         mew_agent::AgentEvent::JobUpdate { .. } => "JobUpdate",
         mew_agent::AgentEvent::FileDelta { .. } => "FileDelta",
         mew_agent::AgentEvent::FlaggedFilesChanged { .. } => "FlaggedFilesChanged",
+        mew_agent::AgentEvent::GoalProposed { .. } => "GoalProposed",
     }
 }
 
@@ -1158,6 +1159,7 @@ fn server_message_type(msg: &mew_protocol::ServerMessage) -> &'static str {
         }
         mew_protocol::ServerMessage::AskUserRequest { .. } => "AskUserRequest",
         mew_protocol::ServerMessage::PlanApprovalRequest { .. } => "PlanApprovalRequest",
+        mew_protocol::ServerMessage::GoalProposed { .. } => "GoalProposed",
         mew_protocol::ServerMessage::SubagentStart { .. } => "SubagentStart",
         mew_protocol::ServerMessage::SubagentStatus { .. } => "SubagentStatus",
         mew_protocol::ServerMessage::SubagentEnd { .. } => "SubagentEnd",

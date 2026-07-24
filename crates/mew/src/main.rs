@@ -11,6 +11,7 @@ use cli::*;
 
 use setup::providers::{resolve_model_opt, resolve_provider};
 
+use commands::funfact::funfact_cmd;
 use commands::run::{resolve_mode, run_cmd};
 use commands::tui::{chat_cmd, chat_with_daemon};
 
@@ -331,6 +332,7 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
         #[cfg(feature = "iroh")]
         Some(Commands::Pair) => commands::daemon::pair_cmd().await,
         Some(Commands::Auth { command }) => commands::auth::auth_cmd(command).await,
+        Some(Commands::Funfact) => funfact_cmd(),
         None => {
             let provider = resolve_provider(None, &state, &cfg);
             let model = resolve_model_opt(None, &state, &cfg);

@@ -12,7 +12,9 @@ use mew_message::Part;
 use mew_personas::Persona;
 use tokio::sync::mpsc::Receiver;
 
-use crate::runtime::target::{CommandTarget, PersonaApplied, SwitchedModel, Unsupported};
+use crate::runtime::target::{
+    CommandTarget, GoalAction, PersonaApplied, SwitchedModel, Unsupported,
+};
 use crate::setup::providers::{build_provider, resolve_reasoning};
 
 /// The local (standalone) command target. Borrows the `Agent` and implements
@@ -226,5 +228,63 @@ impl<'a> CommandTarget for LocalTarget<'a> {
 
     async fn cancel_subagent(&mut self, task_id: &str) -> Result<bool, Unsupported> {
         Ok(self.agent.cancel_subagent(task_id).await)
+    }
+
+    async fn manage_goal(&mut self, action: GoalAction) -> Result<String, Unsupported> {
+        use mew_agent::{GoalState, GoalStatus};
+        let mut goal_guard = self.agent.goal.lock().await;
+        Ok(match action {
+            GoalAction::Set(objective) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                *goal_guard = Some(GoalState {
+                    objective: objective.clone(),
+                    status: GoalStatus::Active,
+                    continuation_count: 0,
+                    started_at: now,
+                });
+                format!("goal set: {objective}\nthe agent will continue working until the goal is complete.")
+            }
+            GoalAction::Status => match &*goal_guard {
+                Some(g) => format!(
+                    "goal: {}\nstatus: {:?}\ncontinuations: {}",
+                    g.objective, g.status, g.continuation_count
+                ),
+                None => "no active goal".to_string(),
+            },
+            GoalAction::Pause => {
+                if let Some(g) = goal_guard.as_mut() {
+                    g.status = GoalStatus::Paused;
+                    format!("goal paused: {}", g.objective)
+                } else {
+                    "no active goal to pause".to_string()
+                }
+            }
+            GoalAction::Resume => {
+                if let Some(g) = goal_guard.as_mut() {
+                    g.status = GoalStatus::Active;
+                    format!("goal resumed: {}", g.objective)
+                } else {
+                    "no goal to resume".to_string()
+                }
+            }
+            GoalAction::Clear => {
+                if goal_guard.take().is_some() {
+                    "goal cleared".to_string()
+                } else {
+                    "no goal to clear".to_string()
+                }
+            }
+            GoalAction::Complete => {
+                if let Some(g) = goal_guard.as_mut() {
+                    g.status = GoalStatus::Complete;
+                    format!("goal marked complete: {}", g.objective)
+                } else {
+                    "no active goal to complete".to_string()
+                }
+            }
+        })
     }
 }
