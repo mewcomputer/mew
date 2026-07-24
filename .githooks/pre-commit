@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Pre-commit: fast checks that catch obvious mistakes before a commit lands.
+# Runs fmt check, clippy on changed crates only, and arch-check.
+set -euo pipefail
+
+echo "🔍 Running cargo fmt --check..."
+cargo fmt --check
+echo "✅ fmt clean"
+
+echo "🔍 Running clippy on changed files..."
+# Run clippy on the whole workspace — it's incremental so unchanged
+# crates are cached and this is fast on a warm build.
+cargo clippy --all -- -D warnings 2>&1 | tail -3
+echo "✅ clippy clean"
+
+echo "🔍 Running arch-check..."
+just arch-check
+echo "✅ arch-check passed"
+
+echo "✅ All pre-commit checks passed!"

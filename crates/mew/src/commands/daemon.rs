@@ -11,6 +11,7 @@ use tracing::info;
 use mew_agent::Agent;
 use mew_message::SessionId;
 
+#[cfg(feature = "iroh")]
 fn remote_invite_payload(node_id: &str, token: &str) -> String {
     format!("computer.mew.mew://{node_id}?token={token}")
 }
@@ -539,7 +540,7 @@ pub(crate) fn stop_daemon(pidfile: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "iroh"))]
 mod tests {
     use super::remote_invite_payload;
 
