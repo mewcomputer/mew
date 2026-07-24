@@ -148,13 +148,13 @@ fn validate_line_bounds(
                 }
             }
             Edit::Insert { cursor, .. } => match cursor {
-                Cursor::BeforeAnchor { anchor } | Cursor::AfterAnchor { anchor } => {
-                    if anchor.line == 0 || anchor.line > len {
-                        return Err(crate::HashlineError::LineOutOfBounds {
-                            line: anchor.line,
-                            file_lines: len,
-                        });
-                    }
+                Cursor::BeforeAnchor { anchor } | Cursor::AfterAnchor { anchor }
+                    if (anchor.line == 0 || anchor.line > len) =>
+                {
+                    return Err(crate::HashlineError::LineOutOfBounds {
+                        line: anchor.line,
+                        file_lines: len,
+                    });
                 }
                 _ => {}
             },

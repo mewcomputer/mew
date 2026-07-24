@@ -1031,12 +1031,10 @@ impl SettingsState {
                     self.rebuild_left_items();
                 }
             }
-            Some(LeftItem::SecretWordsGroup(i)) => {
-                if i < self.config.secrets.words.len() {
-                    self.config.secrets.words.remove(i);
-                    self.dirty = true;
-                    self.rebuild_left_items();
-                }
+            Some(LeftItem::SecretWordsGroup(i)) if i < self.config.secrets.words.len() => {
+                self.config.secrets.words.remove(i);
+                self.dirty = true;
+                self.rebuild_left_items();
             }
             _ => {}
         }

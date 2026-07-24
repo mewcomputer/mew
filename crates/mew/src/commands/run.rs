@@ -12,7 +12,7 @@ use tracing::info;
 use mew_catalog::Catalog;
 use mew_config::Config;
 use mew_hooks::NopDispatcher;
-use mew_message::{Finish, Part, PartId};
+use mew_message::{Part, PartId};
 use mew_session::Writer as SessionWriter;
 
 use crate::setup::agent::{build_session_agent, wire_subagents};
@@ -194,12 +194,21 @@ pub(crate) async fn build_and_run(
                     }
                     part_types.remove(&part_id);
                 }
-                mew_provider::ProviderEvent::MessageEnd { finish, .. } => {
-                    if finish == Finish::Stop {
-                        println!();
-                    }
+                mew_provider::ProviderEvent::MessageEnd { .. } => {}
+                mew_provider::ProviderEvent::RetryWait {
+                    attempt,
+                    max_attempts,
+                    delay_secs,
+                    reason,
+                } => {
+                    eprintln!(
+                        "\n[retry] attempt {}/{} in {}s: {}",
+                        attempt, max_attempts, delay_secs, reason
+                    );
                 }
-                _ => {}
+                mew_provider::ProviderEvent::Error(e) => {
+                    eprintln!("\n[error] {:?}", e);
+                }
             },
             mew_agent::AgentEvent::PermissionRequest { call, tx } => {
                 eprintln!("\n[permission] {}: {:?}", call.tool_name, call.input);
@@ -224,17 +233,10 @@ pub(crate) async fn build_and_run(
             mew_agent::AgentEvent::Error(msg) => {
                 anyhow::bail!("agent error: {}", msg);
             }
-            mew_agent::AgentEvent::SubagentStart {
-                name: _,
-                child_session_id: _,
-                ..
-            } => {}
+            mew_agent::AgentEvent::SubagentStart { .. } => {}
             mew_agent::AgentEvent::SubagentProgress { .. } => {}
             mew_agent::AgentEvent::SubagentStatus { .. } => {}
-            mew_agent::AgentEvent::SubagentEnd {
-                child_session_id: _,
-                ..
-            } => {}
+            mew_agent::AgentEvent::SubagentEnd { .. } => {}
             mew_agent::AgentEvent::SubagentPermissionRequest { call, tx, .. } => {
                 let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
                 let _ = call;

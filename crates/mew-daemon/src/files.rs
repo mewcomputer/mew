@@ -93,7 +93,7 @@ pub async fn handle_list_filesystem_dir(path: Option<String>) -> Result<ServerMe
             });
         }
     }
-    entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    entries.sort_by_key(|a| a.name.to_lowercase());
     Ok(ServerMessage::FilesystemDirListing {
         path: target.display().to_string(),
         entries,

@@ -1229,7 +1229,6 @@ fn translate_message(
                         usage,
                         cost,
                         finish,
-                        manifest: _,
                         ..
                     } => {
                         ss.apply_provider_event(event);

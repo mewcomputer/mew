@@ -101,13 +101,12 @@ async fn handle_connection(
                         wants_ws = true;
                     }
                 }
-                "connection" => {
+                "connection"
                     if v.to_ascii_lowercase()
                         .split(',')
-                        .any(|c| c.trim().eq_ignore_ascii_case("upgrade"))
-                    {
-                        // already set if Upgrade header matched
-                    }
+                        .any(|c| c.trim().eq_ignore_ascii_case("upgrade")) =>
+                {
+                    // already set if Upgrade header matched
                 }
                 _ => {}
             }
