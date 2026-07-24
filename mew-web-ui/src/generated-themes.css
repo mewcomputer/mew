@@ -14,6 +14,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #0d1017;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -118,6 +119,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #fcfcfc;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -222,6 +224,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #1d2331;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -326,6 +329,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #303446;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -430,6 +434,7 @@
   --chart-2: #1e66f5;
   --chart-3: #df8e1d;
   --chart-4: #8839ef;
+  --chat-surface-background: #eff1f5;
   --cyan-bg: #d4f0f2;
   --cyan-fg: #179299;
   --cyan-med: #4cb8be;
@@ -536,6 +541,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #24273a;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -640,6 +646,7 @@
   --chart-2: #89b4fa;
   --chart-3: #f9e2af;
   --chart-4: #cba6f7;
+  --chat-surface-background: #1e1e2e;
   --cyan-bg: #0f3a3a;
   --cyan-fg: #94e2d5;
   --cyan-med: #0d9488;
@@ -746,6 +753,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #282a36;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -850,6 +858,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #222a2e;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -954,6 +963,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #2c3538;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1058,6 +1068,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #d5dfe9;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1162,6 +1173,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #1e2528;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1266,6 +1278,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #0d1116;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1370,6 +1383,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #2b2525;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1474,6 +1488,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #2e3440;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1578,6 +1593,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #1a1825;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1682,6 +1698,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #faf3eb;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1786,6 +1803,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #242236;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1890,6 +1908,7 @@
   --chart-2: #7aa2f7;
   --chart-3: #e0af68;
   --chart-4: #bb9af7;
+  --chat-surface-background: #1a1b26;
   --cyan-bg: #0f2e3a;
   --cyan-fg: #7dcfff;
   --cyan-med: #2a8ac4;
@@ -1996,6 +2015,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #e6e7ec;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -2100,6 +2120,7 @@
   --chart-2: #96bef0;
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
+  --chat-surface-background: #1d2041;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;

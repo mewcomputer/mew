@@ -17,6 +17,7 @@ pub const BASE_TOKENS: &[(&str, &str)] = &[
     ("chart_2", "#96bef0"),
     ("chart_3", "#f5c850"),
     ("chart_4", "#c8aaf0"),
+    ("chat.surface.background", "@panel.background"),
     ("cyan.bg", "#143232"),
     ("cyan.fg", "#00ffff"),
     ("cyan.med", "#287878"),
