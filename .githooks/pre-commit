@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Pre-commit: fast checks that catch obvious mistakes before a commit lands.
-# Runs fmt check, clippy on changed crates only, and arch-check.
+# Runs fmt check, clippy, and arch-check.
 set -euo pipefail
+
+# GUI apps (Zed, VS Code, etc.) run hooks with a minimal PATH that
+# doesn't include cargo, just, mise, homebrew, etc. Add the common
+# locations so the hooks work regardless of how git was invoked.
+export PATH="$HOME/.cargo/bin:$HOME/.local/share/mise/shims:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 echo "🔍 Running cargo fmt --check..."
 cargo fmt --check
 echo "✅ fmt clean"
 
-echo "🔍 Running clippy on changed files..."
-# Run clippy on the whole workspace — it's incremental so unchanged
-# crates are cached and this is fast on a warm build.
+echo "🔍 Running clippy..."
 cargo clippy --all -- -D warnings 2>&1 | tail -3
 echo "✅ clippy clean"
 
