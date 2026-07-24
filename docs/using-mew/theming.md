@@ -1,4 +1,7 @@
-# mew theming
+---
+title: Theming
+description: Make mew look just the way you want.
+---
 
 mew shares a single token vocabulary between the Rust TUI and the React web UI.
 The source of truth is `crates/mew-tui/resources/theme_manifest.json`.
