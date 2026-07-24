@@ -110,6 +110,16 @@ pub enum CoreEvent {
         persona: String,
     },
 
+    /// A goal proposal from the agent (`propose_goal`). The UI should present
+    /// the objective for user approval and call `respond_to_goal`.
+    GoalProposed {
+        daemon: String,
+        session_id: String,
+        request_id: String,
+        call_id: String,
+        objective: String,
+    },
+
     /// A request was resolved (by this device or another). Dismiss the sheet.
     RequestResolved { daemon: String, request_id: String },
 

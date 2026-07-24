@@ -236,9 +236,7 @@ const PERSONA_PREFIXES: &[&str] = &[
     ".agents/personas",
 ];
 
-fn load_persona_file(path: &Path) -> Result<Persona, PersonaError> {
-    let content = std::fs::read_to_string(path)?;
-
+fn parse_persona_content(content: &str, path: PathBuf) -> Result<Persona, PersonaError> {
     let frontmatter = if let Some(body) = content.strip_prefix("---\n") {
         if let Some((yaml, body)) = body.split_once("\n---") {
             let fm: Frontmatter = serde_yaml::from_str(yaml)?;
@@ -280,7 +278,12 @@ fn load_persona_file(path: &Path) -> Result<Persona, PersonaError> {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             validate_name(&dir_name)?;
-            (dir_name, String::new(), content, PersonaConfig::default())
+            (
+                dir_name,
+                String::new(),
+                content.to_string(),
+                PersonaConfig::default(),
+            )
         }
     };
 
@@ -288,9 +291,14 @@ fn load_persona_file(path: &Path) -> Result<Persona, PersonaError> {
         name,
         description,
         body,
-        path: path.to_path_buf(),
+        path,
         config,
     })
+}
+
+fn load_persona_file(path: &Path) -> Result<Persona, PersonaError> {
+    let content = std::fs::read_to_string(path)?;
+    parse_persona_content(&content, path.to_path_buf())
 }
 
 fn validate_name(name: &str) -> Result<(), PersonaError> {
@@ -317,60 +325,10 @@ fn validate_name(name: &str) -> Result<(), PersonaError> {
 ///   from `PLAN.md` at the start of work and executes it step by step.
 pub fn builtin_defaults() -> Vec<Persona> {
     vec![
-        Persona {
-            name: "builder".into(),
-            description: "Executes plans step by step. The default persona — all tools available."
-                .into(),
-            body: BUILDER_BODY.into(),
-            path: PathBuf::from("(built-in)"),
-            config: PersonaConfig::default(),
-        },
-        Persona {
-            name: "planner".into(),
-            description:
-                "Investigates the codebase and writes a plan. Read-only tools plus plan writing."
-                    .into(),
-            body: PLANNER_BODY.into(),
-            path: PathBuf::from("(built-in)"),
-            config: PersonaConfig {
-                tools: Some(vec![
-                    "read".into(),
-                    "glob".into(),
-                    "grep".into(),
-                    "write_plan".into(),
-                    "edit_plan".into(),
-                    "handoff_plan".into(),
-                    "ask_user_question".into(),
-                    "flag_important".into(),
-                    "subagent".into(),
-                    "todo_create".into(),
-                    "todo_update".into(),
-                    "todo_complete".into(),
-                    "todo_list".into(),
-                ]),
-                // Planner cannot switch to any other persona on its own —
-                // the user must explicitly switch via the slash command or
-                // the confirmation modal. This prevents the planner from
-                // self-escalating to a builder without user oversight.
-                transitions: Some(TransitionRules {
-                    allowed: Some(Vec::new()),
-                    confirm: false,
-                }),
-                // Steer the Auto/Auto+ classifier toward being strict about
-                // any mutating or dangerous tool calls, since the planner is
-                // meant to be read-only.
-                autonomous_hint: Some(
-                    "This persona is read-only. The write_plan, edit_plan, and \
-                     handoff_plan tools only touch the configured plan file and \
-                     are part of the normal planning workflow — allow them. Be \
-                     strict about shell commands, arbitrary file writes, and any \
-                     other tool that modifies state: deny or escalate unless the \
-                     action is clearly part of investigating or writing the plan."
-                        .into(),
-                ),
-                ..Default::default()
-            },
-        },
+        parse_persona_content(BUILDER_BODY, PathBuf::from("(built-in)/builder"))
+            .expect("built-in builder persona must parse"),
+        parse_persona_content(PLANNER_BODY, PathBuf::from("(built-in)/planner"))
+            .expect("built-in planner persona must parse"),
     ]
 }
 
