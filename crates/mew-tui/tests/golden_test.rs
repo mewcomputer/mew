@@ -22,22 +22,15 @@ fn golden_dir() -> PathBuf {
 /// Normalize environment-specific data (cwd path, git branch) so golden
 /// frames are portable across different checkouts and branches.
 fn normalize_frame(frame: &str) -> String {
-    // Replace the status bar line: normalize the cwd path and git branch.
-    // The status bar looks like:
-    //   ~/code/mew/crates/mew-tui   git: main   0 tok  ·  $0.00
-    // We normalize to:
-    //   ~/mew   git: main   0 tok  ·  $0.00
-    //
-    // The status bar is always the second-to-last line (before the closing ---).
+    // The status bar is a single line that contains "git:" and "tok".
+    // It renders the cwd path (variable length) left-padded/right-padded
+    // to fill the terminal width. Normalizing just the path changes the
+    // padding and breaks golden frames across different checkout paths.
+    // Instead, replace the entire status bar line with a canonical form.
     let mut lines: Vec<String> = frame.lines().map(|l| l.to_string()).collect();
     for line in &mut lines {
-        // Normalize any path containing /mew/ to ~/mew
-        if line.contains("git:") {
-            // Replace the leading path portion (everything before "git:")
-            if let Some(git_idx) = line.find("git:") {
-                let after_git = &line[git_idx..];
-                *line = format!("  ~/mew   {}", after_git);
-            }
+        if line.contains("tok") && line.contains("$0.00") {
+            *line = "  ~/mew   git: main   0 tok  ·  $0.00".to_string();
         }
     }
     lines.push(String::new()); // re-add trailing newline
