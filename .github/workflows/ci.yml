@@ -35,6 +35,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build web UI (mew-web-bridge embeds dist/)
+        run: pnpm --filter @mew/web-client build && pnpm --filter mew-web-ui build
+
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
