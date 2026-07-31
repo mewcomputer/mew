@@ -70,6 +70,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     } else {
         0
     };
+    app.slash_visible = if show_slash {
+        (slash_cmds.len()).min(max_visible_items as usize)
+    } else {
+        0
+    };
 
     // Landing / start screen: when there's no conversation yet, show the cat +
     // "mew" hero with a centered input directly beneath it instead of the

@@ -1,0 +1,80 @@
+%YAML 1.2
+---
+# Gleam syntax definition for syntect.
+# Covers Gleam's keywords, types, strings, numbers, comments, atoms, and
+# common operators. Scopes follow TextMate conventions so the embedded
+# theme.tmTheme can color them.
+name: Gleam
+file_extensions: [gleam]
+scope: source.gleam
+contexts:
+  main:
+    - include: comments
+    - include: strings
+    - include: numbers
+    - include: keywords
+    - include: types
+    - include: constants
+    - include: operators
+    - include: functions
+
+  comments:
+    - match: '//.*$'
+      scope: comment.line.double-slash.gleam
+
+  strings:
+    - match: '"'
+      push:
+        - meta_scope: string.quoted.double.gleam
+        - match: '\\.'
+          scope: constant.character.escape.gleam
+        - match: '"'
+          pop: true
+    - match: '\b(bit_string|bits)\b\s*\{'
+      push:
+        - meta_scope: string.unquoted.bit-string.gleam
+        - match: '\}'
+          pop: true
+
+  numbers:
+    - match: '\b0[xX][0-9a-fA-F_]+\b'
+      scope: constant.numeric.hex.gleam
+    - match: '\b0[bB][01_]+\b'
+      scope: constant.numeric.binary.gleam
+    - match: '\b0[oO][0-7_]+\b'
+      scope: constant.numeric.octal.gleam
+    - match: '\b\d[\d_]*(\.\d[\d_]*)?([eE][+-]?\d+)?\b'
+      scope: constant.numeric.gleam
+
+  keywords:
+    - match: '\b(pub|fn|let|assert|case|if|else|use|type|opaque|const|import|as|external|todo|panic|try)\b'
+      scope: keyword.control.gleam
+
+  types:
+    - match: '\b(Int|Float|String|Bool|Nil|List|Result|Option|BitString|UtfCodepoint|StringBuilder|Map|Set|Dict)\b'
+      scope: storage.type.gleam
+    - match: '\b[A-Z]\w*\b'
+      scope: entity.name.type.gleam
+
+  constants:
+    - match: '\b(True|False|Nil|Ok|Error)\b'
+      scope: constant.language.gleam
+
+  operators:
+    - match: '\|>'
+      scope: keyword.operator.pipe.gleam
+    - match: '<-|->|\.\.'
+      scope: keyword.operator.gleam
+    - match: '==|!=|<=|>=|<|>'
+      scope: keyword.operator.comparison.gleam
+    - match: '<<|>>|\||\&\&|\|\|'
+      scope: keyword.operator.bitwise.gleam
+    - match: '\+|\-|\*|/|%|\+\+|<!'
+      scope: keyword.operator.arithmetic.gleam
+    - match: '=?='
+      scope: keyword.operator.assignment.gleam
+
+  functions:
+    # Function call: identifier followed by (
+    - match: '\b([a-z][a-z0-9_]*)\s*(?=\()'
+      scope: entity.name.function.gleam

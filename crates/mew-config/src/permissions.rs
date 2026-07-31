@@ -635,8 +635,11 @@ fn token_escapes(token: &str, cwd: &Path, workspace_roots: &[PathBuf]) -> bool {
         }
         Err(_) => {
             // File doesn't exist on disk. Fall back to lexical
-            // resolution against the un-normalized `absolute` form.
-            if is_inside_any_root(&absolute, workspace_roots) {
+            // resolution. Normalize `..` and `.` components so that
+            // `tmp/../foo` (which lexically starts with `tmp/` but
+            // resolves outside) is correctly detected as an escape.
+            let normalized = normalize_path(&absolute);
+            if is_inside_any_root(&normalized, workspace_roots) {
                 return false;
             }
             // Lexical conservative check: if the unexpanded form
@@ -658,6 +661,33 @@ fn token_escapes(token: &str, cwd: &Path, workspace_roots: &[PathBuf]) -> bool {
             false
         }
     }
+}
+
+/// Normalize `.` and `..` components in a path lexically (without touching
+/// the filesystem). This mirrors `Path::canonicalize` for non-existent paths
+/// so that `is_inside_any_root` gets a semantically-correct form to compare
+/// against — `tmp/../foo` becomes `foo` (relative to tmp's parent), which
+/// correctly fails the `starts_with(tmp)` check.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for comp in path.components() {
+        use std::path::Component;
+        match comp {
+            Component::ParentDir => {
+                // Pop the last normal component if possible. If the
+                // previous component is a root or prefix, we can't go
+                // up — leave the `..` in place (it stays absolute).
+                if matches!(components.last(), Some(Component::Normal(_))) {
+                    components.pop();
+                } else {
+                    components.push(comp);
+                }
+            }
+            Component::CurDir => {} // skip `.`
+            other => components.push(other),
+        }
+    }
+    components.iter().collect()
 }
 
 /// True if `path` is inside (or equal to) any of `roots`. Symlink-aware

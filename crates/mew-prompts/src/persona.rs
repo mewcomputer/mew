@@ -114,7 +114,7 @@ mod tests {
         let body = "{{ transclude(\"mew://system_prompts/base\") }}";
         let result = render_template(body, "p", false, &None, &[], &HashSet::new());
         assert!(
-            result.contains("Save progress frequently"),
+            result.contains("Treat the current prompt context as authoritative"),
             "transclude must inline the base prompt; got: {result}"
         );
     }
@@ -125,7 +125,7 @@ mod tests {
         let body = "{{ transclude(\"system_prompts/base\") }}";
         let result = render_template(body, "p", false, &None, &[], &HashSet::new());
         assert!(
-            result.contains("Save progress frequently"),
+            result.contains("Treat the current prompt context as authoritative"),
             "transclude without scheme must still work; got: {result}"
         );
     }
@@ -146,7 +146,7 @@ mod tests {
     fn test_render_template_transclude_with_vars() {
         let body = "{{ transclude(\"mew://system_prompts/base\") }}\n\nYou are {{ persona_name }}.";
         let result = render_template(body, "researcher", false, &None, &[], &HashSet::new());
-        assert!(result.contains("Save progress frequently"));
+        assert!(result.contains("Treat the current prompt context as authoritative"));
         assert!(result.contains("You are researcher."));
     }
 }

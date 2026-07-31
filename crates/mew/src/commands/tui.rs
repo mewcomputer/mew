@@ -271,14 +271,13 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
 }
 
 pub(crate) async fn chat_cmd(
+    cfg: mew_config::Config,
     provider_flag: String,
     model_flag: Option<String>,
     variant_flag: Option<String>,
     raw: bool,
     mode: mew_hooks::PermissionMode,
 ) -> Result<()> {
-    let cfg = mew_config::load().context("load config")?;
-
     let cat = load_catalog(&cfg).await;
 
     run_tui(

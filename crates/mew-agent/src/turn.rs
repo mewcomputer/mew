@@ -6,7 +6,7 @@ use ulid::Ulid;
 use mew_hooks::ChatParams;
 use mew_message::{
     AssistantMeta, CompactionPart, ErrorKind, Message, MessageError, Part, PartBase, Role,
-    TextPart, Time, Tokens,
+    TextPart, Time, Tokens, ToolResultPart, ToolState, ToolStateError, ToolTime,
 };
 use mew_provider::{ProviderEvent, Request, ToolDef};
 use mew_tools::tools::flag_important::FlagMode;
@@ -109,15 +109,6 @@ impl Agent {
                 .collect();
             sort_tool_defs(&mut tool_defs);
 
-            let mut messages = self.messages.lock().await.clone();
-
-            // Apply on_chat_message hook to each message.
-            for msg in &mut messages {
-                *msg = self.dispatcher.on_chat_message(msg.clone()).await;
-            }
-
-            strip_empty_text_parts(&mut messages);
-
             // Check if compaction is needed (forced or auto).
             let force = {
                 let mut flag = self.force_compact.lock().await;
@@ -125,153 +116,8 @@ impl Agent {
                 *flag = false;
                 was
             };
-            let estimated = self.estimated_tokens(&messages);
-            let threshold = (self.context_window as f64 * self.compaction_threshold) as u32;
-            let should_compact = force || (self.context_window > 0 && estimated > threshold);
-            let compaction_start = compaction_start(&messages, self.keep_turns);
-            let has_removable_history =
-                !messages.is_empty() && (self.keep_turns == 0 || compaction_start > 0);
-            if should_compact && has_removable_history {
-                tracing::info!(
-                    estimated,
-                    threshold,
-                    context_window = self.context_window,
-                    force,
-                    compaction_start,
-                    "compacting context"
-                );
-                // Notify plugins before compaction so they can capture any
-                // context they want to preserve.
-                self.dispatcher.on_pre_compaction(&messages).await;
-                let mut compacted = messages.split_off(compaction_start);
-                compacted.retain(|message| !is_compaction_message(message));
-                let tail_start_id = compacted.first().map(|message| message.id);
-                let compact_id = Ulid::new();
-                let compact_msg = Message {
-                    id: compact_id,
-                    session_id: self.session_id,
-                    role: Role::User,
-                    parts: vec![
-                        Part::Text(TextPart {
-                            base: PartBase {
-                                id: Ulid::new(),
-                                message_id: compact_id,
-                                session_id: self.session_id,
-                            },
-                            text: "Previous conversation has been compacted to stay within the context window. Recent turns are preserved below."
-                                .into(),
-                            synthetic: true,
-                        }),
-                        Part::Compaction(CompactionPart {
-                            base: PartBase {
-                                id: Ulid::new(),
-                                message_id: compact_id,
-                                session_id: self.session_id,
-                            },
-                            auto: !force,
-                            overflow: false,
-                            tail_start_id,
-                        }),
-                    ],
-                    time: Time {
-                        created: chrono::Utc::now().timestamp_millis(),
-                        completed: None,
-                    },
-                    assistant: None,
-                };
-                let removed_count = messages.len();
-                messages = compacted;
-                // Prepend the summary note.
-                messages.insert(0, compact_msg.clone());
-
-                // Re-inject flagged files so they survive compaction. Included
-                // files are inlined as text; referenced files get a pointer.
-                // Iterate in reverse so insert(0, ...) preserves flag order.
-                let flagged = self.flagged_files.lock().await;
-                if !flagged.is_empty() {
-                    let now = chrono::Utc::now().timestamp_millis();
-                    for f in flagged.iter().rev() {
-                        let note_text = match f.mode {
-                            FlagMode::Included => match std::fs::read_to_string(&f.path) {
-                                Ok(content) => format!(
-                                    "Flagged file (preserved across compaction) — {}:\n\n{}",
-                                    f.path.display(),
-                                    content,
-                                ),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        path = %f.path.display(),
-                                        error = %e,
-                                        "could not read flagged file for compaction re-injection",
-                                    );
-                                    continue;
-                                }
-                            },
-                            FlagMode::Referenced => format!(
-                                "Flagged file (referenced — re-read with the read tool when needed): {}",
-                                f.path.display(),
-                            ),
-                        };
-                        let id = Ulid::new();
-                        messages.insert(
-                            0,
-                            Message {
-                                id,
-                                session_id: self.session_id,
-                                role: Role::User,
-                                parts: vec![Part::Text(TextPart {
-                                    base: PartBase {
-                                        id: Ulid::new(),
-                                        message_id: id,
-                                        session_id: self.session_id,
-                                    },
-                                    text: note_text,
-                                    synthetic: true,
-                                })],
-                                time: Time {
-                                    created: now,
-                                    completed: None,
-                                },
-                                assistant: None,
-                            },
-                        );
-                    }
-                }
-                drop(flagged);
-
-                // Replace the active context as soon as compaction happens.
-                // Keeping the old history in self.messages would make every
-                // tool turn compact the same prefix again, repeatedly
-                // invalidating provider-side prompt caches.
-                *self.messages.lock().await = messages.clone();
-                self.token_count_cache.lock().unwrap().clear();
-
-                // The session log remains lossless. The marker records the
-                // boundary from which the compacted context should be
-                // reconstructed on resume.
-                if let Some(session) = &self.session {
-                    let mut session = session.lock().await;
-                    if let Err(e) = session.write_message(&compact_msg).await {
-                        tracing::warn!(error = %e, "failed to persist compaction marker");
-                    }
-                }
-
-                // Compaction is an explicit cache boundary. Apply any
-                // deferred system-prompt rebuild now that the old context
-                // prefix has already been replaced.
-                self.apply_deferred_system_rebuild_after_compaction();
-
-                let _ = ev_tx
-                    .send(AgentEvent::Error(format!(
-                        "context compacted: {} messages removed ({} estimated tokens)",
-                        removed_count, estimated
-                    )))
-                    .await;
-
-                // Notify plugins that compaction finished with the
-                // resulting (compacted) message list.
-                self.dispatcher.on_post_compaction(&messages).await;
-            }
+            let (messages, _removed_count) =
+                self.prepare_and_compact_messages(force, Some(&ev_tx)).await;
 
             // A configured retention window may make a deferred refresh safe
             // without compaction. Unknown retention remains conservative.
@@ -670,12 +516,16 @@ impl Agent {
                 return Ok(());
             }
 
-            let result_parts = self
+            let mut result_parts = self
                 .execute_pending_tool_calls(&pending, &mut assistant_msg, &ev_tx)
                 .await;
 
             // If the turn was cancelled during tool execution, stop now
-            // instead of looping back for another provider call.
+            // instead of looping back for another provider call. Make sure the
+            // history we leave behind is still valid for the provider: an
+            // assistant message with tool_calls must be followed by a tool
+            // message for every call_id, so mark any unprocessed tool calls as
+            // errored and append a matching result message.
             if self.cancel_token.is_cancelled() {
                 if let Some(ref mut msg) = assistant_msg {
                     let now = Utc::now().timestamp_millis();
@@ -692,7 +542,58 @@ impl Agent {
                         }),
                         manifest: None,
                     });
-                    self.append_message(msg.clone()).await;
+                    let assistant_id = msg.id;
+                    for tc in &pending {
+                        let already_has_result = result_parts.iter().any(
+                            |p| matches!(p, Part::ToolResult(ref tr) if tr.call_id == tc.call_id),
+                        );
+                        if !already_has_result {
+                            self.update_tool_call(
+                                msg,
+                                tc.base.id,
+                                ToolState::Error(ToolStateError {
+                                    input: tc.state.input().clone(),
+                                    error: "aborted".into(),
+                                    time: ToolTime {
+                                        start: now,
+                                        end: Some(now),
+                                    },
+                                }),
+                            );
+                            result_parts.push(Part::ToolResult(ToolResultPart {
+                                base: PartBase {
+                                    id: Ulid::new(),
+                                    message_id: assistant_id,
+                                    session_id: self.session_id,
+                                },
+                                call_id: tc.call_id.clone(),
+                            }));
+                        }
+                    }
+                    // The assistant message was already appended at MessageEnd.
+                    // Sync the updated state (aborted meta + terminal tool states)
+                    // back into self.messages, then append the result message.
+                    {
+                        let mut messages = self.messages.lock().await;
+                        for m in messages.iter_mut() {
+                            if m.id == msg.id {
+                                *m = msg.clone();
+                                break;
+                            }
+                        }
+                    }
+                    let result_msg = Message {
+                        id: Ulid::new(),
+                        session_id: self.session_id,
+                        role: Role::User,
+                        parts: result_parts,
+                        time: Time {
+                            created: now,
+                            completed: None,
+                        },
+                        assistant: None,
+                    };
+                    self.append_message(result_msg).await;
                 }
                 let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
                 return Ok(());
@@ -730,6 +631,170 @@ impl Agent {
                 dispatcher.on_turn_end(&messages).await;
             });
         }
+    }
+
+    /// Apply the `on_chat_message` hook and strip empty text parts, then
+    /// compact the prefix if forced or if the estimated token count exceeds
+    /// the configured threshold. Returns the prepared messages and the number
+    /// of messages removed by compaction.
+    pub(crate) async fn prepare_and_compact_messages(
+        &mut self,
+        force: bool,
+        ev_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) -> (Vec<Message>, usize) {
+        let mut messages = self.messages.lock().await.clone();
+
+        // Apply on_chat_message hook to each message.
+        for msg in &mut messages {
+            *msg = self.dispatcher.on_chat_message(msg.clone()).await;
+        }
+
+        strip_empty_text_parts(&mut messages);
+
+        let estimated = self.estimated_tokens(&messages);
+        let threshold = (self.context_window as f64 * self.compaction_threshold) as u32;
+        let should_compact = force || (self.context_window > 0 && estimated > threshold);
+        let compaction_start = compaction_start(&messages, self.keep_turns);
+        let has_removable_history =
+            !messages.is_empty() && (self.keep_turns == 0 || compaction_start > 0);
+
+        if !should_compact || !has_removable_history {
+            return (messages, 0);
+        }
+
+        tracing::info!(
+            estimated,
+            threshold,
+            context_window = self.context_window,
+            force,
+            compaction_start,
+            "compacting context"
+        );
+        self.dispatcher.on_pre_compaction(&messages).await;
+        let mut compacted = messages.split_off(compaction_start);
+        compacted.retain(|message| !is_compaction_message(message));
+        let tail_start_id = compacted.first().map(|message| message.id);
+        let compact_id = Ulid::new();
+        let compact_msg = Message {
+            id: compact_id,
+            session_id: self.session_id,
+            role: Role::User,
+            parts: vec![
+                Part::Text(TextPart {
+                    base: PartBase {
+                        id: Ulid::new(),
+                        message_id: compact_id,
+                        session_id: self.session_id,
+                    },
+                    text: "Summarize the important beats of the current thread in a way where if you weren't there you'd know exactly what happened."
+                        .into(),
+                    synthetic: true,
+                }),
+                Part::Compaction(CompactionPart {
+                    base: PartBase {
+                        id: Ulid::new(),
+                        message_id: compact_id,
+                        session_id: self.session_id,
+                    },
+                    auto: !force,
+                    overflow: false,
+                    tail_start_id,
+                }),
+            ],
+            time: Time {
+                created: Utc::now().timestamp_millis(),
+                completed: None,
+            },
+            assistant: None,
+        };
+        let removed_count = messages.len();
+        messages = compacted;
+        messages.insert(0, compact_msg.clone());
+
+        // Re-inject flagged files so they survive compaction.
+        let flagged = self.flagged_files.lock().await;
+        if !flagged.is_empty() {
+            let now = Utc::now().timestamp_millis();
+            for f in flagged.iter().rev() {
+                let note_text = match f.mode {
+                    FlagMode::Included => match std::fs::read_to_string(&f.path) {
+                        Ok(content) => format!(
+                            "Flagged file (preserved across compaction) — {}:\n\n{}",
+                            f.path.display(),
+                            content,
+                        ),
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %f.path.display(),
+                                error = %e,
+                                "could not read flagged file for compaction re-injection",
+                            );
+                            continue;
+                        }
+                    },
+                    FlagMode::Referenced => format!(
+                        "Flagged file (referenced — re-read with the read tool when needed): {}",
+                        f.path.display(),
+                    ),
+                };
+                let id = Ulid::new();
+                messages.insert(
+                    0,
+                    Message {
+                        id,
+                        session_id: self.session_id,
+                        role: Role::User,
+                        parts: vec![Part::Text(TextPart {
+                            base: PartBase {
+                                id: Ulid::new(),
+                                message_id: id,
+                                session_id: self.session_id,
+                            },
+                            text: note_text,
+                            synthetic: true,
+                        })],
+                        time: Time {
+                            created: now,
+                            completed: None,
+                        },
+                        assistant: None,
+                    },
+                );
+            }
+        }
+        drop(flagged);
+
+        *self.messages.lock().await = messages.clone();
+        self.token_count_cache.lock().unwrap().clear();
+
+        if let Some(session) = &self.session {
+            let mut session = session.lock().await;
+            if let Err(e) = session.write_message(&compact_msg).await {
+                tracing::warn!(error = %e, "failed to persist compaction marker");
+            }
+        }
+
+        self.apply_deferred_system_rebuild_after_compaction();
+
+        if let Some(ev_tx) = ev_tx {
+            let _ = ev_tx
+                .send(AgentEvent::Error(format!(
+                    "context compacted: {} messages removed ({} estimated tokens)",
+                    removed_count, estimated
+                )))
+                .await;
+        }
+
+        self.dispatcher.on_post_compaction(&messages).await;
+
+        (messages, removed_count)
+    }
+
+    /// Compact the context immediately, regardless of token threshold.
+    /// Returns the number of messages removed.
+    pub async fn compact_context(&mut self) -> usize {
+        let (_, removed) = self.prepare_and_compact_messages(true, None).await;
+        removed
     }
 }
 

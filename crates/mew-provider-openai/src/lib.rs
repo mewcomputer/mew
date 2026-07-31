@@ -297,6 +297,10 @@ impl Adapter {
                     }
                 }
 
+                // OpenAI requires that `role: tool` messages immediately follow
+                // the assistant message that issued the matching tool_calls. Emit
+                // any tool results first, then the user message (text/images).
+                out.extend(tool_results);
                 if !image_blocks.is_empty() {
                     let mut content: Vec<serde_json::Value> = Vec::new();
                     if !text_content.is_empty() {
@@ -307,7 +311,6 @@ impl Adapter {
                 } else if !text_content.is_empty() {
                     out.push(json!({"role": "user", "content": text_content}));
                 }
-                out.extend(tool_results);
             }
             Role::Assistant => {
                 let mut content = String::new();
@@ -348,12 +351,18 @@ impl Adapter {
                 let mut msg = serde_json::Map::new();
                 msg.insert("role".to_string(), json!("assistant"));
                 if content.is_empty() {
-                    msg.insert("content".to_string(), serde_json::Value::Null);
+                    // Some OpenAI-compatible providers (e.g. Kimi) reject null
+                    // content when tool_calls are present, so use an empty string.
+                    msg.insert("content".to_string(), json!(""));
                 } else {
                     msg.insert("content".to_string(), json!(content));
                 }
-                msg.insert("reasoning".to_string(), json!(reasoning));
-                msg.insert("reasoning_content".to_string(), json!(reasoning));
+                // Only send reasoning fields when there is actual reasoning
+                // content; empty strings can confuse provider-side validation.
+                if !reasoning.is_empty() {
+                    msg.insert("reasoning".to_string(), json!(reasoning));
+                    msg.insert("reasoning_content".to_string(), json!(reasoning));
+                }
                 if !tool_calls.is_empty() {
                     msg.insert("tool_calls".to_string(), json!(tool_calls));
                 }
@@ -737,6 +746,7 @@ fn new_tool_call_part() -> ToolCallPart {
 mod tests {
     use super::*;
     use mew_message::AssistantMeta;
+    use mew_message::{ToolResultPart, ToolStateCompleted};
 
     fn make_minimal_png() -> Vec<u8> {
         vec![
@@ -1169,5 +1179,173 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, ProviderEvent::MessageEnd { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_tool_result_pair() {
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "test-model".to_string(),
+            "test-key".to_string(),
+        );
+        let assistant_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                tool_name: "bash".to_string(),
+                call_id: "bash:14".to_string(),
+                state: ToolState::Completed(ToolStateCompleted {
+                    input: serde_json::json!({"command": "echo hi"}),
+                    output: "hi\n".to_string(),
+                    metadata: None,
+                    diff: None,
+                    time: ToolTime {
+                        start: 0,
+                        end: Some(1),
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let user_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![Part::ToolResult(ToolResultPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                call_id: "bash:14".to_string(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let all = vec![assistant_msg.clone(), user_msg.clone()];
+        let req = Request {
+            model: "test-model".to_string(),
+            messages: all.clone(),
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let messages = body_json["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert!(messages[0]["tool_calls"].is_array());
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "bash:14");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "bash:14");
+        assert_eq!(messages[1]["content"], "hi\n");
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_tool_results_before_user_text() {
+        // OpenAI requires that `role: tool` messages immediately follow the
+        // assistant message that issued the tool_calls. If a user message
+        // carries both text and a tool result, emit tool results first.
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let assistant_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                tool_name: "bash".to_string(),
+                call_id: "bash:14".to_string(),
+                state: ToolState::Completed(ToolStateCompleted {
+                    input: serde_json::json!({"command": "echo hi"}),
+                    output: "hi\n".to_string(),
+                    metadata: None,
+                    diff: None,
+                    time: ToolTime {
+                        start: 0,
+                        end: Some(1),
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let user_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![
+                Part::Text(TextPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: "Here is the result".to_string(),
+                    synthetic: false,
+                }),
+                Part::ToolResult(ToolResultPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    call_id: "bash:14".to_string(),
+                }),
+            ],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let all = vec![assistant_msg.clone(), user_msg.clone()];
+        let req = Request {
+            model: "test-model".to_string(),
+            messages: all.clone(),
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let messages = body_json["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "bash:14");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "bash:14");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"], "Here is the result");
     }
 }

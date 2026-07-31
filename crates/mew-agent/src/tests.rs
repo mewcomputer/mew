@@ -926,6 +926,51 @@ async fn test_tool_turn_denied() {
     assert!(got_tool_end);
 }
 
+#[tokio::test]
+async fn test_cancelled_tool_turn_appends_tool_results() {
+    // If a turn is cancelled while tools are pending, the agent must still
+    // append a tool result message for every tool call so the next request to
+    // the provider is not rejected for missing tool responses.
+    let script = FakeProvider::tool_call("echo", "c1", serde_json::json!({"input": "hi"}));
+    let provider = std::sync::Arc::new(StatefulFakeProvider::new(vec![script]));
+    let agent = Agent::new(
+        provider,
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![std::sync::Arc::new(EchoTool::mutating())],
+        None,
+    );
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut rx = agent.run_with_parts("call echo".into(), vec![], Some(cancel.clone()));
+
+    while let Some(ev) = rx.recv().await {
+        if let AgentEvent::ToolStart { call_id } = &ev {
+            if call_id == "c1" {
+                cancel.cancel();
+            }
+        }
+        if matches!(ev, AgentEvent::Error(_)) {
+            break;
+        }
+    }
+
+    let msgs = agent.messages.lock().await;
+    assert_eq!(
+        msgs.len(),
+        3,
+        "expected user, assistant tool-call, tool result"
+    );
+    assert_eq!(msgs[0].role, Role::User);
+    assert_eq!(msgs[1].role, Role::Assistant);
+    assert!(matches!(&msgs[1].parts[0], Part::ToolCall(_)));
+    assert_eq!(msgs[2].role, Role::User);
+    assert!(
+        matches!(&msgs[2].parts[0], Part::ToolResult(ref tr) if tr.call_id == "c1"),
+        "tool result should reference the call_id"
+    );
+}
+
 /// Build an agent wired for handoff_plan tests: the real `HandoffPlan` tool,
 /// builtin personas (so "builder" resolves), and a two-script provider
 /// (handoff call, then a text response to close the turn).

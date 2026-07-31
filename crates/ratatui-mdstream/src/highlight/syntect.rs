@@ -5,7 +5,7 @@ use syntect::{
     highlighting::{
         HighlightIterator, HighlightState, Highlighter as SyntectHighlighterInner, Theme,
     },
-    parsing::{ParseState, ScopeStack, SyntaxSet},
+    parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxSet},
 };
 
 use crate::highlight::{Highlighter, StyledRun};
@@ -13,7 +13,16 @@ use crate::highlight::{Highlighter, StyledRun};
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 
 fn syntax_set() -> &'static SyntaxSet {
-    SYNTAX_SET.get_or_init(two_face::syntax::extra_newlines)
+    SYNTAX_SET.get_or_init(|| {
+        // Start from two-face's bundled syntaxes, then merge in any custom
+        // definitions that two-face does not ship (e.g. Gleam).
+        let mut builder = two_face::syntax::extra_newlines().into_builder();
+        let gleam_syntax = include_str!("../../resources/gleam.sublime-syntax");
+        if let Ok(def) = SyntaxDefinition::load_from_str(gleam_syntax, false, None) {
+            builder.add(def);
+        }
+        builder.build()
+    })
 }
 
 /// Syntax highlighter backed by syntect.
@@ -159,5 +168,33 @@ mod tests {
             style.fg.is_some() || style.add_modifier != ratatui::style::Modifier::empty()
         });
         assert!(has_styled, "wgsl @vertex should be syntax-highlighted");
+    }
+
+    #[test]
+    fn test_gleam_syntax_available() {
+        let ss = syntax_set();
+        let syntax = ss
+            .find_syntax_by_token("gleam")
+            .or_else(|| ss.find_syntax_by_extension("gleam"));
+        assert!(
+            syntax.is_some(),
+            "gleam syntax should be available (custom sublime-syntax)"
+        );
+    }
+
+    #[test]
+    fn test_gleam_highlighting_produces_styles() {
+        let mut highlighter = SyntectHighlighter::default();
+        highlighter.begin_block(Some("gleam"));
+
+        let line = "pub fn main() {\n";
+        let runs = highlighter.highlight_line(None, line);
+
+        assert!(!runs.is_empty(), "should produce runs for gleam");
+
+        let has_styled = runs.iter().any(|(_, style)| {
+            style.fg.is_some() || style.add_modifier != ratatui::style::Modifier::empty()
+        });
+        assert!(has_styled, "gleam `pub fn` should be syntax-highlighted");
     }
 }

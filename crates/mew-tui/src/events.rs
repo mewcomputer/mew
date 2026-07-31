@@ -436,6 +436,7 @@ fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Ac
 }
 
 fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    let page_lines = (app.chat_area.height.saturating_sub(8)).max(3);
     match key.code {
         KeyCode::Char('a') | KeyCode::Char('A') => {
             app.send_permission_decision(mew_hooks::PermissionDecision::AllowOnce);
@@ -449,12 +450,42 @@ fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Act
             app.send_permission_decision(mew_hooks::PermissionDecision::Deny);
             None
         }
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(ref mut perm) = app.permission {
+                perm.scroll = perm.scroll.saturating_sub(1);
+            }
+            None
+        }
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(ref mut perm) = app.permission {
+                perm.scroll = perm
+                    .scroll
+                    .saturating_add(1)
+                    .min(perm.max_scroll(app.chat_area.height).unwrap_or(perm.scroll));
+            }
+            None
+        }
         KeyCode::Down | KeyCode::Tab => {
             app.permission_next();
             None
         }
         KeyCode::Up => {
             app.permission_prev();
+            None
+        }
+        KeyCode::PageDown => {
+            if let Some(ref mut perm) = app.permission {
+                perm.scroll = perm
+                    .scroll
+                    .saturating_add(page_lines)
+                    .min(perm.max_scroll(app.chat_area.height).unwrap_or(perm.scroll));
+            }
+            None
+        }
+        KeyCode::PageUp => {
+            if let Some(ref mut perm) = app.permission {
+                perm.scroll = perm.scroll.saturating_sub(page_lines);
+            }
             None
         }
         KeyCode::Enter => {

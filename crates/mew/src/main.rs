@@ -241,6 +241,7 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             let provider = resolve_provider(provider, &state, &cfg);
             let model = resolve_model_opt(model, &state, &cfg);
             run_cmd(
+                cfg,
                 provider,
                 model,
                 variant,
@@ -268,7 +269,7 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             } else {
                 let provider = resolve_provider(provider, &state, &cfg);
                 let model = resolve_model_opt(model, &state, &cfg);
-                chat_cmd(provider, model, variant, raw, mode).await
+                chat_cmd(cfg, provider, model, variant, raw, mode).await
             }
         }
         Some(Commands::Daemon {
@@ -337,6 +338,7 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             let provider = resolve_provider(None, &state, &cfg);
             let model = resolve_model_opt(None, &state, &cfg);
             chat_cmd(
+                cfg,
                 provider,
                 model,
                 None,

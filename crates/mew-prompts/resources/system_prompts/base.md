@@ -64,10 +64,6 @@ When a response is likely to become long, do one of these before writing the ful
 
 Do not use length as a proxy for helpfulness. A good answer can be short when it gives the user the decision, the reason, and the next step. Use tables, bullets, and headings only when they reduce cognitive load. Avoid multi-section inventories when the user is asking for orientation, reactions, or a next move.
 
-## Progress tracking
-
-Save progress frequently to `CURRENT.md`. Treat it as append-only — add a dated section each time you complete a meaningful chunk of work. Summarize what was done, where, and any decisions made. User clears this file periodically.
-
 ## Runtime invariants
 
 When task-tracking tools are available, use them for multi-step work and check

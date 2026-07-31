@@ -164,12 +164,31 @@ pub fn render(body: &str, ctx: &TemplateContext) -> String {
 
     let mut env = minijinja::Environment::new();
 
-    // transclude: inline a built-in VFS resource.
+    // transclude: inline a built-in VFS resource, rendering any nested Jinja
+    // directives in the included content against the same context.
     // {{ transclude("mew://system_prompts/base") }} or {{ transclude("system_prompts/base") }}
-    env.add_function("transclude", |path: String| -> String {
-        let stripped = path.strip_prefix("mew://").unwrap_or(&path);
-        crate::vfs::read_builtin(stripped).unwrap_or("").to_string()
-    });
+    let transclude_ctx = env_ctx.clone();
+    env.add_function(
+        "transclude",
+        move |state: &minijinja::State, path: String| -> String {
+            let stripped = path.strip_prefix("mew://").unwrap_or(&path);
+            let content = crate::vfs::read_builtin(stripped).unwrap_or("");
+            if content.is_empty() {
+                return String::new();
+            }
+            state
+                .env()
+                .render_str(content, transclude_ctx.clone())
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        path = %stripped,
+                        "transclude render failed, returning raw content"
+                    );
+                    content.to_string()
+                })
+        },
+    );
 
     // has_tool: check if a tool is in the effective list.
     // {% if has_tool("bash") %}You can run commands.{% endif %}
@@ -298,7 +317,7 @@ mod tests {
         let body = "{{ transclude(\"mew://system_prompts/base\") }}";
         let result = render(body, &ctx());
         assert!(
-            result.contains("Save progress frequently"),
+            result.contains("Treat the current prompt context as authoritative"),
             "transclude must inline the base prompt; got: {result}"
         );
     }

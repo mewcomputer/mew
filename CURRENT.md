@@ -1,3 +1,179 @@
+# 2026-07-30 — Re-fix Kimi K3 tool-call response mismatch (jobblock:80)
+
+## Summary
+
+The previous fix changed `content: null` to `content: ""` for assistant messages with `tool_calls`, but Kimi (and other OpenAI-compatible providers) was still rejecting follow-up requests with:
+
+```text
+an assistant message with 'toolcalls' must be followed by tool messages
+responding to each 'toolcallid'. The following toolcallids did not have
+response messages: jobblock:80
+```
+
+Two issues could leave the assistant message without a matching tool response:
+
+1. **Cancelled tool turns**: if a user cancelled while a tool was running, the agent aborted the turn without appending the tool-result message, leaving a broken conversation history for the next request.
+2. **Ordering bug in the OpenAI adapter**: if a user message somehow carried both text and a `ToolResult`, the adapter emitted the user text *before* the `role: tool` messages, violating the rule that tool messages must immediately follow the assistant message that issued the tool calls.
+
+## Changes
+
+- `crates/mew-agent/src/turn.rs`
+  - When a turn is cancelled after the assistant message has been appended but before/while tools finish, the agent now still appends a matching `ToolResult` message for every pending tool call.
+  - Unprocessed tool calls are marked as errored, and the updated assistant message is synced back into the store instead of being appended a second time.
+
+- `crates/mew-provider-openai/src/lib.rs`
+  - In user messages that contain both `ToolResult` parts and text/image content, emit the `role: tool` messages first, then the user message. This keeps the tool responses immediately after the assistant message even if a message also carries text.
+  - Added `test_build_wire_message_tool_results_before_user_text` to lock in the ordering.
+
+- `crates/mew-agent/src/tests.rs`
+  - Added `test_cancelled_tool_turn_appends_tool_results` to verify that a cancelled turn leaves a valid history (user, assistant tool-call, tool result).
+
+## Verification
+
+- `cargo test -p mew-agent` — 142 tests pass.
+- `cargo test -p mew-provider-openai` — 9 tests pass.
+- `cargo test --all` — all pass.
+- `cargo clippy --all -- -D warnings` — clean.
+- `cargo fmt -- --check` — clean.
+- `just arch-check` — pass.
+
+# 2026-07-26 — Fix duplicated thinking duration across reasoning blocks
+
+## Summary
+
+The TUI was showing the same elapsed thinking time for every reasoning block in the transcript. The elapsed duration was stored in a single global `Option<Duration>` on `App`, so once any reasoning block finished, all collapsed reasoning headers rendered that same duration.
+
+## Changes
+
+- `crates/mew-tui/src/app/mod.rs`
+  - Replaced `pub reasoning_elapsed: Option<Duration>` with `HashMap<PartId, Duration>` so each reasoning block keeps its own elapsed time.
+  - Added `record_reasoning_elapsed(collapse: bool)` helper that records the active reasoning block's duration and optionally collapses it.
+  - Finalize the active reasoning block when a new reasoning part starts, a text/toolcall part starts, the reasoning part ends (`PartEnd`), or the message ends (`MessageEnd`).
+  - Only collapse the reasoning block when the model moves on to a text or toolcall part, preserving the existing behavior where a final reasoning block stays expanded.
+
+- `crates/mew-tui/src/ui/chat.rs`
+  - Rendering now looks up the elapsed duration for each reasoning part by its `PartId` instead of reading a global value.
+  - Added `test_reasoning_headers_use_per_part_elapsed` to verify that two reasoning blocks in the same message show their own recorded durations.
+
+## Verification
+
+- `cargo test -p mew-tui` — 159 unit tests + 5 golden tests pass.
+- `cargo clippy --all -- -D warnings` — clean.
+- `cargo fmt -- --check` — clean.
+
+# 2026-07-26 — Fix Kimi K3 (OpenAI adapter) tool-call validation errors
+
+## Summary
+
+Kimi K3 was rejecting follow-up requests after a tool call with:
+
+```text
+an assistant message with 'toolcalls' must be followed by tool messages
+responding to each 'toolcallid'. The following toolcallids did not have
+response messages: bash:14
+```
+
+The OpenAI adapter was sending assistant messages with `content: null` and empty `reasoning`/`reasoning_content` fields. Some OpenAI-compatible providers (including Kimi) reject that combination when `tool_calls` is present, causing the server to fail validation before it reaches the tool response message.
+
+## Changes
+
+- `crates/mew-provider-openai/src/lib.rs`
+  - For assistant messages with empty content, emit `""` instead of `null`.
+  - Omit `reasoning` and `reasoning_content` fields when the reasoning string is empty; only echo them back when non-empty reasoning was actually streamed.
+  - Added `test_build_wire_message_tool_result_pair` to verify that an assistant message with a tool call and a user message with the matching tool result produce a valid request body.
+
+## Verification
+
+- `cargo test -p mew-provider-openai` — 8 tests pass.
+- `cargo test -p mew-agent` — 141 tests pass.
+- `cargo clippy --all -- -D warnings` — clean.
+
+# 2026-07-26 — Fix mew-prompts transclude and make it render nested content
+
+## Summary
+
+Four mew-prompts tests were failing because `transclude(...)` returned raw file contents without rendering the nested Jinja directives inside them. The system prompt (`base.md`) was recently split into provider-specific partials via `{{ transclude(...) }}`, but the `transclude` function only inserted the raw text. This left literal `{{ transclude(...) }}` directives in the rendered system prompt and broke tests that expected text from the rendered partials.
+
+## Changes
+
+- `crates/mew-prompts/src/template.rs`
+  - Changed the `transclude` function to take the current minijinja `State` and render the included content against a clone of the original template context, so nested directives resolve recursively.
+  - If the included content fails to render, it falls back to the raw content with a warning.
+
+- `crates/mew-prompts/src/persona.rs` and `crates/mew-prompts/src/template.rs`
+  - Updated the four transclude tests to assert on text that actually exists in the current rendered system prompt (`"Treat the current prompt context as authoritative"`).
+
+## Verification
+
+- `cargo test -p mew-prompts` — 52 tests pass (was 48 passing + 4 failing).
+- `cargo test --all` — all pass.
+- `cargo clippy --all -- -D warnings` — clean.
+- `cargo fmt -- --check` — clean.
+- `just arch-check` — pass.
+
+# 2026-07-26 — Fix startup crash on unknown provider and make config loading consistent
+
+## Summary
+
+`mew` was crashing on startup with:
+
+```text
+Error: build provider
+
+Caused by:
+    unknown provider zhipuai-coding-plan
+```
+
+The provider resolution in `async_main` was using a config loaded in the top-level startup path, while `chat_cmd` and `run_cmd` reloaded config independently before building the provider. If the two loads ever diverged (e.g. an environment-only provider present during resolution but missing at build time), the resolved provider could be passed to `build_provider` and fail as unknown. The error message also gave no hint about where the config was loaded from or how to fix it.
+
+## Changes
+
+- `crates/mew/src/main.rs`
+  - Pass the already-loaded `Config` from `async_main` into `chat_cmd` and `run_cmd` instead of letting them reload it.
+
+- `crates/mew/src/commands/tui.rs`
+  - `chat_cmd` now accepts `cfg: mew_config::Config` and uses it directly (no second `mew_config::load()`).
+
+- `crates/mew/src/commands/run.rs`
+  - `run_cmd` now accepts `cfg: mew_config::Config` and uses it directly.
+
+- `crates/mew/src/setup/providers.rs`
+  - Improved the `build_provider` "unknown provider" error to include the config file path, the list of available providers, and a pointer to `state.toml` so the user can clear stale persisted state.
+
+## Verification
+
+- `cargo test --all` — all pass.
+- `cargo clippy --all -- -D warnings` — clean.
+- `cargo fmt -- --check` — clean.
+- `just arch-check` — pass.
+
+# 2026-07-25 — Add Gleam language support to code highlighter and hashline block resolver
+
+## Summary
+
+Added Gleam (`.gleam`) support to two systems:
+1. **`ratatui-mdstream`** — ```` ```gleam ```` code fences are now syntax-highlighted. `two-face` 0.5 does not bundle a Gleam syntax definition, so a custom `gleam.sublime-syntax` is embedded and merged into the `SyntaxSet` at init time via `SyntaxSet::into_builder()` + `SyntaxDefinition::load_from_str()`.
+2. **`mew-hashline`** — `SWAP.BLK` / `DEL.BLK` / `INS.BLK.POST` block resolution now works for `.gleam` files via the `tree-sitter-gleam` grammar.
+
+Changes:
+- `crates/mew-hashline/Cargo.toml` — added `tree-sitter-gleam = "1.0"` dependency.
+- `crates/mew-hashline/src/block.rs` — registered `("gleam", tree_sitter_gleam::LANGUAGE.into())` in `build_language_table()`; added `resolve_gleam_function_block` test.
+- `crates/ratatui-mdstream/resources/gleam.sublime-syntax` — new TextMate-style syntax definition covering Gleam keywords, types, strings, numbers, comments, constants, operators, and function calls. Written from scratch (not copied from any GPL source).
+- `crates/ratatui-mdstream/src/highlight/syntect.rs` — `syntax_set()` now extends two-face's `SyntaxSet` with the embedded Gleam definition; added `test_gleam_syntax_available` and `test_gleam_highlighting_produces_styles` tests.
+
+Verification:
+- `cargo test -p mew-hashline` — 57 passed (including new Gleam block test).
+- `cargo test -p ratatui-mdstream` — 22 passed (including 2 new Gleam tests).
+- `cargo test --all` — all pass, 0 failures.
+- `cargo clippy --all -- -D warnings` — clean.
+- `just arch-check` — pass.
+- `just theme-codegen-check` — pass.
+- `cargo fmt -- --check` — clean on changed files.
+
+Notes:
+- `two-face` 0.5 confirmed (via test program) to NOT include Gleam, hence the custom syntax file.
+- The sublime-syntax uses standard TextMate scope names (`keyword.control`, `storage.type`, `constant.numeric`, `entity.name.function`, etc.) that the existing `theme.tmTheme` already maps colors for.
+
 # 2026-07-19 — Switch Kimi to OpenAI adapter + fix reasoning_content deserialization
 
 ## Summary

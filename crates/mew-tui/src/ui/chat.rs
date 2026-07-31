@@ -217,11 +217,11 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         .take(visible_end.saturating_sub(scroll_offset))
         .cloned()
         .collect();
-    // `Wrap` is kept on as a safety net for the rare line that exceeds
-    // chat width after em-dash expansion during streaming. Since lines are
-    // pre-wrapped at build time, `WordWrapper` returns immediately per line
-    // (1 iteration), so this stays O(visible). The visible-window slice
-    // already eliminated ratatui's O(scroll.y) skip — `scroll` is 0 here.
+    // `Wrap` is kept on as a defensive safety net for any line that somehow
+    // exceeds chat width after pre-wrapping. Since lines are pre-wrapped at build
+    // time, `WordWrapper` returns immediately per line (1 iteration), so this
+    // stays O(visible). The visible-window slice already eliminated ratatui's
+    // O(scroll.y) skip — `scroll` is 0 here.
     let paragraph = Paragraph::new(Text::from(visible))
         .wrap(Wrap { trim: false })
         .scroll((0, 0));
@@ -502,7 +502,7 @@ pub(crate) fn build_chat_lines(
                                 }
                                 lines.extend(pending_lines);
                             }
-                            fix_em_dashes(lines)
+                            lines
                         } else {
                             if app.pending_md_rerender == Some(msg.id) {
                                 app.rendered_md_cache.remove(&tp.base.id);
@@ -516,9 +516,10 @@ pub(crate) fn build_chat_lines(
                                     Rc::unwrap_or_clone(Rc::clone(cached_lines))
                                 } else {
                                     cache.remove(&tp.base.id);
-                                    let lines = fix_em_dashes(ratatui_mdstream::render_markdown(
-                                        &tp.text, md_width, &md_theme,
-                                    ));
+                                    let expanded = tp.text.replace('\u{2014}', "— ");
+                                    let lines = ratatui_mdstream::render_markdown(
+                                        &expanded, md_width, &md_theme,
+                                    );
                                     let rc = Rc::new(lines);
                                     cache.insert(
                                         tp.base.id,
@@ -527,9 +528,10 @@ pub(crate) fn build_chat_lines(
                                     Rc::unwrap_or_clone(rc)
                                 }
                             } else {
-                                let lines = fix_em_dashes(ratatui_mdstream::render_markdown(
-                                    &tp.text, md_width, &md_theme,
-                                ));
+                                let expanded = tp.text.replace('\u{2014}', "— ");
+                                let lines = ratatui_mdstream::render_markdown(
+                                    &expanded, md_width, &md_theme,
+                                );
                                 let rc = Rc::new(lines);
                                 cache.insert(
                                     tp.base.id,
@@ -572,7 +574,7 @@ pub(crate) fn build_chat_lines(
                 Part::Reasoning(rp) => {
                     let line_count = rp.text.lines().count();
                     let is_expanded = app.reasoning_expanded.contains(&rp.base.id);
-                    let dur_text = app.reasoning_elapsed.map(|d| {
+                    let dur_text = app.reasoning_elapsed.get(&rp.base.id).map(|d| {
                         let secs = d.as_secs_f64();
                         if secs < 0.1 {
                             format!("{}ms", d.as_millis())
@@ -837,38 +839,6 @@ fn push_tool_line(width: u16, mut spans: Vec<Span<'static>>, pad_style: Style) -
             .push(Span::styled(" ".repeat((width - used) as usize), pad_style));
     }
     line
-}
-
-fn fix_em_dashes(lines: Vec<ratatui::text::Line<'static>>) -> Vec<ratatui::text::Line<'static>> {
-    lines
-        .into_iter()
-        .map(|line| {
-            let spans: Vec<Span> = line
-                .spans
-                .into_iter()
-                .map(|s| {
-                    let content: String = if s.content.contains('\u{2014}') {
-                        s.content
-                            .chars()
-                            .map(|c| {
-                                if c == '\u{2014}' {
-                                    "— ".to_string()
-                                } else {
-                                    c.to_string()
-                                }
-                            })
-                            .collect()
-                    } else {
-                        s.content.to_string()
-                    };
-                    Span::styled(content, s.style)
-                })
-                .collect();
-            let mut new_line = Line::from(spans);
-            new_line.style = line.style;
-            new_line
-        })
-        .collect()
 }
 
 fn push_tool_edge(width: u16, is_top: bool, tool_bg: Color) -> Option<Line<'static>> {
@@ -1180,6 +1150,59 @@ mod tests {
     }
 
     #[test]
+    fn test_em_dash_expansion_before_markdown_wrap() {
+        // Regression for the bottom-clipping bug: em-dashes were expanded
+        // after markdown wrapping, so a line that fit `md_width` before
+        // expansion became 1 cell too wide afterwards and the Paragraph
+        // safety-net re-wrapped it, pushing the last row under the input box.
+        // The fix expands em-dashes before the markdown renderer wraps the
+        // text, so every produced line fits inside the chat area.
+        use crate::app::App;
+        use mew_message::{Message, Part, Role, TextPart};
+
+        let mut app = App::new();
+        let chat_width = 12u16;
+        let md_width = chat_width - 2;
+
+        // Original display width is exactly md_width (10). After em-dash
+        // expansion it would be 11, so it must wrap *before* expansion.
+        let text = "abcd — def";
+        let msg_id = ulid::Ulid::new();
+        app.push_message(Message {
+            id: msg_id,
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::Text(TextPart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: msg_id,
+                    session_id: ulid::Ulid::new(),
+                },
+                text: text.to_string(),
+                synthetic: false,
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        });
+
+        let built = build_chat_lines(&mut app, md_width, chat_width);
+        assert!(
+            !built.lines.is_empty(),
+            "expected at least one rendered line"
+        );
+        for (i, line) in built.lines.iter().enumerate() {
+            let line_width = line.width();
+            assert!(
+                line_width <= chat_width as usize,
+                "line {i} width {line_width} exceeds chat_width {chat_width}: {line:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_chat_lines_padded_to_full_width_with_bg() {
         // Every line produced by build_chat_lines must be padded to the
         // full chat_width so wrapped continuation rows carry the chat
@@ -1235,5 +1258,84 @@ mod tests {
             let has_bg = line.spans.iter().any(|s| s.style.bg == Some(chat_bg));
             assert!(has_bg, "line {i} has no span with chat surface bg");
         }
+    }
+
+    #[test]
+    fn test_reasoning_headers_use_per_part_elapsed() {
+        use crate::app::App;
+        use mew_message::{Message, Part, ReasoningPart, Role};
+
+        let mut app = App::new();
+        let chat_width = 80u16;
+        let md_width = chat_width - 2;
+
+        let session_id = ulid::Ulid::new();
+        let msg_id = ulid::Ulid::new();
+        let reasoning1_id = ulid::Ulid::new();
+        let reasoning2_id = ulid::Ulid::new();
+
+        app.push_message(Message {
+            id: msg_id,
+            session_id,
+            role: Role::Assistant,
+            parts: vec![
+                Part::Reasoning(ReasoningPart {
+                    base: mew_message::PartBase {
+                        id: reasoning1_id,
+                        message_id: msg_id,
+                        session_id,
+                    },
+                    text: "first thought".to_string(),
+                    signature: None,
+                    encrypted_content: None,
+                }),
+                Part::Reasoning(ReasoningPart {
+                    base: mew_message::PartBase {
+                        id: reasoning2_id,
+                        message_id: msg_id,
+                        session_id,
+                    },
+                    text: "second thought".to_string(),
+                    signature: None,
+                    encrypted_content: None,
+                }),
+            ],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        });
+
+        // Simulate two different recorded durations for each reasoning block.
+        app.reasoning_elapsed
+            .insert(reasoning1_id, std::time::Duration::from_secs(1));
+        app.reasoning_elapsed
+            .insert(reasoning2_id, std::time::Duration::from_secs(5));
+
+        let built = build_chat_lines(&mut app, md_width, chat_width);
+        let header_lines: Vec<String> = built
+            .lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .filter(|s| s.contains("thought for"))
+            .collect();
+
+        assert_eq!(header_lines.len(), 2, "expected two reasoning headers");
+        assert!(
+            header_lines[0].contains("thought for 1.0s"),
+            "first header should show 1.0s: {}",
+            header_lines[0]
+        );
+        assert!(
+            header_lines[1].contains("thought for 5.0s"),
+            "second header should show 5.0s: {}",
+            header_lines[1]
+        );
     }
 }

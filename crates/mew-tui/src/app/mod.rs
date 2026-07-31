@@ -129,11 +129,15 @@ pub struct App {
     pub settings: Option<crate::settings::SettingsState>,
     pub slash_selected: usize,
     pub slash_scroll: usize,
+    /// Last visible item count used to lay out the slash-autocomplete popup.
+    /// Updated by `ui/mod.rs` each frame so `adjust_slash_scroll` can keep the
+    /// selection in view.
+    pub slash_visible: usize,
     pub bash_expanded: bool,
     pub reasoning_expanded: HashSet<PartId>,
     pub reasoning_active_id: Option<PartId>,
     pub reasoning_started_at: Option<std::time::Instant>,
-    pub reasoning_elapsed: Option<std::time::Duration>,
+    pub reasoning_elapsed: HashMap<PartId, std::time::Duration>,
     pub reasoning_header_rows: Vec<(PartId, usize)>,
     pub pending_md_rerender: Option<mew_message::MessageId>,
     pub md_state: mdstream::DocumentState,
@@ -395,6 +399,39 @@ pub struct PermissionState {
     pub input: serde_json::Value,
     pub tx: Option<tokio::sync::oneshot::Sender<mew_hooks::PermissionDecision>>,
     pub selected: usize,
+    /// Vertical scroll offset for the tool-input text when it overflows the
+    /// content area.
+    pub scroll: u16,
+}
+
+impl PermissionState {
+    /// Maximum scroll offset that keeps the tool input content in view.
+    /// `chat_height` is the terminal's main-area height (used to derive the
+    /// popup height). Returns `None` if there is no meaningful scroll range.
+    pub fn max_scroll(&self, chat_height: u16) -> Option<u16> {
+        let popup_height = Self::popup_height(chat_height);
+        let content_height = popup_height.saturating_sub(8).max(3);
+        let lines = self.input_lines();
+        let total = lines as u16;
+        if total <= content_height {
+            return None;
+        }
+        Some(total.saturating_sub(content_height))
+    }
+
+    /// Number of text lines the rendered tool input would occupy before wrapping.
+    fn input_lines(&self) -> usize {
+        serde_json::to_string_pretty(&self.input)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    }
+
+    /// Height of the popup for the given terminal main-area height.
+    pub fn popup_height(chat_height: u16) -> u16 {
+        // Popup is the terminal height minus a 2-row margin top and bottom.
+        chat_height.saturating_sub(4).max(10)
+    }
 }
 
 /// A pending persona switch awaiting user confirmation. Populated by the
@@ -525,11 +562,12 @@ impl App {
             settings: None,
             slash_selected: 0,
             slash_scroll: 0,
+            slash_visible: 0,
             bash_expanded: false,
             reasoning_expanded: HashSet::new(),
             reasoning_active_id: None,
             reasoning_started_at: None,
-            reasoning_elapsed: None,
+            reasoning_elapsed: HashMap::new(),
             reasoning_header_rows: Vec::new(),
             pending_md_rerender: None,
             md_state: mdstream::DocumentState::new(),
@@ -1338,6 +1376,21 @@ impl App {
         }
     }
 
+    /// Record the elapsed duration for the active reasoning block. When
+    /// `collapse` is true, also remove it from the expanded set so the header
+    /// closes; otherwise the block stays expanded (used for the final
+    /// reasoning in a message or when explicitly finalizing a part).
+    fn record_reasoning_elapsed(&mut self, collapse: bool) {
+        if let Some(id) = self.reasoning_active_id.take() {
+            if let Some(start) = self.reasoning_started_at.take() {
+                self.reasoning_elapsed.insert(id, start.elapsed());
+            }
+            if collapse {
+                self.reasoning_expanded.remove(&id);
+            }
+        }
+    }
+
     /// Insert an @-mention into the input, replacing the trigger `@` that
     /// opened the picker. Without this, the trigger `@` (already in the
     /// input) plus the mention's leading `@` produces `@@path`.
@@ -1461,10 +1514,7 @@ impl App {
         if filtered.is_empty() {
             return;
         }
-        // Visible count: min(half the chat area height, 12). Falls back to
-        // 3 when chat_area hasn't been populated yet (e.g. before first draw).
-        let visible: usize = self.chat_area.height.checked_div(2).unwrap_or(3).min(12) as usize;
-        let visible = visible.max(1);
+        let visible = self.slash_visible.max(1);
         if self.slash_selected < self.slash_scroll {
             self.slash_scroll = self.slash_selected;
         } else if self.slash_selected >= self.slash_scroll + visible {
@@ -1489,18 +1539,15 @@ impl App {
                 // the model moves on to text or a tool call.
                 match &part {
                     Part::Reasoning(rp) => {
+                        // If a previous reasoning block is still active, close
+                        // it out before starting a new one.
+                        self.record_reasoning_elapsed(false);
                         self.reasoning_started_at = Some(std::time::Instant::now());
-                        self.reasoning_elapsed = None;
                         self.reasoning_active_id = Some(rp.base.id);
                         self.reasoning_expanded.insert(rp.base.id);
                     }
                     Part::Text(_) | Part::ToolCall(_) => {
-                        if let Some(start) = self.reasoning_started_at.take() {
-                            self.reasoning_elapsed = Some(start.elapsed());
-                        }
-                        if let Some(id) = self.reasoning_active_id.take() {
-                            self.reasoning_expanded.remove(&id);
-                        }
+                        self.record_reasoning_elapsed(true);
                     }
                     _ => {}
                 }
@@ -1559,13 +1606,21 @@ impl App {
                 // once via the Part::Reasoning render.
                 if is_text_delta {
                     if let Some(ref mut stream) = self.md_stream {
-                        let update = stream.append(&delta);
+                        // Expand em-dashes before the markdown renderer wraps the
+                        // text, so the wrap width accounts for the extra cell each
+                        // em-dash gains. This prevents the Paragraph safety-net from
+                        // re-wrapping a line and pushing content below the chat area.
+                        let expanded_delta = delta.replace('\u{2014}', "— ");
+                        let update = stream.append(&expanded_delta);
                         self.md_state.apply(update);
                     }
                 }
                 self.mark_chat_dirty();
             }
-            AgentEvent::Provider(ProviderEvent::PartEnd { .. }) => {
+            AgentEvent::Provider(ProviderEvent::PartEnd { part_id }) => {
+                if self.reasoning_active_id == Some(part_id) {
+                    self.record_reasoning_elapsed(false);
+                }
                 self.mark_chat_dirty();
             }
             AgentEvent::Provider(ProviderEvent::MessageEnd {
@@ -1578,6 +1633,9 @@ impl App {
                     let update: mdstream::Update = stream.finalize();
                     self.md_state.apply(update);
                 }
+                // If the message ended with a reasoning block, record its
+                // elapsed time now so it displays correctly in the transcript.
+                self.record_reasoning_elapsed(false);
                 // Mark the last message for re-render on next frame.
                 if let Some(msg) = self.messages.last() {
                     self.pending_md_rerender = Some(msg.id);
@@ -1630,6 +1688,7 @@ impl App {
                     input: call.input,
                     tx: Some(tx),
                     selected: 0,
+                    scroll: 0,
                 });
             }
             AgentEvent::AskUser {
@@ -1827,6 +1886,7 @@ impl App {
                     input: call.input.clone(),
                     tx: Some(tx),
                     selected: 0,
+                    scroll: 0,
                 });
                 self.mode = crate::app::Mode::PermissionPrompt;
             }
@@ -1837,6 +1897,7 @@ impl App {
                     input: serde_json::json!({"path": path.to_string_lossy()}),
                     tx: Some(tx),
                     selected: 0,
+                    scroll: 0,
                 });
                 self.mode = crate::app::Mode::PermissionPrompt;
             }

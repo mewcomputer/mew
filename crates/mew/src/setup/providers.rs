@@ -626,7 +626,26 @@ pub(crate) fn build_provider(
         .providers
         .get(provider_id)
         .cloned()
-        .with_context(|| format!("unknown provider {}", provider_id))?;
+        .with_context(|| {
+            let config_path = mew_config::config_dir().join("config.toml");
+            let available: Vec<&str> = cfg.providers.keys().map(|s| s.as_str()).collect();
+            format!(
+                "unknown provider '{}'.\n\
+                 Config loaded from: {}\n\
+                 Available providers: {}\n\
+                 Fix: add a [providers.{}] entry for '{}', or clear the stale provider from state.toml at {}",
+                provider_id,
+                config_path.display(),
+                if available.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    available.join(", ")
+                },
+                provider_id,
+                provider_id,
+                mew_config::state_file_path().display()
+            )
+        })?;
 
     // Router providers are task-only primitives used by subagents and the
     // permission classifier. They cannot be selected as the main chat provider.

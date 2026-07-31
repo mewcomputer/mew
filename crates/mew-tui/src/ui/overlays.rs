@@ -136,8 +136,10 @@ pub(super) fn draw_permission_modal(
     area: Rect,
     tokens: &crate::theme::Theme,
 ) {
+    // Use most of the terminal height (minus a 2-row margin top/bottom) so
+    // long tool inputs are readable. Cap width at 60.
     let width = 60u16.min(area.width.saturating_sub(4));
-    let height = 14u16.min(area.height.saturating_sub(4));
+    let height = PermissionState::popup_height(area.height);
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
     let popup = Rect::new(x, y, width, height);
@@ -155,7 +157,7 @@ pub(super) fn draw_permission_modal(
     );
 
     let tool_input = serde_json::to_string_pretty(&perm.input).unwrap_or_default();
-    let text = Text::from(vec![
+    let lines = vec![
         Line::from(vec![
             Span::styled(
                 "tool  ",
@@ -191,10 +193,18 @@ pub(super) fn draw_permission_modal(
                 .fg(tokens.resolve("text.muted"))
                 .bg(tokens.resolve("status_bar.background")),
         )),
-    ]);
-
-    let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
-    f.render_widget(paragraph, inner);
+    ];
+    let content_height = inner.height.saturating_sub(2).max(3);
+    let paragraph = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: true })
+        .scroll((perm.scroll, 0));
+    let content_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: content_height,
+    };
+    f.render_widget(paragraph, content_area);
 
     let options = [("allow once", 'a'), ("session", 's'), ("deny", 'd')];
     let mut option_lines = Vec::new();
@@ -215,7 +225,7 @@ pub(super) fn draw_permission_modal(
 
     let option_area = Rect::new(
         inner.x,
-        inner.y + inner.height.saturating_sub(2),
+        inner.y + inner.height.saturating_sub(1),
         inner.width,
         1,
     );

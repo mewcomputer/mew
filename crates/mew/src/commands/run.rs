@@ -42,6 +42,7 @@ pub(crate) fn resolve_mode(
 }
 
 pub(crate) async fn run_cmd(
+    cfg: mew_config::Config,
     provider_flag: String,
     model_flag: Option<String>,
     variant_flag: Option<String>,
@@ -53,8 +54,6 @@ pub(crate) async fn run_cmd(
     if prompt.is_empty() {
         anyhow::bail!("missing prompt");
     }
-
-    let cfg = mew_config::load().context("load config")?;
 
     let cat = load_catalog(&cfg).await;
 

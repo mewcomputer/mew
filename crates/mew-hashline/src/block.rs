@@ -14,7 +14,7 @@ pub fn nop_block_resolver(_args: &BlockResolverArgs) -> Option<BlockSpan> {
 }
 
 /// Build a block resolver backed by tree-sitter for Rust, TypeScript, Python,
-/// Go, and Markdown.
+/// Go, Markdown, and Gleam.
 pub fn default_block_resolver() -> Box<BlockResolver> {
     let languages = build_language_table();
     Box::new(move |args| resolve_block(&languages, args.path, args.text, args.line))
@@ -155,6 +155,7 @@ fn build_language_table() -> Vec<(&'static str, Language)> {
         ("go", tree_sitter_go::LANGUAGE.into()),
         ("md", tree_sitter_md::LANGUAGE.into()),
         ("markdown", tree_sitter_md::LANGUAGE.into()),
+        ("gleam", tree_sitter_gleam::LANGUAGE.into()),
     ]
 }
 
@@ -254,6 +255,18 @@ mod tests {
             line: 1,
         });
         assert_eq!(span, None);
+    }
+
+    #[test]
+    fn resolve_gleam_function_block() {
+        let text = "pub fn a() {}\npub fn b() {\n  io.println(\"hi\")\n}\npub fn c() {}\n";
+        let resolver = default_block_resolver();
+        let span = resolver(&BlockResolverArgs {
+            path: "src/main.gleam",
+            text,
+            line: 2,
+        });
+        assert_eq!(span, Some(BlockSpan { start: 2, end: 4 }));
     }
 
     #[test]

@@ -19,6 +19,7 @@ tree-sitter-typescript = "0.23"
 tree-sitter-python = "0.25"
 tree-sitter-go = "0.25"
 tree-sitter-md = { version = "0.5", features = ["tree-sitter"] }
+tree-sitter-gleam = "1.0"
 
 [dev-dependencies]
 tokio = { workspace = true }
