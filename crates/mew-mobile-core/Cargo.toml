@@ -10,6 +10,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 name = "mew_mobile_core"
 
 [dependencies]
+mew-client-core = { workspace = true }
 mew-protocol = { workspace = true }
 mew-message = { workspace = true }
 iroh = { workspace = true }

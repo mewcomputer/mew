@@ -1,3 +1,29 @@
+# 2026-07-30 — Start framework-independent desktop client core
+
+## Summary
+
+Started the Tauri-to-GPUI migration with a client-core seam that is independent
+of GPUI, UniFFI, and platform services.
+
+## Changes
+
+- Added `crates/mew-client-core` to the workspace.
+- Added a tolerant server-message codec and typed client-message encoder.
+- Added a transport contract with an in-memory implementation for deterministic
+  tests.
+- Added a reducer for session history, streaming provider parts, usage,
+  optimistic prompt echo handling, model/session metadata, and required-action
+  tracking.
+- Updated `mew-mobile-core` to consume the shared codec while preserving its
+  public compatibility module.
+
+## Verification
+
+- `cargo test -p mew-client-core` — 7 tests pass.
+- `cargo test -p mew-mobile-core --lib` — 24 tests pass.
+- `cargo clippy -p mew-client-core -p mew-mobile-core --all-targets -- -D warnings` — clean.
+- `cargo fmt --all` — clean.
+
 # 2026-07-30 — Re-fix Kimi K3 tool-call response mismatch (jobblock:80)
 
 ## Summary
