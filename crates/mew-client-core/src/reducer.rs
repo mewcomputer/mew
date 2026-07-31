@@ -140,6 +140,11 @@ pub struct ClientState {
 }
 
 impl ClientState {
+    pub fn set_connection_status(&mut self, status: ConnectionStatus) -> ClientEvent {
+        self.connection = Some(status.clone());
+        ClientEvent::ConnectionChanged(status)
+    }
+
     pub fn session(&self, session_id: &str) -> Option<&ClientSession> {
         self.sessions.get(session_id)
     }

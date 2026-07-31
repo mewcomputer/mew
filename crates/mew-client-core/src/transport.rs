@@ -35,7 +35,6 @@ pub struct InMemoryTransport {
 struct InMemoryState {
     inbound: VecDeque<ServerMessage>,
     outbound: Vec<ClientMessage>,
-    closed: bool,
 }
 
 impl InMemoryTransport {
@@ -58,42 +57,49 @@ impl InMemoryTransport {
 
 pub struct InMemoryConnection {
     state: Arc<Mutex<InMemoryState>>,
+    closed: bool,
 }
 
 #[async_trait]
 impl ClientTransport for InMemoryTransport {
     async fn connect(&self) -> Result<Box<dyn ClientConnection>, TransportError> {
-        if self.state.lock().expect("in-memory transport lock").closed {
-            return Err(TransportError::Closed);
-        }
-        Ok(Box::new(InMemoryConnection {
-            state: Arc::clone(&self.state),
-        }))
+        Ok(Box::new(InMemoryConnection::new(Arc::clone(&self.state))))
     }
 }
 
 #[async_trait]
 impl ClientConnection for InMemoryConnection {
+    // Closing one connection must not make the transport factory unusable for
+    // a later reconnect attempt.
     async fn send(&mut self, message: ClientMessage) -> Result<(), TransportError> {
-        let mut state = self.state.lock().expect("in-memory transport lock");
-        if state.closed {
+        if self.closed {
             return Err(TransportError::Closed);
         }
+        let mut state = self.state.lock().expect("in-memory transport lock");
         state.outbound.push(message);
         Ok(())
     }
 
     async fn receive(&mut self) -> Result<Option<ServerMessage>, TransportError> {
-        let mut state = self.state.lock().expect("in-memory transport lock");
-        if state.closed {
+        if self.closed {
             return Err(TransportError::Closed);
         }
+        let mut state = self.state.lock().expect("in-memory transport lock");
         Ok(state.inbound.pop_front())
     }
 
     async fn close(&mut self) -> Result<(), TransportError> {
-        self.state.lock().expect("in-memory transport lock").closed = true;
+        self.closed = true;
         Ok(())
+    }
+}
+
+impl InMemoryConnection {
+    fn new(state: Arc<Mutex<InMemoryState>>) -> Self {
+        Self {
+            state,
+            closed: false,
+        }
     }
 }
 

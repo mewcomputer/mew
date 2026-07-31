@@ -1,3 +1,23 @@
+# 2026-07-30 — Add headless client lifecycle and reconnect coverage
+
+## Summary
+
+Connected the shared client reducer to an async transport driver so the core
+now proves a complete headless conversation lifecycle.
+
+## Changes
+
+- Added `ClientEngine` for typed send, receive, prompt, and close operations.
+- Made the in-memory transport support independent reconnects.
+- Added a lifecycle test covering session attach, prompt echo handling,
+  streaming text, required actions, turn usage, command sending, disconnect,
+  and session-history restoration.
+
+## Verification
+
+- `cargo test -p mew-client-core` — 8 tests pass.
+- `cargo clippy -p mew-client-core --all-targets -- -D warnings` — clean.
+
 # 2026-07-30 — Start framework-independent desktop client core
 
 ## Summary
