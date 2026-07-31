@@ -1,0 +1,15 @@
+[package]
+name = "mew-desktop-supervisor"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+tungstenite = "0.24"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+

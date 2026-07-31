@@ -32,6 +32,7 @@ members = [
     "crates/ratatui-mdstream",
     "crates/mew-mobile-core",
     "crates/mew-client-core",
+    "crates/mew-desktop-supervisor",
 ]
 resolver = "2"
 exclude = ["mew-web-ui/src-tauri"]
@@ -161,6 +162,7 @@ mew-protocol = { path = "crates/mew-protocol" }
 mew-daemon = { path = "crates/mew-daemon" }
 mew-web-bridge = { path = "crates/mew-web-bridge" }
 mew-client-core = { path = "crates/mew-client-core" }
+mew-desktop-supervisor = { path = "crates/mew-desktop-supervisor" }
 ratatui-mdstream = { path = "crates/ratatui-mdstream" }
 
 # Random number generation (kept for the TUI spinner; no other consumers).

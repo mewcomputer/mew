@@ -1,3 +1,27 @@
+# 2026-07-30 — Add Tauri-free desktop supervisor boundary
+
+## Summary
+
+Added the first native-desktop daemon lifecycle boundary without importing
+Tauri, CEF, or frontend types into the supervisor.
+
+## Changes
+
+- Added `crates/mew-desktop-supervisor` to the workspace.
+- Added attach-only handling for explicit WebSocket endpoints.
+- Added app-owned local daemon launch with ephemeral loopback ports, optional
+  logging, health probing, restart, and shutdown ownership.
+- Rejected ambiguous remote configuration where an explicit endpoint is mixed
+  with app-owned remote mode.
+- Kept Tauri sidecar and CEF integration in the existing adapter until it can
+  consume this contract safely.
+
+## Verification
+
+- `cargo test -p mew-desktop-supervisor` — 4 tests pass.
+- `cargo clippy -p mew-desktop-supervisor --all-targets -- -D warnings` — clean.
+- `git diff --check` — clean.
+
 # 2026-07-30 — Add headless client lifecycle and reconnect coverage
 
 ## Summary
