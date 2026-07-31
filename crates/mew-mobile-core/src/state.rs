@@ -195,6 +195,9 @@ pub struct ModelInfo {
 /// Per-session state tracker. Assembles parts from provider events.
 pub struct SessionState {
     pub session_id: String,
+    /// Canonical framework-independent session state. The fields below remain
+    /// as the UniFFI projection until the mobile bindings migrate fully.
+    pub shared: mew_client_core::ClientSession,
     pub messages: Vec<ChatMessage>,
     pub running: bool,
     pub usage_cost: f64,
@@ -221,6 +224,7 @@ pub struct SessionState {
 impl SessionState {
     pub fn new(session_id: String) -> Self {
         Self {
+            shared: mew_client_core::ClientSession::new(session_id.clone()),
             session_id,
             messages: Vec::new(),
             running: false,
@@ -245,6 +249,14 @@ impl SessionState {
     /// Apply a provider event wire to the session state.
     /// Returns true if the event was consumed.
     pub fn apply_provider_event(&mut self, event: &mew_message::ProviderEventWire) -> bool {
+        let shared_events = self.shared.apply_provider_event(event.clone());
+        let shared_handled = !shared_events.is_empty()
+            || matches!(event, mew_message::ProviderEventWire::PartEnd { .. });
+        self.sync_from_shared();
+        if shared_handled {
+            return true;
+        }
+
         use mew_message::{Part, ProviderEventWire};
         match event {
             ProviderEventWire::PartStart { part } => {
@@ -387,6 +399,115 @@ impl SessionState {
             _ => false,
         }
     }
+
+    fn sync_from_shared(&mut self) {
+        self.messages = self
+            .shared
+            .messages
+            .iter()
+            .filter_map(to_mobile_message)
+            .collect();
+        self.running = self.shared.running;
+        self.usage_cost = self.shared.usage.cost;
+        self.input_tokens = self.shared.usage.input_tokens;
+        self.output_tokens = self.shared.usage.output_tokens;
+        self.turns = self.shared.usage.turns;
+        self.streaming_part_id = self.shared.streaming_part_id.map(|id| id.to_string());
+        self.streaming_text = self.shared.streaming_text.clone();
+        self.last_sent_prompt = self.shared.last_sent_prompt.clone();
+        self.last_manifest = self
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| message.assistant_meta.as_ref())
+            .and_then(|meta| meta.manifest.clone());
+    }
+}
+
+fn to_mobile_message(message: &mew_message::Message) -> Option<ChatMessage> {
+    let role = match message.role {
+        mew_message::Role::User => "user",
+        mew_message::Role::Assistant => "assistant",
+        mew_message::Role::System => "system",
+    };
+    let parts = message
+        .parts
+        .iter()
+        .filter_map(to_mobile_part)
+        .collect::<Vec<_>>();
+    let assistant_meta = message.assistant.as_ref().map(|meta| {
+        let model_id = meta
+            .manifest
+            .as_ref()
+            .map(|manifest| manifest.model.clone())
+            .unwrap_or_else(|| meta.model_id.clone());
+        MobileAssistantMeta {
+            model_id,
+            cost: meta.cost,
+            manifest: meta.manifest.as_ref().map(to_mobile_manifest),
+        }
+    });
+    Some(ChatMessage {
+        id: message.id.to_string(),
+        role: role.into(),
+        parts,
+        assistant_meta,
+    })
+}
+
+fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
+    let base = match part {
+        mew_message::Part::Text(part) => {
+            return Some(MessagePart {
+                id: part.base.id.to_string(),
+                kind: PartKind::Text,
+                text: Some(part.text.clone()),
+                tool_name: None,
+                tool_state: None,
+                tool_input: None,
+                tool_output: None,
+                tool_error: None,
+                tool_call_id: None,
+                tool_time_start: None,
+                tool_time_end: None,
+                tool_sensitivity: None,
+            })
+        }
+        mew_message::Part::Reasoning(part) => {
+            return Some(MessagePart {
+                id: part.base.id.to_string(),
+                kind: PartKind::Reasoning,
+                text: Some(part.text.clone()),
+                tool_name: None,
+                tool_state: None,
+                tool_input: None,
+                tool_output: None,
+                tool_error: None,
+                tool_call_id: None,
+                tool_time_start: None,
+                tool_time_end: None,
+                tool_sensitivity: None,
+            })
+        }
+        mew_message::Part::ToolCall(part) => part,
+        _ => return None,
+    };
+    let (tool_input, tool_output, tool_error, tool_time_start, tool_time_end) =
+        tool_state_fields(&base.state);
+    Some(MessagePart {
+        id: base.base.id.to_string(),
+        kind: PartKind::ToolCall,
+        text: None,
+        tool_name: Some(base.tool_name.clone()),
+        tool_state: Some(format!("{:?}", base.state).to_lowercase()),
+        tool_input,
+        tool_output,
+        tool_error,
+        tool_call_id: Some(base.call_id.clone()),
+        tool_time_start,
+        tool_time_end,
+        tool_sensitivity: None,
+    })
 }
 
 /// Extracted fields from a `ToolState`.
@@ -466,6 +587,7 @@ mod tests {
         });
 
         assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.shared.messages.len(), 1);
         assert!(state.streaming_part_id.is_some());
         assert_eq!(state.streaming_text, "Hello");
 
@@ -475,6 +597,10 @@ mod tests {
             delta: " world".into(),
         });
         assert_eq!(state.streaming_text, "Hello world");
+        assert!(matches!(
+            &state.shared.messages[0].parts[0],
+            mew_message::Part::Text(part) if part.text == "Hello world"
+        ));
 
         state.apply_provider_event(&mew_message::ProviderEventWire::PartEnd { part_id });
         assert!(state.streaming_part_id.is_none());
@@ -492,6 +618,7 @@ mod tests {
             cost: 0.0042,
         });
         assert_eq!(state.usage_cost, 0.0042);
+        assert_eq!(state.shared.usage.cost, 0.0042);
     }
 
     #[test]
@@ -515,6 +642,7 @@ mod tests {
         assert_eq!(state.input_tokens, 100);
         assert_eq!(state.output_tokens, 50);
         assert_eq!(state.turns, 1);
+        assert_eq!(state.shared.usage.turns, 1);
 
         // Second turn: 200 input, 75 output tokens — should accumulate.
         state.apply_provider_event(&mew_message::ProviderEventWire::MessageEnd {

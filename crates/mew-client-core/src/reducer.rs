@@ -34,7 +34,7 @@ pub struct ClientSession {
 }
 
 impl ClientSession {
-    fn new(session_id: String) -> Self {
+    pub fn new(session_id: String) -> Self {
         Self {
             session_id,
             cwd: None,
@@ -50,6 +50,88 @@ impl ClientSession {
             streaming_text: String::new(),
         }
     }
+
+    /// Apply provider events to one session without requiring a platform
+    /// client to own the daemon-wide reducer.
+    pub fn apply_provider_event(&mut self, event: ProviderEventWire) -> Vec<SessionEvent> {
+        // Keep the daemon-wide reducer as the behavioral source of truth while
+        // this API is introduced. The temporary projection is intentionally
+        // private to the core and can be removed once all adapters consume the
+        // session reducer directly.
+        let session_id = self.session_id.clone();
+        let mut state = ClientState {
+            attached_session: Some(session_id.clone()),
+            ..ClientState::default()
+        };
+        state.sessions.insert(session_id.clone(), self.clone());
+        let events = state.apply_provider_event(event);
+        *self = state
+            .sessions
+            .remove(&session_id)
+            .expect("projected client session");
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                ClientEvent::MessageChanged { .. } => Some(SessionEvent::MessageChanged),
+                ClientEvent::TextDelta { part_id, delta, .. } => {
+                    Some(SessionEvent::TextDelta { part_id, delta })
+                }
+                ClientEvent::TurnEnded {
+                    cost,
+                    input_tokens,
+                    output_tokens,
+                    ..
+                } => Some(SessionEvent::TurnEnded {
+                    cost,
+                    input_tokens,
+                    output_tokens,
+                }),
+                ClientEvent::Error(message) => Some(SessionEvent::Error(message)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn record_prompt(&mut self, text: String) {
+        self.last_sent_prompt = Some(text.clone());
+        let session_id = Ulid::from_string(&self.session_id).unwrap_or_else(|_| Ulid::new());
+        let message_id = Ulid::new();
+        let part_id = Ulid::new();
+        self.messages.push(Message {
+            id: message_id,
+            session_id,
+            role: Role::User,
+            parts: vec![Part::Text(mew_message::TextPart {
+                base: mew_message::PartBase {
+                    id: part_id,
+                    message_id,
+                    session_id,
+                },
+                text,
+                synthetic: false,
+            })],
+            time: Time {
+                created: now_millis(),
+                completed: None,
+            },
+            assistant: None,
+        });
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    MessageChanged,
+    TextDelta {
+        part_id: PartId,
+        delta: String,
+    },
+    TurnEnded {
+        cost: f64,
+        input_tokens: u32,
+        output_tokens: u32,
+    },
+    Error(String),
 }
 
 #[derive(Debug, Clone)]
@@ -158,30 +240,7 @@ impl ClientState {
     /// Record a prompt before sending it. A later UserMessage echo is matched
     /// and consumed instead of duplicating the message in the transcript.
     pub fn record_prompt(&mut self, session_id: &str, text: String) {
-        let session = self.session_mut(session_id);
-        session.last_sent_prompt = Some(text.clone());
-        let session_id_ulid = Ulid::from_string(session_id).unwrap_or_else(|_| Ulid::new());
-        let message_id = Ulid::new();
-        let part_id = Ulid::new();
-        session.messages.push(Message {
-            id: message_id,
-            session_id: session_id_ulid,
-            role: Role::User,
-            parts: vec![Part::Text(mew_message::TextPart {
-                base: mew_message::PartBase {
-                    id: part_id,
-                    message_id,
-                    session_id: session_id_ulid,
-                },
-                text,
-                synthetic: false,
-            })],
-            time: Time {
-                created: now_millis(),
-                completed: None,
-            },
-            assistant: None,
-        });
+        self.session_mut(session_id).record_prompt(text);
     }
 
     pub fn apply_server_message(&mut self, message: ServerMessage) -> Vec<ClientEvent> {

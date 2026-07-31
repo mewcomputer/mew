@@ -396,6 +396,7 @@ impl MobileCore {
                 let mut ss_lock = conn.state.session_state.lock().unwrap();
                 if let Some(ss) = ss_lock.as_mut() {
                     ss.last_sent_prompt = Some(text.clone());
+                    ss.shared.record_prompt(text.clone());
                     ss.messages.push(state::ChatMessage {
                         id: ulid::Ulid::new().to_string(),
                         role: "user".into(),

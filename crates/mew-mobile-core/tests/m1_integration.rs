@@ -124,6 +124,9 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
         groups_store: server.groups_store.clone(),
         thinking_setter: None,
         auto_summary_enabled: server.auto_summary_enabled.clone(),
+        remote_scope: None,
+        remote_token: None,
+        remote_store: None,
     };
 
     let daemon_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
@@ -296,6 +299,9 @@ impl Harness {
             groups_store: server.groups_store.clone(),
             thinking_setter: None,
             auto_summary_enabled: server.auto_summary_enabled.clone(),
+            remote_scope: None,
+            remote_token: None,
+            remote_store: None,
         };
 
         let daemon_endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)

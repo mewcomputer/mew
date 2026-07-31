@@ -1,3 +1,28 @@
+# 2026-07-30 — Route mobile session projection through shared core
+
+## Summary
+
+The mobile session adapter now maintains canonical `mew-client-core` session
+state and projects it into the existing UniFFI records, preserving mobile
+metadata and optimistic prompt behavior.
+
+## Changes
+
+- Added canonical prompt recording and provider-event projection helpers to
+  `mew-client-core`.
+- Added a shared session field to mobile `SessionState` and synchronized text,
+  reasoning, tool, usage, and manifest data into the mobile representation.
+- Preserved manifest model identifiers and optimistic prompt echo deduplication.
+- Updated stale iroh test fixtures for the current remote-auth handler shape.
+
+## Verification
+
+- `cargo test -p mew-mobile-core --lib` — 24 tests pass.
+- `cargo test -p mew-client-core` — 8 tests pass.
+- `cargo test -p mew-mobile-core --features test-harness --test m0_spike -- --nocapture` — pass.
+- `cargo test -p mew-mobile-core --features test-harness --test m1_integration -- --nocapture` — 2 tests pass.
+- `cargo clippy -p mew-mobile-core -p mew-client-core --all-targets -- -D warnings` — clean.
+
 # 2026-07-30 — Add Tauri-free desktop supervisor boundary
 
 ## Summary
