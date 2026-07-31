@@ -94,6 +94,42 @@ impl DesktopSupervisor {
         self.endpoint.as_ref()
     }
 
+    /// Adopt a daemon launched by a host-specific process manager.
+    ///
+    /// The supervisor records the endpoint but does not take ownership of the
+    /// process behind it. This is used by desktop shells that launch a
+    /// packaged sidecar through their platform integration.
+    pub fn attach_existing(&mut self, url: String) -> Result<DaemonEndpoint> {
+        validate_websocket_url(&url)?;
+        let endpoint = DaemonEndpoint {
+            mode: if url.starts_with("wss://") {
+                DaemonMode::RemoteWebSocket
+            } else {
+                DaemonMode::LocalExisting
+            },
+            websocket_url: url,
+        };
+        self.endpoint = Some(endpoint.clone());
+        Ok(endpoint)
+    }
+
+    pub fn set_remote_enabled(&mut self, enabled: bool) -> Result<DaemonEndpoint> {
+        if self.config.remote_enabled == enabled {
+            return self.connect_or_launch();
+        }
+        if enabled
+            && self
+                .endpoint
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.mode == DaemonMode::LocalExisting)
+        {
+            bail!("desktop remote access requires an app-owned daemon");
+        }
+        self.shutdown()?;
+        self.config.remote_enabled = enabled;
+        self.connect_or_launch()
+    }
+
     pub fn connect_or_launch(&mut self) -> Result<DaemonEndpoint> {
         if let Some(endpoint) = &self.endpoint {
             return Ok(endpoint.clone());
@@ -323,6 +359,18 @@ mod tests {
         assert_eq!(endpoint.websocket_url, "ws://127.0.0.1:43210/ws");
         assert_eq!(endpoint.mode, DaemonMode::LocalExisting);
         supervisor.shutdown().unwrap();
+    }
+
+    #[test]
+    fn host_launched_endpoint_can_be_adopted_without_process_ownership() {
+        let mut supervisor = DesktopSupervisor::new(SupervisorConfig::default());
+
+        let endpoint = supervisor
+            .attach_existing("ws://127.0.0.1:43210".into())
+            .unwrap();
+
+        assert_eq!(endpoint.mode, DaemonMode::LocalExisting);
+        assert_eq!(supervisor.endpoint(), Some(&endpoint));
     }
 
     #[test]

@@ -16,6 +16,7 @@ tauri-build = { version = "2.6.3", features = [] }
 [dependencies]
 anyhow = "1"
 libc = "0.2"
+mew-desktop-supervisor = { path = "../../crates/mew-desktop-supervisor" }
 mew-cef-host = { path = "../../native/cef-host" }
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2.11.5", features = [] }

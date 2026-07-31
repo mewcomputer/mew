@@ -1,3 +1,28 @@
+# 2026-07-30 — Route Tauri daemon lifecycle through shared supervisor
+
+## Summary
+
+The existing Tauri shell now delegates daemon endpoint selection, health
+checks, and configured or packaged process ownership to the Tauri-free desktop
+supervisor. Tauri retains only the platform-specific sidecar fallback and its
+existing CEF integration.
+
+## Changes
+
+- Added endpoint adoption for a host-launched sidecar without transferring
+  process ownership to the shared supervisor.
+- Added shared remote-mode restart handling.
+- Replaced the duplicated Tauri daemon lifecycle implementation with a thin
+  adapter around `mew-desktop-supervisor`.
+- Preserved the fixed local rendezvous port, remote-state persistence, daemon
+  logs, sidecar launch, and CEF/browser code.
+
+## Verification
+
+- `cargo test -p mew-desktop-supervisor` — 5 tests pass.
+- `cargo check --manifest-path mew-web-ui/src-tauri/Cargo.toml` — clean.
+- `cargo clippy --manifest-path mew-web-ui/src-tauri/Cargo.toml -- -D warnings` — clean.
+
 # 2026-07-30 — Introduce typed mobile client events
 
 ## Summary
