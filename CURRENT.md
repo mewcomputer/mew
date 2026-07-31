@@ -1,3 +1,30 @@
+# 2026-07-30 — Introduce typed mobile client events
+
+## Summary
+
+Mobile daemon connections now retain the framework-independent client events
+produced by the shared reducer. The existing `CoreEvent` listener remains as a
+compatibility projection while native platform consumers move to the shared
+event vocabulary.
+
+## Changes
+
+- Added a typed event inbox to each mobile daemon connection.
+- Reduced every incoming server message through `ClientState`, including
+  provider frames, before updating the mobile projection.
+- Routed connecting, connected, backoff, and disconnected states through the
+  shared connection reducer.
+- Added coverage for session-ready and required-action events entering the
+  typed event stream.
+
+## Verification
+
+- `cargo test -p mew-client-core` — 9 tests pass.
+- `cargo test -p mew-mobile-core --lib` — 26 tests pass.
+- `cargo test -p mew-mobile-core --features test-harness --test m0_spike -- --nocapture` — 1 test passes.
+- `cargo test -p mew-mobile-core --features test-harness --test m1_integration -- --nocapture` — 2 tests pass.
+- `cargo clippy -p mew-client-core -p mew-mobile-core --all-targets -- -D warnings` — clean.
+
 # 2026-07-30 — Introduce shared daemon-wide mobile state shadow
 
 ## Summary

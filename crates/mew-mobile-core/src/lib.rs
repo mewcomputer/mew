@@ -182,6 +182,11 @@ struct ConnState {
     current_persona: Mutex<Option<String>>,
     /// Available personas from last PersonaList.
     available_personas: Mutex<Vec<crate::events::PersonaInfo>>,
+    /// Typed events produced by the framework-independent reducer.
+    ///
+    /// The CoreEvent listener remains as a UniFFI compatibility projection
+    /// while platform consumers move to the shared client event vocabulary.
+    shared_events: Mutex<Vec<mew_client_core::ClientEvent>>,
 }
 
 impl ConnState {
@@ -200,7 +205,21 @@ impl ConnState {
             thinking_variant: Mutex::new(None),
             current_persona: Mutex::new(None),
             available_personas: Mutex::new(Vec::new()),
+            shared_events: Mutex::new(Vec::new()),
         }
+    }
+
+    fn push_shared_events(&self, events: impl IntoIterator<Item = mew_client_core::ClientEvent>) {
+        self.shared_events.lock().unwrap().extend(events);
+    }
+
+    fn push_shared_event(&self, event: mew_client_core::ClientEvent) {
+        self.shared_events.lock().unwrap().push(event);
+    }
+
+    #[cfg(test)]
+    fn take_shared_events(&self) -> Vec<mew_client_core::ClientEvent> {
+        std::mem::take(&mut *self.shared_events.lock().unwrap())
     }
 }
 
@@ -347,6 +366,17 @@ impl MobileCore {
                 let jitter = rand_jitter() % 500; // 0-499ms jitter
                 let delay = Duration::from_millis(capped * 1000 + jitter);
 
+                conn_state_for_task.push_shared_event(
+                    conn_state_for_task
+                        .client_state
+                        .lock()
+                        .unwrap()
+                        .set_connection_status(mew_client_core::ConnectionStatus::Backoff {
+                            attempt,
+                            error: error.clone(),
+                        }),
+                );
+
                 if let Some(ref l) = *conn_state_for_task.listener.lock().unwrap() {
                     l.on_event(CoreEvent::DaemonStatusChanged {
                         daemon: daemon_id.clone(),
@@ -362,6 +392,13 @@ impl MobileCore {
                 attempt += 1;
             }
 
+            conn_state_for_task.push_shared_event(
+                conn_state_for_task
+                    .client_state
+                    .lock()
+                    .unwrap()
+                    .set_connection_status(mew_client_core::ConnectionStatus::Disconnected),
+            );
             if let Some(ref l) = *conn_state_for_task.listener.lock().unwrap() {
                 l.on_event(CoreEvent::DaemonStatusChanged {
                     daemon: daemon_id.clone(),
@@ -729,6 +766,18 @@ enum ConnOutcome {
     Dropped { reason: String },
 }
 
+fn set_shared_connection_status(
+    conn_state: &Arc<ConnState>,
+    status: mew_client_core::ConnectionStatus,
+) {
+    let event = conn_state
+        .client_state
+        .lock()
+        .unwrap()
+        .set_connection_status(status);
+    conn_state.push_shared_event(event);
+}
+
 /// Connect to a daemon over iroh and run the message loop.
 ///
 /// This function owns the WebSocket connection and processes incoming
@@ -748,6 +797,7 @@ async fn connect_and_run(
         }
     };
 
+    set_shared_connection_status(conn_state, mew_client_core::ConnectionStatus::Connecting);
     emit_event(CoreEvent::DaemonStatusChanged {
         daemon: daemon_id.to_string(),
         status: DaemonStatus::Connecting,
@@ -779,6 +829,7 @@ async fn connect_and_run(
         .await
         .context("websocket handshake over iroh")?;
 
+    set_shared_connection_status(conn_state, mew_client_core::ConnectionStatus::Connected);
     emit_event(CoreEvent::DaemonStatusChanged {
         daemon: daemon_id.to_string(),
         status: DaemonStatus::Connected,
@@ -876,7 +927,8 @@ async fn connect_and_run(
                     }
                 };
 
-                // Translate ServerMessage → CoreEvent + update ConnState.
+                // Reduce ServerMessage into the shared client state first.
+                // CoreEvent remains a compatibility projection for mobile.
                 let events = translate_message(
                     &server_msg,
                     conn_state,
@@ -983,16 +1035,18 @@ fn translate_message(
     let d = daemon_id.to_string();
     let mut events = Vec::new();
 
-    // Provider events currently use SessionState's mobile projection so the
-    // existing TextDelta/TurnEnded FFI contract remains unchanged. Every
-    // other server message is reduced into the shared client state first;
-    // the projection is synchronized after the legacy event mapping below.
-    if !matches!(msg, ServerMessage::Provider { .. }) {
-        conn_state
-            .client_state
-            .lock()
-            .unwrap()
-            .apply_server_message(msg.clone());
+    let shared_events = conn_state
+        .client_state
+        .lock()
+        .unwrap()
+        .apply_server_message(msg.clone());
+    conn_state.push_shared_events(shared_events);
+
+    // Provider events use the shared session as the source of truth. Sync the
+    // mobile projection before the compatibility match so its legacy helper
+    // observes an already-reduced event instead of applying it twice.
+    if matches!(msg, ServerMessage::Provider { .. }) {
+        sync_mobile_session_from_client_state(conn_state);
     }
 
     match msg {
@@ -1777,30 +1831,10 @@ fn translate_message(
         | ServerMessage::BrowserError { .. } => {}
     }
 
-    if matches!(msg, ServerMessage::Provider { .. }) {
-        sync_client_state_from_mobile_session(conn_state);
-    } else {
+    if !matches!(msg, ServerMessage::Provider { .. }) {
         sync_mobile_session_from_client_state(conn_state);
     }
     events
-}
-
-fn sync_client_state_from_mobile_session(conn_state: &Arc<ConnState>) {
-    let Some(session) = conn_state
-        .session_state
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|s| s.shared.clone())
-    else {
-        return;
-    };
-    conn_state
-        .client_state
-        .lock()
-        .unwrap()
-        .sessions
-        .insert(session.session_id.clone(), session);
 }
 
 fn sync_mobile_session_from_client_state(conn_state: &Arc<ConnState>) {
@@ -2068,6 +2102,51 @@ mod tests {
         );
         assert_eq!(session.pending_actions.len(), 1);
         assert_eq!(session.pending_actions[0].request_id, "request-1");
+    }
+
+    #[test]
+    fn test_translate_queues_typed_shared_events_for_platform_adapters() {
+        let conn = Arc::new(ConnState::new());
+        let daemon_id = "node-abc".to_string();
+        let mut last_prompt: Option<String> = None;
+        let session_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: session_id.into(),
+                cwd: Some("/tmp/project".into()),
+                model: Some("fake".into()),
+                provider: Some("fake".into()),
+                permission_mode: Some("standard".into()),
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon_id,
+        );
+        translate_message(
+            &ServerMessage::PermissionRequest {
+                request_id: "request-1".into(),
+                tool_name: "shell".into(),
+                input: serde_json::json!({"command": "pwd"}),
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon_id,
+        );
+
+        let events = conn.take_shared_events();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                mew_client_core::ClientEvent::SessionReady { session_id: ready_id },
+                mew_client_core::ClientEvent::RequiredActionChanged {
+                    session_id: action_session_id,
+                    request_id,
+                },
+            ] if ready_id == session_id
+                && action_session_id == session_id
+                && request_id == "request-1"
+        ));
     }
 
     #[test]
