@@ -157,6 +157,9 @@ pub struct MobileCore {
 struct ConnState {
     /// The currently attached session ID, if any.
     attached_session: Mutex<Option<String>>,
+    /// Framework-independent daemon/session state used by desktop and mobile
+    /// adapters. The UniFFI projection remains alongside it during migration.
+    client_state: Mutex<mew_client_core::ClientState>,
     /// Per-session state assembler, updated by the message loop.
     session_state: Mutex<Option<SessionState>>,
     /// Daemon version from last Pong.
@@ -185,6 +188,7 @@ impl ConnState {
     fn new() -> Self {
         Self {
             attached_session: Mutex::new(None),
+            client_state: Mutex::new(mew_client_core::ClientState::default()),
             session_state: Mutex::new(None),
             daemon_version: Mutex::new(None),
             models: Mutex::new(Vec::new()),
@@ -979,6 +983,18 @@ fn translate_message(
     let d = daemon_id.to_string();
     let mut events = Vec::new();
 
+    // Provider events currently use SessionState's mobile projection so the
+    // existing TextDelta/TurnEnded FFI contract remains unchanged. Every
+    // other server message is reduced into the shared client state first;
+    // the projection is synchronized after the legacy event mapping below.
+    if !matches!(msg, ServerMessage::Provider { .. }) {
+        conn_state
+            .client_state
+            .lock()
+            .unwrap()
+            .apply_server_message(msg.clone());
+    }
+
     match msg {
         ServerMessage::Pong { version } => {
             *conn_state.daemon_version.lock().unwrap() = Some(version.clone());
@@ -995,6 +1011,7 @@ fn translate_message(
             permission_mode,
             ..
         } => {
+            *conn_state.attached_session.lock().unwrap() = Some(session_id.clone());
             *conn_state.session_state.lock().unwrap() = Some(SessionState::new(session_id.clone()));
             // Capture current model/provider/permission_mode from SessionReady.
             *conn_state.current_model.lock().unwrap() = model.clone();
@@ -1760,7 +1777,55 @@ fn translate_message(
         | ServerMessage::BrowserError { .. } => {}
     }
 
+    if matches!(msg, ServerMessage::Provider { .. }) {
+        sync_client_state_from_mobile_session(conn_state);
+    } else {
+        sync_mobile_session_from_client_state(conn_state);
+    }
     events
+}
+
+fn sync_client_state_from_mobile_session(conn_state: &Arc<ConnState>) {
+    let Some(session) = conn_state
+        .session_state
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.shared.clone())
+    else {
+        return;
+    };
+    conn_state
+        .client_state
+        .lock()
+        .unwrap()
+        .sessions
+        .insert(session.session_id.clone(), session);
+}
+
+fn sync_mobile_session_from_client_state(conn_state: &Arc<ConnState>) {
+    let Some(session_id) = conn_state
+        .client_state
+        .lock()
+        .unwrap()
+        .attached_session
+        .clone()
+    else {
+        return;
+    };
+    let shared = conn_state
+        .client_state
+        .lock()
+        .unwrap()
+        .session(&session_id)
+        .cloned();
+    let Some(shared) = shared else {
+        return;
+    };
+    if let Some(session) = conn_state.session_state.lock().unwrap().as_mut() {
+        session.shared = shared;
+        session.sync_from_shared();
+    }
 }
 
 /// Minimal stream wrapper for iroh QUIC streams.
@@ -1959,6 +2024,50 @@ mod tests {
             conn.current_persona.lock().unwrap().as_deref(),
             Some("explainer")
         );
+        let shared = conn.client_state.lock().unwrap();
+        assert_eq!(shared.personas.len(), 2);
+        assert_eq!(shared.current_persona.as_deref(), Some("explainer"));
+    }
+
+    #[test]
+    fn test_translate_reduces_session_and_required_action_into_shared_state() {
+        let conn = Arc::new(ConnState::new());
+        let daemon_id = "node-abc".to_string();
+        let mut last_prompt: Option<String> = None;
+
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+                cwd: Some("/tmp/project".into()),
+                model: Some("fake".into()),
+                provider: Some("fake".into()),
+                permission_mode: Some("standard".into()),
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon_id,
+        );
+        translate_message(
+            &ServerMessage::PermissionRequest {
+                request_id: "request-1".into(),
+                tool_name: "shell".into(),
+                input: serde_json::json!({"command": "pwd"}),
+            },
+            &conn,
+            &mut last_prompt,
+            &daemon_id,
+        );
+
+        let shared = conn.client_state.lock().unwrap();
+        let session = shared
+            .session("01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            .expect("shared session");
+        assert_eq!(
+            shared.attached_session.as_deref(),
+            Some(session.session_id.as_str())
+        );
+        assert_eq!(session.pending_actions.len(), 1);
+        assert_eq!(session.pending_actions[0].request_id, "request-1");
     }
 
     #[test]

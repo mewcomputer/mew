@@ -2,8 +2,8 @@
 
 use mew_message::{AssistantMeta, Message, Part, PartId, ProviderEventWire, Role, Time};
 use mew_protocol::{
-    ClientMessage, ModelInfo, PermissionDecision, Question, RemoteScope, ServerMessage,
-    SessionInfo, SessionUsageWire,
+    ClientMessage, ModelInfo, PermissionDecision, PersonaInfo, Question, RemoteScope,
+    ServerMessage, SessionInfo, SessionUsageWire,
 };
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -219,6 +219,7 @@ pub struct ClientState {
     pub thinking_variant: Option<String>,
     pub permission_mode: Option<String>,
     pub current_persona: Option<String>,
+    pub personas: Vec<PersonaInfo>,
 }
 
 impl ClientState {
@@ -400,6 +401,14 @@ impl ClientState {
             }
             ServerMessage::PersonaSwitched { name } => {
                 self.current_persona = Some(name);
+                Vec::new()
+            }
+            ServerMessage::PersonaList { personas } => {
+                self.current_persona = personas
+                    .iter()
+                    .find(|persona| persona.active)
+                    .map(|persona| persona.name.clone());
+                self.personas = personas;
                 Vec::new()
             }
             ServerMessage::Error { message } | ServerMessage::ErrorEvent { message } => {
@@ -676,5 +685,29 @@ mod tests {
             .unwrap()
             .pending_actions
             .is_empty());
+    }
+
+    #[test]
+    fn persona_list_keeps_active_persona_in_shared_state() {
+        let mut state = ClientState::default();
+        state.apply_server_message(ServerMessage::PersonaList {
+            personas: vec![
+                PersonaInfo {
+                    name: "default".into(),
+                    description: "Default".into(),
+                    color: None,
+                    active: false,
+                },
+                PersonaInfo {
+                    name: "reviewer".into(),
+                    description: "Reviews code".into(),
+                    color: Some("blue".into()),
+                    active: true,
+                },
+            ],
+        });
+
+        assert_eq!(state.personas.len(), 2);
+        assert_eq!(state.current_persona.as_deref(), Some("reviewer"));
     }
 }

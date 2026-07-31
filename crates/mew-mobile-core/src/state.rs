@@ -400,7 +400,7 @@ impl SessionState {
         }
     }
 
-    fn sync_from_shared(&mut self) {
+    pub(crate) fn sync_from_shared(&mut self) {
         self.messages = self
             .shared
             .messages

@@ -1,3 +1,29 @@
+# 2026-07-30 — Introduce shared daemon-wide mobile state shadow
+
+## Summary
+
+Mobile daemon translation now reduces non-streaming protocol messages into the
+framework-independent client state and synchronizes the existing UniFFI
+projection from it. Provider streams continue through the already migrated
+shared session reducer so the FFI event contract stays stable.
+
+## Changes
+
+- Added shared client state to each mobile daemon connection.
+- Reduced session readiness, history, user messages, required actions, models,
+  personas, mode changes, and other daemon metadata through `ClientState`.
+- Added explicit synchronization in both directions around provider events so
+  reconnect and streaming state remain coherent during the adapter transition.
+- Fixed `SessionReady` to record the attached session for new sessions.
+- Added tests proving shared state is populated by mobile translation.
+
+## Verification
+
+- `cargo test -p mew-client-core` — 9 tests pass.
+- `cargo test -p mew-mobile-core --lib` — 25 tests pass.
+- `cargo test -p mew-mobile-core --features test-harness --test m1_integration -- --nocapture` — 2 tests pass.
+- `cargo clippy -p mew-client-core -p mew-mobile-core --all-targets -- -D warnings` — clean.
+
 # 2026-07-30 — Route mobile session projection through shared core
 
 ## Summary
