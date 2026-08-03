@@ -66,6 +66,7 @@ impl App {
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: Some("→ thinking variants".into()),
+            budget: None,
         });
     }
 
@@ -124,7 +125,43 @@ impl App {
             cursor: 0,
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
-            hint: None,
+            hint: Some("⏎ attach · ^A archive · ^P pin".into()),
+            budget: None,
+        });
+    }
+
+    pub fn open_project_picker(&mut self) {
+        let items: Vec<PickerItem> = self
+            .projects
+            .iter()
+            .map(|p| {
+                let last = p
+                    .last_used_at
+                    .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                    .map(|dt| dt.format("%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "—".to_string());
+                PickerItem {
+                    id: p.path.clone(),
+                    label: p.display_name.clone(),
+                    description: format!(
+                        "{}  ·  {} sessions  ·  last: {}",
+                        p.path, p.session_count, last
+                    ),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        self.mode = Mode::CommandPalette;
+        self.picker = Some(PickerState {
+            kind: "project".into(),
+            items,
+            filter: String::new(),
+            selected: 0,
+            cursor: 0,
+            scroll: 0,
+            visible_items: PICKER_VISIBLE_ITEMS,
+            hint: Some("new session in project".into()),
+            budget: None,
         });
     }
 
@@ -208,6 +245,7 @@ impl App {
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
+            budget: None,
         });
     }
 
@@ -251,6 +289,29 @@ impl App {
                 ..Default::default()
             });
         }
+        // Models that accept a numeric token budget get a budget row after
+        // the effort rows. The draft is seeded from the active budget
+        // variant if set, else the effort mapping of the active effort,
+        // else the metadata default.
+        let budget = self.thinking_budget.get(bare_model).cloned();
+        let picker_budget = budget.map(|info| {
+            let seed = self.active_budget_seed(&info);
+            crate::app::PickerBudget {
+                draft: seed.clone(),
+                seed,
+                info,
+                track_rect: None,
+                dragging: false,
+            }
+        });
+        if picker_budget.is_some() {
+            items.push(PickerItem {
+                id: "budget".into(),
+                label: "token budget".into(),
+                description: String::new(),
+                ..Default::default()
+            });
+        }
         self.mode = Mode::CommandPalette;
         self.picker = Some(PickerState {
             kind: "thinking_variant".into(),
@@ -261,7 +322,26 @@ impl App {
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
+            budget: picker_budget,
         });
+    }
+
+    /// Seed the budget draft for a picker: the active `budget:<n>` variant
+    /// if one is set, else the mapped budget of the active effort level,
+    /// else the metadata default.
+    fn active_budget_seed(&self, budget: &mew_protocol::ThinkingBudgetInfo) -> String {
+        let active = self.active_thinking_variant.as_deref();
+        if let Some(n) = active.and_then(|v| v.strip_prefix("budget:")) {
+            return n.to_string();
+        }
+        if let Some((_, n)) = budget
+            .by_effort
+            .iter()
+            .find(|(effort, _)| active == Some(effort.as_str()))
+        {
+            return n.to_string();
+        }
+        budget.default.to_string()
     }
 
     pub fn open_theme_picker(&mut self) {
@@ -291,6 +371,7 @@ impl App {
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
+            budget: None,
         });
     }
 
@@ -322,6 +403,7 @@ impl App {
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
+            budget: None,
         });
     }
 
@@ -368,6 +450,7 @@ impl App {
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
+            budget: None,
         });
     }
 
@@ -495,6 +578,7 @@ impl App {
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
+            budget: None,
         });
     }
 
@@ -561,6 +645,7 @@ impl App {
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
+            budget: None,
         });
     }
 }

@@ -85,6 +85,51 @@ pub struct Model {
     /// the current agent loop does not act on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_version: Option<String>,
+    /// True when the model can produce text output (`modalities.output`
+    /// contains "text"). Image/video/audio generation models (output
+    /// `["image"]` / `["video"]`) are filtered out of the model picker by
+    /// the daemon lister and local discovery. Defaults to true when the
+    /// field is absent so unknown models stay selectable.
+    #[serde(default = "default_text_output")]
+    pub text_output: bool,
+    /// Numeric thinking-budget range, for models that accept a
+    /// `thinking_budget` token cap (e.g. Qwen3.8-max). `None` means the
+    /// model has no configurable budget. Independent of `thinking_variants`:
+    /// a model can offer effort levels, a budget range, both, or neither.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<ThinkingBudget>,
+}
+
+fn default_text_output() -> bool {
+    true
+}
+
+/// Numeric thinking-budget range for a model that accepts a
+/// `thinking_budget` token cap. The budget is mutually exclusive with
+/// `reasoning_effort` on the wire for providers that support it, so effort
+/// variants and budget selection are distinct axes in the UI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThinkingBudget {
+    pub min: i64,
+    pub max: i64,
+    pub step: i64,
+    pub default: i64,
+    /// Canonical budget (in tokens) for each named effort variant, so the UI
+    /// can seed a slider position from the active effort level.
+    #[serde(default)]
+    pub by_effort: Vec<(String, i64)>,
+}
+
+impl ThinkingBudget {
+    /// Clamps `value` to `min..=max` and snaps it to the nearest `step`
+    /// boundary. A non-positive step (bad config) degrades to plain clamping.
+    pub fn snap(&self, value: i64) -> i64 {
+        let clamped = value.clamp(self.min, self.max);
+        if self.step <= 0 {
+            return clamped;
+        }
+        self.min + ((clamped - self.min + self.step / 2) / self.step) * self.step
+    }
 }
 
 /// A named thinking/reasoning variant for a model.
@@ -198,6 +243,20 @@ impl Catalog {
         Self::builtin_thinking_variants(model_id)
     }
 
+    /// Returns the numeric thinking-budget range for a model, if it has one.
+    ///
+    /// If the model has a user-defined budget range (from config), that is
+    /// returned. Otherwise, built-in defaults are computed from the model ID.
+    /// `None` means the model does not accept a `thinking_budget` token cap.
+    pub fn thinking_budget(&self, model_id: &str) -> Option<ThinkingBudget> {
+        if let Some(m) = self.models.get(model_id) {
+            if m.thinking_budget.is_some() {
+                return m.thinking_budget.clone();
+            }
+        }
+        Self::builtin_thinking_budget(model_id)
+    }
+
     /// Returns the default thinking variant for a model, if any.
     ///
     /// This is the variant that should be used when the user doesn't specify one.
@@ -209,11 +268,13 @@ impl Catalog {
             return None;
         }
         // Prefer "high" as default for effort-based models,
-        // "thinking" for boolean models, otherwise first variant.
+        // "thinking" for boolean models, "xhigh" for qwen3.8-style models
+        // (whose API default effort is xhigh), otherwise first variant.
         variants
             .iter()
             .find(|v| v.name == "high")
             .or_else(|| variants.iter().find(|v| v.name == "thinking"))
+            .or_else(|| variants.iter().find(|v| v.name == "xhigh"))
             .or_else(|| variants.first())
             .cloned()
     }
@@ -221,7 +282,10 @@ impl Catalog {
     /// Map a variant name from one model's set to the closest match in
     /// another model's set. Used when switching models to carry over the
     /// thinking effort level. Tries exact match first, then maps by
-    /// effort level using a canonical ordering.
+    /// effort level using a canonical ordering. A `budget:<n>` name carries
+    /// over to the target model's budget range when the target declares one
+    /// (clamped/snapped to that range); otherwise it falls through to the
+    /// effort mapping and finally the target's default.
     pub fn map_variant(&self, variant: &str, model_id: &str) -> Option<ThinkingVariant> {
         let variants = self.thinking_variants(model_id);
         if variants.is_empty() {
@@ -230,6 +294,22 @@ impl Catalog {
         // Exact match.
         if let Some(v) = variants.iter().find(|v| v.name == variant) {
             return Some(v.clone());
+        }
+        // Numeric budget carry-over: clamp/snap to the target's range.
+        if let Some(budget) = self.thinking_budget(model_id) {
+            if let Some(n) = variant
+                .strip_prefix("budget:")
+                .and_then(|s| s.parse::<i64>().ok())
+            {
+                let snapped = budget.snap(n);
+                return Some(ThinkingVariant {
+                    name: format!("budget:{snapped}"),
+                    params: serde_json::json!({
+                        "enable_thinking": true,
+                        "thinking_budget": snapped,
+                    }),
+                });
+            }
         }
         // Map by effort level. Canonical ordering from lowest to highest.
         let effort_order = ["none", "low", "medium", "high", "xhigh", "max", "ultra"];
@@ -245,10 +325,16 @@ impl Catalog {
             .collect();
         if let Some(src) = source_effort {
             if !target_by_effort.is_empty() {
-                // Find the target with the closest effort level.
+                // Find the target with the closest effort level. On ties,
+                // prefer the higher level (e.g. OpenAI "high" maps to "xhigh"
+                // rather than "medium" on qwen3.8-style sets).
                 let closest = target_by_effort
                     .iter()
-                    .min_by_key(|(pos, _)| (*pos as i32 - src as i32).abs())
+                    .min_by(|(a, _), (b, _)| {
+                        let da = (*a as i32 - src as i32).abs();
+                        let db = (*b as i32 - src as i32).abs();
+                        da.cmp(&db).then_with(|| b.cmp(a))
+                    })
                     .map(|(_, v)| (*v).clone());
                 if closest.is_some() {
                     return closest;
@@ -339,6 +425,43 @@ impl Catalog {
                     params: serde_json::json!({"reasoning_effort": effort}),
                 })
                 .collect();
+        }
+
+        // Qwen3.8: configurable effort via enable_thinking + reasoning_effort.
+        // Thinking is on by default for these models, so "off" is an explicit
+        // variant that sends enable_thinking: false (omitting the field would
+        // leave thinking on). Token budgets are offered alongside via
+        // `builtin_thinking_budget`; budget and effort are mutually exclusive
+        // on the wire, so they are separate axes everywhere else.
+        if id.contains("qwen") && (id.contains("3.8") || id.contains("3-8")) {
+            return [
+                ThinkingVariant {
+                    name: "low".into(),
+                    params: serde_json::json!({
+                        "enable_thinking": true,
+                        "reasoning_effort": "low",
+                    }),
+                },
+                ThinkingVariant {
+                    name: "medium".into(),
+                    params: serde_json::json!({
+                        "enable_thinking": true,
+                        "reasoning_effort": "medium",
+                    }),
+                },
+                ThinkingVariant {
+                    name: "xhigh".into(),
+                    params: serde_json::json!({
+                        "enable_thinking": true,
+                        "reasoning_effort": "xhigh",
+                    }),
+                },
+                ThinkingVariant {
+                    name: "off".into(),
+                    params: serde_json::json!({"enable_thinking": false}),
+                },
+            ]
+            .to_vec();
         }
 
         // Models with no configurable thinking
@@ -439,6 +562,33 @@ impl Catalog {
         }
 
         Vec::new()
+    }
+
+    /// Built-in thinking-budget ranges based on model ID patterns.
+    ///
+    /// Returns `None` for models that don't accept a `thinking_budget` token
+    /// cap (only Qwen3.8/3.7/3.6/3.5/3-VL/3, GLM, and Kimi series do).
+    fn builtin_thinking_budget(model_id: &str) -> Option<ThinkingBudget> {
+        let id = model_id.to_lowercase();
+
+        // Qwen3.8-max family: configurable budget from 0 to 262144 tokens in
+        // 1024-token steps, defaulting to 131072 (the API default).
+        // Matches qwen3.8-max, qwen3.8-max-preview, and dated snapshots.
+        if id.contains("qwen") && (id.contains("3.8") || id.contains("3-8")) {
+            return Some(ThinkingBudget {
+                min: 0,
+                max: 262_144,
+                step: 1024,
+                default: 131_072,
+                by_effort: vec![
+                    ("low".into(), 4096),
+                    ("medium".into(), 16_384),
+                    ("xhigh".into(), 262_144),
+                ],
+            });
+        }
+
+        None
     }
 }
 
@@ -573,6 +723,13 @@ fn parse_models_dev_model(val: &serde_json::Value, provider_id: &str) -> Option<
         .map(|arr| arr.iter().any(|v| v.as_str() == Some("image")))
         .unwrap_or(false);
 
+    let text_output = val
+        .get("modalities")
+        .and_then(|m| m.get("output"))
+        .and_then(|o| o.as_array())
+        .map(|arr| arr.iter().any(|v| v.as_str() == Some("text")))
+        .unwrap_or(true);
+
     let pricing = val
         .get("cost")
         .map(|c| Pricing {
@@ -592,12 +749,14 @@ fn parse_models_dev_model(val: &serde_json::Value, provider_id: &str) -> Option<
         tool_call,
         reasoning,
         vision,
+        text_output,
         shape: String::new(),
         pricing,
         thinking_variants: Vec::new(),
         responses_lite: false,
         prompt_cache_retention_secs: None,
         multi_agent_version: None,
+        thinking_budget: None,
     })
 }
 
@@ -824,12 +983,14 @@ fn parse_umans(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
                 .map(|r| r.supported)
                 .unwrap_or(false),
             vision,
+            text_output: true,
             shape: "anthropic".into(),
             pricing: Pricing::default(),
             thinking_variants: build_umans_thinking_variants(entry.capabilities.reasoning.as_ref()),
             responses_lite: false,
             prompt_cache_retention_secs: None,
             multi_agent_version: None,
+            thinking_budget: None,
         };
         out.push(model);
     }
@@ -1014,12 +1175,14 @@ pub fn parse_codex(data: &[u8]) -> Result<Vec<Model>, CatalogError> {
             tool_call: m.supports_parallel_tool_calls,
             reasoning: m.default_reasoning_level.is_some(),
             vision: m.input_modalities.iter().any(|x| x == "image"),
+            text_output: true,
             shape: "responses".into(),
             pricing: Pricing::default(),
             thinking_variants,
             responses_lite: m.use_responses_lite,
             prompt_cache_retention_secs: None,
             multi_agent_version: m.multi_agent_version.clone(),
+            thinking_budget: None,
         });
     }
     Ok(out)
@@ -1268,8 +1431,137 @@ mod tests {
         let cat = Catalog::empty();
         // k3 has low/high/max. "medium" isn't available, so it should map
         // to the closest effort level — "low" or "high" (both are distance 1).
+        // Ties prefer the higher level.
         let v = cat.map_variant("medium", "k3").unwrap();
-        assert!(v.name == "low" || v.name == "high");
+        assert_eq!(v.name, "high");
+    }
+
+    #[test]
+    fn test_thinking_variants_qwen38() {
+        let cat = Catalog::empty();
+        let variants = cat.thinking_variants("qwen3.8-max");
+        let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["low", "medium", "xhigh", "off"]);
+        // Effort variants enable thinking explicitly and set reasoning_effort.
+        assert_eq!(
+            variants[0].params,
+            serde_json::json!({
+                "enable_thinking": true,
+                "reasoning_effort": "low",
+            })
+        );
+        // The off variant must disable thinking explicitly (qwen3.8 thinks
+        // by default; omitting the field would leave thinking on).
+        assert_eq!(
+            variants[3].params,
+            serde_json::json!({"enable_thinking": false})
+        );
+        // Preview and dated snapshots match too.
+        let preview = cat.thinking_variants("qwen3.8-max-preview");
+        let names: Vec<&str> = preview.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["low", "medium", "xhigh", "off"]);
+        // Older qwen models stay without configurable thinking.
+        assert!(cat.thinking_variants("qwen2.5-coder").is_empty());
+    }
+
+    #[test]
+    fn test_thinking_budget_qwen38_rule() {
+        let cat = Catalog::empty();
+        for id in ["qwen3.8-max", "qwen3.8-max-preview", "qwen3.8-max-20250520"] {
+            let budget = cat.thinking_budget(id).expect("budget for {id}");
+            assert_eq!(
+                (budget.min, budget.max, budget.step, budget.default),
+                (0, 262_144, 1024, 131_072)
+            );
+            assert_eq!(
+                budget.by_effort,
+                vec![
+                    ("low".to_owned(), 4096),
+                    ("medium".to_owned(), 16_384),
+                    ("xhigh".to_owned(), 262_144),
+                ]
+            );
+        }
+        // Models without budget support return None.
+        assert!(cat.thinking_budget("qwen2.5-coder").is_none());
+        assert!(cat.thinking_budget("deepseek-v4").is_none());
+        assert!(cat.thinking_budget("unknown-model").is_none());
+    }
+
+    #[test]
+    fn test_thinking_budget_config_override() {
+        let mut cat = Catalog::empty();
+        cat.merge_local(vec![Model {
+            id: "qwen3.8-max".into(),
+            thinking_budget: Some(ThinkingBudget {
+                min: 1000,
+                max: 10_000,
+                step: 500,
+                default: 5000,
+                by_effort: Vec::new(),
+            }),
+            ..Default::default()
+        }]);
+        let budget = cat.thinking_budget("qwen3.8-max").unwrap();
+        assert_eq!(
+            (budget.min, budget.max, budget.step, budget.default),
+            (1000, 10_000, 500, 5000)
+        );
+        // Budget and effort variants are independent axes: overriding the
+        // budget range must not wipe the built-in effort variants.
+        let variants = cat.thinking_variants("qwen3.8-max");
+        let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["low", "medium", "xhigh", "off"]);
+    }
+
+    #[test]
+    fn test_thinking_budget_snap() {
+        let budget = ThinkingBudget {
+            min: 0,
+            max: 262_144,
+            step: 1024,
+            default: 131_072,
+            by_effort: Vec::new(),
+        };
+        assert_eq!(budget.snap(8192), 8192); // exact multiple
+        assert_eq!(budget.snap(8200), 8192); // rounds to nearest step
+        assert_eq!(budget.snap(-5), 0); // clamped below min
+        assert_eq!(budget.snap(999_999_999), 262_144); // clamped above max
+        assert_eq!(budget.snap(100), 0); // (100 + 512) / 1024 -> 0 steps
+    }
+
+    #[test]
+    fn test_default_thinking_qwen38() {
+        let cat = Catalog::empty();
+        // qwen3.8 has no "high"/"thinking" variant, so the xhigh preference
+        // applies (matching the API default effort).
+        let v = cat.default_thinking("qwen3.8-max").unwrap();
+        assert_eq!(v.name, "xhigh");
+        assert_eq!(v.params["reasoning_effort"], "xhigh");
+    }
+
+    #[test]
+    fn test_map_variant_budget_carryover() {
+        let cat = Catalog::empty();
+        // Clamped to the target's max.
+        let v = cat.map_variant("budget:999999999", "qwen3.8-max").unwrap();
+        assert_eq!(v.name, "budget:262144");
+        assert_eq!(v.params["thinking_budget"], 262_144);
+        // Snapped to the nearest step.
+        let v = cat.map_variant("budget:200001", "qwen3.8-max").unwrap();
+        assert_eq!(v.name, "budget:199680");
+        // Target without budget metadata falls back to its default.
+        let v = cat.map_variant("budget:8192", "k3").unwrap();
+        assert_eq!(v.name, "high");
+    }
+
+    #[test]
+    fn test_map_variant_high_to_qwen38_prefers_xhigh() {
+        let cat = Catalog::empty();
+        // "high" (index 3) is distance 1 from both "medium" (2) and "xhigh"
+        // (4); the tie-break prefers the higher level.
+        let v = cat.map_variant("high", "qwen3.8-max").unwrap();
+        assert_eq!(v.name, "xhigh");
     }
 
     #[test]
@@ -1379,6 +1671,46 @@ mod tests {
         assert_eq!(cat.models.len(), 1);
         let m = cat.lookup("array-model").unwrap();
         assert_eq!(m.shape, "anthropic");
+    }
+
+    #[test]
+    fn test_parse_models_dev_text_output() {
+        // models.dev nested format: image/video/audio generation models
+        // (modalities.output without "text") must be flagged so the picker
+        // can filter them out; chat models keep text_output = true.
+        let json = br#"{
+            "alibaba-token-plan": {
+                "models": {
+                    "qwen3.8-max-preview": {
+                        "id": "qwen3.8-max-preview",
+                        "modalities": {"input": ["text", "image"], "output": ["text"]},
+                        "limit": {"context": 1000000, "output": 65536},
+                        "reasoning": true,
+                        "tool_call": true
+                    },
+                    "qwen-image-2.0": {
+                        "id": "qwen-image-2.0",
+                        "modalities": {"input": ["text"], "output": ["image"]},
+                        "limit": {"context": 32000}
+                    },
+                    "wan2.7-image": {
+                        "id": "wan2.7-image",
+                        "modalities": {"input": ["text"], "output": ["image"]}
+                    },
+                    "legacy-model": {
+                        "id": "legacy-model",
+                        "limit": {"context": 32000}
+                    }
+                }
+            }
+        }"#;
+        let cat = parse(json).unwrap();
+        assert!(cat.lookup("qwen3.8-max-preview").unwrap().text_output);
+        assert!(!cat.lookup("qwen-image-2.0").unwrap().text_output);
+        assert!(!cat.lookup("wan2.7-image").unwrap().text_output);
+        // Missing modalities.output must default to text-capable so
+        // unknown/legacy entries stay selectable.
+        assert!(cat.lookup("legacy-model").unwrap().text_output);
     }
 
     #[test]

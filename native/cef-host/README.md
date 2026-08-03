@@ -5,9 +5,9 @@ It creates the visible Chromium window with `cef-rs` and enables a loopback
 Chrome DevTools Protocol endpoint. `agent-browser` can attach to that same
 visible browser with `--cdp`, so the agent and the user operate on one session.
 
-The host is deliberately separate from Tauri while the lifecycle is being
-validated. CEF has its own browser, render, GPU, and helper processes and
-requires a specific macOS app bundle layout.
+The host is deliberately separate from the GPUI shell. CEF has its own
+browser, render, GPU, and helper processes and requires a specific macOS app
+bundle layout.
 
 ## Development
 
@@ -48,33 +48,27 @@ bundle does not trigger repeated macOS Keychain prompts. Set
 storage. This switch only affects Chromium browser data; mew's provider
 credential keyring is unchanged.
 
-## Tauri sibling mode
+## Native GPUI integration
 
-The Tauri desktop target consumes this package as a native sibling. React owns
-the layout and sends the browser viewport bounds to Tauri; CEF creates a child
-`NSView` over that rectangle. The existing Tauri `WKWebView` remains the app
-surface around it, and `agent-browser` is pointed at CEF's CDP port when the
-native surface is available.
+The GPUI desktop target consumes this package as a native sibling. GPUI owns
+the layout and sends the browser viewport bounds through `mew-browser-host`;
+CEF creates a child `NSView` over that rectangle. The browser surface remains
+opaque to the GPUI tree, and `agent-browser` can attach to CEF's CDP port so
+automation and the user operate on the same visible page.
 
-`pnpm desktop:prepare:cef:dev` copies a local CEF distribution into the
-development layout (pass `--link` to `scripts/prepare-cef.mjs` to symlink
-instead). `pnpm desktop:prepare:cef` copies the framework into the macOS app
-bundle for release packaging. Set `MEW_CEF_FRAMEWORK_SOURCE` or `CEF_PATH` when
-the CEF distribution is outside `~/.local/share/cef`.
+`just desktop-build` builds the GPUI client, the daemon, and the CEF helper,
+then packages the framework and helper app bundles. Set
+`MEW_CEF_FRAMEWORK_SOURCE` or `CEF_PATH` when the CEF distribution is outside
+`~/.local/share/cef`; set `MEW_CEF_HELPER_PATH` to override the helper binary.
 
 Chromium anchors its Mach-port rendezvous names to the main bundle identifier,
 and every helper process resolves the same name to find the browser's
-rendezvous server. A packaged app gets this for free, but `tauri dev` runs an
-unbundled executable, so `scripts/prepare-cef.mjs` also writes a synthetic
-`mew.app` (just an `Info.plist`) next to the development binary. The host sets
-`main_bundle_path` to that bundle plus an explicit `framework_dir_path`, and
-CEF propagates both to every helper so all processes agree on the rendezvous
-name. Set `MEW_CEF_MAIN_BUNDLE_PATH` to override the bundle location.
+rendezvous server. The packaged native app provides the real bundle identity;
+development can override it with `MEW_CEF_MAIN_BUNDLE_PATH` when needed.
 
-The embedded sibling currently runs without Chromium's macOS sandbox bootstrap
-and requests software rendering by default. The Tauri smoke path still needs
-GPU-process hardening on this machine; `MEW_CEF_ENABLE_GPU=1` opts into GPU
-rendering for experiments. A production sandbox/helper layout is still a
+The embedded browser currently runs without Chromium's macOS sandbox bootstrap
+and requests software rendering by default. `MEW_CEF_ENABLE_GPU=1` opts into
+GPU rendering for experiments. A production sandbox/helper layout is still a
 separate hardening step.
 
 CEF is distributed under its own license. The final app bundle must include

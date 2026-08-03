@@ -117,16 +117,22 @@ impl<'a> CommandTarget for LocalTarget<'a> {
 
     async fn set_thinking(&mut self, variant: &str) -> Result<(), Unsupported> {
         let model_id = &self.agent.model_id;
-        if variant.is_empty() || variant == "off" || variant == "none" {
+        if variant.is_empty() {
             self.agent.set_reasoning(None);
-        } else {
-            match resolve_reasoning(self.cat.as_ref(), model_id, Some(variant)) {
-                Some(config) => {
-                    self.agent.set_reasoning(Some(config));
-                }
-                None => {
-                    return Err(Unsupported("unknown thinking variant for model"));
-                }
+            return Ok(());
+        }
+        match resolve_reasoning(self.cat.as_ref(), model_id, Some(variant)) {
+            Some((config, _)) => {
+                self.agent.set_reasoning(Some(config));
+            }
+            // "off"/"none" on a model without an explicit off variant is a
+            // plain disable (thinking is off by default for those models);
+            // anything else unresolved is an error.
+            None if variant == "off" || variant == "none" => {
+                self.agent.set_reasoning(None);
+            }
+            None => {
+                return Err(Unsupported("unknown thinking variant for model"));
             }
         }
         Ok(())
@@ -286,5 +292,58 @@ impl<'a> CommandTarget for LocalTarget<'a> {
                 }
             }
         })
+    }
+
+    async fn set_auto_title(&mut self, _enabled: bool) -> Result<(), Unsupported> {
+        Err(Unsupported("auto-title is only available in daemon mode"))
+    }
+
+    async fn set_auto_summary(&mut self, _enabled: bool) -> Result<(), Unsupported> {
+        Err(Unsupported("auto-summary is only available in daemon mode"))
+    }
+
+    async fn yield_control(&mut self) -> Result<(), Unsupported> {
+        Err(Unsupported("yield is only available in daemon mode"))
+    }
+
+    async fn unflag_file(&mut self, path: &str) -> Result<(), Unsupported> {
+        let mut flagged = self.agent.flagged_files.lock().await;
+        let before = flagged.len();
+        flagged.retain(|f| f.path.as_path() != std::path::Path::new(path));
+        if flagged.len() == before {
+            Err(Unsupported("file is not flagged"))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn list_projects(&mut self) -> Result<(), Unsupported> {
+        Err(Unsupported(
+            "the project picker is only available in daemon mode",
+        ))
+    }
+
+    async fn new_session_in(&mut self, _path: &str) -> Result<(), Unsupported> {
+        Err(Unsupported(
+            "creating sessions is only available in daemon mode",
+        ))
+    }
+
+    async fn archive_session(&mut self, _id: &str, _archived: bool) -> Result<(), Unsupported> {
+        Err(Unsupported(
+            "session archive is only available in daemon mode",
+        ))
+    }
+
+    async fn pin_session(&mut self, _id: &str, _pinned: bool) -> Result<(), Unsupported> {
+        Err(Unsupported(
+            "session pinning is only available in daemon mode",
+        ))
+    }
+
+    async fn rename_session(&mut self, _id: &str, _title: &str) -> Result<(), Unsupported> {
+        Err(Unsupported(
+            "session rename is only available in daemon mode",
+        ))
     }
 }

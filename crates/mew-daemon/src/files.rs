@@ -169,6 +169,7 @@ pub async fn handle_list_dir(
     });
 
     Ok(ServerMessage::DirListing {
+        session_id: session_id.to_owned(),
         path: display_path,
         entries,
     })

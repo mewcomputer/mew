@@ -1,0 +1,13 @@
+[package]
+name = "mew-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+portable-pty = { workspace = true }
+unicode-width = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

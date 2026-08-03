@@ -1,0 +1,20 @@
+[package]
+name = "mew-client-iroh"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
+iroh = { workspace = true }
+mew-client-core = { workspace = true }
+mew-protocol = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tungstenite = "0.24"
+
+[dev-dependencies]
+tokio = { workspace = true }

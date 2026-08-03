@@ -234,6 +234,10 @@ export interface ModelInfo {
   description?: string;
   /** Available thinking/reasoning variants for this model. */
   thinking_variants?: ThinkingVariantInfo[];
+  /** Numeric thinking-budget range, when the model accepts a
+   *  `thinking_budget` token cap (e.g. Qwen3.8-max). Absent when the model
+   *  has no configurable budget. */
+  thinking_budget?: ThinkingBudgetInfo | null;
   /** Maximum context window in tokens, if known from the catalog. */
   context_window?: number;
 }
@@ -253,6 +257,20 @@ export interface PersonaInfo {
 /** A named thinking/reasoning variant (e.g. "high", "max", "thinking"). */
 export interface ThinkingVariantInfo {
   name: string;
+}
+
+/** Numeric thinking-budget range for models that accept a `thinking_budget`
+ *  token cap. Budget selection rides `setThinkingVariant` as the string
+ *  convention `"budget:<n>"` (clamped/snapped to `min..=max` by `step` by
+ *  the daemon); see `setThinkingBudget`. */
+export interface ThinkingBudgetInfo {
+  min: number;
+  max: number;
+  step: number;
+  default: number;
+  /** Canonical budget (in tokens) for each named effort variant, so UIs can
+   *  seed a slider position from the active effort level. */
+  by_effort: [string, number][];
 }
 
 /** Session lifecycle state. */
@@ -1024,7 +1042,9 @@ export class MewClient {
   }
 
   /** Set or clear the thinking/reasoning variant. Pass empty string or
-   *  "none" to disable. Resolves when the daemon confirms via
+   *  "none" to disable. Numeric token budgets ride this call as the string
+   *  convention `"budget:<n>"` (e.g. `"budget:8192"`); use
+   *  `setThinkingBudget` for that. Resolves when the daemon confirms via
    *  `thinking-variant-changed`. Returns the resolved variant name, or
    *  null if thinking was disabled. */
   setThinkingVariant(variant: string): Promise<string | null> {
@@ -1036,6 +1056,13 @@ export class MewClient {
       this.on("thinking-variant-changed", onChanged);
       this.send({ type: "set_thinking_variant", variant });
     });
+  }
+
+  /** Set a numeric token budget for thinking via `setThinkingVariant`
+   *  (`"budget:<n>"`). Only valid for models that declare a
+   *  `thinking_budget` range. */
+  setThinkingBudget(tokens: number): Promise<string | null> {
+    return this.setThinkingVariant(`budget:${tokens}`);
   }
 
   /** Set the permission mode for the active session. Mode is one of:

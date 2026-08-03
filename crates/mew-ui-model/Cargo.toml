@@ -1,0 +1,15 @@
+[package]
+name = "mew-ui-model"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mew-client-core = { workspace = true }
+mew-message = { workspace = true }
+mew-protocol = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+ulid = { workspace = true }

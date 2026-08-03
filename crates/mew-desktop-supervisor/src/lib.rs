@@ -397,4 +397,21 @@ mod tests {
         assert!(validate_websocket_url("http://127.0.0.1:1").is_err());
         assert!(websocket_address("ws://").is_err());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_reaps_an_owned_child() {
+        let child = Command::new("sh")
+            .args(["-c", "exec sleep 30"])
+            .spawn()
+            .unwrap();
+        let child_pid = child.id();
+        let mut supervisor = DesktopSupervisor::new(SupervisorConfig::default());
+        supervisor.child = Some(child);
+
+        supervisor.shutdown().unwrap();
+
+        assert!(supervisor.child.is_none());
+        assert_ne!(unsafe { libc::kill(child_pid as libc::pid_t, 0) }, 0);
+    }
 }

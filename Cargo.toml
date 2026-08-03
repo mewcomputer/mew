@@ -14,6 +14,7 @@ members = [
     "crates/mew-agent",
     "crates/mew-tools",
     "crates/mew-hashline",
+    "crates/mew-diff",
     "crates/mew-mcp",
     "crates/mew-config",
     "crates/mew-session",
@@ -32,10 +33,19 @@ members = [
     "crates/ratatui-mdstream",
     "crates/mew-mobile-core",
     "crates/mew-client-core",
+    "crates/mew-client-local",
+    "crates/mew-client-iroh",
+    "crates/mew-ui-model",
     "crates/mew-desktop-supervisor",
+    "crates/mew-browser-host",
+    "crates/mew-pty",
+    "apps/mew-desktop",
+    "native/cef-host",
 ]
 resolver = "2"
-exclude = ["mew-web-ui/src-tauri"]
+
+[patch.crates-io]
+libghostty-vt-sys = { path = "vendor/libghostty-vt-sys" }
 
 [workspace.package]
 version = "0.2.0"
@@ -68,11 +78,15 @@ minijinja = "2"
 # shell parsing
 shell-words = "1"
 
+# native terminal emulation
+libghostty-vt = "0.1"
+
 # id generation
 ulid = { version = "1", features = ["serde"] }
 
 # PKCE / OAuth helpers (in-tree openai oauth flow)
 base64 = "0.22"
+portable-pty = "0.9"
 sha2 = "0.10"
 
 # tracing
@@ -130,6 +144,9 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-fan
 # websocket
 tokio-tungstenite = "0.24"
 
+# native window handles
+raw-window-handle = "0.6"
+
 # unix system calls (fork, setsid, signals)
 nix = { version = "0.29", features = ["process", "signal", "fs"] }
 
@@ -141,6 +158,7 @@ mew-hooks-runtime = { path = "crates/mew-hooks-runtime" }
 mew-ext-broker = { path = "crates/mew-ext-broker" }
 mew-tools = { path = "crates/mew-tools" }
 mew-hashline = { path = "crates/mew-hashline" }
+mew-diff = { path = "crates/mew-diff" }
 mew-mcp = { path = "crates/mew-mcp" }
 mew-config = { path = "crates/mew-config" }
 mew-session = { path = "crates/mew-session" }
@@ -162,7 +180,12 @@ mew-protocol = { path = "crates/mew-protocol" }
 mew-daemon = { path = "crates/mew-daemon" }
 mew-web-bridge = { path = "crates/mew-web-bridge" }
 mew-client-core = { path = "crates/mew-client-core" }
+mew-client-local = { path = "crates/mew-client-local" }
+mew-client-iroh = { path = "crates/mew-client-iroh" }
+mew-ui-model = { path = "crates/mew-ui-model" }
 mew-desktop-supervisor = { path = "crates/mew-desktop-supervisor" }
+mew-browser-host = { path = "crates/mew-browser-host" }
+mew-pty = { path = "crates/mew-pty" }
 ratatui-mdstream = { path = "crates/ratatui-mdstream" }
 
 # Random number generation (kept for the TUI spinner; no other consumers).

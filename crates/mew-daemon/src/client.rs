@@ -244,83 +244,131 @@ impl DaemonClient {
 
     /// Request the daemon's session list. The response arrives as
     /// `ServerMessage::SessionList` on the notification channel.
-    pub async fn list_sessions(&self) {
+    pub async fn list_sessions(&self) -> Result<()> {
         let msg = ClientMessage::ListSessions;
-        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
-        let _ = self.state.ws_out.send(json).await;
+        let json = mew_protocol::encode_json(&msg)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
     }
 
     /// Request the list of available models from the daemon. The response
     /// arrives as `ServerMessage::ModelList`, which populates the TUI's
     /// model picker and thinking-variants map.
-    pub async fn list_models(&self) {
+    pub async fn list_models(&self) -> Result<()> {
         let msg = ClientMessage::ListModels;
-        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
-        let _ = self.state.ws_out.send(json).await;
+        let json = mew_protocol::encode_json(&msg)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
+    }
+
+    /// Request the daemon's known project directories. The response arrives
+    /// as `ServerMessage::ProjectList` on the notification channel.
+    pub async fn list_projects(&self) -> Result<()> {
+        let msg = ClientMessage::ListProjects;
+        let json = mew_protocol::encode_json(&msg)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
     }
 
     /// Create a new session in the given cwd.
-    pub async fn new_session_in(&self, cwd: &str) {
+    pub async fn new_session_in(&self, cwd: &str) -> Result<()> {
         let msg = ClientMessage::NewSession {
             cwd: Some(cwd.to_string()),
             client_kind: mew_protocol::ClientKind::Tui,
         };
-        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
-        let _ = self.state.ws_out.send(json).await;
+        let json = mew_protocol::encode_json(&msg)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
     }
 
     /// Archive or unarchive a session.
-    pub async fn archive_session(&self, session_id: &str, archived: bool) {
+    pub async fn archive_session(&self, session_id: &str, archived: bool) -> Result<()> {
         let msg = ClientMessage::ArchiveSession {
             session_id: session_id.to_string(),
             archived,
         };
-        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
-        let _ = self.state.ws_out.send(json).await;
+        let json = mew_protocol::encode_json(&msg)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
     }
 
     /// Pin or unpin a session.
-    pub async fn pin_session(&self, session_id: &str, pinned: bool) {
+    pub async fn pin_session(&self, session_id: &str, pinned: bool) -> Result<()> {
         let msg = ClientMessage::PinSession {
             session_id: session_id.to_string(),
             pinned,
         };
-        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
-        let _ = self.state.ws_out.send(json).await;
+        let json = mew_protocol::encode_json(&msg)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
     }
 
     /// Toggle auto-title for the current session.
-    pub async fn set_auto_title(&self, enabled: bool) {
+    pub async fn set_auto_title(&self, enabled: bool) -> Result<()> {
         let msg = ClientMessage::SetAutoTitle { enabled };
-        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
-        let _ = self.state.ws_out.send(json).await;
+        let json = mew_protocol::encode_json(&msg)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
     }
 
     /// Toggle auto-summary for the current session.
-    pub async fn set_auto_summary(&self, enabled: bool) {
+    pub async fn set_auto_summary(&self, enabled: bool) -> Result<()> {
         let msg = ClientMessage::SetAutoSummary { enabled };
-        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
-        let _ = self.state.ws_out.send(json).await;
+        let json = mew_protocol::encode_json(&msg)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
     }
 
     /// Rename a session.
-    pub async fn rename_session(&self, session_id: &str, title: &str) {
+    pub async fn rename_session(&self, session_id: &str, title: &str) -> Result<()> {
         let msg = ClientMessage::RenameSession {
             session_id: session_id.to_string(),
             title: title.to_string(),
         };
-        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
-        let _ = self.state.ws_out.send(json).await;
+        let json = mew_protocol::encode_json(&msg)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
     }
 
     /// Unflag a file in a session.
-    pub async fn unflag_file(&self, session_id: &str, path: &str) {
+    pub async fn unflag_file(&self, session_id: &str, path: &str) -> Result<()> {
         let msg = ClientMessage::UnflagFile {
             session_id: session_id.to_string(),
             path: path.to_string(),
         };
-        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
-        let _ = self.state.ws_out.send(json).await;
+        let json = mew_protocol::encode_json(&msg)?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .map_err(|e| anyhow::anyhow!("daemon send error: {}", e))
     }
 
     /// Returns the current session ID, if known (set after `SessionReady`).
@@ -729,7 +777,11 @@ async fn translate_server_message(
         | ServerMessage::FsChanged { .. }
         | ServerMessage::SessionUsageChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }
-        | ServerMessage::SessionAttentionChanged { .. } => {
+        | ServerMessage::SessionAttentionChanged { .. }
+        | ServerMessage::TerminalOpened { .. }
+        | ServerMessage::TerminalOutput { .. }
+        | ServerMessage::TerminalExited { .. }
+        | ServerMessage::TerminalError { .. } => {
             // Forward to the notification channel for the TUI's daemon
             // session rail / alerts / metadata. These don't map to
             // AgentEvents.

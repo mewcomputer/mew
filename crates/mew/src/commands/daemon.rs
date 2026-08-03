@@ -58,21 +58,20 @@ pub(crate) async fn build_daemon_server(
                 .session_id
                 .strip_prefix("sess_")
                 .and_then(|s| ulid::Ulid::from_string(s).ok());
-            Ok((
-                {
-                    let mut a = Agent::new(
-                        provider,
-                        dispatcher,
-                        Some(params.writer),
-                        Vec::new(),
-                        session_id,
-                    );
-                    a.set_model_info("fake", "fake");
-                    a
-                },
-                Some("fake".to_string()),
-                Some("fake".to_string()),
-            ))
+            let mut agent = Agent::new(
+                provider,
+                dispatcher,
+                Some(params.writer),
+                Vec::new(),
+                session_id,
+            );
+            agent.set_model_info("fake", "fake");
+            let personas = mew_personas::builtin_defaults();
+            agent.set_personas(personas.clone());
+            if let Some(persona) = personas.iter().find(|p| p.name == "builder") {
+                agent.apply_persona(persona);
+            }
+            Ok((agent, Some("fake".to_string()), Some("fake".to_string())))
         })
     } else {
         let (provider_id, model_id) = crate::setup::providers::resolve_model(
@@ -124,7 +123,28 @@ pub(crate) async fn build_daemon_server(
     let mut server = mew_daemon::DaemonServer::new(builder);
 
     // Enable model switching for non-fake providers.
-    if !fake_provider {
+    if fake_provider {
+        let switcher: mew_daemon::ModelSwitcher =
+            Arc::new(|agent: &mut Agent, provider: &str, model: &str| {
+                if provider != "fake" || model != "fake" {
+                    anyhow::bail!("fake daemon only supports fake/fake")
+                }
+                agent.set_model_info(provider, model);
+                Ok((provider.to_owned(), model.to_owned()))
+            });
+        let lister: mew_daemon::ModelLister = Arc::new(|| {
+            vec![mew_protocol::ModelInfo {
+                id: "fake/fake".into(),
+                provider: "fake".into(),
+                model: "fake".into(),
+                description: Some("local test model · standard".into()),
+                thinking_variants: Vec::new(),
+                thinking_budget: None,
+                context_window: None,
+            }]
+        });
+        server = server.with_model_management(switcher, lister);
+    } else {
         let raw2 = raw;
 
         // Clone Arcs for each closure before either captures them.
@@ -158,6 +178,11 @@ pub(crate) async fn build_daemon_server(
                         ) {
                             continue;
                         }
+                        // Skip image/video/audio generation models — the
+                        // agent can't consume their output.
+                        if !m.text_output {
+                            continue;
+                        }
                         let thinking_variants = cat
                             .thinking_variants(&m.id)
                             .into_iter()
@@ -173,6 +198,15 @@ pub(crate) async fn build_daemon_server(
                                 if m.reasoning { "reasoning" } else { "standard" }
                             )),
                             thinking_variants,
+                            thinking_budget: cat.thinking_budget(&m.id).map(|b| {
+                                mew_protocol::ThinkingBudgetInfo {
+                                    min: b.min,
+                                    max: b.max,
+                                    step: b.step,
+                                    default: b.default,
+                                    by_effort: b.by_effort,
+                                }
+                            }),
                             context_window: Some(m.context_window),
                         });
                     }
@@ -210,20 +244,30 @@ pub(crate) async fn build_daemon_server(
         server = server.with_model_management(switcher, lister);
 
         // Thinking variant setter: resolves a variant name via the catalog
-        // and applies it to the agent's reasoning config.
+        // and applies it to the agent's reasoning config. Returns the
+        // canonical resolved name (a clamped/snapped `budget:<n>` for
+        // numeric budgets) so the client can display what was applied.
         let cat_thinking = Arc::clone(&cat_for_models);
         let thinking_setter: mew_daemon::ThinkingSetter =
             Arc::new(move |agent: &mut Agent, model_id: &str, variant: &str| {
                 let cat_ref = (*cat_thinking).as_ref();
-                if variant.is_empty() || variant == "none" {
+                if variant.is_empty() {
                     agent.set_reasoning(None);
                     return Ok(None);
                 }
-                let config =
-                    crate::setup::providers::resolve_reasoning(cat_ref, model_id, Some(variant));
-                let resolved = config.is_some().then(|| variant.to_string());
-                agent.set_reasoning(config);
-                Ok(resolved)
+                match crate::setup::providers::resolve_reasoning(cat_ref, model_id, Some(variant)) {
+                    Some((config, resolved_name)) => {
+                        agent.set_reasoning(Some(config));
+                        Ok(Some(resolved_name))
+                    }
+                    // Unknown variant — or "off" on a model without an
+                    // explicit off variant — is a plain disable, matching
+                    // the previous wire behavior.
+                    None => {
+                        agent.set_reasoning(None);
+                        Ok(None)
+                    }
+                }
             });
         server = server.with_thinking_setter(thinking_setter);
     }

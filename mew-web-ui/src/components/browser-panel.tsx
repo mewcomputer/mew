@@ -1,17 +1,9 @@
-import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { Camera, Globe, Loader2, MoreHorizontal, Play, RefreshCw, X } from "lucide-react";
 import type { MewClient } from "@mew/web-client";
 import type { WorkbenchTab } from "../lib/workbench-tabs";
-import { acceptsBrowserEvent, acceptsNativeBrowserEvent } from "../lib/browser-lifecycle";
+import { acceptsBrowserEvent } from "../lib/browser-lifecycle";
 import { Button } from "./ui/button";
-import {
-  cefBrowserAvailable,
-  isDesktopHost,
-  listenCefBrowserEvents,
-  navigateCefBrowser,
-  setCefBrowserRect,
-  setCefBrowserVisible,
-} from "../lib/host";
 import { cn } from "../lib/utils";
 
 export function BrowserPanel({
@@ -39,33 +31,6 @@ export function BrowserPanel({
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [browserError, setBrowserError] = useState<string | null>(null);
-  const [nativeAvailable, setNativeAvailable] = useState<boolean | null>(() => (
-    isDesktopHost() ? null : false
-  ));
-  const [nativeVisible, setNativeVisible] = useState(false);
-  const nativeVisibleRef = useRef(nativeVisible);
-  const busyRef = useRef(busy);
-  const viewportRef = useRef<HTMLDivElement>(null);
-  nativeVisibleRef.current = nativeVisible;
-  busyRef.current = busy;
-
-  useEffect(() => {
-    if (!isDesktopHost()) return;
-    let mounted = true;
-    void cefBrowserAvailable()
-      .then((available) => {
-        if (mounted) {
-          setNativeAvailable(available);
-          setNativeVisible(available && Boolean(tabUrl));
-        }
-      })
-      .catch(() => {
-        if (mounted) setNativeAvailable(false);
-      });
-    return () => {
-      mounted = false;
-    };
-  }, []);
 
   useEffect(() => {
     setUrl(tabUrl);
@@ -74,99 +39,18 @@ export function BrowserPanel({
     setSnapshot("");
     setScreenshot(null);
     setBrowserError(null);
-    setBusy(false);
-    setNativeVisible(nativeAvailable === true && Boolean(tabUrl) && active);
-
-    if (nativeAvailable === null || !tabUrl || !active) return;
-    setBusy(true);
-    if (nativeAvailable) {
-      void navigateCefBrowser(tabUrl, tab.id)
-        .then(() => setBusy(false))
-        .catch((error: unknown) => {
-          setBusy(false);
-          setBrowserError(error instanceof Error ? error.message : String(error));
-        });
-    } else if (client && connected) {
-      try {
-        client.browserOpen(tabUrl, tab.id);
-      } catch (error) {
-        setBusy(false);
-        setBrowserError(error instanceof Error ? error.message : String(error));
-      }
-    } else {
+    if (!tabUrl || !active || !client || !connected) {
       setBusy(false);
+      return;
     }
-  }, [active, client, connected, nativeAvailable, tab.id]);
-
-  useLayoutEffect(() => {
-    if (!nativeAvailable || !viewportRef.current) return;
-
-    const updateBounds = () => {
-      const viewport = viewportRef.current;
-      if (!viewport) return;
-      const bounds = viewport.getBoundingClientRect();
-      const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
-      void setCefBrowserRect({
-        owner: tab.id,
-        x: bounds.left,
-        y: viewportHeight - bounds.bottom,
-        width: bounds.width,
-        height: bounds.height,
-        visible: active && nativeVisibleRef.current,
-      }).catch(() => undefined);
-    };
-
-    updateBounds();
-    const observer = typeof ResizeObserver === "undefined"
-      ? null
-      : new ResizeObserver(updateBounds);
-    observer?.observe(viewportRef.current);
-    window.addEventListener("resize", updateBounds);
-    window.visualViewport?.addEventListener("resize", updateBounds);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener("resize", updateBounds);
-      window.visualViewport?.removeEventListener("resize", updateBounds);
-      void setCefBrowserVisible(false, tab.id).catch(() => undefined);
-    };
-  }, [active, nativeAvailable, tab.id]);
-
-  useLayoutEffect(() => {
-    if (!nativeAvailable) return;
-    void setCefBrowserVisible(active && nativeVisible, tab.id).catch(() => undefined);
-  }, [active, nativeAvailable, nativeVisible, tab.id]);
-
-  useEffect(() => {
-    if (!nativeAvailable) return;
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void listenCefBrowserEvents((event) => {
-      if (disposed) return;
-      if (!acceptsNativeBrowserEvent(event, {
-        tabId: tab.id,
-        url: tab.payload?.url ?? "",
-        active,
-        visible: nativeVisibleRef.current,
-        loading: busyRef.current,
-      })) return;
-      if (event.kind === "address_changed") {
-        setBusy(false);
-        setCurrentUrl(event.url);
-        setUrl(event.url);
-        onTabChange({ payload: { ...tab.payload, url: event.url } });
-      } else {
-        setTitle(event.title);
-        onTabChange({ title: event.title || tab.title });
-      }
-    }).then((cleanup) => {
-      if (disposed) cleanup();
-      else unlisten = cleanup;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [active, nativeAvailable, onTabChange, tab]);
+    setBusy(true);
+    try {
+      client.browserOpen(tabUrl, tab.id);
+    } catch (error) {
+      setBusy(false);
+      setBrowserError(error instanceof Error ? error.message : String(error));
+    }
+  }, [active, client, connected, tab.id, tabUrl]);
 
   useEffect(() => {
     if (!client) return;
@@ -239,40 +123,19 @@ export function BrowserPanel({
     event.preventDefault();
     if (!canUseBrowser || !url.trim()) return;
     setBrowserError(null);
-    if (nativeAvailable === true) {
-      setNativeVisible(true);
-    }
     onTabChange({ title: tabTitleForUrl(url.trim()), payload: { ...tab.payload, url: url.trim() } });
-    if (nativeAvailable === true) {
-      setBusy(true);
-      void navigateCefBrowser(url.trim(), tab.id)
-        .then(() => setBusy(false))
-        .catch((error: unknown) => {
-          setBusy(false);
-          setBrowserError(error instanceof Error ? error.message : String(error));
-        });
-    } else if (client && connected) {
-      run(() => client.browserOpen(url.trim(), tab.id));
-    }
   };
 
   const close = () => {
     setToolsOpen(false);
-    if (nativeAvailable === true) {
-      setNativeVisible(false);
-      return;
-    }
     if (client && connected) run(() => client.browserClose(tab.id));
   };
 
-  const canUseBrowser = nativeAvailable === true || (
-    nativeAvailable === false && Boolean(client) && connected
-  );
+  const canUseBrowser = Boolean(client) && connected;
 
   const closeTools = () => {
     setToolsOpen(false);
     setInspectorOpen(false);
-    if (nativeAvailable === true && tabUrl && active) setNativeVisible(true);
   };
 
   const openTools = () => {
@@ -384,23 +247,12 @@ export function BrowserPanel({
         )}
       </div>
 
-      {nativeAvailable !== false ? (
-        <div ref={viewportRef} className="relative min-h-32 min-w-0 flex-1 overflow-hidden bg-muted/20">
-          {!nativeVisible && (
-            <div className="flex h-full min-h-32 flex-col items-center justify-center gap-2 px-6 text-center text-[11px] text-muted-foreground">
-              <Globe className="h-5 w-5 opacity-50" />
-              <p>the browser surface is closed. open a URL to bring it back.</p>
-            </div>
-          )}
+      <div className="min-h-0 flex-1 overflow-auto bg-muted/20">
+        <div className="flex h-full min-h-32 flex-col items-center justify-center gap-2 px-6 text-center text-[11px] text-muted-foreground">
+          <Globe className="h-5 w-5 opacity-50" />
+          <p>open a page, then use Browser tools to inspect or capture it.</p>
         </div>
-      ) : (
-        <div className="min-h-0 flex-1 overflow-auto bg-muted/20">
-          <div className="flex h-full min-h-32 flex-col items-center justify-center gap-2 px-6 text-center text-[11px] text-muted-foreground">
-            <Globe className="h-5 w-5 opacity-50" />
-            <p>open a page, then use Browser tools to inspect or capture it.</p>
-          </div>
-        </div>
-      )}
+      </div>
     </div>
   );
 }

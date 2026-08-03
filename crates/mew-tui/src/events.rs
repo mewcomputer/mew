@@ -309,7 +309,12 @@ fn insert_paste(app: &mut crate::app::App, content: &str) {
     }
 }
 
-fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
+pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
+    // The thinking picker's budget track is mouse-interactive; all other
+    // picker content stays inert.
+    if app.mode == crate::app::Mode::CommandPalette {
+        return handle_picker_mouse_event(app, mouse);
+    }
     if !matches!(
         app.mode,
         crate::app::Mode::Normal | crate::app::Mode::SlashCommand
@@ -397,6 +402,21 @@ fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Ac
                     return None;
                 }
 
+                // Check if this click landed on a tool-batch header.
+                if let Some(&(id, _)) = app
+                    .tool_batch_header_rows
+                    .iter()
+                    .find(|(_, header_row)| *header_row == visual_row)
+                {
+                    if app.tool_batch_expanded.contains(&id) {
+                        app.tool_batch_expanded.remove(&id);
+                    } else {
+                        app.tool_batch_expanded.insert(id);
+                    }
+                    app.mark_chat_dirty();
+                    return None;
+                }
+
                 let rel_col = col.saturating_sub(app.chat_area.x) as usize;
                 app.sel_anchor_row = Some(visual_row);
                 app.sel_anchor_col = Some(rel_col);
@@ -430,6 +450,78 @@ fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Ac
                 return Some(Action::CopySelection(text));
             }
             None
+        }
+        _ => None,
+    }
+}
+
+/// Mouse handling while a picker is open. Only the thinking picker's budget
+/// track is interactive: click/drag sets the draft, release commits it as
+/// `budget:<n>` (the picker stays open), and the wheel nudges by one step
+/// and commits immediately.
+fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
+    let row = mouse.row.saturating_sub(1);
+    let col = mouse.column.saturating_sub(1);
+    // Validate the picker and snapshot the track state (read-only borrow).
+    let (in_track, dragging) = {
+        let picker = app.picker.as_ref()?;
+        if picker.kind != "thinking_variant" {
+            return None;
+        }
+        let budget = picker.budget.as_ref()?;
+        let rect = budget.track_rect?;
+        (rect.contains((col, row).into()), budget.dragging)
+    };
+    // Down/scroll need the track; Up only needs an active drag (the pointer
+    // may have left the track mid-drag).
+    if !in_track && !dragging {
+        return None;
+    }
+    match mouse.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if in_track => {
+            let picker = app.picker.as_mut()?;
+            let budget = picker.budget.as_mut()?;
+            let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                budget.info.step
+            } else {
+                -budget.info.step
+            };
+            budget.step(delta);
+            budget.dragging = false;
+            Some(Action::SetThinkingVariant(format!(
+                "budget:{}",
+                budget.snapped()
+            )))
+        }
+        MouseEventKind::Down(MouseButton::Left) if in_track => {
+            let picker = app.picker.as_mut()?;
+            // Select the budget row so arrow keys keep working after a click.
+            if let Some(index) = picker.filtered().iter().position(|i| i.id == "budget") {
+                picker.selected = index;
+            }
+            let budget = picker.budget.as_mut()?;
+            budget.dragging = true;
+            if let Some(rect) = budget.track_rect {
+                budget.set_from_col(col, rect);
+            }
+            None
+        }
+        MouseEventKind::Drag(MouseButton::Left) if dragging && in_track => {
+            let picker = app.picker.as_mut()?;
+            let budget = picker.budget.as_mut()?;
+            if let Some(rect) = budget.track_rect {
+                budget.set_from_col(col, rect);
+            }
+            None
+        }
+        MouseEventKind::Up(MouseButton::Left) if dragging => {
+            let picker = app.picker.as_mut()?;
+            let budget = picker.budget.as_mut()?;
+            budget.dragging = false;
+            Some(Action::SetThinkingVariant(format!(
+                "budget:{}",
+                budget.snapped()
+            )))
         }
         _ => None,
     }
@@ -811,6 +903,10 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.toggle_reasoning_expanded();
             return None;
         }
+        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.toggle_tool_batch_expanded();
+            return None;
+        }
         KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.auto_scroll = true;
             app.scroll = app.max_scroll;
@@ -1102,6 +1198,26 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
     }
 }
 
+/// True when the thinking picker's budget row is currently selected.
+fn budget_row_selected(picker: &crate::app::PickerState) -> bool {
+    picker.budget.is_some() && picker.selected_item().map(|i| i.id.as_str()) == Some("budget")
+}
+
+/// Resolve the thinking picker's selected row to a variant string: effort
+/// rows pass through by id, the budget row commits its draft as
+/// `budget:<n>` (clamped/snapped).
+fn selected_thinking_variant(picker: &crate::app::PickerState) -> Option<String> {
+    let id = picker.selected_item().map(|i| i.id.clone())?;
+    if id == "budget" {
+        picker
+            .budget
+            .as_ref()
+            .map(|b| format!("budget:{}", b.snapped()))
+    } else {
+        Some(id)
+    }
+}
+
 fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     // Ctrl+P in the thinking variant picker cycles to the next variant.
     if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1109,13 +1225,29 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             if picker.kind == "thinking_variant" {
                 picker.move_selection(1);
                 picker.adjust_scroll();
-                // Return the selected variant as an action.
-                let item = app
-                    .picker
-                    .as_ref()
-                    .and_then(|p| p.selected_item().map(|i| i.id.clone()));
+                // Return the selected variant as an action (the budget row
+                // commits its draft as `budget:<n>`).
+                let item = app.picker.as_ref().and_then(selected_thinking_variant);
                 if let Some(variant) = item {
                     return Some(Action::SetThinkingVariant(variant));
+                }
+            } else if picker.kind == "session" {
+                // ^P toggles pinned on the highlighted session row.
+                let id = picker.selected_item().map(|i| i.id.clone());
+                if let Some(id) = id {
+                    return Some(Action::ToggleSessionPinned(id));
+                }
+            }
+        }
+        return None;
+    }
+    // ^A in the session picker toggles archived on the highlighted row.
+    if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(ref picker) = app.picker {
+            if picker.kind == "session" {
+                let id = picker.selected_item().map(|i| i.id.clone());
+                if let Some(id) = id {
+                    return Some(Action::ToggleSessionArchived(id));
                 }
             }
         }
@@ -1131,6 +1263,9 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 p.selected_item()
                     .map(|item| (item.id.clone(), p.kind.clone(), item.label.clone()))
             });
+            // The thinking picker's budget row commits its draft as
+            // `budget:<n>` instead of the raw row id.
+            let budget_variant = app.picker.as_ref().and_then(selected_thinking_variant);
             if let Some((id, kind, label)) = picker_data {
                 app.close_picker();
                 if kind == "command" {
@@ -1158,7 +1293,7 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 } else if kind == "model" {
                     Some(Action::SwitchModel(id))
                 } else if kind == "thinking_variant" {
-                    Some(Action::SetThinkingVariant(id))
+                    budget_variant.map(Action::SetThinkingVariant)
                 } else if kind == "permission_mode" {
                     mew_hooks::PermissionMode::from_id(&id).map(Action::SetPermissionMode)
                 } else if kind == "file" {
@@ -1169,6 +1304,8 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     }
                 } else if kind == "session" {
                     Some(Action::AttachSession(id))
+                } else if kind == "project" {
+                    Some(Action::NewSessionInProject(id))
                 } else if kind == "theme" {
                     Some(Action::SlashCommand(format!("/theme {}", id)))
                 } else if kind == "persona" {
@@ -1191,6 +1328,18 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             None
         }
         KeyCode::Char(c) => {
+            // Digits on the budget row type into the draft instead of the
+            // filter; anything else keeps filtering.
+            if c.is_ascii_digit() {
+                if let Some(p) = app.picker.as_mut() {
+                    if budget_row_selected(p) {
+                        if let Some(b) = p.budget.as_mut() {
+                            b.type_digit(c);
+                        }
+                        return None;
+                    }
+                }
+            }
             app.picker_insert(c);
             None
         }
@@ -1202,14 +1351,42 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             None
         }
         KeyCode::Backspace => {
+            // Backspace on the budget row pops the typed draft instead of
+            // the filter.
+            if let Some(p) = app.picker.as_mut() {
+                if budget_row_selected(p) {
+                    if let Some(b) = p.budget.as_mut() {
+                        b.backspace();
+                    }
+                    return None;
+                }
+            }
             app.picker_backspace();
             None
         }
         KeyCode::Left => {
+            // Left/Right on the budget row step the draft by one step.
+            if let Some(p) = app.picker.as_mut() {
+                if budget_row_selected(p) {
+                    if let Some(b) = p.budget.as_mut() {
+                        b.step(-b.info.step);
+                    }
+                    return None;
+                }
+            }
             app.picker_cursor_left();
             None
         }
         KeyCode::Right => {
+            // Left/Right on the budget row step the draft by one step.
+            if let Some(p) = app.picker.as_mut() {
+                if budget_row_selected(p) {
+                    if let Some(b) = p.budget.as_mut() {
+                        b.step(b.info.step);
+                    }
+                    return None;
+                }
+            }
             // In the model picker, Right opens the thinking variant picker
             // when the filter is empty and the selected model has variants.
             // The model picker item IDs are in "provider/model" format, but
@@ -1293,4 +1470,11 @@ pub enum Action {
     /// inserted as an @-mention so the existing image attachment pipeline
     /// picks it up on submit.
     PasteClipboardImage,
+    /// Create and attach to a new daemon session in the given project
+    /// directory (project picker selection). Daemon mode only.
+    NewSessionInProject(String),
+    /// Toggle the archived flag on a daemon session (session picker ^A).
+    ToggleSessionArchived(String),
+    /// Toggle the pinned flag on a daemon session (session picker ^P).
+    ToggleSessionPinned(String),
 }

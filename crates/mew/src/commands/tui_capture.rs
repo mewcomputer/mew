@@ -279,7 +279,7 @@ impl DaemonBackend {
         debug!(theme = %app.theme.name, "loaded theme");
 
         // Populate the sidebar session rail.
-        client.list_sessions().await;
+        client.list_sessions().await?;
 
         let terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         let (event_loop, event_rx) = mew_tui::EventLoop::new();
@@ -1206,6 +1206,10 @@ fn server_message_type(msg: &mew_protocol::ServerMessage) -> &'static str {
         mew_protocol::ServerMessage::ClientAttached { .. } => "ClientAttached",
         mew_protocol::ServerMessage::ClientDetached { .. } => "ClientDetached",
         mew_protocol::ServerMessage::ControlYielded { .. } => "ControlYielded",
+        mew_protocol::ServerMessage::TerminalOpened { .. } => "TerminalOpened",
+        mew_protocol::ServerMessage::TerminalOutput { .. } => "TerminalOutput",
+        mew_protocol::ServerMessage::TerminalExited { .. } => "TerminalExited",
+        mew_protocol::ServerMessage::TerminalError { .. } => "TerminalError",
     }
 }
 

@@ -18,9 +18,14 @@ These are configured out of the box. Set the credential and you're ready.
 | `z-ai` | openai | - | `MEW_CRED_Z_AI` |
 | `deepseek` | openai | `deepseek-v4-flash` | `MEW_CRED_DEEPSEEK` |
 | `umans` | anthropic | - | `MEW_CRED_UMANS` |
+| `alibaba-token-plan` | openai | - | `MEW_CRED_ALIBABA_TOKEN_PLAN` |
+| `alibaba-token-plan-cn` | openai | - | `MEW_CRED_ALIBABA_TOKEN_PLAN_CN` |
 
 `opencode-zen` and `opencode-go` share the same credential. `umans` uses
-the Anthropic shape and hits `/v1/messages` with `x-api-key` headers.
+the Anthropic shape and hits `/v1/messages` with `x-api-key` headers. The
+Alibaba Token Plan providers are OpenAI-compatible (`/compatible-mode/v1`);
+`alibaba-token-plan-cn` targets the mainland China endpoint and has its own
+credential.
 
 ## Provider shapes
 

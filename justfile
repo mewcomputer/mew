@@ -161,15 +161,21 @@ _open-url url:
 dev-ui:
     pnpm --filter mew-web-ui dev
 
-# Run the React app inside the Tauri desktop shell with Vite HMR.
+# Run the native GPUI desktop client with a debug daemon beside it.
 desktop-dev:
-    pnpm --filter mew-web-ui desktop:dev
+    cargo build -p mew
+    cargo build -p mew-desktop
+    cargo build -p mew-cef-host --bin mew-cef-host-helper --no-default-features
+    MEW_DESKTOP_PROFILE=debug {{justfile_directory()}}/scripts/package-desktop-native.sh
+    MEW_DESKTOP_DAEMON_BINARY="{{justfile_directory()}}/target/debug/mew" "{{justfile_directory()}}/target/debug/bundle/macos/mew.app/Contents/MacOS/mew-desktop"
 
-# Build the desktop bundle from the existing React app.
+# Build the native GPUI desktop binary and its daemon.
 desktop-build:
-    pnpm --filter mew-web-ui desktop:build
+    cargo build --release -p mew -p mew-desktop
+    cargo build --release -p mew-cef-host --bin mew-cef-host-helper --no-default-features
+    {{justfile_directory()}}/scripts/package-desktop-native.sh
 
-# Build and install the macOS app into /Applications.
+# Build and install the native macOS app into /Applications.
 desktop-install: desktop-build
     #!/usr/bin/env bash
     set -euo pipefail
@@ -177,7 +183,7 @@ desktop-install: desktop-build
         echo "desktop-install currently supports macOS only" >&2
         exit 1
     fi
-    app="{{justfile_directory()}}/mew-web-ui/src-tauri/target/release/bundle/macos/mew.app"
+    app="{{justfile_directory()}}/target/release/bundle/macos/mew.app"
     destination="/Applications/mew.app"
     if [ ! -d "$app" ]; then
         echo "release app not found at $app" >&2

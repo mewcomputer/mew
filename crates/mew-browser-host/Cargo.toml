@@ -1,0 +1,11 @@
+[package]
+name = "mew-browser-host"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+mew-cef-host = { path = "../../native/cef-host" }

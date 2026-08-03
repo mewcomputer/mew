@@ -420,7 +420,7 @@ impl MobileCore {
         if let Some(conn) = conns.get(&id.node_id) {
             *conn.state.attached_session.lock().unwrap() = Some(session_id.clone());
             let _ = conn.tx.send(ClientMessage::AttachSession {
-                session_id,
+                session_id: session_id.clone(),
                 client_kind: mew_protocol::ClientKind::Mobile,
             });
         }
@@ -1142,15 +1142,11 @@ fn translate_message(
             });
         }
 
-        ServerMessage::DirListing { path, entries } => {
-            // Need the session_id for the event — use whatever's currently
-            // attached on this connection.
-            let sid = conn_state
-                .attached_session
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or_default();
+        ServerMessage::DirListing {
+            session_id,
+            path,
+            entries,
+        } => {
             let entries: Vec<events::DirEntry> = entries
                 .iter()
                 .map(|e| events::DirEntry {
@@ -1161,7 +1157,7 @@ fn translate_message(
                 .collect();
             events.push(CoreEvent::DirListing {
                 daemon: d,
-                session_id: sid,
+                session_id: session_id.clone(),
                 path: path.clone(),
                 entries,
             });
@@ -1828,7 +1824,11 @@ fn translate_message(
         | ServerMessage::BrowserSnapshot { .. }
         | ServerMessage::BrowserScreenshot { .. }
         | ServerMessage::BrowserState { .. }
-        | ServerMessage::BrowserError { .. } => {}
+        | ServerMessage::BrowserError { .. }
+        | ServerMessage::TerminalOpened { .. }
+        | ServerMessage::TerminalOutput { .. }
+        | ServerMessage::TerminalExited { .. }
+        | ServerMessage::TerminalError { .. } => {}
     }
 
     if !matches!(msg, ServerMessage::Provider { .. }) {

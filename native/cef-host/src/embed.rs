@@ -15,7 +15,7 @@ mod mac_impl {
     use super::{BrowserEvent, BrowserEventCallback};
     use crate::mac;
     use cef::*;
-    use objc2_app_kit::NSView;
+    use objc2_app_kit::{NSResponder, NSView};
     use objc2_foundation::{NSPoint, NSRect, NSSize};
     use std::{
         ffi::{CString, c_void},
@@ -52,7 +52,7 @@ mod mac_impl {
     }
 
     // CEF objects are only touched from the macOS main thread. The controller
-    // itself is passed through Tauri state, which requires Send + Sync.
+    // itself crosses the GPUI portal boundary, which requires Send + Sync.
     unsafe impl Send for EmbedState {}
     unsafe impl Sync for EmbedState {}
 
@@ -132,9 +132,9 @@ mod mac_impl {
             };
             let settings = Settings {
                 external_message_pump: 1,
-                // The Tauri sibling does not have a separate sandbox bootstrap
-                // executable yet. Keep the development host usable until the
-                // packaged helper/sandbox layout is wired in.
+                // The native embedding mode does not have a separate sandbox
+                // bootstrap executable yet. Keep the host usable until the
+                // packaged helper/sandbox layout is hardened.
                 no_sandbox: 1,
                 remote_debugging_port: debug_port(),
                 root_cache_path: cache_dir,
@@ -180,7 +180,7 @@ mod mac_impl {
         }
 
         /// The current CEF child view handle, or 0 before `on_after_created`.
-        /// Lets the host reorder the view beneath the WKWebView.
+        /// Lets the host inspect the native child view used by the GPUI portal.
         pub fn native_view_handle(&self) -> usize {
             self.state.native_view.load(Ordering::Acquire)
         }
@@ -209,22 +209,41 @@ mod mac_impl {
             }
         }
 
-        pub fn shutdown(&self) {
-            if self.state.initialized.swap(false, Ordering::AcqRel) {
-                if let Ok(mut browser) = self.state.browser.lock() {
-                    if let Some(browser) = browser.as_mut()
-                        && let Some(host) = browser.host()
-                    {
-                        host.close_browser(true as _);
-                    }
-                    // Release the Rust wrapper before unloading libcef. The
-                    // browser process owns the actual close lifecycle, while
-                    // keeping this wrapper alive past CefShutdown would let a
-                    // later Drop call into an unloaded library.
-                    *browser = None;
+        fn close_browser(&self) {
+            if let Ok(mut browser) = self.state.browser.lock() {
+                if let Some(browser) = browser.as_mut()
+                    && let Some(host) = browser.host()
+                {
+                    host.close_browser(true as _);
                 }
-                self.state.native_view.store(0, Ordering::Release);
+                // Release the Rust wrapper before unloading libcef. The
+                // browser process owns the actual close lifecycle, while
+                // keeping this wrapper alive past CefShutdown would let a
+                // later Drop call into an unloaded library.
+                *browser = None;
+            }
+            self.state.native_view.store(0, Ordering::Release);
+        }
+
+        pub fn shutdown(&mut self) {
+            if self.owns_runtime && self.state.initialized.swap(false, Ordering::AcqRel) {
+                self.close_browser();
+                self.owns_runtime = false;
                 cef::shutdown();
+            }
+        }
+
+        /// Disarm the embedded browser for process exit without calling into CEF.
+        ///
+        /// GPUI runs app-quit observers while its application `RefCell` is
+        /// still borrowed. CEF teardown can call `NSApplication terminate:`
+        /// on macOS, which would re-enter GPUI's quit path and panic. The host
+        /// process is already exiting, so leave the browser runtime intact and
+        /// let the operating system reclaim it with the process.
+        pub fn prepare_for_process_exit(&mut self) {
+            if self.owns_runtime {
+                self.state.initialized.store(false, Ordering::Release);
+                self.owns_runtime = false;
             }
         }
 
@@ -240,6 +259,54 @@ mod mac_impl {
             }
             let view = unsafe { &*(handle as *const NSView) };
             view.setHidden(!visible);
+        }
+
+        pub fn focus_on_main_thread(&self) -> bool {
+            let Ok(mut browser) = self.state.browser.lock() else {
+                return false;
+            };
+            if let Some(browser) = browser.as_mut()
+                && let Some(host) = browser.host()
+            {
+                host.set_focus(true as _);
+                return true;
+            }
+            false
+        }
+
+        pub fn blur_on_main_thread(&self) -> bool {
+            let cef_blurred = self
+                .state
+                .browser
+                .lock()
+                .ok()
+                .and_then(|mut browser| {
+                    browser.as_mut().and_then(|browser| {
+                        browser.host().map(|host| {
+                            host.set_focus(false as _);
+                            true
+                        })
+                    })
+                })
+                .unwrap_or(false);
+
+            let native_view = self.state.native_view.load(Ordering::Acquire);
+            let native_blurred = if native_view == 0 {
+                false
+            } else {
+                let view = unsafe { &*(native_view as *const NSView) };
+                view.window()
+                    .map(|window| {
+                        if let Some(superview) = unsafe { view.superview() } {
+                            window.makeFirstResponder(Some(&*superview))
+                        } else {
+                            window.makeFirstResponder(None::<&NSResponder>)
+                        }
+                    })
+                    .unwrap_or(false)
+            };
+
+            cef_blurred || native_blurred
         }
 
         pub fn do_message_loop_work() {
@@ -389,10 +456,17 @@ mod mac_impl {
             return None;
         }
 
-        // Development run: the desktop packaging scripts place a synthetic
-        // bundle next to the executable for exactly this purpose.
-        let bundle = executable.parent()?.join("mew.app");
-        bundle.is_dir().then_some(bundle)
+        // Development run: the desktop packaging scripts place a bundle
+        // either in the profile directory or its standard bundle output
+        // directory. Use it so CEF resolves framework-owned dylibs from the
+        // app instead of from the bare Rust target directory.
+        let profile_dir = executable.parent()?;
+        [
+            profile_dir.join("bundle/macos/mew.app"),
+            profile_dir.join("mew.app"),
+        ]
+        .into_iter()
+        .find(|bundle| bundle.is_dir())
     }
 
     fn cache_dir() -> PathBuf {
@@ -414,6 +488,12 @@ mod mac_impl {
 
     fn apply_rect(handle: usize, rect: BrowserRect) {
         let view = unsafe { &*(handle as *const NSView) };
+        // GPUI owns the parent view and can redraw its layer after CEF adds
+        // the child. Re-adding the browser to its existing superview keeps
+        // the native surface above that layer without involving the UI shell.
+        if let Some(superview) = unsafe { view.superview() } {
+            superview.addSubview(view);
+        }
         view.setFrame(NSRect {
             origin: NSPoint::new(rect.x, rect.y),
             size: NSSize::new(rect.width.max(1.0), rect.height.max(1.0)),
@@ -480,9 +560,9 @@ mod mac_impl {
                 let client = MewBrowserClient::new(self.state.clone());
                 let mut client = Some(client);
                 let bounds = Rect { x: 0, y: 0, width: 1, height: 1 };
-                // Create the browser hidden so no window flashes before React
-                // claims it; `on_after_created` keeps it hidden until the
-                // first visible rect arrives.
+                // Create the browser hidden so no window flashes before the
+                // host claims an active workbench tab. `on_after_created`
+                // keeps it hidden until the first visible rect arrives.
                 let mut window_info = WindowInfo::default().set_as_child(
                     self.parent_view as *mut c_void,
                     &bounds,
@@ -577,7 +657,7 @@ mod mac_impl {
                 if let Some(host) = browser.host() {
                     let handle = host.window_handle() as usize;
                     self.state.native_view.store(handle, Ordering::Release);
-                    // The browser is created before React has had a chance to
+                    // The browser is created before GPUI has had a chance to
                     // claim an active workbench tab. Keep the child hidden
                     // until the first visible bounds update arrives.
                     let view = unsafe { &*(handle as *const NSView) };
@@ -661,6 +741,9 @@ mod non_macos {
         }
         pub fn set_rect_on_main_thread(&self, _rect: BrowserRect) {}
         pub fn set_visible_on_main_thread(&self, _visible: bool) {}
+        pub fn blur_on_main_thread(&self) -> bool {
+            false
+        }
         pub fn navigate_on_main_thread(&self, _url: &str) {}
         pub fn do_message_loop_work() {}
     }

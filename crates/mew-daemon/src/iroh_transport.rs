@@ -235,6 +235,7 @@ impl ProtocolHandler for MewIrohHandler {
                 self.auto_summary_enabled.clone(),
                 self.remote_scope,
                 Some(authorizer),
+                false,
             )
             .await
         } else {
@@ -246,6 +247,7 @@ impl ProtocolHandler for MewIrohHandler {
                 self.auto_summary_enabled.clone(),
                 self.remote_scope,
                 self.remote_token.as_deref(),
+                true,
             )
             .await
         };

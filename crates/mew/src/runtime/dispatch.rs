@@ -146,6 +146,77 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             handle_paste_clipboard_image(cx).await;
             Flow::Continue
         }
+        Action::NewSessionInProject(path) => {
+            match cx.target.new_session_in(&path).await {
+                Ok(()) => {
+                    // The daemon attaches the client to the new session and
+                    // pushes its history; clear the stale display.
+                    cx.app.clear_messages();
+                    cx.app
+                        .push_synthetic_message(format!("new session in {}", path));
+                    cx.app.auto_scroll = true;
+                    cx.app.scroll = cx.app.max_scroll;
+                }
+                Err(Unsupported(reason)) => cx.app.set_alert(reason),
+            }
+            Flow::Continue
+        }
+        Action::ToggleSessionArchived(id) => {
+            let current = cx
+                .app
+                .daemon_sessions
+                .iter()
+                .find(|s| s.session_id == id)
+                .map(|s| s.archived)
+                .unwrap_or(false);
+            match cx.target.archive_session(&id, !current).await {
+                Ok(()) => {
+                    if let Some(s) = cx
+                        .app
+                        .daemon_sessions
+                        .iter_mut()
+                        .find(|s| s.session_id == id)
+                    {
+                        s.archived = !current;
+                    }
+                    cx.app.push_synthetic_message(format!(
+                        "{} session {}",
+                        if current { "unarchived" } else { "archived" },
+                        id
+                    ));
+                }
+                Err(Unsupported(reason)) => cx.app.set_alert(reason),
+            }
+            Flow::Continue
+        }
+        Action::ToggleSessionPinned(id) => {
+            let current = cx
+                .app
+                .daemon_sessions
+                .iter()
+                .find(|s| s.session_id == id)
+                .map(|s| s.pinned)
+                .unwrap_or(false);
+            match cx.target.pin_session(&id, !current).await {
+                Ok(()) => {
+                    if let Some(s) = cx
+                        .app
+                        .daemon_sessions
+                        .iter_mut()
+                        .find(|s| s.session_id == id)
+                    {
+                        s.pinned = !current;
+                    }
+                    cx.app.push_synthetic_message(format!(
+                        "{} session {}",
+                        if current { "unpinned" } else { "pinned" },
+                        id
+                    ));
+                }
+                Err(Unsupported(reason)) => cx.app.set_alert(reason),
+            }
+            Flow::Continue
+        }
     }
 }
 
@@ -178,6 +249,16 @@ async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String) {
 /// On SSH connections the system clipboard is the remote machine's
 /// clipboard, not the user's local one — detect this and warn early.
 async fn handle_paste_clipboard_image<T: CommandTarget>(cx: &mut Ctx<'_, T>) {
+    handle_paste_clipboard_image_with(cx, read_clipboard_image).await;
+}
+
+/// Shared implementation with an injectable reader so the error branch can
+/// be tested without depending on the developer machine's clipboard.
+pub(crate) async fn handle_paste_clipboard_image_with<T, F>(cx: &mut Ctx<'_, T>, read_image: F)
+where
+    T: CommandTarget,
+    F: FnOnce() -> Result<std::path::PathBuf, String>,
+{
     // SSH detection: if SSH_CONNECTION or SSH_TTY is set, the user is almost
     // certainly on a remote host whose clipboard is not the one they copied
     // the image to.
@@ -187,7 +268,7 @@ async fn handle_paste_clipboard_image<T: CommandTarget>(cx: &mut Ctx<'_, T>) {
         return;
     }
 
-    match read_clipboard_image() {
+    match read_image() {
         Ok(path) => {
             let path_str = path.to_string_lossy().to_string();
             cx.app.insert_mention(&format!("@{}", path_str));
@@ -354,6 +435,10 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
             cx.app.open_session_picker_from_disk();
             Flow::Continue
         }
+        SlashResult::OpenSessionPicker => {
+            cx.app.open_session_picker();
+            Flow::Continue
+        }
         SlashResult::OpenHelp => {
             cx.app.mode = mew_tui::app::Mode::Help;
             Flow::Continue
@@ -374,6 +459,87 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
             match cx.target.manage_goal(action).await {
                 Ok(msg) => {
                     cx.app.push_synthetic_message(msg);
+                }
+                Err(Unsupported(reason)) => {
+                    cx.app.set_alert(reason);
+                }
+            }
+            Flow::Continue
+        }
+        SlashResult::SetAutoTitle(enabled) => {
+            match cx.target.set_auto_title(enabled).await {
+                Ok(()) => {
+                    cx.app.push_synthetic_message(format!(
+                        "auto-title {}",
+                        if enabled { "enabled" } else { "disabled" }
+                    ));
+                }
+                Err(Unsupported(reason)) => {
+                    cx.app.set_alert(reason);
+                }
+            }
+            Flow::Continue
+        }
+        SlashResult::SetAutoSummary(enabled) => {
+            match cx.target.set_auto_summary(enabled).await {
+                Ok(()) => {
+                    cx.app.push_synthetic_message(format!(
+                        "auto-summary {}",
+                        if enabled { "enabled" } else { "disabled" }
+                    ));
+                }
+                Err(Unsupported(reason)) => {
+                    cx.app.set_alert(reason);
+                }
+            }
+            Flow::Continue
+        }
+        SlashResult::YieldControl => {
+            match cx.target.yield_control().await {
+                Ok(()) => {
+                    cx.app
+                        .push_synthetic_message("yielded control to other clients".into());
+                }
+                Err(Unsupported(reason)) => {
+                    cx.app.set_alert(reason);
+                }
+            }
+            Flow::Continue
+        }
+        SlashResult::UnflagFile(path) => {
+            match cx.target.unflag_file(&path).await {
+                Ok(()) => {
+                    cx.app.flagged_files.retain(|f| f.path != path);
+                    cx.app.push_synthetic_message(format!("unflagged {}", path));
+                }
+                Err(Unsupported(reason)) => {
+                    cx.app.set_alert(reason);
+                }
+            }
+            Flow::Continue
+        }
+        SlashResult::OpenProjectPicker => {
+            // The picker opens when the daemon's `ProjectList` response
+            // arrives on the notify channel.
+            match cx.target.list_projects().await {
+                Ok(()) => {}
+                Err(Unsupported(reason)) => {
+                    cx.app.set_alert(reason);
+                }
+            }
+            Flow::Continue
+        }
+        SlashResult::RenameSession(title) => {
+            let id = cx.app.status.session_id.clone();
+            if id.is_empty() {
+                cx.app.set_alert("no active session to rename");
+                return Flow::Continue;
+            }
+            match cx.target.rename_session(&id, &title).await {
+                Ok(()) => {
+                    cx.app.session_titles.insert(id, title.clone());
+                    cx.app
+                        .push_synthetic_message(format!("session renamed to \"{}\"", title));
                 }
                 Err(Unsupported(reason)) => {
                     cx.app.set_alert(reason);
@@ -576,6 +742,12 @@ async fn handle_cycle_persona<T: CommandTarget>(cx: &mut Ctx<'_, T>, delta: i32)
 
 /// Handle `ResumeSession` — load a previous session.
 async fn handle_resume_session<T: CommandTarget>(cx: &mut Ctx<'_, T>, id: &str) {
+    // In daemon mode the daemon owns session state; attach instead of
+    // loading from local disk (the JSONL may not exist on this machine).
+    if cx.app.daemon_mode {
+        handle_attach_session(cx, id).await;
+        return;
+    }
     // For local mode, resume loads from disk. The target handles agent state;
     // we handle app display state.
     // We need the loaded messages to repopulate the app display.

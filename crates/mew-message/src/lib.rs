@@ -102,6 +102,7 @@ pub enum ErrorKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum Part {
     Text(TextPart),
     Reasoning(ReasoningPart),
@@ -365,6 +366,7 @@ fn is_default<T: Default + PartialEq>(t: &T) -> bool {
 /// serializes cleanly for the daemon protocol.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum ProviderEventWire {
     PartStart {
         part: Part,

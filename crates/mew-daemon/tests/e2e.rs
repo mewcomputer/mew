@@ -18,7 +18,7 @@ use mew_agent::{Agent, AgentEvent};
 use mew_daemon::DaemonServer;
 use mew_hooks::NopDispatcher;
 use mew_message::{Finish, PartId, TextPart, ToolCallPart, ToolState, ToolStatePending, ToolTime};
-use mew_protocol::{ClientMessage, ServerMessage};
+use mew_protocol::{ClientKind, ClientMessage, ServerMessage};
 use mew_provider_fake::FakeProvider;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
@@ -182,6 +182,198 @@ async fn new_session_returns_session_ready() {
 }
 
 #[tokio::test]
+async fn switching_sessions_detaches_the_previous_session_client() {
+    let script = Arc::new(|| FakeProvider::text_response("hello"));
+    let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
+
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    let first_ready =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
+    let first_session_id = match first_ready {
+        ServerMessage::SessionReady { session_id, .. } => session_id,
+        _ => unreachable!(),
+    };
+
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    let messages = recv_until(&mut ws, |m| {
+        matches!(m, ServerMessage::SessionReady { session_id, .. } if session_id != &first_session_id)
+    })
+    .await;
+
+    assert!(
+        messages
+            .iter()
+            .any(|message| matches!(message, ServerMessage::ClientDetached { .. })),
+        "switching sessions should detach the old registration, got {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn new_session_in_group_persists_group_membership_before_attach() {
+    let script = Arc::new(|| FakeProvider::text_response("hello"));
+    let (dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
+
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
+    recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
+
+    send(
+        &mut ws,
+        ClientMessage::CreateGroup {
+            name: "Project work".into(),
+            color: None,
+        },
+    )
+    .await;
+    let groups = recv_one_matching(&mut ws, |m| {
+        matches!(m, ServerMessage::GroupsChanged { .. })
+    })
+    .await;
+    let group_id = match groups {
+        ServerMessage::GroupsChanged { groups } => groups[0].id.clone(),
+        _ => unreachable!(),
+    };
+
+    send(
+        &mut ws,
+        ClientMessage::NewSessionInGroup {
+            cwd: None,
+            group_id: group_id.clone(),
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
+    let ready =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
+    let session_id = match ready {
+        ServerMessage::SessionReady { session_id, .. } => session_id,
+        _ => unreachable!(),
+    };
+
+    let meta_path = dir
+        .path()
+        .join("sessions")
+        .join(&session_id)
+        .join("meta.json");
+    let meta = tokio::fs::read_to_string(meta_path)
+        .await
+        .expect("read meta");
+    assert!(meta.contains(&format!(r#""group_id": "{group_id}""#)));
+}
+
+#[tokio::test]
+async fn desktop_terminal_is_owned_by_daemon_and_streams_bytes() {
+    let script = Arc::new(|| FakeProvider::text_response("unused"));
+    let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
+
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Desktop,
+        },
+    )
+    .await;
+    recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
+
+    send(&mut ws, ClientMessage::TerminalOpen { rows: 24, cols: 80 }).await;
+    let opened = recv_one_matching(&mut ws, |m| {
+        matches!(m, ServerMessage::TerminalOpened { .. })
+    })
+    .await;
+    let terminal_id = match opened {
+        ServerMessage::TerminalOpened { terminal_id } => terminal_id,
+        _ => unreachable!(),
+    };
+
+    send(
+        &mut ws,
+        ClientMessage::TerminalInput {
+            terminal_id: terminal_id.clone(),
+            bytes: b"printf 'daemon-wire\\n'; exit\n".to_vec(),
+        },
+    )
+    .await;
+    let messages = recv_until(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::TerminalExited { terminal_id: id, .. } if id == &terminal_id
+        )
+    })
+    .await;
+    let output: Vec<u8> = messages
+        .iter()
+        .filter_map(|message| match message {
+            ServerMessage::TerminalOutput {
+                terminal_id: id,
+                bytes,
+            } if id == &terminal_id => Some(bytes.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .collect();
+    assert!(
+        String::from_utf8_lossy(&output).contains("daemon-wire"),
+        "terminal output was {:?}",
+        String::from_utf8_lossy(&output)
+    );
+}
+
+#[tokio::test]
+async fn desktop_new_session_is_allowed_on_local_transport() {
+    let script = Arc::new(|| FakeProvider::text_response("hello"));
+    let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
+
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Desktop,
+        },
+    )
+    .await;
+
+    let messages = recv_until(&mut ws, |m| {
+        matches!(
+            m,
+            ServerMessage::SessionReady { .. } | ServerMessage::Error { .. }
+        )
+    })
+    .await;
+    assert!(
+        messages
+            .iter()
+            .all(|message| !matches!(message, ServerMessage::Error { .. })),
+        "local desktop session creation should not be rejected: {messages:?}"
+    );
+}
+
+#[tokio::test]
 async fn prompt_streams_text_response_events() {
     let script = Arc::new(|| FakeProvider::text_response("hello world"));
     let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
@@ -291,6 +483,104 @@ async fn prompt_without_new_session_returns_error() {
         }
         _ => unreachable!(),
     }
+}
+
+#[tokio::test]
+async fn setting_permissive_mode_keeps_the_session_connection_alive() {
+    let script = Arc::new(|| FakeProvider::text_response("ok"));
+    let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
+
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    recv_one_matching(&mut ws, |message| {
+        matches!(message, ServerMessage::SessionReady { .. })
+    })
+    .await;
+
+    send(
+        &mut ws,
+        ClientMessage::SetPermissionMode {
+            mode: "permissive".into(),
+        },
+    )
+    .await;
+    recv_one_matching(&mut ws, |message| {
+        matches!(message, ServerMessage::PermissionModeChanged { mode } if mode == "permissive")
+    })
+    .await;
+
+    send(&mut ws, ClientMessage::Ping).await;
+    let pong = recv_one_matching(&mut ws, |message| {
+        matches!(message, ServerMessage::Pong { .. })
+    })
+    .await;
+    assert!(matches!(pong, ServerMessage::Pong { .. }));
+}
+
+#[tokio::test]
+async fn setting_permissive_mode_does_not_wait_for_an_active_turn() {
+    let script = Arc::new(|| FakeProvider::text_response(&"x".repeat(800)));
+    let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
+
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    recv_one_matching(&mut ws, |message| {
+        matches!(message, ServerMessage::SessionReady { .. })
+    })
+    .await;
+
+    send(
+        &mut ws,
+        ClientMessage::Prompt {
+            text: "keep working".into(),
+            attachments: vec![],
+        },
+    )
+    .await;
+    recv_one_matching(&mut ws, |message| {
+        matches!(
+            message,
+            ServerMessage::SessionActivityChanged {
+                activity: mew_protocol::SessionState::Running,
+                ..
+            }
+        )
+    })
+    .await;
+
+    send(
+        &mut ws,
+        ClientMessage::SetPermissionMode {
+            mode: "permissive".into(),
+        },
+    )
+    .await;
+    let changed = tokio::time::timeout(
+        Duration::from_millis(250),
+        recv_one_matching(&mut ws, |message| {
+            matches!(message, ServerMessage::PermissionModeChanged { mode } if mode == "permissive")
+        }),
+    )
+    .await
+    .expect("permission mode should update while a turn is running");
+    assert!(matches!(
+        changed,
+        ServerMessage::PermissionModeChanged { mode } if mode == "permissive"
+    ));
 }
 
 #[tokio::test]

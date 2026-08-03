@@ -143,7 +143,10 @@ impl CommandTarget for DaemonTarget {
         let client = self.client.clone();
         match client.attach_session(id).await {
             Ok(()) => {
-                client.list_sessions().await;
+                client
+                    .list_sessions()
+                    .await
+                    .map_err(|_| Unsupported("failed to refresh daemon sessions"))?;
                 Ok(())
             }
             Err(_) => Err(Unsupported("failed to attach to daemon session")),
@@ -208,5 +211,92 @@ impl CommandTarget for DaemonTarget {
             Ok(()) => Ok("goal command sent".to_string()),
             Err(_) => Err(Unsupported("daemon goal command failed")),
         }
+    }
+
+    async fn set_auto_title(&mut self, enabled: bool) -> Result<(), Unsupported> {
+        self.client
+            .set_auto_title(enabled)
+            .await
+            .map_err(|_| Unsupported("failed to update daemon auto-title setting"))
+    }
+
+    async fn set_auto_summary(&mut self, enabled: bool) -> Result<(), Unsupported> {
+        self.client
+            .set_auto_summary(enabled)
+            .await
+            .map_err(|_| Unsupported("failed to update daemon auto-summary setting"))
+    }
+
+    async fn yield_control(&mut self) -> Result<(), Unsupported> {
+        let msg = mew_protocol::ClientMessage::YieldControl {};
+        match mew_protocol::encode_json(&msg) {
+            Ok(json) => match self.client.send_raw(&json).await {
+                Ok(()) => Ok(()),
+                Err(_) => Err(Unsupported("daemon connection failed during yield")),
+            },
+            Err(_) => Err(Unsupported("failed to encode yield message")),
+        }
+    }
+
+    async fn unflag_file(&mut self, path: &str) -> Result<(), Unsupported> {
+        match self.client.session_id().await {
+            Some(id) => self
+                .client
+                .unflag_file(&id, path)
+                .await
+                .map_err(|_| Unsupported("failed to unflag daemon file")),
+            None => Err(Unsupported("no active daemon session")),
+        }
+    }
+
+    async fn list_projects(&mut self) -> Result<(), Unsupported> {
+        self.client
+            .list_projects()
+            .await
+            .map_err(|_| Unsupported("failed to list daemon projects"))
+    }
+
+    async fn new_session_in(&mut self, path: &str) -> Result<(), Unsupported> {
+        self.client
+            .new_session_in(path)
+            .await
+            .map_err(|_| Unsupported("failed to create daemon session"))?;
+        self.client
+            .list_sessions()
+            .await
+            .map_err(|_| Unsupported("failed to refresh daemon sessions"))
+    }
+
+    async fn archive_session(&mut self, id: &str, archived: bool) -> Result<(), Unsupported> {
+        self.client
+            .archive_session(id, archived)
+            .await
+            .map_err(|_| Unsupported("failed to archive daemon session"))?;
+        self.client
+            .list_sessions()
+            .await
+            .map_err(|_| Unsupported("failed to refresh daemon sessions"))
+    }
+
+    async fn pin_session(&mut self, id: &str, pinned: bool) -> Result<(), Unsupported> {
+        self.client
+            .pin_session(id, pinned)
+            .await
+            .map_err(|_| Unsupported("failed to pin daemon session"))?;
+        self.client
+            .list_sessions()
+            .await
+            .map_err(|_| Unsupported("failed to refresh daemon sessions"))
+    }
+
+    async fn rename_session(&mut self, id: &str, title: &str) -> Result<(), Unsupported> {
+        self.client
+            .rename_session(id, title)
+            .await
+            .map_err(|_| Unsupported("failed to rename daemon session"))?;
+        self.client
+            .list_sessions()
+            .await
+            .map_err(|_| Unsupported("failed to refresh daemon sessions"))
     }
 }

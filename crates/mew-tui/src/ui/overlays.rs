@@ -11,7 +11,8 @@ use ratatui::{
 use super::display_width;
 use crate::app::{
     App, GoalProposalState, PermissionState, PersonaSummary, PersonaSwitchConfirmState,
-    PickerState, PlanApprovalState, SlashCommand, UserQuestionState, PICKER_VISIBLE_ITEMS,
+    PickerBudget, PickerItem, PickerState, PlanApprovalState, SlashCommand, UserQuestionState,
+    PICKER_VISIBLE_ITEMS,
 };
 
 pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCommand], area: Rect) {
@@ -611,6 +612,46 @@ fn wrap_text(s: &str, max: usize) -> Vec<String> {
     super::chat::wrap_text_to_width(s, max as u16)
 }
 
+/// Width in cells of the budget slider track in the thinking picker.
+const BUDGET_TRACK_WIDTH: u16 = 20;
+
+/// Render the thinking picker's budget row as a slider track:
+/// `[█████░░░░░░░] 8192 tok`. The fill reflects the snapped draft; the
+/// label shows the raw typed digits, with a cursor underscore while the
+/// row is selected.
+fn budget_track_line(
+    budget: &PickerBudget,
+    selected: bool,
+    tokens: &crate::theme::Theme,
+) -> Line<'static> {
+    let value = budget.snapped();
+    let total = (budget.info.max - budget.info.min).max(1) as f64;
+    let filled = ((value - budget.info.min) as f64 / total * BUDGET_TRACK_WIDTH as f64)
+        .round()
+        .clamp(0.0, BUDGET_TRACK_WIDTH as f64) as usize;
+    let bg = tokens.resolve("status_bar.background");
+    let muted = Style::default().fg(tokens.resolve("text.muted")).bg(bg);
+    let value_style = if selected {
+        Style::default()
+            .fg(tokens.resolve("selection.foreground"))
+            .bg(bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(tokens.resolve("text.body")).bg(bg)
+    };
+    let cursor = if selected { "_" } else { "" };
+    Line::from(vec![
+        Span::styled("[", muted),
+        Span::styled(
+            "█".repeat(filled),
+            Style::default().fg(tokens.resolve("text.accent")).bg(bg),
+        ),
+        Span::styled("░".repeat(BUDGET_TRACK_WIDTH as usize - filled), muted),
+        Span::styled("]", muted),
+        Span::styled(format!(" {} tok{}", budget.draft, cursor), value_style),
+    ])
+}
+
 pub(super) fn draw_picker(
     f: &mut Frame,
     picker: &mut PickerState,
@@ -641,7 +682,9 @@ pub(super) fn draw_picker(
 
     picker.visible_items = visible_items;
 
-    let filtered = picker.filtered();
+    // `filtered` is cloned to owned items so the budget-track bookkeeping
+    // below can mutate the picker while iterating the visible rows.
+    let filtered: Vec<PickerItem> = picker.filtered().into_iter().cloned().collect();
 
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
@@ -716,7 +759,15 @@ pub(super) fn draw_picker(
 
     let mut list_text = Text::default();
 
+    // The budget track is only hit-testable while its row is visible.
+    if let Some(budget) = picker.budget.as_mut() {
+        if !filtered.iter().any(|i| i.id == "budget") {
+            budget.track_rect = None;
+        }
+    }
+
     let start = picker.scroll;
+    let mut row_y = list_area.y;
     for (i, item) in filtered.iter().enumerate().skip(start).take(visible_items) {
         // Section headers render as a non-selectable muted label.
         if item.header {
@@ -727,6 +778,19 @@ pub(super) fn draw_picker(
                     .bg(tokens.resolve("status_bar.background"))
                     .add_modifier(Modifier::DIM),
             )]));
+            row_y += 1;
+            continue;
+        }
+        // The thinking picker's budget row renders as a slider track.
+        if item.id == "budget" {
+            let line = if let Some(budget) = picker.budget.as_mut() {
+                budget.track_rect = Some(Rect::new(list_area.x, row_y, BUDGET_TRACK_WIDTH, 1));
+                budget_track_line(budget, i == picker.selected, tokens)
+            } else {
+                Line::from(vec![Span::styled("budget", Style::default())])
+            };
+            list_text.push_line(line);
+            row_y += 1;
             continue;
         }
         let is_selected = i == picker.selected;
@@ -751,11 +815,13 @@ pub(super) fn draw_picker(
         };
 
         list_text.push_line(Line::from(vec![Span::styled(&item.label, label_style)]));
+        row_y += 1;
         if !item.description.is_empty() {
             list_text.push_line(Line::from(vec![Span::styled(
                 &item.description,
                 desc_style,
             )]));
+            row_y += 1;
         }
     }
 
@@ -1392,6 +1458,10 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect, tokens: &crate::theme::Theme
         Line::from(vec![
             Span::styled("  Ctrl+T     ", key_style),
             Span::styled("toggle reasoning blocks", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+G     ", key_style),
+            Span::styled("expand/collapse tool-call batch", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  Ctrl+1/2/3 ", key_style),

@@ -156,6 +156,57 @@ impl runtime::target::CommandTarget for RecordingTarget {
             Ok("goal managed".into())
         }
     }
+    async fn set_auto_title(&mut self, _enabled: bool) -> Result<(), runtime::target::Unsupported> {
+        self.record("set_auto_title");
+        self.check()
+    }
+    async fn set_auto_summary(
+        &mut self,
+        _enabled: bool,
+    ) -> Result<(), runtime::target::Unsupported> {
+        self.record("set_auto_summary");
+        self.check()
+    }
+    async fn yield_control(&mut self) -> Result<(), runtime::target::Unsupported> {
+        self.record("yield_control");
+        self.check()
+    }
+    async fn unflag_file(&mut self, _path: &str) -> Result<(), runtime::target::Unsupported> {
+        self.record("unflag_file");
+        self.check()
+    }
+    async fn list_projects(&mut self) -> Result<(), runtime::target::Unsupported> {
+        self.record("list_projects");
+        self.check()
+    }
+    async fn new_session_in(&mut self, _path: &str) -> Result<(), runtime::target::Unsupported> {
+        self.record("new_session_in");
+        self.check()
+    }
+    async fn archive_session(
+        &mut self,
+        _id: &str,
+        _archived: bool,
+    ) -> Result<(), runtime::target::Unsupported> {
+        self.record("archive_session");
+        self.check()
+    }
+    async fn pin_session(
+        &mut self,
+        _id: &str,
+        _pinned: bool,
+    ) -> Result<(), runtime::target::Unsupported> {
+        self.record("pin_session");
+        self.check()
+    }
+    async fn rename_session(
+        &mut self,
+        _id: &str,
+        _title: &str,
+    ) -> Result<(), runtime::target::Unsupported> {
+        self.record("rename_session");
+        self.check()
+    }
 }
 
 /// Every `Action` variant must produce an observable effect through
@@ -391,7 +442,10 @@ async fn test_paste_clipboard_image_ssh_warning() {
         loaded_personas: &[],
         plugin_info: &plugin_info,
     };
-    let _ = runtime::handle_action(&mut cx, Action::PasteClipboardImage).await;
+    runtime::dispatch::handle_paste_clipboard_image_with(&mut cx, || {
+        Err("clipboard image tool unavailable".into())
+    })
+    .await;
     std::env::remove_var("SSH_CONNECTION");
 
     assert!(
@@ -778,4 +832,233 @@ fn mk_personas(names: &[&str]) -> Vec<mew_personas::Persona> {
             config: mew_personas::PersonaConfig::default(),
         })
         .collect()
+}
+
+// -----------------------------------------------------------------------
+// /autotitle, /autosummary, /yield — daemon session toggles.
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_autotitle_autosummary_yield_reach_target() {
+    for (cmd, expected) in [
+        ("/autotitle on", "set_auto_title"),
+        ("/autotitle off", "set_auto_title"),
+        ("/autosummary on", "set_auto_summary"),
+        ("/yield", "yield_control"),
+    ] {
+        let mut app = mew_tui::App::new();
+        app.daemon_mode = true;
+        let mut target = RecordingTarget::new();
+        let mut should_break = false;
+        let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+            session_id: String::new(),
+            model: String::new(),
+            provider: String::new(),
+            workspace: String::new(),
+            active_persona: None,
+        }));
+        let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+        let mut cx = runtime::Ctx {
+            app: &mut app,
+            target: &mut target,
+            event_loop: &event_loop,
+            should_break: &mut should_break,
+            cat: None,
+            loaded_personas: &[],
+            plugin_info: &plugin_info,
+        };
+        let _ = runtime::handle_action(&mut cx, Action::SlashCommand(cmd.into())).await;
+        assert!(
+            target.calls.contains(&expected),
+            "{cmd} should call {expected}; got calls: {:?}",
+            target.calls
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_autotitle_unsupported_renders_alert() {
+    let mut app = mew_tui::App::new();
+    app.daemon_mode = true;
+    let mut target = RecordingTarget::failing();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        session_id: String::new(),
+        model: String::new(),
+        provider: String::new(),
+        workspace: String::new(),
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    let _ = runtime::handle_action(&mut cx, Action::SlashCommand("/autotitle on".into())).await;
+    assert!(
+        app.alert.is_some(),
+        "unsupported set_auto_title should render a visible alert"
+    );
+}
+
+#[tokio::test]
+async fn test_unflag_reaches_target_and_updates_display() {
+    let mut app = mew_tui::App::new();
+    app.flagged_files = vec![mew_agent::FlaggedFileInfo {
+        path: "src/main.rs".into(),
+        reason: None,
+    }];
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        session_id: String::new(),
+        model: String::new(),
+        provider: String::new(),
+        workspace: String::new(),
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    let _ =
+        runtime::handle_action(&mut cx, Action::SlashCommand("/unflag src/main.rs".into())).await;
+    assert!(
+        target.calls.contains(&"unflag_file"),
+        "/unflag should call unflag_file; got calls: {:?}",
+        target.calls
+    );
+    assert!(
+        app.flagged_files.is_empty(),
+        "display flagged set should drop the unflagged file"
+    );
+}
+
+#[tokio::test]
+async fn test_project_picker_flow_reaches_target() {
+    // /project requests the project list; selecting a row creates the
+    // session via NewSessionInProject.
+    let mut app = mew_tui::App::new();
+    app.daemon_mode = true;
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        session_id: String::new(),
+        model: String::new(),
+        provider: String::new(),
+        workspace: String::new(),
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    let _ = runtime::handle_action(&mut cx, Action::SlashCommand("/project".into())).await;
+    let _ = runtime::handle_action(&mut cx, Action::NewSessionInProject("/tmp/proj".into())).await;
+    assert!(
+        target.calls.contains(&"list_projects"),
+        "/project should call list_projects; got calls: {:?}",
+        target.calls
+    );
+    assert!(
+        target.calls.contains(&"new_session_in"),
+        "project selection should call new_session_in; got calls: {:?}",
+        target.calls
+    );
+}
+
+#[tokio::test]
+async fn test_session_meta_actions_reach_target() {
+    // Toggle archived/pinned + rename all reach the target and update
+    // display state.
+    let mut app = mew_tui::App::new();
+    app.daemon_mode = true;
+    app.status.session_id = "sess_1".into();
+    app.daemon_sessions = vec![mew_protocol::SessionInfo {
+        session_id: "sess_1".into(),
+        state: mew_protocol::SessionState::Active,
+        model: None,
+        provider: None,
+        created_at: 0,
+        last_message_at: None,
+        summary: None,
+        client_count: 1,
+        cwd: None,
+        last_turn_failed: false,
+        archived: false,
+        pinned: false,
+        group_id: None,
+        change_stats: None,
+        usage: None,
+        pending_permissions: 0,
+        pending_questions: 0,
+        first_message: None,
+    }];
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        session_id: String::new(),
+        model: String::new(),
+        provider: String::new(),
+        workspace: String::new(),
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    let _ = runtime::handle_action(&mut cx, Action::ToggleSessionArchived("sess_1".into())).await;
+    let _ = runtime::handle_action(&mut cx, Action::ToggleSessionPinned("sess_1".into())).await;
+    let _ = runtime::handle_action(&mut cx, Action::SlashCommand("/rename fix-auth".into())).await;
+    assert!(
+        cx.app.daemon_sessions[0].archived,
+        "archive toggle should flip local state"
+    );
+    assert!(
+        cx.app.daemon_sessions[0].pinned,
+        "pin toggle should flip local state"
+    );
+    assert_eq!(
+        cx.app.session_titles.get("sess_1").map(String::as_str),
+        Some("fix-auth"),
+        "rename should update the display title"
+    );
+    assert!(
+        target.calls.contains(&"archive_session"),
+        "toggle should call archive_session; got: {:?}",
+        target.calls
+    );
+    assert!(
+        target.calls.contains(&"pin_session"),
+        "toggle should call pin_session; got: {:?}",
+        target.calls
+    );
+    assert!(
+        target.calls.contains(&"rename_session"),
+        "/rename should call rename_session; got: {:?}",
+        target.calls
+    );
 }

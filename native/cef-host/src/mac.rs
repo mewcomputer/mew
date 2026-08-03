@@ -110,8 +110,8 @@ pub fn setup_application() {
     assert!(NSApp(mtm).isKindOfClass(MewCefApplication::class()));
 }
 
-/// Tauri owns the already-created NSApplication instance. Do not replace its
-/// class or delegate, because that would break Tauri's event loop.
+/// GPUI owns the already-created NSApplication instance. Do not replace its
+/// class or delegate, because that would break the app event loop.
 #[allow(dead_code)]
 pub fn setup_existing_application() {
     let mtm = MainThreadMarker::new().expect("CEF must initialize on the main thread");
@@ -125,7 +125,7 @@ pub fn setup_existing_application() {
         let set_imp: Imp = std::mem::transmute(
             existing_application_set_handling_send_event as unsafe extern "C-unwind" fn(_, _, _),
         );
-        // CEF's macOS message loop asks NSApp for these two methods. Tauri
+        // CEF's macOS message loop asks NSApp for these two methods. GPUI
         // owns the application instance, so add the narrow protocol methods
         // to its concrete class instead of replacing the application class.
         let _ =

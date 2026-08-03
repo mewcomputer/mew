@@ -74,24 +74,35 @@ impl App {
                 description: "switch theme (e.g. /theme light, /theme dark)".into(),
             },
             SlashCommand {
-                name: "/web".into(),
-                description: "show the web UI URL for the current session".into(),
-            },
-            SlashCommand {
                 name: "/yield".into(),
                 description: "yield control to other clients".into(),
             },
             SlashCommand {
                 name: "/autotitle".into(),
-                description: "toggle auto session titling (daemon mode)".into(),
+                description: "toggle auto session titling (e.g. /autotitle off; daemon mode)"
+                    .into(),
             },
             SlashCommand {
                 name: "/autosummary".into(),
-                description: "toggle auto session summaries (daemon mode)".into(),
+                description: "toggle auto session summaries (e.g. /autosummary off; daemon mode)"
+                    .into(),
             },
             SlashCommand {
                 name: "/goal".into(),
                 description: "set or manage a goal (e.g. /goal fix the bug, /goal pause)".into(),
+            },
+            SlashCommand {
+                name: "/unflag".into(),
+                description: "unflag a flagged file (e.g. /unflag src/main.rs)".into(),
+            },
+            SlashCommand {
+                name: "/project".into(),
+                description: "new session in a project directory (daemon mode)".into(),
+            },
+            SlashCommand {
+                name: "/rename".into(),
+                description: "rename the active session (e.g. /rename fix-auth; daemon mode)"
+                    .into(),
             },
         ]
     }
@@ -171,14 +182,75 @@ impl App {
                     SlashResult::PermissionModeMenu
                 }
             }
-            "/sessions" | "/session" => SlashResult::OpenSessionPickerFromDisk,
+            "/sessions" | "/session" => {
+                if self.daemon_mode {
+                    SlashResult::OpenSessionPicker
+                } else {
+                    SlashResult::OpenSessionPickerFromDisk
+                }
+            }
             "/autotitle" | "/autosummary" => {
-                SlashResult::Message("this command is only available in daemon mode".into())
+                let is_title = cmd == "/autotitle";
+                if !self.daemon_mode {
+                    SlashResult::Message("this command is only available in daemon mode".into())
+                } else {
+                    match arg.map(str::trim) {
+                        Some("on") => {
+                            if is_title {
+                                SlashResult::SetAutoTitle(true)
+                            } else {
+                                SlashResult::SetAutoSummary(true)
+                            }
+                        }
+                        Some("off") => {
+                            if is_title {
+                                SlashResult::SetAutoTitle(false)
+                            } else {
+                                SlashResult::SetAutoSummary(false)
+                            }
+                        }
+                        _ => SlashResult::Message(format!("usage: {cmd} on|off")),
+                    }
+                }
+            }
+            "/yield" => SlashResult::YieldControl,
+            "/project" => {
+                if self.daemon_mode {
+                    SlashResult::OpenProjectPicker
+                } else {
+                    SlashResult::Message("this command is only available in daemon mode".into())
+                }
+            }
+            "/rename" => {
+                if !self.daemon_mode {
+                    SlashResult::Message("this command is only available in daemon mode".into())
+                } else {
+                    match arg.map(str::trim) {
+                        Some(title) if !title.is_empty() => {
+                            SlashResult::RenameSession(title.to_string())
+                        }
+                        _ => SlashResult::Message("usage: /rename <title>".into()),
+                    }
+                }
+            }
+            "/unflag" => {
+                if let Some(path) = arg {
+                    let path = path.trim();
+                    if path.is_empty() {
+                        SlashResult::Message("usage: /unflag <path>".into())
+                    } else {
+                        SlashResult::UnflagFile(path.to_string())
+                    }
+                } else {
+                    SlashResult::Message("usage: /unflag <path>".into())
+                }
             }
             "/mouse" | "/m" => SlashResult::ToggleMouseCapture,
             "/resume" => {
                 if let Some(id) = arg {
                     SlashResult::ResumeSession(id.to_string())
+                } else if self.daemon_mode {
+                    SlashResult::OpenSessionPicker
                 } else {
                     SlashResult::OpenSessionPickerFromDisk
                 }

@@ -139,7 +139,8 @@ pub(crate) async fn build_and_run(
     }
 
     // Apply reasoning variant from catalog or CLI flag.
-    let reasoning = resolve_reasoning(cat, &model_id, variant_flag.as_deref());
+    let reasoning =
+        resolve_reasoning(cat, &model_id, variant_flag.as_deref()).map(|(config, _)| config);
     if let Some(r) = reasoning {
         agent.set_reasoning(Some(r));
         info!(variant = ?variant_flag, model = %model_id, "enabled thinking variant");

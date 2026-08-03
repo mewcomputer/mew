@@ -33,7 +33,8 @@
 //! - `has_mcp(name)` — returns true if `name` is a connected MCP server.
 //! - `is_model_variant(variant)` — returns true if the active provider matches
 //!   a known variant name. Recognizes: "anthropic" (umans), "openai"
-//!   (opencode-zen, opencode-go, deepseek, z-ai), "deepseek", "z-ai", "umans",
+//!   (opencode-zen, opencode-go, deepseek, z-ai, alibaba-token-plan,
+//!   alibaba-token-plan-cn), "deepseek", "z-ai", "umans",
 //!   "opencode" (any opencode-*). Falls back to exact provider ID match.
 
 use std::collections::HashSet;
@@ -222,7 +223,12 @@ pub fn render(body: &str, ctx: &TemplateContext) -> String {
             "anthropic" => p == "umans",
             "openai" => matches!(
                 p.as_str(),
-                "opencode-zen" | "opencode-go" | "deepseek" | "z-ai"
+                "opencode-zen"
+                    | "opencode-go"
+                    | "deepseek"
+                    | "z-ai"
+                    | "alibaba-token-plan"
+                    | "alibaba-token-plan-cn"
             ),
             "deepseek" => p == "deepseek",
             "z-ai" => p == "z-ai",
@@ -418,6 +424,39 @@ mod tests {
             render("{% if is_model_variant(\"anthropic\") %}yes{% endif %}", &c),
             ""
         );
+    }
+
+    #[test]
+    fn test_render_is_model_variant_openai_family_alibaba() {
+        for provider_id in ["alibaba-token-plan", "alibaba-token-plan-cn"] {
+            let c = TemplateContext {
+                provider_id: provider_id.into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                render("{% if is_model_variant(\"openai\") %}yes{% endif %}", &c),
+                "yes",
+                "{} should be recognized as openai-shaped",
+                provider_id
+            );
+            assert_eq!(
+                render("{% if is_model_variant(\"anthropic\") %}yes{% endif %}", &c),
+                "",
+                "{} should not be anthropic",
+                provider_id
+            );
+            // Exact provider id match still works via the fallback arm.
+            assert_eq!(
+                render(
+                    &format!(
+                        "{{% if is_model_variant(\"{}\") %}}yes{{% endif %}}",
+                        provider_id
+                    ),
+                    &c
+                ),
+                "yes"
+            );
+        }
     }
 
     #[test]

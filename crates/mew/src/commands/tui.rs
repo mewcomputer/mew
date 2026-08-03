@@ -60,10 +60,10 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
     app.recent_models = state.recent_models.clone();
 
     // Request the session list so the sidebar rail is populated immediately.
-    client.list_sessions().await;
+    client.list_sessions().await?;
     // Request the model list so the model picker and thinking-variant
     // picker are populated in daemon mode.
-    client.list_models().await;
+    client.list_models().await?;
 
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -500,6 +500,8 @@ pub(crate) async fn run_tui(
     let state = mew_config::load_state().unwrap_or_default();
 
     // Apply reasoning variant: CLI flag > persisted state > catalog default.
+    // Produces the provider params plus the canonical resolved name (a
+    // clamped/snapped `budget:<n>` for numeric budgets) for the status bar.
     let variant_source = variant_flag.as_deref().map(|_| "cli").or_else(|| {
         if state.last_thinking_variant.is_some() {
             Some("state")
@@ -510,23 +512,44 @@ pub(crate) async fn run_tui(
     let variant_name = variant_flag
         .as_deref()
         .or(state.last_thinking_variant.as_deref());
-    let reasoning = if let Some(name) = variant_name {
+    let resolved = if let Some(name) = variant_name {
         if name == "off" || name == "none" {
-            None
-        } else if let Some(c) = cat {
-            c.map_variant(name, &model_id)
-                .map(|v| mew_provider::ReasoningConfig {
-                    params: v.params.as_object().cloned().unwrap_or_default(),
-                })
+            // Off is a plain disable unless the model has an explicit off
+            // variant that needs real params (qwen3.8-max sends
+            // `enable_thinking: false` because thinking is on by default).
+            cat.as_ref().and_then(|c| {
+                c.map_variant(name, &model_id)
+                    .filter(|v| v.name == "off" || v.name == "none")
+                    .map(|v| {
+                        (
+                            mew_provider::ReasoningConfig {
+                                params: v.params.as_object().cloned().unwrap_or_default(),
+                            },
+                            v.name,
+                        )
+                    })
+            })
         } else {
-            resolve_reasoning(cat, &model_id, Some(name))
+            match cat.as_ref() {
+                Some(c) => c.map_variant(name, &model_id).map(|v| {
+                    (
+                        mew_provider::ReasoningConfig {
+                            params: v.params.as_object().cloned().unwrap_or_default(),
+                        },
+                        v.name,
+                    )
+                }),
+                None => resolve_reasoning(cat, &model_id, Some(name)),
+            }
         }
     } else {
         resolve_reasoning(cat, &model_id, None)
     };
-    if let Some(r) = reasoning {
-        agent.set_reasoning(Some(r));
-        info!(source = ?variant_source, model = %model_id, "enabled thinking variant");
+    if let Some((r, resolved_name)) = &resolved {
+        agent.set_reasoning(Some(r.clone()));
+        if resolved_name != "off" && resolved_name != "none" {
+            info!(source = ?variant_source, model = %model_id, "enabled thinking variant");
+        }
     }
 
     // Apply the default persona on startup (builder by default). The agent's
@@ -562,19 +585,10 @@ pub(crate) async fn run_tui(
     app.recent_models = state.recent_models.clone();
 
     // Restore the thinking variant display so the status bar shows it.
-    if let Some(name) = variant_name {
-        if name != "off" && name != "none" {
-            // The variant may have been mapped to a different name for this
-            // model. Show the mapped name if it resolved, otherwise the
-            // original.
-            if let Some(c) = cat {
-                if let Some(mapped) = c.map_variant(name, &model_id) {
-                    app.active_thinking_variant = Some(mapped.name);
-                }
-            } else {
-                app.active_thinking_variant = Some(name.to_string());
-            }
-        }
+    // `resolved` carries the canonical name (a clamped/snapped
+    // `budget:<n>` for numeric budgets) from the resolution above.
+    if let Some((_, resolved_name)) = &resolved {
+        app.active_thinking_variant = Some(resolved_name.clone());
     }
 
     // Seed the sidebar's todos pane from whatever was loaded at startup.
@@ -628,6 +642,26 @@ pub(crate) async fn run_tui(
                         .map(|v| v.name)
                         .collect::<Vec<_>>(),
                 )
+            })
+            .collect();
+        // Same for numeric budget ranges (qwen3.8-max etc.), so the picker
+        // can offer a budget slider for models that accept one.
+        app.thinking_budget = c
+            .models
+            .values()
+            .filter_map(|m| {
+                c.thinking_budget(&m.id).map(|budget| {
+                    (
+                        m.id.clone(),
+                        mew_protocol::ThinkingBudgetInfo {
+                            min: budget.min,
+                            max: budget.max,
+                            step: budget.step,
+                            default: budget.default,
+                            by_effort: budget.by_effort,
+                        },
+                    )
+                })
             })
             .collect();
     }

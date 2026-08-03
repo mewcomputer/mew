@@ -144,6 +144,30 @@ impl Default for Config {
                 ..Default::default()
             },
         );
+        // Alibaba Token Plan (https://www.alibabacloud.com/help/en/model-studio).
+        // OpenAI-compatible (`/compatible-mode/v1`); model list, pricing, and
+        // capabilities come from the models.dev catalog. The (China) variant
+        // uses the mainland endpoint; credentials are separate per region.
+        providers.insert(
+            "alibaba-token-plan".into(),
+            ProviderConfig {
+                shape: "openai".into(),
+                base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+                    .into(),
+                credential_ref: "alibaba-token-plan".into(),
+                ..Default::default()
+            },
+        );
+        providers.insert(
+            "alibaba-token-plan-cn".into(),
+            ProviderConfig {
+                shape: "openai".into(),
+                base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+                    .into(),
+                credential_ref: "alibaba-token-plan-cn".into(),
+                ..Default::default()
+            },
+        );
         Self {
             providers,
             default_model: String::new(),
@@ -184,6 +208,11 @@ pub struct CustomModel {
     /// User-defined thinking variants. When set, overrides built-in defaults.
     #[serde(default)]
     pub thinking_variants: Vec<ThinkingVariantDef>,
+    /// Numeric thinking-budget range for models that accept a
+    /// `thinking_budget` token cap (e.g. Qwen3.8-max). Mirrors
+    /// `mew_catalog::ThinkingBudget`; the setup layer converts between them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<ThinkingBudgetDef>,
     /// True for OpenAI Codex models that require the Responses Lite transport.
     #[serde(default)]
     pub responses_lite: bool,
@@ -206,6 +235,24 @@ pub struct ThinkingVariantDef {
     pub name: String,
     #[serde(default)]
     pub params: serde_json::Value,
+}
+
+/// Numeric thinking-budget range in config.toml. Mirrors
+/// `mew_catalog::ThinkingBudget` (which the setup layer converts this into).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThinkingBudgetDef {
+    #[serde(default)]
+    pub min: i64,
+    #[serde(default)]
+    pub max: i64,
+    #[serde(default)]
+    pub step: i64,
+    #[serde(default)]
+    pub default: i64,
+    /// Canonical budget (in tokens) for each named effort variant, so the UI
+    /// can seed a slider position from the active effort level.
+    #[serde(default)]
+    pub by_effort: Vec<(String, i64)>,
 }
 
 /// Permission configuration section.
@@ -404,6 +451,9 @@ pub struct State {
     /// Active theme name (overrides config when set via /theme command).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub theme: String,
+    /// Native desktop terminal font family. Empty uses the bundled default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub terminal_font: String,
     /// Recently used models (most recent first), capped at 6.
     /// Stored as "provider/model" IDs matching the model picker.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -412,6 +462,86 @@ pub struct State {
     /// startup if the model supports it (or a close match is found).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_thinking_variant: Option<String>,
+    /// Last native desktop window frame, stored in logical screen points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_window: Option<DesktopWindowState>,
+    /// Saved native desktop remote connection profiles. Pairing credentials
+    /// are intentionally not stored here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desktop_remote_profiles: Vec<DesktopRemoteProfile>,
+    /// NodeId of the profile selected for the next native desktop launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_active_remote_profile: Option<String>,
+    /// Native desktop theme mode: system, light, or dark.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub desktop_theme_mode: String,
+    /// Native desktop view state keyed by daemon session ID.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub desktop_session_views: HashMap<String, DesktopSessionViewState>,
+    /// Theme used when the native desktop is in light mode.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub desktop_light_theme: String,
+    /// Theme used when the native desktop is in dark mode.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub desktop_dark_theme: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopRemoteProfile {
+    pub name: String,
+    pub node_id: String,
+    #[serde(default)]
+    pub device_name: String,
+}
+
+/// Persisted native desktop window frame.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DesktopWindowState {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Persisted per-session native desktop layout and auxiliary view state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DesktopSessionViewState {
+    #[serde(default)]
+    pub sidebar_collapsed: bool,
+    #[serde(default)]
+    pub workbench_collapsed: bool,
+    #[serde(default)]
+    pub terminal_collapsed: bool,
+    #[serde(default = "default_true")]
+    pub changes_expanded: bool,
+    #[serde(default = "default_true")]
+    pub local_expanded: bool,
+    #[serde(default = "default_true")]
+    pub activity_expanded: bool,
+    #[serde(default = "default_auxiliary_view")]
+    pub auxiliary_view: String,
+    #[serde(default = "default_workbench_width")]
+    pub workbench_width: f32,
+    #[serde(default)]
+    pub expanded_chat_parts: Vec<String>,
+    #[serde(default)]
+    pub browser_panel_open: bool,
+    #[serde(default)]
+    pub browser_url: String,
+    #[serde(default)]
+    pub browser_title: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_auxiliary_view() -> String {
+    "changes".into()
+}
+
+fn default_workbench_width() -> f32 {
+    360.
 }
 
 /// Reads state from the standard location.
@@ -628,6 +758,8 @@ mod tests {
         assert!(cfg.providers.contains_key("z-ai"));
         assert!(cfg.providers.contains_key("umans"));
         assert!(cfg.providers.contains_key("kimi-for-coding"));
+        assert!(cfg.providers.contains_key("alibaba-token-plan"));
+        assert!(cfg.providers.contains_key("alibaba-token-plan-cn"));
     }
 
     #[test]
@@ -654,6 +786,38 @@ mod tests {
         assert_eq!(kimi.base_url, "https://api.kimi.com/coding/v1");
         assert_eq!(kimi.credential_ref, "kimi-for-coding");
         assert_eq!(kimi.kind, "direct");
+    }
+
+    #[test]
+    fn test_default_alibaba_token_plan_provider() {
+        let cfg = Config::default();
+        let alibaba = cfg
+            .providers
+            .get("alibaba-token-plan")
+            .expect("alibaba-token-plan built-in provider should be present");
+        assert_eq!(alibaba.shape, "openai");
+        assert_eq!(
+            alibaba.base_url,
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(alibaba.credential_ref, "alibaba-token-plan");
+        assert_eq!(alibaba.kind, "direct");
+    }
+
+    #[test]
+    fn test_default_alibaba_token_plan_cn_provider() {
+        let cfg = Config::default();
+        let alibaba = cfg
+            .providers
+            .get("alibaba-token-plan-cn")
+            .expect("alibaba-token-plan-cn built-in provider should be present");
+        assert_eq!(alibaba.shape, "openai");
+        assert_eq!(
+            alibaba.base_url,
+            "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(alibaba.credential_ref, "alibaba-token-plan-cn");
+        assert_eq!(alibaba.kind, "direct");
     }
 
     #[test]
@@ -777,12 +941,67 @@ values = ["sk_test_deadbeef"]
         let state = State {
             last_model: "deepseek-v4-flash".into(),
             last_provider: "opencode-zen".into(),
+            terminal_font: "SF Mono".into(),
             ..Default::default()
         };
         let serialized = toml::to_string_pretty(&state).unwrap();
         let deserialized: State = toml::from_str(&serialized).unwrap();
         assert_eq!(deserialized.last_model, "deepseek-v4-flash");
         assert_eq!(deserialized.last_provider, "opencode-zen");
+        assert_eq!(deserialized.terminal_font, "SF Mono");
+    }
+
+    #[test]
+    fn test_state_desktop_window_roundtrip() {
+        let mut session_views = HashMap::new();
+        session_views.insert(
+            "session-1".into(),
+            DesktopSessionViewState {
+                sidebar_collapsed: true,
+                workbench_collapsed: false,
+                terminal_collapsed: true,
+                changes_expanded: true,
+                local_expanded: false,
+                activity_expanded: true,
+                auxiliary_view: "activity".into(),
+                workbench_width: 420.,
+                expanded_chat_parts: vec!["chat-part-1-0".into()],
+                browser_panel_open: false,
+                browser_url: "https://example.com".into(),
+                browser_title: "Example".into(),
+            },
+        );
+        let state = State {
+            desktop_window: Some(DesktopWindowState {
+                x: 24.,
+                y: 48.,
+                width: 1240.,
+                height: 760.,
+            }),
+            desktop_remote_profiles: vec![DesktopRemoteProfile {
+                name: "work daemon".into(),
+                node_id: "node-id".into(),
+                device_name: "mew desktop".into(),
+            }],
+            desktop_active_remote_profile: Some("node-id".into()),
+            desktop_session_views: session_views,
+            ..Default::default()
+        };
+        let serialized = toml::to_string_pretty(&state).unwrap();
+        let deserialized: State = toml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.desktop_window, state.desktop_window);
+        assert_eq!(
+            deserialized.desktop_remote_profiles,
+            state.desktop_remote_profiles
+        );
+        assert_eq!(
+            deserialized.desktop_active_remote_profile,
+            state.desktop_active_remote_profile
+        );
+        assert_eq!(
+            deserialized.desktop_session_views,
+            state.desktop_session_views
+        );
     }
 
     #[test]
@@ -943,9 +1162,17 @@ values = ["sk_test_deadbeef"]
             disabled_plugins: vec!["buddy".into()],
             revoked_extensions: vec![],
             theme: "dark".into(),
+            terminal_font: String::new(),
             sidebar_collapsed: HashMap::new(),
             recent_models: vec![],
             last_thinking_variant: None,
+            desktop_window: None,
+            desktop_remote_profiles: vec![],
+            desktop_active_remote_profile: None,
+            desktop_theme_mode: "system".into(),
+            desktop_light_theme: "light".into(),
+            desktop_dark_theme: "dark".into(),
+            desktop_session_views: HashMap::new(),
         };
         let healed = heal_state(&cfg, &state);
         assert!(healed.last_provider.is_empty());

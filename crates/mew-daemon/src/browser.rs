@@ -1,8 +1,8 @@
 //! Small adapter around the native `agent-browser` CLI.
 //!
 //! The daemon owns the browser session. Keeping this behind a narrow adapter
-//! lets the UI use semantic snapshots now while leaving room for a native
-//! WKWebView renderer later.
+//! lets the UI use semantic snapshots now while leaving room for another
+//! native renderer later.
 
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;

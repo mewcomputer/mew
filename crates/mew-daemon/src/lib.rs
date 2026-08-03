@@ -48,6 +48,7 @@ pub mod files;
 pub mod groups;
 pub mod remote;
 pub mod session;
+pub mod terminal;
 
 #[cfg(feature = "iroh")]
 pub mod iroh_transport;
@@ -337,6 +338,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
             message,
             ClientMessage::RemoteHello { .. }
                 | ClientMessage::NewSession { .. }
+                | ClientMessage::NewSessionInGroup { .. }
                 | ClientMessage::AttachSession { .. }
                 | ClientMessage::ListSessions
                 | ClientMessage::DeleteSession { .. }
@@ -348,6 +350,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::PermissionResponse { .. }
                 | ClientMessage::AskUserResponse { .. }
                 | ClientMessage::PlanApprovalResponse { .. }
+                | ClientMessage::GoalResponse { .. }
                 | ClientMessage::SlashCommand { .. }
                 | ClientMessage::ListModels
                 | ClientMessage::SwitchModel { .. }
@@ -379,6 +382,10 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::BrowserFill { .. }
                 | ClientMessage::BrowserPress { .. }
                 | ClientMessage::BrowserClose { .. }
+                | ClientMessage::TerminalOpen { .. }
+                | ClientMessage::TerminalInput { .. }
+                | ClientMessage::TerminalResize { .. }
+                | ClientMessage::TerminalClose { .. }
         );
     }
 
@@ -412,6 +419,121 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
         )
 }
 
+async fn detach_connection_client(
+    session_manager: &Arc<SessionManager>,
+    session: Arc<Session>,
+    client_id: u64,
+) {
+    session
+        .broadcast(ServerMessage::ClientDetached { client_id })
+        .await;
+    if !session.detach_client(client_id).await {
+        return;
+    }
+
+    let session_id = session.id.clone();
+    let session_clone = session.clone();
+    let manager = session_manager.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        if session_clone.client_count().await == 0 {
+            if session_clone.current_turn_cancel.lock().await.is_some() {
+                session_clone.cancel_turn().await;
+            }
+            manager.remove(&session_id).await;
+        }
+    });
+}
+
+/// Poll a session workspace and notify its clients when filesystem entries
+/// change. This intentionally keeps the watcher dependency-free: daemon
+/// sessions can live on network filesystems where native watcher backends are
+/// not consistently available.
+async fn watch_workspace(session: Arc<Session>, root: PathBuf, cancel: CancellationToken) {
+    let mut previous = tokio::task::spawn_blocking({
+        let root = root.clone();
+        move || workspace_snapshot(&root)
+    })
+    .await
+    .unwrap_or_default();
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = interval.tick() => {
+                let next = tokio::task::spawn_blocking({
+                    let root = root.clone();
+                    move || workspace_snapshot(&root)
+                })
+                .await
+                .unwrap_or_default();
+                let changed = changed_workspace_paths(&previous, &next);
+                previous = next;
+                if !changed.is_empty() {
+                    session.broadcast(ServerMessage::FsChanged { paths: changed }).await;
+                }
+            }
+        }
+    }
+}
+
+fn workspace_snapshot(
+    root: &std::path::Path,
+) -> std::collections::HashMap<String, (u64, u32, u64)> {
+    let mut snapshot = std::collections::HashMap::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if matches!(name.as_str(), ".git" | "target" | "node_modules" | ".venv") {
+                    continue;
+                }
+                pending.push(path);
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .unwrap_or_default();
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            snapshot.insert(
+                relative,
+                (modified.as_secs(), modified.subsec_nanos(), metadata.len()),
+            );
+        }
+    }
+    snapshot
+}
+
+fn changed_workspace_paths(
+    previous: &std::collections::HashMap<String, (u64, u32, u64)>,
+    next: &std::collections::HashMap<String, (u64, u32, u64)>,
+) -> Vec<String> {
+    let mut changed = previous
+        .keys()
+        .chain(next.keys())
+        .filter(|path| previous.get(*path) != next.get(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    changed.sort();
+    changed.dedup();
+    changed
+}
+
 pub async fn handle_connection<S>(
     stream: S,
     session_manager: Arc<SessionManager>,
@@ -430,6 +552,7 @@ where
         auto_summary_enabled,
         None,
         None,
+        false,
     )
     .await
 }
@@ -439,6 +562,7 @@ where
 /// The local transports pass `None`. Iroh remote transports must pass a scope
 /// so a connected peer cannot turn a transport-level identity check into full
 /// daemon authority by sending handcrafted protocol messages.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_connection_with_scope<S>(
     stream: S,
     session_manager: Arc<SessionManager>,
@@ -447,6 +571,7 @@ pub async fn handle_connection_with_scope<S>(
     auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
     remote_scope: Option<RemoteScope>,
     remote_token: Option<&str>,
+    legacy_iroh: bool,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -468,6 +593,7 @@ where
         auto_summary_enabled,
         remote_scope,
         authorizer,
+        legacy_iroh,
     )
     .await
 }
@@ -476,6 +602,7 @@ where
 pub type RemoteAuthorizer =
     Arc<dyn Fn(Option<&str>, &str) -> Result<Option<RemoteScope>> + Send + Sync>;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_connection_with_authorizer<S>(
     stream: S,
     session_manager: Arc<SessionManager>,
@@ -484,6 +611,7 @@ pub async fn handle_connection_with_authorizer<S>(
     auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
     mut remote_scope: Option<RemoteScope>,
     remote_authorizer: Option<RemoteAuthorizer>,
+    legacy_iroh: bool,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -497,6 +625,8 @@ where
     ) = mpsc::unbounded_channel();
     let mut attached_session: Option<Arc<Session>> = None;
     let mut client_id: Option<u64> = None;
+    let mut terminal: Option<terminal::TerminalHandle> = None;
+    let mut workspace_watch: Option<CancellationToken> = None;
     let mut auto_title_enabled = true;
     let mut remote_ready = remote_scope.is_none() && remote_authorizer.is_none();
 
@@ -600,6 +730,7 @@ where
             if matches!(
                 &client_msg,
                 ClientMessage::NewSession { client_kind, .. }
+                    | ClientMessage::NewSessionInGroup { client_kind, .. }
                     | ClientMessage::AttachSession { client_kind, .. }
                     if *client_kind != ClientKind::Remote
             ) {
@@ -608,21 +739,31 @@ where
                 });
                 continue;
             }
-        } else if matches!(
-            &client_msg,
-            ClientMessage::NewSession {
-                client_kind: ClientKind::Desktop,
-                ..
-            } | ClientMessage::AttachSession {
-                client_kind: ClientKind::Desktop,
-                ..
-            }
-        ) {
+        } else if legacy_iroh
+            && matches!(
+                &client_msg,
+                ClientMessage::NewSession {
+                    client_kind: ClientKind::Desktop,
+                    ..
+                } | ClientMessage::NewSessionInGroup {
+                    client_kind: ClientKind::Desktop,
+                    ..
+                } | ClientMessage::AttachSession {
+                    client_kind: ClientKind::Desktop,
+                    ..
+                }
+            )
+        {
             reply(ServerMessage::Error {
                 message: "legacy iroh connections cannot use desktop-only capabilities".into(),
             });
             continue;
         }
+
+        let requested_group_id = match &client_msg {
+            ClientMessage::NewSessionInGroup { group_id, .. } => Some(group_id.clone()),
+            _ => None,
+        };
 
         match client_msg {
             ClientMessage::RemoteHello { .. } => {
@@ -630,7 +771,10 @@ where
                     message: "remote authentication is only available over iroh".into(),
                 });
             }
-            ClientMessage::NewSession { cwd, client_kind } => {
+            ClientMessage::NewSession { cwd, client_kind }
+            | ClientMessage::NewSessionInGroup {
+                cwd, client_kind, ..
+            } => {
                 // A web client may not know the host's filesystem cwd. Keep
                 // the session useful for workspace tools by binding it to the
                 // daemon's launch directory in that case.
@@ -655,8 +799,48 @@ where
                         continue;
                     }
                 }
+                if let Some(group_id) = requested_group_id.as_deref() {
+                    if !groups_store.contains(group_id).await {
+                        reply(ServerMessage::Error {
+                            message: "session group not found".into(),
+                        });
+                        continue;
+                    }
+                }
                 match session_manager.create(cwd.clone(), client_kind).await {
                     Ok(session) => {
+                        if let Some(group_id) = requested_group_id.as_deref() {
+                            let dir = session_manager.session_dir.clone();
+                            let agent = session.agent.lock().await;
+                            if let Some(writer) = &agent.session {
+                                let _ = writer
+                                    .lock()
+                                    .await
+                                    .set_group_id(&dir, Some(group_id.to_owned()))
+                                    .await;
+                            }
+                            drop(agent);
+                            if let Err(e) = groups_store
+                                .assign_session(&session.id, Some(group_id.to_owned()))
+                                .await
+                            {
+                                reply(ServerMessage::Error {
+                                    message: format!("failed to assign session group: {e}"),
+                                });
+                                continue;
+                            }
+                        }
+                        if let Some(watch) = workspace_watch.take() {
+                            watch.cancel();
+                        }
+                        if let (Some(previous), Some(previous_id)) =
+                            (attached_session.take(), client_id.take())
+                        {
+                            detach_connection_client(&session_manager, previous, previous_id).await;
+                        }
+                        if let Some(previous_terminal) = terminal.take() {
+                            previous_terminal.close();
+                        }
                         let (cid, was_first, _) =
                             session.attach_client(client_tx.clone(), client_kind).await;
                         client_id = Some(cid);
@@ -711,13 +895,28 @@ where
                 session_id,
                 client_kind,
             } => {
+                if attached_session
+                    .as_ref()
+                    .is_some_and(|session| session.id == session_id)
+                {
+                    continue;
+                }
                 match session_manager.attach(&session_id).await {
                     Ok(session) => {
-                        let (cid, was_first, browser_activated) =
-                            session.attach_client(client_tx.clone(), client_kind).await;
-                        if browser_activated {
-                            session.append_browser_capability_notice().await;
+                        if let Some(watch) = workspace_watch.take() {
+                            watch.cancel();
                         }
+                        if let (Some(previous), Some(previous_id)) =
+                            (attached_session.take(), client_id.take())
+                        {
+                            detach_connection_client(&session_manager, previous, previous_id).await;
+                        }
+                        if let Some(previous_terminal) = terminal.take() {
+                            previous_terminal.close();
+                        }
+                        let (cid, was_first, _) =
+                            session.attach_client(client_tx.clone(), client_kind).await;
+                        let existing_clients = session.client_presence_except(cid).await;
                         client_id = Some(cid);
                         attached_session = Some(session.clone());
 
@@ -777,6 +976,13 @@ where
                             }
                         }
 
+                        for (existing_id, existing_kind) in existing_clients {
+                            reply(ServerMessage::ClientAttached {
+                                client_id: existing_id,
+                                client_kind: existing_kind,
+                            });
+                        }
+
                         // Notify other clients that a new client joined.
                         if !was_first {
                             session
@@ -815,8 +1021,7 @@ where
                 // Remove from active sessions if present.
                 session_manager.remove(&session_id).await;
                 // Delete from disk.
-                let session_dir = mew_session::session_dir();
-                let dir = session_dir.join(&session_id);
+                let dir = session_manager.session_dir.join(&session_id);
                 if dir.exists() {
                     match tokio::fs::remove_dir_all(&dir).await {
                         Ok(_) => {
@@ -828,14 +1033,25 @@ where
                     }
                 }
                 // If the deleted session was the current one, navigate home.
-                if attached_session.as_ref().map(|s| s.id.as_str()) == Some(session_id.as_str()) {
-                    attached_session = None;
-                    client_id = None;
+                if attached_session
+                    .as_ref()
+                    .is_some_and(|session| session.id == session_id)
+                {
+                    if let Some(watch) = workspace_watch.take() {
+                        watch.cancel();
+                    }
+                    if let (Some(session), Some(cid)) = (attached_session.take(), client_id.take())
+                    {
+                        detach_connection_client(&session_manager, session, cid).await;
+                    }
+                    if let Some(previous_terminal) = terminal.take() {
+                        previous_terminal.close();
+                    }
                 }
             }
             ClientMessage::RenameSession { session_id, title } => {
                 // Persist to disk for both active and idle sessions.
-                let dir = mew_session::session_dir();
+                let dir = session_manager.session_dir.clone();
                 if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
                     let _ = meta.set_custom_title(&dir, title.clone()).await;
                 }
@@ -874,7 +1090,7 @@ where
                         // Generate title via LLM (falls back to text truncation).
                         let title = generate_session_title(&agent, &prompt_text).await;
                         // Persist the title to disk.
-                        let dir = mew_session::session_dir();
+                        let dir = session.session_dir.clone();
                         if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await
                         {
                             let _ = meta.set_custom_title(&dir, title.clone()).await;
@@ -931,18 +1147,25 @@ where
                     // falls back to text truncation on error. Skipped if the
                     // user has disabled auto-title generation.
                     if auto_title && !had_error {
+                        let has_existing_title = agent
+                            .session_meta()
+                            .await
+                            .and_then(|meta| meta.custom_title)
+                            .is_some();
                         let mut generated = session.title_generated.lock().await;
-                        if !*generated {
+                        if !*generated && !has_existing_title {
                             *generated = true;
                             drop(generated);
 
                             let title = generate_session_title(&agent, &prompt_text).await;
-                            session
-                                .broadcast(ServerMessage::SessionTitleChanged {
-                                    session_id: session.id.clone(),
-                                    title,
-                                })
-                                .await;
+                            if let Ok(Some(mut meta)) =
+                                mew_session::Meta::read(&session.session_dir, &session.id).await
+                            {
+                                let _ = meta
+                                    .set_custom_title(&session.session_dir, title.clone())
+                                    .await;
+                            }
+                            session_mgr.broadcast_title(&session.id, title).await;
                         }
                     }
                 });
@@ -950,6 +1173,130 @@ where
             ClientMessage::Cancel => {
                 if let Some(session) = &attached_session {
                     session.cancel_turn().await;
+                }
+            }
+            ClientMessage::TerminalOpen { rows, cols } => {
+                let Some(session) = attached_session.clone() else {
+                    reply(ServerMessage::TerminalError {
+                        terminal_id: None,
+                        message: "no session — send NewSession or AttachSession first".into(),
+                    });
+                    continue;
+                };
+                if let Some(existing) = terminal.take() {
+                    existing.close();
+                }
+                let cwd = session_manager
+                    .session_cwd(&session.id)
+                    .await
+                    .or_else(|| std::env::current_dir().ok());
+                let Some(cwd) = cwd else {
+                    reply(ServerMessage::TerminalError {
+                        terminal_id: None,
+                        message: "could not determine terminal working directory".into(),
+                    });
+                    continue;
+                };
+                match terminal::spawn(&cwd, rows, cols) {
+                    Ok((handle, events)) => {
+                        let terminal_id = handle.id.clone();
+                        let (terminal_tx, mut terminal_rx) = mpsc::channel(256);
+                        let websocket_tx = client_tx.clone();
+                        tokio::spawn(async move {
+                            while let Some(message) = terminal_rx.recv().await {
+                                if websocket_tx.send(message).is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                        let output_tx = terminal_tx.clone();
+                        let event_terminal_id = terminal_id.clone();
+                        tokio::task::spawn_blocking(move || {
+                            while let Ok(event) = events.recv() {
+                                let message = match event {
+                                    terminal::TerminalEvent::Output(bytes) => {
+                                        ServerMessage::TerminalOutput {
+                                            terminal_id: event_terminal_id.clone(),
+                                            bytes,
+                                        }
+                                    }
+                                    terminal::TerminalEvent::Exited(status) => {
+                                        ServerMessage::TerminalExited {
+                                            terminal_id: event_terminal_id.clone(),
+                                            status,
+                                        }
+                                    }
+                                    terminal::TerminalEvent::Failed(message) => {
+                                        ServerMessage::TerminalError {
+                                            terminal_id: Some(event_terminal_id.clone()),
+                                            message,
+                                        }
+                                    }
+                                };
+                                if output_tx.blocking_send(message).is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                        terminal = Some(handle);
+                        reply(ServerMessage::TerminalOpened { terminal_id });
+                    }
+                    Err(error) => reply(ServerMessage::TerminalError {
+                        terminal_id: None,
+                        message: format!("could not open terminal: {error}"),
+                    }),
+                }
+            }
+            ClientMessage::TerminalInput { terminal_id, bytes } => {
+                match terminal
+                    .as_ref()
+                    .filter(|terminal| terminal.id == terminal_id)
+                {
+                    Some(terminal) => {
+                        if let Err(error) = terminal.send_input(bytes) {
+                            reply(ServerMessage::TerminalError {
+                                terminal_id: Some(terminal_id),
+                                message: error.to_string(),
+                            });
+                        }
+                    }
+                    None => reply(ServerMessage::TerminalError {
+                        terminal_id: Some(terminal_id),
+                        message: "terminal is not open".into(),
+                    }),
+                }
+            }
+            ClientMessage::TerminalResize {
+                terminal_id,
+                rows,
+                cols,
+            } => {
+                match terminal
+                    .as_ref()
+                    .filter(|terminal| terminal.id == terminal_id)
+                {
+                    Some(terminal) => {
+                        if let Err(error) = terminal.resize(rows, cols) {
+                            reply(ServerMessage::TerminalError {
+                                terminal_id: Some(terminal_id),
+                                message: error.to_string(),
+                            });
+                        }
+                    }
+                    None => reply(ServerMessage::TerminalError {
+                        terminal_id: Some(terminal_id),
+                        message: "terminal is not open".into(),
+                    }),
+                }
+            }
+            ClientMessage::TerminalClose { terminal_id } => {
+                if terminal
+                    .as_ref()
+                    .is_some_and(|terminal| terminal.id == terminal_id)
+                {
+                    if let Some(terminal) = terminal.take() {
+                        terminal.close();
+                    }
                 }
             }
             ClientMessage::Ping => {
@@ -1304,7 +1651,8 @@ where
                 };
                 let session = session.clone();
                 tokio::spawn(async move {
-                    let _guard = session.turn_lock.lock().await;
+                    // PermissionEngine stores the mode atomically, so this
+                    // setting must not wait behind an active agent turn.
                     let parsed = mew_hooks::PermissionMode::from_id(&mode);
                     match parsed {
                         Some(m) => {
@@ -1378,6 +1726,7 @@ where
                 match groups_store.delete_group(&group_id).await {
                     Ok(groups) => {
                         let dir = session_manager.session_dir.clone();
+                        let mut ungrouped_sessions = Vec::new();
                         if let Ok(entries) = tokio::fs::read_dir(&dir).await {
                             let mut entries = entries;
                             while let Ok(Some(entry)) = entries.next_entry().await {
@@ -1387,12 +1736,27 @@ where
                                     {
                                         if meta.group_id.as_deref() == Some(&group_id) {
                                             let _ = meta.set_group_id(&dir, None).await;
+                                            ungrouped_sessions.push((
+                                                id.to_owned(),
+                                                meta.archived,
+                                                meta.pinned,
+                                            ));
                                         }
                                     }
                                 }
                             }
                         }
                         session_manager.broadcast_groups(groups).await;
+                        for (session_id, archived, pinned) in ungrouped_sessions {
+                            session_manager
+                                .broadcast_all(ServerMessage::SessionMetaChanged {
+                                    session_id,
+                                    archived,
+                                    pinned,
+                                    group_id: None,
+                                })
+                                .await;
+                        }
                     }
                     Err(e) => {
                         reply(ServerMessage::Error {
@@ -1408,9 +1772,13 @@ where
             } => {
                 let dir = session_manager.session_dir.clone();
                 let mut meta_group_id = None;
+                let mut meta_archived = false;
+                let mut meta_pinned = false;
                 if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
                     let _ = meta.set_group_id(&dir, group_id.clone()).await;
                     meta_group_id = meta.group_id.clone();
+                    meta_archived = meta.archived;
+                    meta_pinned = meta.pinned;
                 }
                 match groups_store.assign_session(&session_id, group_id).await {
                     Ok(groups) => {
@@ -1418,8 +1786,8 @@ where
                         session_manager
                             .broadcast_all(ServerMessage::SessionMetaChanged {
                                 session_id: session_id.clone(),
-                                archived: false,
-                                pinned: false,
+                                archived: meta_archived,
+                                pinned: meta_pinned,
                                 group_id: meta_group_id,
                             })
                             .await;
@@ -1436,29 +1804,39 @@ where
                 archived,
             } => {
                 let dir = session_manager.session_dir.clone();
+                let mut meta_group_id = None;
+                let mut meta_pinned = false;
                 if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
-                    let _ = meta.set_archived(&dir, archived).await;
+                    meta_group_id = meta.group_id.clone();
+                    if meta.set_archived(&dir, archived).await.is_ok() {
+                        meta_pinned = meta.pinned;
+                    }
                 }
                 session_manager
                     .broadcast_all(ServerMessage::SessionMetaChanged {
                         session_id: session_id.clone(),
                         archived,
-                        pinned: false,
-                        group_id: None,
+                        pinned: meta_pinned,
+                        group_id: meta_group_id,
                     })
                     .await;
             }
             ClientMessage::PinSession { session_id, pinned } => {
                 let dir = session_manager.session_dir.clone();
+                let mut meta_group_id = None;
+                let mut meta_archived = false;
                 if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &session_id).await {
-                    let _ = meta.set_pinned(&dir, pinned).await;
+                    meta_group_id = meta.group_id.clone();
+                    if meta.set_pinned(&dir, pinned).await.is_ok() {
+                        meta_archived = meta.archived;
+                    }
                 }
                 session_manager
                     .broadcast_all(ServerMessage::SessionMetaChanged {
                         session_id: session_id.clone(),
-                        archived: false,
+                        archived: meta_archived,
                         pinned,
-                        group_id: None,
+                        group_id: meta_group_id,
                     })
                     .await;
             }
@@ -1499,8 +1877,35 @@ where
                     }),
                 }
             }
-            ClientMessage::WatchWorkspace { .. } => {
-                // Watcher not implemented in v1; acknowledge silently.
+            ClientMessage::WatchWorkspace {
+                session_id,
+                enabled,
+            } => {
+                if let Some(watch) = workspace_watch.take() {
+                    watch.cancel();
+                }
+                if enabled {
+                    let Some(session) = attached_session
+                        .as_ref()
+                        .filter(|session| session.id == session_id)
+                        .cloned()
+                    else {
+                        reply(ServerMessage::Error {
+                            message: "watch_workspace requires the attached session".into(),
+                        });
+                        continue;
+                    };
+                    let Some(root) = session_manager.session_cwd(&session_id).await else {
+                        reply(ServerMessage::Error {
+                            message: "session has no workspace".into(),
+                        });
+                        continue;
+                    };
+                    let cancel = CancellationToken::new();
+                    let task_cancel = cancel.clone();
+                    tokio::spawn(watch_workspace(session, root, task_cancel));
+                    workspace_watch = Some(cancel);
+                }
             }
 
             // -- Browser --
@@ -1821,30 +2226,14 @@ where
             }
         }
     }
-    if let (Some(session), Some(cid)) = (&attached_session, client_id) {
-        // Broadcast departure to remaining clients.
-        session
-            .broadcast(ServerMessage::ClientDetached { client_id: cid })
-            .await;
-        let was_last = session.detach_client(cid).await;
-        if was_last {
-            // Keep-warm: spawn a grace-period timer. If no client reattaches
-            // before it fires, cancel the turn and unload the session.
-            let session_id = session.id.clone();
-            let session_clone = session.clone();
-            let sm = session_manager.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                // Check if the session still has no clients.
-                if session_clone.client_count().await == 0 {
-                    let has_turn: bool = session_clone.current_turn_cancel.lock().await.is_some();
-                    if has_turn {
-                        session_clone.cancel_turn().await;
-                    }
-                    sm.remove(&session_id).await;
-                }
-            });
-        }
+    if let Some(watch) = workspace_watch.take() {
+        watch.cancel();
+    }
+    if let (Some(session), Some(cid)) = (attached_session.take(), client_id.take()) {
+        detach_connection_client(&session_manager, session, cid).await;
+    }
+    if let Some(terminal) = terminal {
+        terminal.close();
     }
     drop(client_tx);
     writer.await?;
@@ -2093,7 +2482,7 @@ pub fn check_socket_liveness(socket_path: &str) -> Result<()> {
     }
 }
 
-/// Collect known projects from session metas.
+/// Collect known projects from configured workspace roots and session metas.
 /// Deduped by canonicalized path, sorted by recency (most recent first).
 async fn list_projects(
     session_manager: &std::sync::Arc<crate::session::SessionManager>,
@@ -2103,6 +2492,27 @@ async fn list_projects(
 
     let dir = session_manager.session_dir.clone();
     let mut projects: HashMap<PathBuf, mew_protocol::ProjectInfo> = HashMap::new();
+
+    // Workspace roots are useful projects even before a session has been
+    // created for them. Loading config here also keeps this query aligned with
+    // the same layered config the agent builder uses.
+    if let Ok(config) = mew_config::load() {
+        for root in config.workspace.roots {
+            let canonical = std::fs::canonicalize(&root).unwrap_or(root.clone());
+            let display_name = canonical
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| canonical.to_string_lossy().to_string());
+            projects
+                .entry(canonical.clone())
+                .or_insert_with(|| mew_protocol::ProjectInfo {
+                    path: root.to_string_lossy().to_string(),
+                    display_name,
+                    session_count: 0,
+                    last_used_at: None,
+                });
+        }
+    }
 
     // Walk session dirs and read meta.json for each.
     if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
@@ -2182,30 +2592,32 @@ async fn idle_summary_task(
             continue;
         }
 
-        // Collect idle sessions (id, Arc) without holding the active lock.
-        let candidates: Vec<(String, Arc<Session>)> = {
+        let sessions: Vec<(String, Arc<Session>)> = {
             let active = session_manager.active.lock().await;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            let mut to_process: Vec<(String, Arc<Session>)> = Vec::new();
-            for (id, session) in active.iter() {
-                let last = {
-                    let agent = session.agent.lock().await;
-                    let msgs = agent.messages.lock().await;
-                    msgs.last().map(|m| m.time.created).unwrap_or(0)
-                };
-                if now - last >= idle_threshold.as_millis() as i64 {
-                    to_process.push((id.clone(), session.clone()));
-                }
-            }
-            to_process
+            active
+                .iter()
+                .map(|(id, session)| (id.clone(), session.clone()))
+                .collect()
         };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let mut candidates = Vec::new();
+        for (id, session) in sessions {
+            let last = {
+                let agent = session.agent.lock().await;
+                let msgs = agent.messages.lock().await;
+                msgs.last().map(|m| m.time.created).unwrap_or(0)
+            };
+            if now - last >= idle_threshold.as_millis() as i64 {
+                candidates.push((id, session));
+            }
+        }
 
         for (id, session) in candidates {
             // Check if already has a summary.
-            let dir = mew_session::session_dir();
+            let dir = session.session_dir.clone();
             let has_summary = mew_session::Meta::read(&dir, &id)
                 .await
                 .ok()
@@ -2215,20 +2627,28 @@ async fn idle_summary_task(
             if has_summary {
                 continue;
             }
+            if session
+                .summary_running
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                continue;
+            }
 
             let session_clone = session.clone();
             let id_clone = id.clone();
+            let manager = session_manager.clone();
             tokio::spawn(async move {
-                if let Some(summary) = {
-                    let agent_guard = session_clone.agent.lock().await;
-                    let agent_ref: &Agent = &agent_guard;
-                    generate_session_summary(agent_ref).await
-                } {
+                let agent = session_clone.agent.lock().await.clone();
+                let summary = generate_session_summary(&agent).await;
+                session_clone
+                    .summary_running
+                    .store(false, std::sync::atomic::Ordering::Release);
+                if let Some(summary) = summary {
                     if let Ok(Some(mut meta)) = mew_session::Meta::read(&dir, &id_clone).await {
                         let _ = meta.set_summary(&dir, summary.clone()).await;
                     }
-                    session_clone
-                        .broadcast(mew_protocol::ServerMessage::SessionSummaryChanged {
+                    manager
+                        .broadcast_all(mew_protocol::ServerMessage::SessionSummaryChanged {
                             session_id: id_clone.clone(),
                             summary,
                         })
@@ -2798,6 +3218,24 @@ mod tests {
                 session_id: "sess_1".into()
             }
         ));
+        assert!(!remote_message_allowed(
+            RemoteScope::Collaborate,
+            &ClientMessage::TerminalOpen { rows: 24, cols: 80 }
+        ));
+        assert!(!remote_message_allowed(
+            RemoteScope::Collaborate,
+            &ClientMessage::TerminalInput {
+                terminal_id: "terminal-1".into(),
+                bytes: b"rm -rf .\n".to_vec(),
+            }
+        ));
+        assert!(!remote_message_allowed(
+            RemoteScope::Collaborate,
+            &ClientMessage::GoalResponse {
+                request_id: "request-1".into(),
+                accepted: true,
+            }
+        ));
     }
 
     #[test]
@@ -2808,5 +3246,32 @@ mod tests {
                 session_id: "sess_1".into()
             }
         ));
+        assert!(remote_message_allowed(
+            RemoteScope::Control,
+            &ClientMessage::GoalResponse {
+                request_id: "request-1".into(),
+                accepted: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn workspace_snapshot_reports_added_changed_and_removed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        std::fs::write(&first, "one").unwrap();
+        std::fs::write(&second, "two").unwrap();
+        let previous = workspace_snapshot(dir.path());
+
+        std::fs::write(&first, "changed").unwrap();
+        std::fs::remove_file(&second).unwrap();
+        std::fs::write(dir.path().join("third.txt"), "three").unwrap();
+        let next = workspace_snapshot(dir.path());
+
+        assert_eq!(
+            changed_workspace_paths(&previous, &next),
+            vec!["first.txt", "second.txt", "third.txt"]
+        );
     }
 }

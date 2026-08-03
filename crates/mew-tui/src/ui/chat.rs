@@ -261,7 +261,8 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
 /// row, pre-wrapped to ≤ `chat_width`) plus the plain-text mirror used by
 /// mouse selection. Called by `App::ensure_chat_rendered` only when the
 /// cache is stale. Mutates `app.reasoning_header_rows`,
-/// `app.rendered_md_cache`, and `app.pending_md_rerender` as side effects
+/// `app.tool_batch_header_rows`, `app.rendered_md_cache`, and
+/// `app.pending_md_rerender` as side effects
 /// (same as the old inline build loop).
 pub(crate) fn build_chat_lines(
     app: &mut App,
@@ -275,6 +276,7 @@ pub(crate) fn build_chat_lines(
     let msg_count = app.messages.len();
     let tool_width = chat_width;
     app.reasoning_header_rows.clear();
+    app.tool_batch_header_rows.clear();
     let mut sel_ctx = ChatLineCtx {
         lines: &mut lines,
         chat_rows: &mut chat_rows,
@@ -359,6 +361,50 @@ pub(crate) fn build_chat_lines(
                 let show_expanded = is_expanded || is_active || run_len <= 1;
 
                 if show_expanded {
+                    // When the user manually expanded a batch, keep a header
+                    // row above the individual calls so it can be collapsed
+                    // again (click or Ctrl-G).
+                    if is_expanded && !is_active && run_len > 1 {
+                        let mut seen = std::collections::HashSet::new();
+                        let unique_names: Vec<&str> = msg.parts[run_start..run_end]
+                            .iter()
+                            .filter_map(|p| {
+                                if let Part::ToolCall(tc) = p {
+                                    Some(tc.tool_name.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .filter(|n| seen.insert(*n))
+                            .collect();
+                        let names_str = if unique_names.len() <= 3 {
+                            unique_names.join(", ")
+                        } else {
+                            format!("{}, +{}", unique_names[0], unique_names.len() - 1)
+                        };
+                        app.tool_batch_header_rows
+                            .push((first_id, sel_ctx.visual_row));
+                        sel_ctx.push_line(push_tool_line(
+                            tool_width,
+                            vec![
+                                Span::styled("  ", tool_bg_style),
+                                Span::styled(
+                                    format!("▾ {} tool calls: {}", run_len, names_str),
+                                    Style::default()
+                                        .fg(app.theme.resolve("text.muted"))
+                                        .bg(tool_bg)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    "  (click or Ctrl-G to collapse)",
+                                    Style::default()
+                                        .fg(app.theme.resolve("text.muted"))
+                                        .bg(tool_bg),
+                                ),
+                            ],
+                            tool_bg_style,
+                        ));
+                    }
                     // Render each tool call individually (the original
                     // inline rendering path). For a single tool call, this
                     // is identical to the old behavior.
@@ -437,6 +483,10 @@ pub(crate) fn build_chat_lines(
                     if let Some(line) = push_tool_edge(tool_width, true, tool_bg) {
                         sel_ctx.push_line(line);
                     }
+                    // Record the visual row so mouse clicks and Ctrl-G can
+                    // map back to this batch.
+                    app.tool_batch_header_rows
+                        .push((first_id, sel_ctx.visual_row));
                     sel_ctx.push_line(push_tool_line(
                         tool_width,
                         vec![
@@ -449,7 +499,7 @@ pub(crate) fn build_chat_lines(
                                     .add_modifier(Modifier::BOLD),
                             ),
                             Span::styled(
-                                "  (click to expand)",
+                                "  (click or Ctrl-G to expand)",
                                 Style::default()
                                     .fg(app.theme.resolve("text.muted"))
                                     .bg(tool_bg),

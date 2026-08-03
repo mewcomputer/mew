@@ -92,6 +92,8 @@ pub(crate) fn resolve_provider(
         "deepseek",
         "kimi-for-coding",
         "codex",
+        "alibaba-token-plan",
+        "alibaba-token-plan-cn",
     ]
     .into_iter()
     .find(|provider| cfg.providers.contains_key(*provider) && provider_available(cfg, provider))
@@ -174,6 +176,17 @@ fn build_custom_model(
         })
         .collect();
 
+    let thinking_budget: Option<mew_catalog::ThinkingBudget> =
+        cm.thinking_budget
+            .as_ref()
+            .map(|b| mew_catalog::ThinkingBudget {
+                min: b.min,
+                max: b.max,
+                step: b.step,
+                default: b.default,
+                by_effort: b.by_effort.clone(),
+            });
+
     let base = match (cm.merge, existing) {
         (true, Some(existing)) => existing.clone(),
         _ => mew_catalog::Model::default(),
@@ -197,10 +210,17 @@ fn build_custom_model(
         } else {
             thinking_variants
         },
+        thinking_budget: thinking_budget.or(base.thinking_budget),
         responses_lite: cm.responses_lite || base.responses_lite,
         prompt_cache_retention_secs: cm
             .prompt_cache_retention_secs
             .or(base.prompt_cache_retention_secs),
+        // Custom models are chat-completions targets; a merged override of a
+        // known image/video-only catalog model keeps its text_output flag.
+        text_output: match (cm.merge, existing) {
+            (true, Some(_)) => base.text_output,
+            _ => true,
+        },
         ..base
     }
 }
@@ -279,23 +299,63 @@ pub(crate) async fn load_catalog(cfg: &Config) -> Option<Catalog> {
     Some(cat)
 }
 
+/// Resolve a thinking variant name to provider params, returning the params
+/// plus the canonical resolved name (a clamped/snapped `budget:<n>` when the
+/// input was a numeric budget, the variant name otherwise).
+///
+/// Returns `None` when the model has no configurable thinking, the name is
+/// unknown, or the name is an explicit off request on a model that has no
+/// explicit off variant (callers treat that as a plain disable).
 pub(crate) fn resolve_reasoning(
     cat: Option<&Catalog>,
     model_id: &str,
     variant_name: Option<&str>,
-) -> Option<mew_provider::ReasoningConfig> {
+) -> Option<(mew_provider::ReasoningConfig, String)> {
     let cat = cat?;
     let variants = cat.thinking_variants(model_id);
     if variants.is_empty() {
         return None;
     }
-    let variant = match variant_name {
-        Some("none") => return None,
-        Some(name) => variants.iter().find(|v| v.name == name)?.clone(),
-        None => cat.default_thinking(model_id)?,
+    let (variant, resolved_name) = match variant_name {
+        // Explicit off: only models with an explicit off/none variant can
+        // disable thinking with real params (qwen3.8-max sends
+        // `enable_thinking: false` because thinking is on by default;
+        // MiniMax M3 sends `thinking: disabled`).
+        Some(name) if name == "off" || name == "none" => {
+            let off = variants
+                .iter()
+                .find(|v| v.name == "off" || v.name == "none")?;
+            (off.clone(), off.name.clone())
+        }
+        // Numeric token budget: clamped and snapped to the model's declared
+        // range. Requires budget metadata; unknown budgets resolve to `None`
+        // (treated as unknown variants by callers).
+        Some(name) if name.starts_with("budget:") => {
+            let budget = cat.thinking_budget(model_id)?;
+            let n = name
+                .strip_prefix("budget:")
+                .and_then(|s| s.parse::<i64>().ok())?;
+            let snapped = budget.snap(n);
+            let variant = mew_catalog::ThinkingVariant {
+                name: format!("budget:{snapped}"),
+                params: serde_json::json!({
+                    "enable_thinking": true,
+                    "thinking_budget": snapped,
+                }),
+            };
+            (variant, format!("budget:{snapped}"))
+        }
+        Some(name) => {
+            let variant = variants.iter().find(|v| v.name == name)?.clone();
+            (variant, name.to_string())
+        }
+        None => {
+            let default = cat.default_thinking(model_id)?;
+            (default.clone(), default.name.clone())
+        }
     };
     let params = variant.params.as_object().cloned().unwrap_or_default();
-    Some(mew_provider::ReasoningConfig { params })
+    Some((mew_provider::ReasoningConfig { params }, resolved_name))
 }
 
 /// Return the first provider configured as a router.
@@ -390,9 +450,14 @@ pub(crate) fn resolve_model(
             if let Some(m) = c.lookup(&model_id) {
                 // The catalog may use a different provider name than the
                 // config (e.g. catalog may use a different name). Map it back
-                // to the configured provider if a known mapping exists.
-                provider_id = config_provider_for_catalog(cfg, &m.provider)
-                    .unwrap_or_else(|| m.provider.clone());
+                // to the configured provider if a known mapping exists. If the
+                // catalog provider isn't configured at all, keep the current
+                // provider: models.dev dedups model ids across resellers, so
+                // the catalog entry may name a provider the user has no
+                // credentials for ("unknown provider" at startup otherwise).
+                if let Some(configured) = config_provider_for_catalog(cfg, &m.provider) {
+                    provider_id = configured;
+                }
             } else if let Some(idx) = model_id.find('/') {
                 let candidate = &model_id[..idx];
                 if is_known_provider(cfg, candidate) {
@@ -475,6 +540,28 @@ pub(crate) fn provider_name_to_shape(pid: &str) -> &'static str {
     }
 }
 
+/// Per-model transport overrides that the models.dev catalog cannot express
+/// (it has no per-model transport field). Applied after the provider default
+/// and any catalog shape, so the hardcode always wins.
+fn hardcoded_shape_override(provider_id: &str, model: &str) -> Option<&'static str> {
+    if provider_id == "opencode-go" && model.starts_with("minimax-") {
+        return Some("anthropic");
+    }
+    // DeepSeek V4 Flash speaks the OpenAI Responses API (`POST /v1/responses`);
+    // the rest of the DeepSeek lineup is chat-completions only.
+    if provider_id == "deepseek" && model == "deepseek-v4-flash" {
+        return Some("responses");
+    }
+    None
+}
+
+/// Whether a responses-shaped provider may authenticate with the stored Codex
+/// OAuth tokens. Only codex itself: those tokens are OpenAI credentials and
+/// must never be sent to a third-party endpoint.
+fn responses_uses_codex_oauth(provider_id: &str) -> bool {
+    provider_id == "codex"
+}
+
 /// Return whether a catalog provider id can supply models for a configured
 /// provider. models.dev and mew use different names for a few compatible
 /// endpoints, so exact string equality would hide otherwise usable models.
@@ -534,8 +621,10 @@ pub(crate) fn build_direct_provider(
     }
 
     let mut base_url = pc.base_url.clone();
+    if let Some(overridden) = hardcoded_shape_override(provider_id, &model) {
+        shape = overridden.to_string();
+    }
     if provider_id == "opencode-go" && model.starts_with("minimax-") {
-        shape = "anthropic".to_string();
         base_url = "https://opencode.ai/zen/go/v1".to_string();
     }
 
@@ -563,6 +652,20 @@ pub(crate) fn build_direct_provider(
             Ok(Arc::new(adapter))
         }
         "responses" => {
+            // Non-codex responses providers (e.g. deepseek's V4 Flash)
+            // authenticate with their own API key only — the stored Codex
+            // OAuth tokens are OpenAI credentials and must not be sent to a
+            // third-party endpoint.
+            if !responses_uses_codex_oauth(provider_id) {
+                let key = creds?;
+                let mut adapter =
+                    ResponsesAdapter::new(provider_id.to_string(), base_url, model, key)
+                        .with_responses_lite(responses_lite);
+                if raw {
+                    adapter.set_dump(true);
+                }
+                return Ok(Arc::new(adapter));
+            }
             // Try OAuth first, then fall back to API key. A missing API key
             // credential is not fatal here because OAuth may succeed, so we
             // drop the error if auth::resolve finds another path — but we keep
@@ -741,8 +844,17 @@ pub(crate) async fn discover_models(
                 format!("{}/{}", pid, m.id)
             };
             if seen.insert(full_id.clone()) {
-                let desc = if let Some(c) = cat.and_then(|c| c.lookup(&m.id)) {
-                    format!("{} · {} · {} ctx", pid, c.shape, c.context_window)
+                let catalog_model = cat.and_then(|c| c.lookup(&m.id));
+                // Image/video/audio generation models aren't usable by the
+                // chat agent — drop them when the catalog identifies one.
+                // Unknown models stay (they may be new, pre-catalog).
+                if let Some(cm) = catalog_model {
+                    if !cm.text_output {
+                        continue;
+                    }
+                }
+                let desc = if let Some(cm) = catalog_model {
+                    format!("{} · {} · {} ctx", pid, cm.shape, cm.context_window)
                 } else {
                     let shape = provider_name_to_shape(&pid);
                     format!("{} · {}", pid, shape)
@@ -1024,6 +1136,77 @@ mod tests {
         assert_eq!(built.pricing.input, 0.0);
     }
 
+    #[test]
+    fn build_custom_model_threads_thinking_budget() {
+        // Explicit budget range without merge: replaces wholesale.
+        let cm = mew_config::CustomModel {
+            id: "qwen3.8-max".into(),
+            provider: "qwen".into(),
+            thinking_budget: Some(mew_config::ThinkingBudgetDef {
+                min: 1000,
+                max: 10_000,
+                step: 500,
+                default: 5000,
+                by_effort: vec![("low".into(), 1000)],
+            }),
+            ..Default::default()
+        };
+        let built = build_custom_model(&cm, None);
+        let budget = built.thinking_budget.expect("budget threaded");
+        assert_eq!(
+            (budget.min, budget.max, budget.step, budget.default),
+            (1000, 10_000, 500, 5000)
+        );
+        assert_eq!(budget.by_effort, vec![("low".to_owned(), 1000)]);
+
+        // Merge preserves an unset budget from the catalog entry.
+        let mut existing = sample_catalog_model();
+        existing.thinking_budget = Some(mew_catalog::ThinkingBudget {
+            min: 0,
+            max: 262_144,
+            step: 1024,
+            default: 131_072,
+            by_effort: Vec::new(),
+        });
+        let preserved = mew_config::CustomModel {
+            id: "glm-5.3".into(),
+            provider: "z-ai".into(),
+            merge: true,
+            ..Default::default()
+        };
+        assert!(build_custom_model(&preserved, Some(&existing))
+            .thinking_budget
+            .is_some());
+
+        // Merge overrides an existing budget when set.
+        let overridden = mew_config::CustomModel {
+            id: "glm-5.3".into(),
+            provider: "z-ai".into(),
+            thinking_budget: Some(mew_config::ThinkingBudgetDef {
+                min: 0,
+                max: 4096,
+                step: 128,
+                default: 2048,
+                by_effort: Vec::new(),
+            }),
+            merge: true,
+            ..Default::default()
+        };
+        let built = build_custom_model(&overridden, Some(&existing));
+        let budget = built.thinking_budget.expect("budget overridden");
+        assert_eq!((budget.min, budget.max), (0, 4096));
+
+        // Without merge, the catalog's budget is dropped unless set here.
+        let replaced = mew_config::CustomModel {
+            id: "glm-5.3".into(),
+            provider: "z-ai".into(),
+            ..Default::default()
+        };
+        assert!(build_custom_model(&replaced, Some(&existing))
+            .thinking_budget
+            .is_none());
+    }
+
     // --- split_provider_model ---
 
     #[test]
@@ -1130,11 +1313,17 @@ mod tests {
         );
         let result = resolve_reasoning(Some(&cat), "test-model", Some("high"));
         assert!(result.is_some(), "should find the 'high' variant");
+        let (config, name) = result.unwrap();
+        assert_eq!(name, "high");
+        assert!(config.params.is_empty());
     }
 
     #[test]
     fn resolve_reasoning_none_variant_name() {
+        // "test-model" has no explicit off/none variant, so an off request
+        // is a plain disable (None) rather than an error.
         assert!(resolve_reasoning(Some(&cat_with_variant()), "test-model", Some("none")).is_none());
+        assert!(resolve_reasoning(Some(&cat_with_variant()), "test-model", Some("off")).is_none());
     }
 
     #[test]
@@ -1142,6 +1331,69 @@ mod tests {
         let cat = cat_with_variant();
         let result = resolve_reasoning(Some(&cat), "test-model", None);
         assert!(result.is_some(), "should find the default variant");
+        let (_, name) = result.unwrap();
+        assert_eq!(name, "high");
+    }
+
+    #[test]
+    fn resolve_reasoning_qwen38_off_sends_enable_thinking_false() {
+        // qwen3.8-max thinks by default, so "off" must resolve to an
+        // explicit enable_thinking: false rather than a plain disable.
+        let cat = Catalog::empty();
+        let (config, name) = resolve_reasoning(Some(&cat), "qwen3.8-max", Some("off")).unwrap();
+        assert_eq!(name, "off");
+        assert_eq!(config.params["enable_thinking"], serde_json::json!(false));
+        assert!(config.params.get("thinking_budget").is_none());
+    }
+
+    #[test]
+    fn resolve_reasoning_qwen38_effort_variants_enable_thinking() {
+        let cat = Catalog::empty();
+        let (config, name) = resolve_reasoning(Some(&cat), "qwen3.8-max", Some("xhigh")).unwrap();
+        assert_eq!(name, "xhigh");
+        assert_eq!(config.params["enable_thinking"], serde_json::json!(true));
+        assert_eq!(config.params["reasoning_effort"], "xhigh");
+    }
+
+    #[test]
+    fn resolve_reasoning_budget_parse_clamp_snap() {
+        let cat = Catalog::empty();
+        // Exact multiple passes through.
+        let (config, name) = resolve_reasoning(Some(&cat), "qwen3.8-max", Some("budget:8192"))
+            .expect("budget resolves");
+        assert_eq!(name, "budget:8192");
+        assert_eq!(config.params["thinking_budget"], 8192);
+        assert_eq!(config.params["enable_thinking"], serde_json::json!(true));
+        // Out-of-range clamps to the declared range.
+        let (_, name) =
+            resolve_reasoning(Some(&cat), "qwen3.8-max", Some("budget:999999999")).unwrap();
+        assert_eq!(name, "budget:262144");
+        // Off-step values snap to the nearest step.
+        let (config, name) =
+            resolve_reasoning(Some(&cat), "qwen3.8-max", Some("budget:200001")).unwrap();
+        assert_eq!(name, "budget:199680");
+        assert_eq!(config.params["thinking_budget"], 199680);
+    }
+
+    #[test]
+    fn resolve_reasoning_budget_unknown_or_unsupported_returns_none() {
+        let cat = Catalog::empty();
+        // Unparseable budget.
+        assert!(resolve_reasoning(Some(&cat), "qwen3.8-max", Some("budget:abc")).is_none());
+        // Model without budget metadata (deepseek-v4 has no thinking_budget).
+        assert!(resolve_reasoning(Some(&cat), "deepseek-v4", Some("budget:8192")).is_none());
+        // Model with no thinking at all.
+        assert!(resolve_reasoning(Some(&cat), "kimi-for-coding", Some("budget:8192")).is_none());
+        // Unknown variant name still resolves to None.
+        assert!(resolve_reasoning(Some(&cat), "qwen3.8-max", Some("bogus")).is_none());
+    }
+
+    #[test]
+    fn resolve_reasoning_off_requires_explicit_off_variant() {
+        let cat = Catalog::empty();
+        // deepseek-v4 has effort variants but no off variant: off → None
+        // (callers treat it as a plain disable).
+        assert!(resolve_reasoning(Some(&cat), "deepseek-v4", Some("off")).is_none());
     }
 
     fn cat_with_variant() -> Catalog {
@@ -1480,6 +1732,73 @@ mod tests {
 
     // --- provider_name_to_shape ---
 
+    // --- resolve_model ---
+
+    #[test]
+    fn resolve_model_maps_catalog_provider_to_configured_name() {
+        let cfg = cfg_with_default_providers();
+        let mut cat = Catalog::empty();
+        cat.models.insert(
+            "glm-5.2".into(),
+            mew_catalog::Model {
+                id: "glm-5.2".into(),
+                provider: "zai".into(),
+                ..Default::default()
+            },
+        );
+        // "zai" is a known alias for configured "z-ai".
+        let (pid, mid) = resolve_model(&cfg, Some(&cat), "opencode-zen", Some("glm-5.2".into()));
+        assert_eq!(pid, "z-ai");
+        assert_eq!(mid, "glm-5.2");
+    }
+
+    #[test]
+    fn resolve_model_keeps_provider_when_catalog_provider_not_configured() {
+        // models.dev lists popular models under many resellers; the catalog
+        // dedup keeps whichever provider sorts last (e.g. venice). Adopting an
+        // unconfigured catalog provider crashed startup with "unknown provider"
+        // even when the resolved provider serves the model just fine.
+        let cfg = cfg_with_default_providers();
+        let mut cat = Catalog::empty();
+        cat.models.insert(
+            "deepseek-v4-flash".into(),
+            mew_catalog::Model {
+                id: "deepseek-v4-flash".into(),
+                provider: "venice".into(),
+                ..Default::default()
+            },
+        );
+        let (pid, mid) = resolve_model(
+            &cfg,
+            Some(&cat),
+            "deepseek",
+            Some("deepseek-v4-flash".into()),
+        );
+        assert_eq!(pid, "deepseek");
+        assert_eq!(mid, "deepseek-v4-flash");
+    }
+
+    #[test]
+    fn resolve_model_adopts_catalog_provider_when_configured() {
+        let cfg = cfg_with_default_providers();
+        let mut cat = Catalog::empty();
+        cat.models.insert(
+            "deepseek-v4-flash".into(),
+            mew_catalog::Model {
+                id: "deepseek-v4-flash".into(),
+                provider: "deepseek".into(),
+                ..Default::default()
+            },
+        );
+        let (pid, _) = resolve_model(
+            &cfg,
+            Some(&cat),
+            "opencode-zen",
+            Some("deepseek-v4-flash".into()),
+        );
+        assert_eq!(pid, "deepseek");
+    }
+
     #[test]
     fn provider_name_to_shape_known() {
         assert_eq!(provider_name_to_shape("opencode-zen"), "openai");
@@ -1493,6 +1812,51 @@ mod tests {
     #[test]
     fn provider_name_to_shape_unknown_defaults_to_openai() {
         assert_eq!(provider_name_to_shape("nonexistent-provider"), "openai");
+    }
+
+    // --- hardcoded_shape_override ---
+
+    #[test]
+    fn hardcoded_shape_override_deepseek_v4_flash_uses_responses() {
+        assert_eq!(
+            hardcoded_shape_override("deepseek", "deepseek-v4-flash"),
+            Some("responses")
+        );
+    }
+
+    #[test]
+    fn hardcoded_shape_override_leaves_other_models_on_provider_default() {
+        // The rest of the DeepSeek lineup stays on chat completions.
+        assert_eq!(
+            hardcoded_shape_override("deepseek", "deepseek-v4-pro"),
+            None
+        );
+        assert_eq!(hardcoded_shape_override("deepseek", "deepseek-chat"), None);
+        assert_eq!(
+            hardcoded_shape_override("deepseek", "deepseek-reasoner"),
+            None
+        );
+        // The same model id under a different provider is not overridden.
+        assert_eq!(
+            hardcoded_shape_override("openai", "deepseek-v4-flash"),
+            None
+        );
+    }
+
+    #[test]
+    fn hardcoded_shape_override_minimax_stays_anthropic() {
+        assert_eq!(
+            hardcoded_shape_override("opencode-go", "minimax-text-01"),
+            Some("anthropic")
+        );
+    }
+
+    // --- responses_uses_codex_oauth ---
+
+    #[test]
+    fn responses_oauth_only_for_codex() {
+        assert!(responses_uses_codex_oauth("codex"));
+        assert!(!responses_uses_codex_oauth("deepseek"));
     }
 
     // --- build_provider credential error surfacing ---

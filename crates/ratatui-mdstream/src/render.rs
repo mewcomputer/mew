@@ -83,36 +83,44 @@ fn render_paragraph(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>>
 
 fn render_list(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    let mut continuation_indent = 2usize;
     for line in text.lines() {
         let trimmed = line.trim_start();
-        let _indent = line.len() - trimmed.len();
-        let content = if trimmed.starts_with("- ")
+        let indent = line.len() - trimmed.len();
+
+        let (marker, content) = if trimmed.starts_with("- ")
             || trimmed.starts_with("* ")
             || trimmed.starts_with("+ ")
         {
-            &trimmed[2..]
+            ("• ".to_string(), &trimmed[2..])
         } else if let Some(n) = trimmed.find(". ") {
             if trimmed[..n].parse::<u32>().is_ok() {
-                &trimmed[n + 2..]
+                (format!("{}. ", &trimmed[..n]), &trimmed[n + 2..])
             } else {
-                trimmed
+                (String::new(), trimmed)
             }
         } else {
-            trimmed
+            (String::new(), trimmed)
         };
 
-        let bullet = Span::styled("  ", theme.list_bullet);
-        let item_width = width.saturating_sub(2);
+        let prefix_width = if marker.is_empty() {
+            continuation_indent
+        } else {
+            continuation_indent = indent.saturating_add(marker.len());
+            continuation_indent
+        };
+
+        let item_width = width.saturating_sub(prefix_width.min(u16::MAX as usize) as u16);
         let runs = parse_inline(content, theme);
         let wrapped = wrap_styled(&runs, item_width);
 
         for (i, spans) in wrapped.into_iter().enumerate() {
-            let mut line_spans = Vec::new();
-            if i == 0 {
-                line_spans.push(bullet.clone());
+            let prefix = if i == 0 && !marker.is_empty() {
+                Span::styled(format!("{}{marker}", " ".repeat(indent)), theme.list_bullet)
             } else {
-                line_spans.push(Span::styled("  ", Style::default()));
-            }
+                Span::styled(" ".repeat(prefix_width), Style::default())
+            };
+            let mut line_spans = vec![prefix];
             line_spans.extend(spans);
             lines.push(Line::from(line_spans).style(theme.paragraph));
         }
@@ -228,5 +236,87 @@ pub fn extract_fence_lang(line: &str) -> Option<&str> {
         rest.split_whitespace().next()
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bullet_theme() -> Theme {
+        Theme {
+            list_bullet: Style::default(),
+            ..Theme::default()
+        }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn unordered_list_items_get_bullet_glyphs() {
+        let theme = bullet_theme();
+        let lines = render_list("- one\n* two\n+ three", 40, &theme);
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(line_text(&lines[0]), "• one");
+        assert_eq!(line_text(&lines[1]), "• two");
+        assert_eq!(line_text(&lines[2]), "• three");
+        assert_eq!(lines[0].spans[0].style, theme.list_bullet);
+    }
+
+    #[test]
+    fn ordered_list_items_keep_their_numbers() {
+        let theme = bullet_theme();
+        let lines = render_list("1. one\n2. two", 40, &theme);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(line_text(&lines[0]), "1. one");
+        assert_eq!(line_text(&lines[1]), "2. two");
+    }
+
+    #[test]
+    fn wrapped_list_continuations_align_with_item_text() {
+        let theme = bullet_theme();
+        let lines = render_list("10. alpha beta gamma", 12, &theme);
+
+        assert!(lines.len() > 1);
+        assert!(line_text(&lines[0]).starts_with("10. alpha"));
+        for wrapped in &lines[1..] {
+            assert!(line_text(wrapped).starts_with("    "));
+        }
+    }
+
+    #[test]
+    fn nested_list_items_keep_their_indentation() {
+        let theme = bullet_theme();
+        let lines = render_list("- parent\n  - child", 40, &theme);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(line_text(&lines[0]), "• parent");
+        assert_eq!(line_text(&lines[1]), "  • child");
+    }
+
+    #[test]
+    fn renders_nested_mdstream_lists_with_bullets_and_indent() {
+        let theme = bullet_theme();
+        let mut stream = mdstream::MdStream::new(mdstream::Options::default());
+        let mut state = mdstream::DocumentState::new();
+        state.apply(stream.append("- parent\n  - child\n- sibling"));
+        state.apply(stream.finalize());
+
+        let blocks: Vec<_> = state.blocks().collect();
+        assert_eq!(blocks.len(), 1);
+        let mut highlighter = crate::highlight::NoHighlight;
+        let lines = render_block(blocks[0], 40, &theme, &mut highlighter);
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!(line_text(&lines[0]), "• parent");
+        assert_eq!(line_text(&lines[1]), "  • child");
+        assert_eq!(line_text(&lines[2]), "• sibling");
     }
 }

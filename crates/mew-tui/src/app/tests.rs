@@ -1474,6 +1474,161 @@ fn test_active_thinking_variant_updates_from_daemon_notification() {
 }
 
 #[test]
+fn test_model_list_populates_picker_state() {
+    let mut app = App::new();
+    app.status.provider = "kimi".into();
+    app.status.model = "k3".into();
+    assert!(app.models.is_empty());
+    assert!(app.thinking_variants.is_empty());
+
+    let msg = mew_protocol::ServerMessage::ModelList {
+        models: vec![
+            mew_protocol::ModelInfo {
+                id: "kimi/k3".into(),
+                provider: "kimi".into(),
+                model: "k3".into(),
+                description: Some("256k ctx · reasoning".into()),
+                thinking_variants: vec![
+                    mew_protocol::ThinkingVariantInfo {
+                        name: "high".into(),
+                    },
+                    mew_protocol::ThinkingVariantInfo { name: "max".into() },
+                ],
+                thinking_budget: None,
+                context_window: Some(256_000),
+            },
+            mew_protocol::ModelInfo {
+                id: "deepseek/deepseek-v4-flash".into(),
+                provider: "deepseek".into(),
+                model: "deepseek-v4-flash".into(),
+                description: None,
+                thinking_variants: vec![],
+                thinking_budget: None,
+                context_window: None,
+            },
+        ],
+    };
+    app.apply_daemon_notification(&msg);
+
+    assert_eq!(
+        app.models,
+        vec![
+            ("kimi/k3".to_string(), "256k ctx · reasoning".to_string()),
+            (
+                "deepseek/deepseek-v4-flash".to_string(),
+                "deepseek".to_string()
+            ),
+        ]
+    );
+    // Thinking variants keyed by bare model id; models without variants
+    // are omitted.
+    assert_eq!(
+        app.thinking_variants.get("k3").map(Vec::as_slice),
+        Some(["high".to_string(), "max".to_string()].as_slice())
+    );
+    assert!(!app.thinking_variants.contains_key("deepseek-v4-flash"));
+    // Active model's context window is refreshed.
+    assert_eq!(app.status.context_window, 256_000);
+}
+
+#[test]
+fn test_change_stats_and_flagged_files_reduce() {
+    let mut app = App::new();
+    app.status.session_id = "sess_1".into();
+
+    // Local mode: FileDelta accumulates per-file stats.
+    app.handle_agent_event(mew_agent::AgentEvent::FileDelta {
+        path: "src/main.rs".into(),
+        added: 10,
+        removed: 2,
+    });
+    app.handle_agent_event(mew_agent::AgentEvent::FileDelta {
+        path: "src/lib.rs".into(),
+        added: 5,
+        removed: 0,
+    });
+    assert_eq!(app.change_stats.added, 15);
+    assert_eq!(app.change_stats.removed, 2);
+    assert_eq!(
+        app.change_stats.files,
+        vec!["src/main.rs".to_string(), "src/lib.rs".to_string()]
+    );
+
+    // Local mode: FlaggedFilesChanged replaces the flagged set.
+    app.handle_agent_event(mew_agent::AgentEvent::FlaggedFilesChanged {
+        files: vec![mew_agent::FlaggedFileInfo {
+            path: "src/main.rs".into(),
+            reason: Some("important".into()),
+        }],
+    });
+    assert_eq!(app.flagged_files.len(), 1);
+    assert_eq!(app.flagged_files[0].path, "src/main.rs");
+
+    // Daemon mode: SessionStatsChanged updates totals for the active
+    // session only.
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionStatsChanged {
+        session_id: "sess_2".into(),
+        added: 99,
+        removed: 99,
+        files_changed: 1,
+    });
+    assert_eq!(app.change_stats.added, 15, "other session must not apply");
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionStatsChanged {
+        session_id: "sess_1".into(),
+        added: 20,
+        removed: 4,
+        files_changed: 2,
+    });
+    assert_eq!(app.change_stats.added, 20);
+    assert_eq!(app.change_stats.removed, 4);
+
+    // Daemon mode: FlaggedFilesChanged replaces the flagged set.
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::FlaggedFilesChanged {
+        session_id: "sess_1".into(),
+        files: vec![mew_protocol::FlaggedFileWire {
+            path: "README.md".into(),
+            reason: None,
+        }],
+    });
+    assert_eq!(app.flagged_files.len(), 1);
+    assert_eq!(app.flagged_files[0].path, "README.md");
+}
+
+#[test]
+fn test_session_list_syncs_active_change_stats() {
+    let mut app = App::new();
+    app.status.session_id = "sess_1".into();
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionList {
+        sessions: vec![mew_protocol::SessionInfo {
+            session_id: "sess_1".into(),
+            state: mew_protocol::SessionState::Active,
+            model: None,
+            provider: None,
+            created_at: 0,
+            last_message_at: None,
+            summary: None,
+            client_count: 1,
+            cwd: None,
+            last_turn_failed: false,
+            archived: false,
+            pinned: false,
+            group_id: None,
+            change_stats: Some(mew_session::ChangeStats {
+                added: 7,
+                removed: 3,
+                files: vec!["a.rs".into()],
+            }),
+            usage: None,
+            pending_permissions: 0,
+            pending_questions: 0,
+            first_message: None,
+        }],
+    });
+    assert_eq!(app.change_stats.added, 7);
+    assert_eq!(app.change_stats.files, vec!["a.rs".to_string()]);
+}
+
+#[test]
 fn test_theme_no_arg_opens_picker() {
     let app = App::new();
     let result = app.handle_slash("/theme");
@@ -1565,6 +1720,22 @@ fn test_resume_no_arg_opens_picker() {
     let app = App::new();
     let result = app.handle_slash("/resume");
     assert!(matches!(result, SlashResult::OpenSessionPickerFromDisk));
+}
+
+#[test]
+fn test_sessions_no_arg_opens_daemon_picker_in_daemon_mode() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    let result = app.handle_slash("/sessions");
+    assert!(matches!(result, SlashResult::OpenSessionPicker));
+}
+
+#[test]
+fn test_resume_no_arg_opens_daemon_picker_in_daemon_mode() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    let result = app.handle_slash("/resume");
+    assert!(matches!(result, SlashResult::OpenSessionPicker));
 }
 
 #[test]
@@ -1787,5 +1958,308 @@ fn test_render_cache_batches_deltas() {
         "expected exactly 3 render rebuilds for 10 deltas in batches of 4 \
              (got {} — broken would be 10)",
         app.render_count
+    );
+}
+
+// --- thinking token-budget row ---
+
+fn qwen_budget() -> mew_protocol::ThinkingBudgetInfo {
+    mew_protocol::ThinkingBudgetInfo {
+        min: 0,
+        max: 262_144,
+        step: 1024,
+        default: 131_072,
+        by_effort: vec![
+            ("low".to_owned(), 4096),
+            ("medium".to_owned(), 16_384),
+            ("xhigh".to_owned(), 262_144),
+        ],
+    }
+}
+
+fn open_qwen_thinking_picker(app: &mut App) {
+    app.status.model = "qwen3.8-max".into();
+    app.thinking_variants.insert(
+        "qwen3.8-max".into(),
+        vec!["low".into(), "medium".into(), "xhigh".into()],
+    );
+    app.thinking_budget
+        .insert("qwen3.8-max".into(), qwen_budget());
+    app.open_thinking_variant_picker_for(None);
+}
+
+fn select_budget_row(app: &mut App) {
+    let picker = app.picker.as_mut().expect("picker open");
+    picker.selected = picker
+        .items
+        .iter()
+        .position(|i| i.id == "budget")
+        .expect("budget row present");
+}
+
+fn budget_draft(app: &App) -> String {
+    app.picker
+        .as_ref()
+        .and_then(|p| p.budget.as_ref())
+        .map(|b| b.draft.clone())
+        .expect("budget draft present")
+}
+
+/// Extract the variant string from a SetThinkingVariant action (for
+/// assertion ergonomics; `Action` doesn't implement PartialEq).
+fn thinking_action(action: Option<crate::events::Action>) -> Option<String> {
+    match action {
+        Some(crate::events::Action::SetThinkingVariant(variant)) => Some(variant),
+        _ => None,
+    }
+}
+
+fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+}
+
+#[test]
+fn test_thinking_picker_budget_row_only_with_metadata() {
+    let mut app = App::new();
+    app.status.model = "qwen3.8-max".into();
+    // No budget metadata → no budget row.
+    app.open_thinking_variant_picker_for(None);
+    let picker = app.picker.as_ref().unwrap();
+    assert!(!picker.items.iter().any(|i| i.id == "budget"));
+    assert!(picker.budget.is_none());
+
+    // With budget metadata → budget row appended after the variants.
+    open_qwen_thinking_picker(&mut app);
+    let picker = app.picker.as_ref().unwrap();
+    let ids: Vec<&str> = picker.items.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(ids, vec!["off", "low", "medium", "xhigh", "budget"]);
+    assert!(picker.budget.is_some());
+}
+
+#[test]
+fn test_thinking_picker_budget_draft_seeding() {
+    // Active budget:<n> variant wins.
+    let mut app = App::new();
+    app.active_thinking_variant = Some("budget:4096".into());
+    open_qwen_thinking_picker(&mut app);
+    assert_eq!(budget_draft(&app), "4096");
+
+    // Active effort maps through by_effort.
+    let mut app = App::new();
+    app.active_thinking_variant = Some("medium".into());
+    open_qwen_thinking_picker(&mut app);
+    assert_eq!(budget_draft(&app), "16384");
+
+    // Nothing set → metadata default.
+    let mut app = App::new();
+    open_qwen_thinking_picker(&mut app);
+    assert_eq!(budget_draft(&app), "131072");
+}
+
+#[test]
+fn test_budget_keys_step_type_and_backspace() {
+    let mut app = App::new();
+    open_qwen_thinking_picker(&mut app);
+    select_budget_row(&mut app);
+
+    // First digit replaces the seeded value, later digits append.
+    assert!(
+        crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Char('8')))
+            .is_none()
+    );
+    assert_eq!(budget_draft(&app), "8");
+    assert!(
+        crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Char('1')))
+            .is_none()
+    );
+    assert_eq!(budget_draft(&app), "81");
+
+    // Right steps up by one step, snapped; Left steps back down.
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Right));
+    assert_eq!(budget_draft(&app), "1024");
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Left));
+    assert_eq!(budget_draft(&app), "0");
+
+    // Backspace pops digits; an emptied draft reseeds to the default.
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Right));
+    assert_eq!(budget_draft(&app), "1024");
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Backspace));
+    assert_eq!(budget_draft(&app), "102");
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Backspace));
+    assert_eq!(budget_draft(&app), "10");
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Backspace));
+    assert_eq!(budget_draft(&app), "1");
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Backspace));
+    assert_eq!(budget_draft(&app), "131072");
+}
+
+#[test]
+fn test_budget_clamps_at_range_edges() {
+    let mut app = App::new();
+    open_qwen_thinking_picker(&mut app);
+    select_budget_row(&mut app);
+
+    // Left at the default never goes below min.
+    for _ in 0..200 {
+        crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Left));
+    }
+    assert_eq!(budget_draft(&app), "0");
+
+    // Right never goes above max.
+    for _ in 0..300 {
+        crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Right));
+    }
+    assert_eq!(budget_draft(&app), "262144");
+}
+
+#[test]
+fn test_budget_enter_commits_budget_variant() {
+    let mut app = App::new();
+    open_qwen_thinking_picker(&mut app);
+    select_budget_row(&mut app);
+
+    // Type an on-step value, then Enter commits `budget:<snapped>` and closes.
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Char('8')));
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Char('1')));
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Char('9')));
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Char('2')));
+    let action = crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Enter));
+    assert_eq!(thinking_action(action), Some("budget:8192".into()));
+    assert!(app.picker.is_none());
+
+    // Reopen: Enter on an off-step typed value commits the snapped value.
+    open_qwen_thinking_picker(&mut app);
+    select_budget_row(&mut app);
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Char('1')));
+    crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Char('9')));
+    let action = crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Enter));
+    assert_eq!(thinking_action(action), Some("budget:0".into()));
+}
+
+#[test]
+fn test_budget_mouse_click_drag_commit() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = App::new();
+    open_qwen_thinking_picker(&mut app);
+    let rect = ratatui::layout::Rect::new(10, 5, 20, 1);
+    app.picker
+        .as_mut()
+        .unwrap()
+        .budget
+        .as_mut()
+        .unwrap()
+        .track_rect = Some(rect);
+
+    let mouse = |kind: MouseEventKind, column: u16, row: u16| MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+
+    // Click on the track sets the draft (row/col are 1-based; the handler
+    // subtracts 1). Column 15 → frac (14-10)/19 ≈ 0.21 → snap → 55296.
+    assert!(crate::events::handle_mouse_event(
+        &mut app,
+        mouse(MouseEventKind::Down(MouseButton::Left), 15, 6)
+    )
+    .is_none());
+    assert_eq!(budget_draft(&app), "55296");
+    // The click also selects the budget row so arrows keep working.
+    assert_eq!(
+        app.picker.as_ref().unwrap().selected_item().unwrap().id,
+        "budget"
+    );
+
+    // Drag to the right end.
+    crate::events::handle_mouse_event(
+        &mut app,
+        mouse(MouseEventKind::Drag(MouseButton::Left), 30, 6),
+    );
+    assert_eq!(budget_draft(&app), "262144");
+
+    // Release commits `budget:<n>` and keeps the picker open.
+    let action = crate::events::handle_mouse_event(
+        &mut app,
+        mouse(MouseEventKind::Up(MouseButton::Left), 30, 6),
+    );
+    assert_eq!(thinking_action(action), Some("budget:262144".into()));
+    assert!(app.picker.is_some());
+}
+
+#[test]
+fn test_budget_mouse_wheel_nudges_and_commits() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    let mut app = App::new();
+    open_qwen_thinking_picker(&mut app);
+    let rect = ratatui::layout::Rect::new(10, 5, 20, 1);
+    app.picker
+        .as_mut()
+        .unwrap()
+        .budget
+        .as_mut()
+        .unwrap()
+        .track_rect = Some(rect);
+
+    let mouse = |kind: MouseEventKind| MouseEvent {
+        kind,
+        column: 15,
+        row: 6,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+
+    // Wheel down over the track nudges down one step and commits.
+    let action = crate::events::handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollDown));
+    assert_eq!(thinking_action(action), Some("budget:130048".into()));
+    // Wheel up nudges up.
+    let action = crate::events::handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollUp));
+    assert_eq!(thinking_action(action), Some("budget:131072".into()));
+    // Wheel outside the track is ignored.
+    let off = MouseEvent {
+        kind: MouseEventKind::ScrollUp,
+        column: 2,
+        row: 2,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    assert!(crate::events::handle_mouse_event(&mut app, off).is_none());
+}
+
+#[test]
+fn test_model_list_populates_thinking_budget() {
+    let mut app = App::new();
+    assert!(app.thinking_budget.is_empty());
+
+    let msg = mew_protocol::ServerMessage::ModelList {
+        models: vec![
+            mew_protocol::ModelInfo {
+                id: "qwen/qwen3.8-max".into(),
+                provider: "qwen".into(),
+                model: "qwen3.8-max".into(),
+                description: None,
+                thinking_variants: vec![],
+                thinking_budget: Some(qwen_budget()),
+                context_window: None,
+            },
+            mew_protocol::ModelInfo {
+                id: "deepseek/deepseek-v4-flash".into(),
+                provider: "deepseek".into(),
+                model: "deepseek-v4-flash".into(),
+                description: None,
+                thinking_variants: vec![],
+                thinking_budget: None,
+                context_window: None,
+            },
+        ],
+    };
+    app.apply_daemon_notification(&msg);
+
+    assert!(app.thinking_budget.contains_key("qwen3.8-max"));
+    assert!(!app.thinking_budget.contains_key("deepseek-v4-flash"));
+    let budget = &app.thinking_budget["qwen3.8-max"];
+    assert_eq!(
+        (budget.min, budget.max, budget.step, budget.default),
+        (0, 262_144, 1024, 131_072)
     );
 }

@@ -498,6 +498,16 @@ impl Writer {
     ) -> Result<(), SessionError> {
         self.meta.set_cwd(dir, cwd).await
     }
+
+    /// Set and persist the session group while keeping the writer's in-memory
+    /// metadata in sync with the on-disk record.
+    pub async fn set_group_id(
+        &mut self,
+        dir: &Path,
+        group_id: Option<String>,
+    ) -> Result<(), SessionError> {
+        self.meta.set_group_id(dir, group_id).await
+    }
 }
 
 impl Meta {
@@ -663,6 +673,28 @@ mod tests {
             .expect("meta")
             .expect("present");
         assert_eq!(meta.cwd.as_deref(), Some("/tmp/project"));
+
+        writer.close().await.expect("close");
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn test_writer_set_group_updates_memory_and_disk() {
+        let root = tmp_root();
+        let session_id = format!("test-{}", Ulid::new());
+        let mut writer = Writer::open_at(&root, &session_id).await.expect("open");
+
+        writer
+            .set_group_id(&root, Some("grp_1".into()))
+            .await
+            .expect("set group");
+
+        assert_eq!(writer.meta().group_id.as_deref(), Some("grp_1"));
+        let meta = Reader::load_meta_from(&root, &session_id)
+            .await
+            .expect("meta")
+            .expect("present");
+        assert_eq!(meta.group_id.as_deref(), Some("grp_1"));
 
         writer.close().await.expect("close");
         let _ = tokio::fs::remove_dir_all(&root).await;

@@ -112,6 +112,15 @@ impl GroupsStore {
         self.state.lock().await.membership.get(session_id).cloned()
     }
 
+    pub async fn contains(&self, group_id: &str) -> bool {
+        self.state
+            .lock()
+            .await
+            .groups
+            .iter()
+            .any(|group| group.id == group_id)
+    }
+
     /// Create a new group. Returns the group list.
     pub async fn create_group(
         &self,
@@ -186,5 +195,41 @@ impl GroupsStore {
         state.write(&self.session_dir).await?;
         drop(state);
         Ok(self.list().await)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn deleting_a_group_ungroups_members_and_persists() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = GroupsStore::from_state(
+            GroupsState {
+                groups: vec![Group {
+                    id: "grp_1".into(),
+                    name: "Project".into(),
+                    color: None,
+                    order: 0,
+                }],
+                membership: HashMap::from([
+                    ("session-1".into(), "grp_1".into()),
+                    ("session-2".into(), "grp_1".into()),
+                ]),
+            },
+            directory.path().to_owned(),
+        );
+
+        let groups = store.delete_group("grp_1").await.unwrap();
+
+        assert!(groups.is_empty());
+        assert_eq!(store.group_for_session("session-1").await, None);
+        assert_eq!(store.group_for_session("session-2").await, None);
+
+        let persisted = GroupsState::load(directory.path()).await;
+        assert!(persisted.groups.is_empty());
+        assert!(persisted.membership.is_empty());
     }
 }

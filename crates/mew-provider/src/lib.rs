@@ -80,6 +80,8 @@ pub struct Request {
 /// - OpenAI: `{"reasoning_effort": "high"}`
 /// - Anthropic: `{"thinking": {"type": "enabled", "budget_tokens": 16000}}`
 /// - z-ai GLM: `{"thinking": {"type": "enabled"}}`
+/// - Qwen3.8-max (token budget): `{"enable_thinking": true, "thinking_budget": 8192}`
+/// - Qwen3.8-max (off): `{"enable_thinking": false}`
 #[derive(Debug, Clone, Default)]
 pub struct ReasoningConfig {
     /// Provider-specific fields to merge into the request body.
@@ -99,6 +101,7 @@ pub struct ToolDef {
 /// (e.g. `include_str!()`). Plugins in Rust should define their own
 /// types with `field: String` and convert.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum ProviderEvent {
     PartStart {
         part: Part,

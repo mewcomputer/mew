@@ -1,0 +1,16 @@
+[package]
+name = "mew-client-local"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
+mew-client-core = { workspace = true }
+mew-protocol = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tungstenite = "0.24"

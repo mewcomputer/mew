@@ -50,6 +50,21 @@ pub enum SlashResult {
     OpenPersonaPicker,
     OpenRewindPicker,
     OpenSessionPickerFromDisk,
+    /// Open the daemon session picker (daemon mode; rows attach on select).
+    OpenSessionPicker,
+    /// `/autotitle on|off` (daemon mode).
+    SetAutoTitle(bool),
+    /// `/autosummary on|off` (daemon mode).
+    SetAutoSummary(bool),
+    /// `/yield` — yield control of the session to other clients (daemon mode).
+    YieldControl,
+    /// `/unflag <path>` — remove a file from the session's flagged-files set.
+    UnflagFile(String),
+    /// `/project` — request the daemon's project list and open the picker.
+    OpenProjectPicker,
+    /// `/rename <title>` — set a custom title on the active session
+    /// (daemon mode).
+    RenameSession(String),
     OpenHelp,
     /// Set, pause, resume, clear, or complete a goal.
     GoalCommand(GGoalCommand),
@@ -110,6 +125,9 @@ pub struct App {
     pub sidebar_rect: Rect,
     pub models: Vec<(String, String)>,
     pub thinking_variants: HashMap<String, Vec<String>>,
+    /// Numeric thinking-budget ranges keyed by bare model id, for models
+    /// that accept a `thinking_budget` token cap (e.g. qwen3.8-max).
+    pub thinking_budget: HashMap<String, mew_protocol::ThinkingBudgetInfo>,
     pub active_thinking_variant: Option<String>,
     /// Recently used models (most recent first), capped at 6.
     /// Loaded from persisted state and updated on model switch.
@@ -139,6 +157,9 @@ pub struct App {
     pub reasoning_started_at: Option<std::time::Instant>,
     pub reasoning_elapsed: HashMap<PartId, std::time::Duration>,
     pub reasoning_header_rows: Vec<(PartId, usize)>,
+    /// Visual rows of tool-batch header lines, mapping a click back to the
+    /// batch's first `ToolCall` part id. Rebuilt every `draw_chat`.
+    pub tool_batch_header_rows: Vec<(PartId, usize)>,
     pub pending_md_rerender: Option<mew_message::MessageId>,
     pub md_state: mdstream::DocumentState,
     pub md_stream: Option<mdstream::MdStream>,
@@ -191,8 +212,20 @@ pub struct App {
     pub session_titles: std::collections::HashMap<String, String>,
     pub session_summaries: std::collections::HashMap<String, String>,
     pub session_attention: std::collections::HashMap<String, (u32, u32)>,
+    /// Known project directories from the daemon (populated by
+    /// `ServerMessage::ProjectList`, drives the `/project` picker).
+    pub projects: Vec<mew_protocol::ProjectInfo>,
+    /// Session groups from the daemon (populated by `GroupList` /
+    /// `GroupsChanged`), used to group the sessions rail.
+    pub groups: Vec<mew_protocol::GroupInfo>,
     pub auto_title: bool,
     pub auto_summary: bool,
+    /// Cumulative diff stats for the active session. Populated from
+    /// `AgentEvent::FileDelta` in local mode and from `SessionList` /
+    /// `SessionStatsChanged` notifications in daemon mode.
+    pub change_stats: mew_session::ChangeStats,
+    /// Files flagged via the `flag_important` tool (both modes).
+    pub flagged_files: Vec<mew_agent::FlaggedFileInfo>,
     pub tool_batch_expanded: std::collections::HashSet<mew_message::PartId>,
     /// Test-only instrumentation: counts how many times `ensure_chat_rendered`
     /// rebuilds the chat (the `!cache_ok` branch). Used by `test_daemon_coalescing`
@@ -301,6 +334,82 @@ pub struct PickerState {
     pub scroll: usize,
     pub visible_items: usize,
     pub hint: Option<String>,
+    /// Numeric budget row state for the thinking-variant picker. `None` for
+    /// other pickers and for models without budget metadata.
+    pub budget: Option<PickerBudget>,
+}
+
+/// State for the thinking picker's numeric budget row. The row renders as a
+/// track slider; the draft is the current value as digit characters,
+/// committed as `budget:<n>` on Enter or mouse-up.
+#[derive(Debug)]
+pub struct PickerBudget {
+    pub info: mew_protocol::ThinkingBudgetInfo,
+    /// Current draft value as digits ("8192"). Shown in the row; committed
+    /// (clamped/snapped) as `budget:<n>`.
+    pub draft: String,
+    /// Draft value the picker opened with. Typing a digit while the draft
+    /// still equals the seed replaces it instead of appending.
+    pub seed: String,
+    /// Screen rect of the track, recorded during draw so mouse events can
+    /// hit-test it. Cleared when the row isn't drawn (filtered out).
+    pub track_rect: Option<Rect>,
+    /// True while a mouse drag on the track is in progress.
+    pub dragging: bool,
+}
+
+impl PickerBudget {
+    /// Clamp `value` to the declared range and snap it to the nearest step.
+    fn snap(&self, value: i64) -> i64 {
+        let clamped = value.clamp(self.info.min, self.info.max);
+        if self.info.step <= 0 {
+            return clamped;
+        }
+        self.info.min
+            + ((clamped - self.info.min + self.info.step / 2) / self.info.step) * self.info.step
+    }
+
+    /// The value the track and commits use: the draft parsed, clamped and
+    /// snapped; falls back to the metadata default when unparseable.
+    pub fn snapped(&self) -> i64 {
+        let parsed = self.draft.parse::<i64>().unwrap_or(self.info.default);
+        self.snap(parsed)
+    }
+
+    /// Nudge the draft by `delta` tokens (result clamped/snapped).
+    pub fn step(&mut self, delta: i64) {
+        self.draft = self.snap(self.snapped() + delta).to_string();
+    }
+
+    /// Type a digit. Replaces the seeded value on the first keystroke, then
+    /// appends (capped at 9 digits to avoid overflow).
+    pub fn type_digit(&mut self, digit: char) {
+        if self.draft == self.seed {
+            self.draft.clear();
+        }
+        if self.draft.len() < 9 {
+            self.draft.push(digit);
+        }
+    }
+
+    /// Pop the last digit; an emptied draft reseeds to the metadata default
+    /// (and becomes the new seed, so the next typed digit replaces it).
+    pub fn backspace(&mut self) {
+        self.draft.pop();
+        if self.draft.is_empty() {
+            self.draft = self.info.default.to_string();
+            self.seed = self.draft.clone();
+        }
+    }
+
+    /// Set the draft from a mouse column within `rect`, mapped across the
+    /// range and snapped to the nearest step.
+    pub fn set_from_col(&mut self, col: u16, rect: Rect) {
+        let width = rect.width.max(1) as f64;
+        let frac = (col.saturating_sub(rect.x) as f64 / (width - 1.0)).clamp(0.0, 1.0);
+        let raw = self.info.min + ((self.info.max - self.info.min) as f64 * frac).round() as i64;
+        self.draft = self.snap(raw).to_string();
+    }
 }
 
 impl PickerState {
@@ -553,6 +662,7 @@ impl App {
             sidebar_rect: Rect::default(),
             models: Vec::new(),
             thinking_variants: HashMap::new(),
+            thinking_budget: HashMap::new(),
             active_thinking_variant: None,
             recent_models: Vec::new(),
             queued_messages: Vec::new(),
@@ -569,6 +679,7 @@ impl App {
             reasoning_started_at: None,
             reasoning_elapsed: HashMap::new(),
             reasoning_header_rows: Vec::new(),
+            tool_batch_header_rows: Vec::new(),
             pending_md_rerender: None,
             md_state: mdstream::DocumentState::new(),
             md_stream: None,
@@ -615,8 +726,12 @@ impl App {
             session_titles: std::collections::HashMap::new(),
             session_summaries: std::collections::HashMap::new(),
             session_attention: std::collections::HashMap::new(),
+            projects: Vec::new(),
+            groups: Vec::new(),
             auto_title: false,
             auto_summary: false,
+            change_stats: mew_session::ChangeStats::default(),
+            flagged_files: Vec::new(),
             tool_batch_expanded: std::collections::HashSet::new(),
             #[cfg(test)]
             render_count: 0,
@@ -630,6 +745,14 @@ impl App {
         use mew_protocol::ServerMessage;
         match msg {
             ServerMessage::SessionList { sessions } => {
+                // Sync the active session's cumulative change stats (gives
+                // the per-file list that `SessionStatsChanged` lacks).
+                if let Some(active) = sessions
+                    .iter()
+                    .find(|s| s.session_id == self.status.session_id)
+                {
+                    self.change_stats = active.change_stats.clone().unwrap_or_default();
+                }
                 self.daemon_sessions = sessions.clone();
             }
             ServerMessage::SessionTitleChanged { session_id, title } => {
@@ -705,12 +828,65 @@ impl App {
                 self.status.provider = provider.clone();
                 self.status.model = model.clone();
             }
+            ServerMessage::ProjectList { projects } => {
+                self.projects = projects.clone();
+                // The project list is only requested in response to
+                // `/project`, so its arrival opens the picker.
+                self.open_project_picker();
+            }
+            ServerMessage::GroupList { groups } | ServerMessage::GroupsChanged { groups } => {
+                self.groups = groups.clone();
+            }
+            ServerMessage::ModelList { models } => {
+                // Populate the model picker in daemon mode (mirrors the
+                // local-mode `discover_models` + catalog seeding).
+                self.models = models
+                    .iter()
+                    .map(|m| {
+                        (
+                            m.id.clone(),
+                            m.description.clone().unwrap_or_else(|| m.provider.clone()),
+                        )
+                    })
+                    .collect();
+                self.thinking_variants = models
+                    .iter()
+                    .filter(|m| !m.thinking_variants.is_empty())
+                    .map(|m| {
+                        (
+                            m.model.clone(),
+                            m.thinking_variants
+                                .iter()
+                                .map(|v| v.name.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect();
+                self.thinking_budget = models
+                    .iter()
+                    .filter_map(|m| {
+                        m.thinking_budget
+                            .clone()
+                            .map(|budget| (m.model.clone(), budget))
+                    })
+                    .collect();
+                // Refresh the context window for the active model if the
+                // daemon knows it.
+                let active_id = format!("{}/{}", self.status.provider, self.status.model);
+                if let Some(m) = models.iter().find(|m| m.id == active_id) {
+                    if let Some(cw) = m.context_window {
+                        self.status.context_window = cw as u32;
+                    }
+                }
+            }
             ServerMessage::SessionReady {
+                session_id,
                 model,
                 provider,
                 permission_mode,
                 ..
             } => {
+                self.status.session_id = session_id.clone();
                 // On attach, update the active model/provider from the
                 // daemon's session state. Fields may be empty if the
                 // session hasn't been used yet.
@@ -743,10 +919,28 @@ impl App {
                 // The next SessionList will refresh the rail.
                 let _ = session_id;
             }
+            ServerMessage::SessionStatsChanged {
+                session_id,
+                added,
+                removed,
+                ..
+            } => {
+                // Live totals update for the active session. The message
+                // carries no per-file paths, so the file list stays as last
+                // synced from `SessionList`.
+                if session_id == &self.status.session_id {
+                    self.change_stats.added = *added;
+                    self.change_stats.removed = *removed;
+                }
+            }
             ServerMessage::FlaggedFilesChanged { files, .. } => {
-                // Store flagged files for the Changes sidebar section.
-                // (Item 8 will render these; for now just log.)
-                let _ = files;
+                self.flagged_files = files
+                    .iter()
+                    .map(|f| mew_agent::FlaggedFileInfo {
+                        path: f.path.clone(),
+                        reason: f.reason.clone(),
+                    })
+                    .collect();
             }
             _ => {
                 // Other notifications (ClientAttached, FsChanged, etc.)
@@ -800,6 +994,7 @@ impl App {
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
+            budget: None,
         });
     }
 
@@ -1376,6 +1571,19 @@ impl App {
         }
     }
 
+    /// Toggle expansion of the most recently drawn tool-call batch. No-op
+    /// when no collapsed/expanded batch header is on screen.
+    pub fn toggle_tool_batch_expanded(&mut self) {
+        if let Some(&(id, _)) = self.tool_batch_header_rows.last() {
+            if self.tool_batch_expanded.contains(&id) {
+                self.tool_batch_expanded.remove(&id);
+            } else {
+                self.tool_batch_expanded.insert(id);
+            }
+            self.mark_chat_dirty();
+        }
+    }
+
     /// Record the elapsed duration for the active reasoning block. When
     /// `collapse` is true, also remove it from the expanded set so the header
     /// closes; otherwise the block stays expanded (used for the final
@@ -1927,12 +2135,15 @@ impl App {
                     });
                 }
             }
-            AgentEvent::FileDelta { .. } => {
-                // File delta accumulation is handled by the daemon for web
-                // clients. The TUI doesn't show per-session diff stats yet.
+            AgentEvent::FileDelta {
+                path,
+                added,
+                removed,
+            } => {
+                self.change_stats.apply_delta(&path, added, removed);
             }
-            AgentEvent::FlaggedFilesChanged { .. } => {
-                // Flagged files visibility is handled by web frontends.
+            AgentEvent::FlaggedFilesChanged { files } => {
+                self.flagged_files = files;
             }
             AgentEvent::GoalProposed {
                 call_id,

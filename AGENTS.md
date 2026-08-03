@@ -99,9 +99,10 @@ shared data and infrastructure
   crates/ratatui-mdstream  streaming markdown, wrapping, syntax highlighting, and tables
 
 other frontends
+  apps/mew-desktop         native GPUI desktop client and app-owned daemon supervisor
   mew-web-client            TypeScript wire-protocol client
   mew-web-ui                React/Vite browser frontend
-    src-tauri               macOS-first Tauri desktop shell (outside Cargo workspace)
+  native/cef-host           macOS CEF helper used by the native desktop browser portal
   mew-ios                   Swift app using mew-mobile-core
   site                      Astro documentation/marketing site
 ```
@@ -126,23 +127,20 @@ The web path is `browser → mew-web-bridge → daemon`. The bridge relays WebSo
 frames to the daemon's Unix socket and serves the compiled React assets. The
 mobile path uses `mew-mobile-core` over iroh and the same protocol model.
 
-The desktop path is `Tauri host → loopback TCP daemon`. The thin Rust host in
-`mew-web-ui/src-tauri` uses a shared loopback rendezvous port (`25566` by
-default, overridable with `MEW_DESKTOP_DAEMON_PORT`). It first performs a
-WebSocket ping/pong health check and attaches to an existing mew daemon without
-owning it. If the port is occupied by another service, startup fails with an
-actionable error rather than launching a duplicate. Otherwise it starts
-`mew daemon --port 127.0.0.1:<port>`, waits for a protocol-level health check,
-and exposes the WebSocket URL through the `daemon_ws_url` command. Startup is
-lazy so the shared React app can render a retryable failure state.
+The desktop path is `apps/mew-desktop (GPUI) → transport → daemon`. The native
+client uses a shared loopback rendezvous port (`25566` by default, overridable
+with `MEW_DESKTOP_DAEMON_PORT`), performs a WebSocket health check, and attaches
+to an existing daemon without owning it. If no healthy daemon is present, the
+supervisor starts `mew daemon --port 127.0.0.1:<port>`, waits for a
+protocol-level health check, and owns that child for the app lifetime.
+`MEW_DESKTOP_DAEMON_URL` is attach-only; `MEW_DESKTOP_DAEMON_BINARY` selects an
+external executable for the app-owned launch path. Remote profiles use the
+same native client model over iroh.
 
-The React tree is shared with the browser app; `mew-web-ui/src/lib/host.ts`
-only changes how the endpoint is resolved. Release bundles contain an
-architecture-specific `mew` sidecar, prepared by
-`mew-web-ui/scripts/build-sidecar.mjs`. The host owns and kills sidecars and
-binaries it launches. `MEW_DESKTOP_DAEMON_URL` is attach-only: it connects to
-an already-running daemon and never kills it. `MEW_DESKTOP_DAEMON_BINARY`
-selects an external executable for this app instance to launch and own.
+The browser frontend remains a separate React/Vite web client. Native desktop
+packaging is handled by `scripts/package-desktop-native.sh`; the native browser
+portal uses `native/cef-host` behind `mew-browser-host` and does not share the
+web client’s host bridge.
 
 `SessionManager` owns active sessions and reloads idle top-level sessions from
 the path returned by `mew_session::session_dir()` (`MEW_SESSION_DIR` overrides

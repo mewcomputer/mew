@@ -20,6 +20,14 @@ impl ClientEngine {
         &self.state
     }
 
+    pub fn ui_snapshot(&self) -> ClientState {
+        self.state.ui_snapshot()
+    }
+
+    pub fn ui_metadata_snapshot(&self) -> ClientState {
+        self.state.ui_metadata_snapshot()
+    }
+
     pub fn state_mut(&mut self) -> &mut ClientState {
         &mut self.state
     }
@@ -40,10 +48,62 @@ impl ClientEngine {
         .await
     }
 
+    pub async fn yield_control(&mut self) -> Result<(), TransportError> {
+        self.send(ClientMessage::YieldControl {}).await
+    }
+
+    pub async fn rename_session(
+        &mut self,
+        session_id: String,
+        title: String,
+    ) -> Result<(), TransportError> {
+        self.send(ClientMessage::RenameSession { session_id, title })
+            .await
+    }
+
+    pub async fn archive_session(
+        &mut self,
+        session_id: String,
+        archived: bool,
+    ) -> Result<(), TransportError> {
+        self.send(ClientMessage::ArchiveSession {
+            session_id,
+            archived,
+        })
+        .await
+    }
+
+    pub async fn pin_session(
+        &mut self,
+        session_id: String,
+        pinned: bool,
+    ) -> Result<(), TransportError> {
+        self.send(ClientMessage::PinSession { session_id, pinned })
+            .await
+    }
+
+    /// Subscribe (or unsubscribe) to filesystem change notifications for a
+    /// session's workspace. Changes arrive as `ServerMessage::FsChanged`.
+    pub async fn watch_workspace(
+        &mut self,
+        session_id: String,
+        enabled: bool,
+    ) -> Result<(), TransportError> {
+        self.send(ClientMessage::WatchWorkspace {
+            session_id,
+            enabled,
+        })
+        .await
+    }
+
     pub async fn receive(&mut self) -> Result<Vec<ClientEvent>, TransportError> {
         match self.connection.receive().await? {
             Some(message) => Ok(self.state.apply_server_message(message)),
-            None => Ok(Vec::new()),
+            None => {
+                self.state
+                    .set_connection_status(crate::ConnectionStatus::Disconnected);
+                Err(TransportError::Closed)
+            }
         }
     }
 
@@ -201,5 +261,43 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn engine_sends_session_management_and_workspace_messages() {
+        let transport = InMemoryTransport::default();
+        let mut engine = ClientEngine::connect(&transport).await.unwrap();
+
+        engine.yield_control().await.unwrap();
+        engine
+            .rename_session("sess-1".into(), "renamed".into())
+            .await
+            .unwrap();
+        engine.archive_session("sess-1".into(), true).await.unwrap();
+        engine.pin_session("sess-1".into(), false).await.unwrap();
+        engine.watch_workspace("sess-1".into(), true).await.unwrap();
+
+        let sent = transport.sent_messages();
+        assert!(matches!(sent[0], ClientMessage::YieldControl {}));
+        assert!(matches!(
+            &sent[1],
+            ClientMessage::RenameSession { session_id, title }
+                if session_id == "sess-1" && title == "renamed"
+        ));
+        assert!(matches!(
+            &sent[2],
+            ClientMessage::ArchiveSession { session_id, archived: true }
+                if session_id == "sess-1"
+        ));
+        assert!(matches!(
+            &sent[3],
+            ClientMessage::PinSession { session_id, pinned: false }
+                if session_id == "sess-1"
+        ));
+        assert!(matches!(
+            &sent[4],
+            ClientMessage::WatchWorkspace { session_id, enabled: true }
+                if session_id == "sess-1"
+        ));
     }
 }

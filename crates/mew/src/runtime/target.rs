@@ -98,6 +98,35 @@ pub trait CommandTarget: Send {
 
     /// Manage the session goal. Returns a status string for display.
     async fn manage_goal(&mut self, action: GoalAction) -> Result<String, Unsupported>;
+
+    /// Enable or disable auto-generated session titles (daemon mode).
+    async fn set_auto_title(&mut self, enabled: bool) -> Result<(), Unsupported>;
+
+    /// Enable or disable idle session summaries (daemon mode).
+    async fn set_auto_summary(&mut self, enabled: bool) -> Result<(), Unsupported>;
+
+    /// Yield control of the session to other clients (daemon mode).
+    async fn yield_control(&mut self) -> Result<(), Unsupported>;
+
+    /// Remove a file from the session's flagged-files set.
+    async fn unflag_file(&mut self, path: &str) -> Result<(), Unsupported>;
+
+    /// Request the daemon's project directory list (daemon mode). The
+    /// project picker opens when `ProjectList` arrives.
+    async fn list_projects(&mut self) -> Result<(), Unsupported>;
+
+    /// Create and attach to a new session in the given project directory
+    /// (daemon mode).
+    async fn new_session_in(&mut self, path: &str) -> Result<(), Unsupported>;
+
+    /// Archive or unarchive a session (daemon mode).
+    async fn archive_session(&mut self, id: &str, archived: bool) -> Result<(), Unsupported>;
+
+    /// Pin or unpin a session (daemon mode).
+    async fn pin_session(&mut self, id: &str, pinned: bool) -> Result<(), Unsupported>;
+
+    /// Rename a session — set a custom title (daemon mode).
+    async fn rename_session(&mut self, id: &str, title: &str) -> Result<(), Unsupported>;
 }
 
 /// Goal management actions for `CommandTarget::manage_goal`.

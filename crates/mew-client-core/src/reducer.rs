@@ -1,9 +1,10 @@
 //! Deterministic daemon-message reducer used by platform clients.
 
-use mew_message::{AssistantMeta, Message, Part, PartId, ProviderEventWire, Role, Time};
+use mew_message::{AssistantMeta, Message, Part, PartId, ProviderEventWire, Role, Time, ToolState};
 use mew_protocol::{
-    ClientMessage, ModelInfo, PermissionDecision, PersonaInfo, Question, RemoteScope,
-    ServerMessage, SessionInfo, SessionUsageWire,
+    ClientKind, ClientMessage, DirEntry, FlaggedFileWire, GroupInfo, ModelInfo, PermissionDecision,
+    PersonaInfo, ProjectInfo, Question, RemoteScope, ServerMessage, SessionInfo, SessionUsageWire,
+    Todo,
 };
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,6 +28,9 @@ pub struct ClientSession {
     pub messages: Vec<Message>,
     pub running: bool,
     pub usage: SessionUsageWire,
+    pub subagents: Vec<SubagentEntry>,
+    pub todos: Vec<Todo>,
+    pub flagged_files: Vec<FlaggedFileWire>,
     pub pending_actions: Vec<PendingAction>,
     pub last_sent_prompt: Option<String>,
     pub streaming_part_id: Option<PartId>,
@@ -44,6 +48,9 @@ impl ClientSession {
             messages: Vec::new(),
             running: false,
             usage: SessionUsageWire::default(),
+            subagents: Vec::new(),
+            todos: Vec::new(),
+            flagged_files: Vec::new(),
             pending_actions: Vec::new(),
             last_sent_prompt: None,
             streaming_part_id: None,
@@ -134,7 +141,7 @@ pub enum SessionEvent {
     Error(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ActionKind {
     Permission {
         tool_name: String,
@@ -164,10 +171,38 @@ pub enum ActionKind {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PendingAction {
     pub request_id: String,
     pub kind: ActionKind,
+}
+
+/// One active subagent task, keyed by the parent tool call id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentEntry {
+    pub task_id: String,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub status: String,
+    pub tool_name: Option<String>,
+}
+
+/// One other client attached to the same session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresenceEntry {
+    pub client_id: u64,
+    pub client_kind: ClientKind,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BrowserState {
+    pub open: bool,
+    pub url: Option<String>,
+    pub title: Option<String>,
+    pub tab_id: Option<String>,
+    pub snapshot: Option<String>,
+    pub screenshot: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,8 +213,32 @@ pub enum ClientEvent {
         session_id: String,
     },
     SessionListChanged,
+    ProjectListChanged,
+    GroupsChanged,
+    SessionMetaChanged {
+        session_id: String,
+    },
+    ModelListChanged,
+    PersonaListChanged,
+    SubagentsChanged {
+        session_id: String,
+    },
+    TodosChanged {
+        session_id: String,
+    },
+    FlaggedFilesChanged {
+        session_id: String,
+    },
+    PresenceChanged,
+    UsageChanged {
+        session_id: String,
+    },
+    FileTreeChanged,
     SessionHistoryLoaded {
         session_id: String,
+    },
+    PermissionModeChanged {
+        mode: String,
     },
     MessageChanged {
         session_id: String,
@@ -188,6 +247,11 @@ pub enum ClientEvent {
         session_id: String,
         part_id: PartId,
         delta: String,
+    },
+    ToolProgress {
+        session_id: String,
+        call_id: String,
+        chunk: String,
     },
     TurnEnded {
         session_id: String,
@@ -202,10 +266,46 @@ pub enum ClientEvent {
     RequestResolved {
         request_id: String,
     },
+    TerminalOpened {
+        terminal_id: String,
+    },
+    TerminalOutput {
+        terminal_id: String,
+        bytes: Vec<u8>,
+    },
+    TerminalExited {
+        terminal_id: String,
+        status: String,
+    },
+    TerminalError {
+        terminal_id: Option<String>,
+        message: String,
+    },
+    BrowserStateChanged {
+        open: bool,
+        url: Option<String>,
+        title: Option<String>,
+        tab_id: Option<String>,
+    },
+    BrowserSnapshot {
+        snapshot: String,
+        url: String,
+        title: String,
+        tab_id: Option<String>,
+    },
+    BrowserScreenshot {
+        data: String,
+        url: String,
+        tab_id: Option<String>,
+    },
+    BrowserError {
+        message: String,
+        tab_id: Option<String>,
+    },
     Error(String),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ClientState {
     pub connection: Option<ConnectionStatus>,
     pub remote_scope: Option<RemoteScope>,
@@ -213,6 +313,9 @@ pub struct ClientState {
     pub attached_session: Option<String>,
     pub sessions: BTreeMap<String, ClientSession>,
     pub session_list: Vec<SessionInfo>,
+    pub session_titles: BTreeMap<String, String>,
+    pub groups: Vec<GroupInfo>,
+    pub projects: Vec<ProjectInfo>,
     pub models: Vec<ModelInfo>,
     pub current_model: Option<String>,
     pub current_provider: Option<String>,
@@ -220,9 +323,58 @@ pub struct ClientState {
     pub permission_mode: Option<String>,
     pub current_persona: Option<String>,
     pub personas: Vec<PersonaInfo>,
+    pub browser: BrowserState,
+    pub presence: Vec<PresenceEntry>,
+    pub control_yielded_by: Option<u64>,
+    pub dir_listing_session_id: Option<String>,
+    pub dir_listing_path: Option<String>,
+    pub dir_listing: Vec<DirEntry>,
 }
 
 impl ClientState {
+    /// Build the state needed by a presentation client without cloning idle
+    /// sessions that are not visible in the current session.
+    pub fn ui_snapshot(&self) -> Self {
+        let mut snapshot = self.ui_metadata_snapshot();
+        if let Some(session_id) = &self.attached_session {
+            if let Some(session) = self.sessions.get(session_id) {
+                snapshot
+                    .sessions
+                    .insert(session_id.clone(), session.clone());
+            }
+        }
+        snapshot
+    }
+
+    /// Build the presentation state that excludes message history. Streaming
+    /// deltas are applied incrementally by the presentation layer.
+    pub fn ui_metadata_snapshot(&self) -> Self {
+        Self {
+            connection: self.connection.clone(),
+            remote_scope: self.remote_scope,
+            daemon_version: self.daemon_version.clone(),
+            attached_session: self.attached_session.clone(),
+            sessions: BTreeMap::new(),
+            session_list: self.session_list.clone(),
+            session_titles: self.session_titles.clone(),
+            groups: self.groups.clone(),
+            projects: self.projects.clone(),
+            models: self.models.clone(),
+            current_model: self.current_model.clone(),
+            current_provider: self.current_provider.clone(),
+            thinking_variant: self.thinking_variant.clone(),
+            permission_mode: self.permission_mode.clone(),
+            current_persona: self.current_persona.clone(),
+            personas: self.personas.clone(),
+            browser: self.browser.clone(),
+            presence: self.presence.clone(),
+            control_yielded_by: self.control_yielded_by,
+            dir_listing_session_id: self.dir_listing_session_id.clone(),
+            dir_listing_path: self.dir_listing_path.clone(),
+            dir_listing: self.dir_listing.clone(),
+        }
+    }
+
     pub fn set_connection_status(&mut self, status: ConnectionStatus) -> ClientEvent {
         self.connection = Some(status.clone());
         ClientEvent::ConnectionChanged(status)
@@ -230,6 +382,10 @@ impl ClientState {
 
     pub fn session(&self, session_id: &str) -> Option<&ClientSession> {
         self.sessions.get(session_id)
+    }
+
+    pub fn usage(&self, session_id: &str) -> Option<&SessionUsageWire> {
+        self.sessions.get(session_id).map(|session| &session.usage)
     }
 
     pub fn session_mut(&mut self, session_id: &str) -> &mut ClientSession {
@@ -270,18 +426,109 @@ impl ClientState {
                 self.current_model = model;
                 self.current_provider = provider;
                 self.permission_mode = permission_mode;
+                self.presence.clear();
+                self.control_yielded_by = None;
                 vec![ClientEvent::SessionReady { session_id }]
             }
             ServerMessage::SessionList { sessions } => {
                 self.session_list = sessions;
                 vec![ClientEvent::SessionListChanged]
             }
+            ServerMessage::GroupList { groups } | ServerMessage::GroupsChanged { groups } => {
+                self.groups = groups;
+                vec![ClientEvent::GroupsChanged]
+            }
+            ServerMessage::SessionTitleChanged { session_id, title } => {
+                self.session_titles.insert(session_id, title);
+                vec![ClientEvent::SessionListChanged]
+            }
+            ServerMessage::SessionSummaryChanged {
+                session_id,
+                summary,
+            } => {
+                if let Some(session) = self
+                    .session_list
+                    .iter_mut()
+                    .find(|session| session.session_id == session_id)
+                {
+                    session.summary = Some(summary);
+                }
+                vec![ClientEvent::SessionListChanged]
+            }
+            ServerMessage::SessionActivityChanged {
+                session_id,
+                activity,
+            } => {
+                if let Some(session) = self
+                    .session_list
+                    .iter_mut()
+                    .find(|session| session.session_id == session_id)
+                {
+                    session.state = activity;
+                }
+                vec![ClientEvent::SessionListChanged]
+            }
+            ServerMessage::SessionStatsChanged {
+                session_id,
+                added,
+                removed,
+                ..
+            } => {
+                if let Some(session) = self
+                    .session_list
+                    .iter_mut()
+                    .find(|session| session.session_id == session_id)
+                {
+                    let stats = session
+                        .change_stats
+                        .get_or_insert_with(mew_session::ChangeStats::default);
+                    stats.added = added;
+                    stats.removed = removed;
+                }
+                vec![ClientEvent::SessionListChanged]
+            }
+            ServerMessage::SessionAttentionChanged {
+                session_id,
+                pending_permissions,
+                pending_questions,
+            } => {
+                if let Some(session) = self
+                    .session_list
+                    .iter_mut()
+                    .find(|session| session.session_id == session_id)
+                {
+                    session.pending_permissions = pending_permissions;
+                    session.pending_questions = pending_questions;
+                }
+                vec![ClientEvent::SessionListChanged]
+            }
+            ServerMessage::FlaggedFilesChanged { session_id, files } => {
+                self.session_mut(&session_id).flagged_files = files;
+                vec![ClientEvent::FlaggedFilesChanged { session_id }]
+            }
+            ServerMessage::SessionMetaChanged {
+                session_id,
+                archived,
+                pinned,
+                group_id,
+            } => {
+                if let Some(session) = self
+                    .session_list
+                    .iter_mut()
+                    .find(|session| session.session_id == session_id)
+                {
+                    session.archived = archived;
+                    session.pinned = pinned;
+                    session.group_id = group_id;
+                }
+                vec![ClientEvent::SessionMetaChanged { session_id }]
+            }
             ServerMessage::SessionHistory { messages } => {
-                let Some(session_id) = messages
-                    .first()
-                    .map(|message| message.session_id.to_string())
-                    .or_else(|| self.attached_session.clone())
-                else {
+                let Some(session_id) = self.attached_session.clone().or_else(|| {
+                    messages
+                        .first()
+                        .map(|message| message.session_id.to_string())
+                }) else {
                     return Vec::new();
                 };
                 self.attached_session = Some(session_id.clone());
@@ -317,6 +564,28 @@ impl ClientState {
                 }
                 Vec::new()
             }
+            ServerMessage::ToolProgress { call_id, chunk } => {
+                let Some(session_id) = self.attached_session.clone() else {
+                    return Vec::new();
+                };
+                let session = self.session_mut(&session_id);
+                for message in &mut session.messages {
+                    if let Some(Part::ToolCall(part)) = message.parts.iter_mut().find(
+                        |part| matches!(part, Part::ToolCall(tool) if tool.call_id == call_id),
+                    ) {
+                        if let ToolState::Running(state) = &mut part.state {
+                            state.output.push_str(&chunk);
+                            return vec![ClientEvent::ToolProgress {
+                                session_id,
+                                call_id,
+                                chunk,
+                            }];
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            ServerMessage::ToolStart { .. } | ServerMessage::ToolEnd { .. } => Vec::new(),
             ServerMessage::PermissionRequest {
                 request_id,
                 tool_name,
@@ -363,6 +632,96 @@ impl ClientState {
                 },
                 request_id,
             ),
+            ServerMessage::SubagentStart {
+                parent_call_id,
+                name,
+                display_name,
+                ..
+            } => {
+                let Some(session_id) = self.attached_session.clone() else {
+                    return Vec::new();
+                };
+                let session = self.session_mut(&session_id);
+                session
+                    .subagents
+                    .retain(|entry| entry.task_id != parent_call_id);
+                session.subagents.push(SubagentEntry {
+                    task_id: parent_call_id,
+                    name,
+                    display_name,
+                    status: "running".into(),
+                    tool_name: None,
+                });
+                vec![ClientEvent::SubagentsChanged { session_id }]
+            }
+            ServerMessage::SubagentStatus {
+                parent_call_id,
+                tool_name,
+                message,
+            } => {
+                let Some(session_id) = self.attached_session.clone() else {
+                    return Vec::new();
+                };
+                let session = self.session_mut(&session_id);
+                match session
+                    .subagents
+                    .iter_mut()
+                    .find(|entry| entry.task_id == parent_call_id)
+                {
+                    Some(entry) => {
+                        entry.status = message;
+                        entry.tool_name = Some(tool_name);
+                    }
+                    None => session.subagents.push(SubagentEntry {
+                        task_id: parent_call_id,
+                        name: String::new(),
+                        display_name: None,
+                        status: message,
+                        tool_name: Some(tool_name),
+                    }),
+                }
+                vec![ClientEvent::SubagentsChanged { session_id }]
+            }
+            ServerMessage::SubagentEnd { parent_call_id, .. } => {
+                let Some(session_id) = self.attached_session.clone() else {
+                    return Vec::new();
+                };
+                let session = self.session_mut(&session_id);
+                let before = session.subagents.len();
+                session
+                    .subagents
+                    .retain(|entry| entry.task_id != parent_call_id);
+                if session.subagents.len() == before {
+                    return Vec::new();
+                }
+                vec![ClientEvent::SubagentsChanged { session_id }]
+            }
+            ServerMessage::TodosUpdated { todos } => {
+                let Some(session_id) = self.attached_session.clone() else {
+                    return Vec::new();
+                };
+                self.session_mut(&session_id).todos = todos;
+                vec![ClientEvent::TodosChanged { session_id }]
+            }
+            ServerMessage::ClientAttached {
+                client_id,
+                client_kind,
+            } => {
+                self.presence.retain(|entry| entry.client_id != client_id);
+                self.presence.push(PresenceEntry {
+                    client_id,
+                    client_kind,
+                });
+                vec![ClientEvent::PresenceChanged]
+            }
+            ServerMessage::ClientDetached { client_id } => {
+                self.presence.retain(|entry| entry.client_id != client_id);
+                vec![ClientEvent::PresenceChanged]
+            }
+            ServerMessage::ControlYielded { client_id } => {
+                self.control_yielded_by = Some(client_id);
+                vec![ClientEvent::PresenceChanged]
+            }
             ServerMessage::RequestResolved { request_id } => {
                 for session in self.sessions.values_mut() {
                     session
@@ -380,11 +739,11 @@ impl ClientState {
             }
             ServerMessage::SessionUsageChanged { session_id, usage } => {
                 self.session_mut(&session_id).usage = usage;
-                Vec::new()
+                vec![ClientEvent::UsageChanged { session_id }]
             }
             ServerMessage::ModelList { models } => {
                 self.models = models;
-                Vec::new()
+                vec![ClientEvent::ModelListChanged]
             }
             ServerMessage::ModelSwitched { provider, model } => {
                 self.current_provider = Some(provider);
@@ -396,8 +755,8 @@ impl ClientState {
                 Vec::new()
             }
             ServerMessage::PermissionModeChanged { mode } => {
-                self.permission_mode = Some(mode);
-                Vec::new()
+                self.permission_mode = Some(mode.clone());
+                vec![ClientEvent::PermissionModeChanged { mode }]
             }
             ServerMessage::PersonaSwitched { name } => {
                 self.current_persona = Some(name);
@@ -409,8 +768,121 @@ impl ClientState {
                     .find(|persona| persona.active)
                     .map(|persona| persona.name.clone());
                 self.personas = personas;
-                Vec::new()
+                vec![ClientEvent::PersonaListChanged]
             }
+            ServerMessage::ProjectList { projects } => {
+                self.projects = projects;
+                vec![ClientEvent::ProjectListChanged]
+            }
+            ServerMessage::SlashResult { text } => {
+                let message_id = Ulid::new();
+                let session_id = Ulid::new();
+                let part_id = Ulid::new();
+                let part = Part::Text(mew_message::TextPart {
+                    base: mew_message::PartBase {
+                        id: part_id,
+                        message_id,
+                        session_id,
+                    },
+                    text,
+                    synthetic: true,
+                });
+                let mut events = self.apply_provider_event(ProviderEventWire::PartStart { part });
+                events.extend(self.apply_provider_event(ProviderEventWire::PartEnd { part_id }));
+                events.extend(self.apply_provider_event(ProviderEventWire::MessageEnd {
+                    finish: mew_message::Finish::Stop,
+                    usage: mew_message::Tokens::default(),
+                    cost: 0.0,
+                    manifest: None,
+                }));
+                events
+            }
+            ServerMessage::BrowserState {
+                open,
+                url,
+                title,
+                tab_id,
+            } => {
+                self.browser = BrowserState {
+                    open,
+                    url: url.clone(),
+                    title: title.clone(),
+                    tab_id: tab_id.clone(),
+                    snapshot: self.browser.snapshot.take(),
+                    screenshot: self.browser.screenshot.take(),
+                    error: None,
+                };
+                vec![ClientEvent::BrowserStateChanged {
+                    open,
+                    url,
+                    title,
+                    tab_id,
+                }]
+            }
+            ServerMessage::BrowserSnapshot {
+                snapshot,
+                url,
+                title,
+                tab_id,
+            } => {
+                self.browser.open = true;
+                self.browser.url = Some(url.clone());
+                self.browser.title = Some(title.clone());
+                self.browser.tab_id = tab_id.clone();
+                self.browser.snapshot = Some(snapshot.clone());
+                self.browser.error = None;
+                vec![ClientEvent::BrowserSnapshot {
+                    snapshot,
+                    url,
+                    title,
+                    tab_id,
+                }]
+            }
+            ServerMessage::BrowserScreenshot { data, url, tab_id } => {
+                self.browser.open = true;
+                self.browser.url = Some(url.clone());
+                self.browser.tab_id = tab_id.clone();
+                self.browser.screenshot = Some(data.clone());
+                self.browser.error = None;
+                vec![ClientEvent::BrowserScreenshot { data, url, tab_id }]
+            }
+            ServerMessage::BrowserError { message, tab_id } => {
+                self.browser.error = Some(message.clone());
+                vec![ClientEvent::BrowserError { message, tab_id }]
+            }
+            ServerMessage::TerminalOpened { terminal_id } => {
+                vec![ClientEvent::TerminalOpened { terminal_id }]
+            }
+            ServerMessage::TerminalOutput { terminal_id, bytes } => {
+                vec![ClientEvent::TerminalOutput { terminal_id, bytes }]
+            }
+            ServerMessage::TerminalExited {
+                terminal_id,
+                status,
+            } => vec![ClientEvent::TerminalExited {
+                terminal_id,
+                status,
+            }],
+            ServerMessage::TerminalError {
+                terminal_id,
+                message,
+            } => vec![ClientEvent::TerminalError {
+                terminal_id,
+                message,
+            }],
+            ServerMessage::DirListing {
+                session_id,
+                path,
+                entries,
+            } => {
+                self.dir_listing_session_id = Some(session_id);
+                self.dir_listing_path = Some(path);
+                self.dir_listing = entries;
+                vec![ClientEvent::FileTreeChanged]
+            }
+            // The daemon pushes this after a WatchWorkspace subscription; the
+            // client is expected to re-request a `ListDir`, like the web UI.
+            ServerMessage::FsChanged { .. } => vec![ClientEvent::FileTreeChanged],
             ServerMessage::Error { message } | ServerMessage::ErrorEvent { message } => {
                 vec![ClientEvent::Error(message)]
             }
@@ -580,7 +1052,9 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mew_message::{Finish, PartBase, TextPart, Tokens};
+    use mew_message::{
+        Finish, PartBase, TextPart, Tokens, ToolCallPart, ToolState, ToolStateRunning, ToolTime,
+    };
 
     fn session_ready(state: &mut ClientState) {
         state.apply_server_message(ServerMessage::SessionReady {
@@ -605,6 +1079,71 @@ mod tests {
         });
         assert!(events.is_empty());
         assert_eq!(state.session(&id).unwrap().messages.len(), before);
+    }
+
+    #[test]
+    fn session_history_keeps_the_session_ready_identifier() {
+        let mut state = ClientState::default();
+        state.apply_server_message(ServerMessage::SessionReady {
+            session_id: "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            cwd: Some("/tmp/project".into()),
+            model: Some("gpt-test".into()),
+            provider: Some("fake".into()),
+            permission_mode: Some("standard".into()),
+        });
+        let message_id = Ulid::new();
+        let session_ulid = Ulid::from_string("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+        let events = state.apply_server_message(ServerMessage::SessionHistory {
+            messages: vec![Message {
+                id: message_id,
+                session_id: session_ulid,
+                role: Role::User,
+                parts: Vec::new(),
+                time: Time {
+                    created: 0,
+                    completed: None,
+                },
+                assistant: None,
+            }],
+        });
+
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::SessionHistoryLoaded { session_id }]
+                if session_id == "sess_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        ));
+        assert_eq!(
+            state.attached_session.as_deref(),
+            Some("sess_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        );
+        assert_eq!(
+            state
+                .session("sess_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        assert!(state.session("01ARZ3NDEKTSV4RRFFQ69G5FAV").is_none());
+    }
+
+    #[test]
+    fn ui_snapshot_keeps_only_the_attached_session() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        state
+            .session_mut("01ARZ3NDEKTSV4RRFFQ69G5FAV-other")
+            .record_prompt("background history".into());
+
+        let snapshot = state.ui_snapshot();
+
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert!(snapshot
+            .session(state.attached_session.as_deref().unwrap())
+            .is_some());
+        assert!(snapshot
+            .session("01ARZ3NDEKTSV4RRFFQ69G5FAV-other")
+            .is_none());
     }
 
     #[test]
@@ -663,6 +1202,52 @@ mod tests {
     }
 
     #[test]
+    fn tool_progress_updates_the_running_tool_part() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        let session_id = state.attached_session.clone().unwrap();
+        let session_ulid = Ulid::from_string(&session_id).unwrap();
+        let message_id = Ulid::new();
+        let part_id = Ulid::new();
+        state.apply_server_message(ServerMessage::Provider {
+            event: ProviderEventWire::PartStart {
+                part: Part::ToolCall(ToolCallPart {
+                    base: PartBase {
+                        id: part_id,
+                        message_id,
+                        session_id: session_ulid,
+                    },
+                    tool_name: "shell".into(),
+                    call_id: "call-1".into(),
+                    state: ToolState::Running(ToolStateRunning {
+                        input: serde_json::json!({"command": "pwd"}),
+                        output: String::new(),
+                        time: ToolTime {
+                            start: 0,
+                            end: None,
+                        },
+                    }),
+                    raw_input: String::new(),
+                }),
+            },
+        });
+
+        let events = state.apply_server_message(ServerMessage::ToolProgress {
+            call_id: "call-1".into(),
+            chunk: "/tmp/mew\n".into(),
+        });
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::ToolProgress { session_id: changed, call_id, chunk }]
+                if changed == &session_id && call_id == "call-1" && chunk == "/tmp/mew\n"
+        ));
+        assert!(matches!(
+            &state.session(&session_id).unwrap().messages[0].parts[0],
+            Part::ToolCall(part) if part.state.output() == Some("/tmp/mew\n")
+        ));
+    }
+
+    #[test]
     fn required_actions_are_stored_and_resolved() {
         let mut state = ClientState::default();
         session_ready(&mut state);
@@ -688,9 +1273,32 @@ mod tests {
     }
 
     #[test]
+    fn terminal_messages_become_client_events_without_touching_transcript() {
+        let mut state = ClientState::default();
+        let opened = state.apply_server_message(ServerMessage::TerminalOpened {
+            terminal_id: "term-1".into(),
+        });
+        assert!(matches!(
+            opened.as_slice(),
+            [ClientEvent::TerminalOpened { terminal_id }] if terminal_id == "term-1"
+        ));
+
+        let output = state.apply_server_message(ServerMessage::TerminalOutput {
+            terminal_id: "term-1".into(),
+            bytes: b"$ pwd\n".to_vec(),
+        });
+        assert!(matches!(
+            output.as_slice(),
+            [ClientEvent::TerminalOutput { terminal_id, bytes }]
+                if terminal_id == "term-1" && bytes == b"$ pwd\n"
+        ));
+        assert!(state.sessions.is_empty());
+    }
+
+    #[test]
     fn persona_list_keeps_active_persona_in_shared_state() {
         let mut state = ClientState::default();
-        state.apply_server_message(ServerMessage::PersonaList {
+        let events = state.apply_server_message(ServerMessage::PersonaList {
             personas: vec![
                 PersonaInfo {
                     name: "default".into(),
@@ -707,7 +1315,430 @@ mod tests {
             ],
         });
 
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::PersonaListChanged]
+        ));
         assert_eq!(state.personas.len(), 2);
         assert_eq!(state.current_persona.as_deref(), Some("reviewer"));
+    }
+
+    #[test]
+    fn model_list_updates_shared_state_and_emits_a_catalog_event() {
+        let mut state = ClientState::default();
+        let events = state.apply_server_message(ServerMessage::ModelList {
+            models: vec![ModelInfo {
+                id: "fake/fake".into(),
+                provider: "fake".into(),
+                model: "fake".into(),
+                description: Some("local test model".into()),
+                thinking_variants: Vec::new(),
+                thinking_budget: None,
+                context_window: None,
+            }],
+        });
+
+        assert!(matches!(events.as_slice(), [ClientEvent::ModelListChanged]));
+        assert_eq!(state.models[0].id, "fake/fake");
+    }
+
+    #[test]
+    fn permission_mode_change_emits_a_targeted_event() {
+        let mut state = ClientState::default();
+        let events = state.apply_server_message(ServerMessage::PermissionModeChanged {
+            mode: "permissive".into(),
+        });
+
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::PermissionModeChanged { mode }] if mode == "permissive"
+        ));
+        assert_eq!(state.permission_mode.as_deref(), Some("permissive"));
+    }
+
+    #[test]
+    fn groups_and_session_metadata_are_reduced_for_sidebar_clients() {
+        let mut state = ClientState::default();
+        let group = mew_protocol::GroupInfo {
+            id: "grp_1".into(),
+            name: "Project work".into(),
+            color: Some("blue".into()),
+            order: 0,
+        };
+        let events = state.apply_server_message(ServerMessage::GroupList {
+            groups: vec![group.clone()],
+        });
+        assert!(matches!(events.as_slice(), [ClientEvent::GroupsChanged]));
+        assert_eq!(state.groups, vec![group]);
+
+        state.session_list.push(SessionInfo {
+            session_id: "session-1".into(),
+            state: mew_protocol::SessionState::Idle,
+            model: None,
+            provider: None,
+            created_at: 0,
+            last_message_at: None,
+            summary: Some("A session".into()),
+            client_count: 0,
+            cwd: None,
+            last_turn_failed: false,
+            archived: false,
+            pinned: false,
+            group_id: None,
+            change_stats: None,
+            usage: None,
+            pending_permissions: 0,
+            pending_questions: 0,
+            first_message: None,
+        });
+        let events = state.apply_server_message(ServerMessage::SessionMetaChanged {
+            session_id: "session-1".into(),
+            archived: false,
+            pinned: true,
+            group_id: Some("grp_1".into()),
+        });
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::SessionMetaChanged { session_id }] if session_id == "session-1"
+        ));
+        assert_eq!(state.session_list[0].group_id.as_deref(), Some("grp_1"));
+        assert!(state.session_list[0].pinned);
+    }
+
+    #[test]
+    fn browser_state_and_events_share_tab_identity() {
+        let mut state = ClientState::default();
+        let events = state.apply_server_message(ServerMessage::BrowserState {
+            open: true,
+            url: Some("https://example.com".into()),
+            title: Some("Example".into()),
+            tab_id: Some("browser-1".into()),
+        });
+
+        assert_eq!(state.browser.url.as_deref(), Some("https://example.com"));
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::BrowserStateChanged { tab_id, url, .. }]
+                if tab_id.as_deref() == Some("browser-1")
+                    && url.as_deref() == Some("https://example.com")
+        ));
+
+        let events = state.apply_server_message(ServerMessage::BrowserError {
+            message: "navigation failed".into(),
+            tab_id: Some("browser-1".into()),
+        });
+        assert_eq!(state.browser.error.as_deref(), Some("navigation failed"));
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::BrowserError { tab_id, .. }]
+                if tab_id.as_deref() == Some("browser-1")
+        ));
+    }
+
+    #[test]
+    fn subagent_lifecycle_is_tracked_per_session() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        let session_id = state.attached_session.clone().unwrap();
+
+        let events = state.apply_server_message(ServerMessage::SubagentStart {
+            parent_call_id: "call-1".into(),
+            name: "researcher".into(),
+            child_session_id: "01H".into(),
+            display_name: Some("Curie".into()),
+        });
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::SubagentsChanged { session_id: changed }] if changed == &session_id
+        ));
+        assert_eq!(state.session(&session_id).unwrap().subagents.len(), 1);
+
+        let events = state.apply_server_message(ServerMessage::SubagentStatus {
+            parent_call_id: "call-1".into(),
+            tool_name: "shell".into(),
+            message: "scanning".into(),
+        });
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::SubagentsChanged { .. }]
+        ));
+        let entry = &state.session(&session_id).unwrap().subagents[0];
+        assert_eq!(entry.task_id, "call-1");
+        assert_eq!(entry.status, "scanning");
+        assert_eq!(entry.tool_name.as_deref(), Some("shell"));
+        assert_eq!(entry.display_name.as_deref(), Some("Curie"));
+
+        let events = state.apply_server_message(ServerMessage::SubagentEnd {
+            parent_call_id: "call-1".into(),
+            child_session_id: "01H".into(),
+            outcome: mew_protocol::SubagentOutcome::Completed,
+            manifests: Vec::new(),
+        });
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::SubagentsChanged { .. }]
+        ));
+        assert!(state.session(&session_id).unwrap().subagents.is_empty());
+    }
+
+    #[test]
+    fn subagent_status_without_a_start_creates_an_entry() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        let session_id = state.attached_session.clone().unwrap();
+
+        let events = state.apply_server_message(ServerMessage::SubagentStatus {
+            parent_call_id: "call-9".into(),
+            tool_name: "read".into(),
+            message: "reading files".into(),
+        });
+
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::SubagentsChanged { .. }]
+        ));
+        let entry = &state.session(&session_id).unwrap().subagents[0];
+        assert_eq!(entry.task_id, "call-9");
+        assert_eq!(entry.status, "reading files");
+    }
+
+    #[test]
+    fn todos_updated_replaces_the_session_todos() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        let session_id = state.attached_session.clone().unwrap();
+
+        let events = state.apply_server_message(ServerMessage::TodosUpdated {
+            todos: vec![
+                Todo {
+                    id: 1,
+                    content: "first".into(),
+                    status: "completed".into(),
+                    depends_on: Vec::new(),
+                },
+                Todo {
+                    id: 2,
+                    content: "second".into(),
+                    status: "in_progress".into(),
+                    depends_on: vec![1],
+                },
+            ],
+        });
+
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::TodosChanged { session_id: changed }] if changed == &session_id
+        ));
+        let todos = &state.session(&session_id).unwrap().todos;
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[1].depends_on, vec![1]);
+    }
+
+    #[test]
+    fn presence_and_control_yield_are_tracked() {
+        let mut state = ClientState::default();
+
+        let events = state.apply_server_message(ServerMessage::ClientAttached {
+            client_id: 7,
+            client_kind: ClientKind::Web,
+        });
+        assert!(matches!(events.as_slice(), [ClientEvent::PresenceChanged]));
+        assert_eq!(state.presence.len(), 1);
+        assert_eq!(state.presence[0].client_kind, ClientKind::Web);
+
+        let events = state.apply_server_message(ServerMessage::ControlYielded { client_id: 7 });
+        assert!(matches!(events.as_slice(), [ClientEvent::PresenceChanged]));
+        assert_eq!(state.control_yielded_by, Some(7));
+
+        let events = state.apply_server_message(ServerMessage::ClientDetached { client_id: 7 });
+        assert!(matches!(events.as_slice(), [ClientEvent::PresenceChanged]));
+        assert!(state.presence.is_empty());
+    }
+
+    #[test]
+    fn session_ready_clears_session_scoped_presence() {
+        let mut state = ClientState::default();
+        state.presence.push(PresenceEntry {
+            client_id: 7,
+            client_kind: ClientKind::Web,
+        });
+        state.control_yielded_by = Some(7);
+
+        state.apply_server_message(ServerMessage::SessionReady {
+            session_id: "session-2".into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        });
+
+        assert!(state.presence.is_empty());
+        assert_eq!(state.control_yielded_by, None);
+    }
+
+    #[test]
+    fn session_metadata_notifications_reduce_into_shared_state() {
+        let mut state = ClientState::default();
+        state.session_list.push(SessionInfo {
+            session_id: "session-1".into(),
+            state: mew_protocol::SessionState::Idle,
+            model: None,
+            provider: None,
+            created_at: 0,
+            last_message_at: None,
+            summary: None,
+            client_count: 0,
+            cwd: None,
+            last_turn_failed: false,
+            archived: false,
+            pinned: false,
+            group_id: None,
+            change_stats: None,
+            usage: None,
+            pending_permissions: 0,
+            pending_questions: 0,
+            first_message: Some("first prompt".into()),
+        });
+
+        let events = state.apply_server_message(ServerMessage::SessionTitleChanged {
+            session_id: "session-1".into(),
+            title: "Renamed session".into(),
+        });
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::SessionListChanged]
+        ));
+        assert_eq!(state.session_titles["session-1"], "Renamed session");
+
+        state.apply_server_message(ServerMessage::SessionSummaryChanged {
+            session_id: "session-1".into(),
+            summary: "A concise summary".into(),
+        });
+        state.apply_server_message(ServerMessage::SessionActivityChanged {
+            session_id: "session-1".into(),
+            activity: mew_protocol::SessionState::Running,
+        });
+        state.apply_server_message(ServerMessage::SessionStatsChanged {
+            session_id: "session-1".into(),
+            added: 12,
+            removed: 3,
+            files_changed: 2,
+        });
+        state.apply_server_message(ServerMessage::SessionAttentionChanged {
+            session_id: "session-1".into(),
+            pending_permissions: 1,
+            pending_questions: 2,
+        });
+        state.apply_server_message(ServerMessage::FlaggedFilesChanged {
+            session_id: "session-1".into(),
+            files: vec![FlaggedFileWire {
+                path: "src/main.rs".into(),
+                reason: Some("important".into()),
+            }],
+        });
+
+        let info = &state.session_list[0];
+        assert_eq!(info.summary.as_deref(), Some("A concise summary"));
+        assert_eq!(info.state, mew_protocol::SessionState::Running);
+        assert_eq!(
+            info.change_stats.as_ref().map(|stats| stats.added),
+            Some(12)
+        );
+        assert_eq!(
+            info.change_stats.as_ref().map(|stats| stats.removed),
+            Some(3)
+        );
+        assert_eq!(info.pending_permissions, 1);
+        assert_eq!(info.pending_questions, 2);
+        assert_eq!(state.session("session-1").unwrap().flagged_files.len(), 1);
+
+        let projects = vec![ProjectInfo {
+            path: "/tmp/project".into(),
+            display_name: "project".into(),
+            session_count: 1,
+            last_used_at: Some(1),
+        }];
+        let events = state.apply_server_message(ServerMessage::ProjectList { projects });
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::ProjectListChanged]
+        ));
+        assert_eq!(state.projects[0].path, "/tmp/project");
+    }
+
+    #[test]
+    fn slash_results_are_rendered_as_synthetic_assistant_messages() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+
+        let events = state.apply_server_message(ServerMessage::SlashResult {
+            text: "compacted".into(),
+        });
+
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::MessageChanged { .. }, ..]
+        ));
+        let message = state
+            .session(state.attached_session.as_deref().unwrap())
+            .unwrap()
+            .messages
+            .last()
+            .unwrap();
+        assert_eq!(message.role, Role::Assistant);
+        assert!(
+            matches!(message.parts[0], Part::Text(ref part) if part.text == "compacted" && part.synthetic)
+        );
+    }
+
+    #[test]
+    fn session_usage_changed_updates_state_and_emits_an_event() {
+        let mut state = ClientState::default();
+        let events = state.apply_server_message(ServerMessage::SessionUsageChanged {
+            session_id: "sess-1".into(),
+            usage: SessionUsageWire {
+                input_tokens: 10,
+                output_tokens: 4,
+                cache_read_tokens: 2,
+                cache_write_tokens: 0,
+                cost: 0.5,
+                turns: 1,
+            },
+        });
+
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::UsageChanged { session_id }] if session_id == "sess-1"
+        ));
+        let usage = state.usage("sess-1").unwrap();
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 4);
+        assert_eq!(usage.cost, 0.5);
+        assert_eq!(usage.turns, 1);
+    }
+
+    #[test]
+    fn dir_listing_and_fs_changed_emit_file_tree_events() {
+        let mut state = ClientState::default();
+
+        let events = state.apply_server_message(ServerMessage::DirListing {
+            session_id: "sess-1".into(),
+            path: "src".into(),
+            entries: vec![DirEntry {
+                name: "main.rs".into(),
+                is_dir: false,
+                size: Some(12),
+            }],
+        });
+        assert!(matches!(events.as_slice(), [ClientEvent::FileTreeChanged]));
+        assert_eq!(state.dir_listing_path.as_deref(), Some("src"));
+        assert_eq!(state.dir_listing_session_id.as_deref(), Some("sess-1"));
+        assert_eq!(state.dir_listing.len(), 1);
+        assert_eq!(state.dir_listing[0].name, "main.rs");
+
+        let events = state.apply_server_message(ServerMessage::FsChanged {
+            paths: vec!["src/main.rs".into()],
+        });
+        assert!(matches!(events.as_slice(), [ClientEvent::FileTreeChanged]));
     }
 }

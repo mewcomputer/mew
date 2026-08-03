@@ -444,6 +444,63 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         )));
     }
 
+    // Changes (file diffs + flagged files) — only when there is activity.
+    if !app.change_stats.files.is_empty() || !app.flagged_files.is_empty() {
+        text.push_line(Line::from(vec![
+            Span::styled(
+                "Changes ",
+                Style::default()
+                    .fg(app.theme.resolve("text.body"))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "(+{} −{})",
+                    app.change_stats.added, app.change_stats.removed
+                ),
+                Style::default().fg(app.theme.resolve("text.muted")),
+            ),
+        ]));
+        let max = area.width.saturating_sub(6) as usize;
+        // Union of changed files and flagged files (flagged first, with ⚑).
+        let mut rows: Vec<(String, bool)> = Vec::new();
+        for f in &app.flagged_files {
+            rows.push((f.path.clone(), true));
+        }
+        for f in &app.change_stats.files {
+            if !app.flagged_files.iter().any(|ff| &ff.path == f) {
+                rows.push((f.clone(), false));
+            }
+        }
+        for (path, flagged) in rows.iter().take(10) {
+            let trimmed: String = path.chars().take(max).collect();
+            let label = if path.chars().count() > max {
+                format!("{}…", trimmed)
+            } else {
+                trimmed
+            };
+            let (marker, color) = if *flagged {
+                ("⚑ ", app.theme.resolve("text.warning"))
+            } else {
+                ("  ", app.theme.resolve("text.placeholder"))
+            };
+            text.push_line(Line::from(vec![
+                Span::styled(format!("  {}", marker), Style::default().fg(color)),
+                Span::styled(label, Style::default().fg(color)),
+            ]));
+        }
+        if rows.len() > 10 {
+            text.push_line(Line::from(Span::styled(
+                format!("    … {} more", rows.len() - 10),
+                Style::default().fg(app.theme.resolve("text.muted")),
+            )));
+        }
+        text.push_line(Line::from(Span::styled(
+            "─".repeat(area.width.saturating_sub(2) as usize),
+            Style::default().fg(app.theme.resolve("divider")),
+        )));
+    }
+
     // Session
     text.push_line(Line::from(vec![Span::styled(
         "Session",
@@ -563,73 +620,120 @@ fn draw_sessions_section(text: &mut Text, visual_row: &mut u16, app: &mut App, w
         let sessions = app.daemon_sessions.clone();
         let titles = app.session_titles.clone();
         let attention = app.session_attention.clone();
+        let groups = app.groups.clone();
         let max_title = width.saturating_sub(14) as usize;
 
-        for s in sessions.iter().filter(|s| !s.archived) {
-            let title = titles
-                .get(&s.session_id)
-                .cloned()
-                .or_else(|| s.summary.clone())
-                .unwrap_or_else(|| s.session_id.chars().take(8).collect::<String>());
-            let title_display: String = title.chars().take(max_title).collect();
-            let title_str = if title.chars().count() > max_title {
-                format!("{}…", title_display)
-            } else {
-                title_display
+        // Render one session row (glyph, title, cost, attention badge).
+        let push_session_row =
+            |text: &mut Text, visual_row: &mut u16, s: &mew_protocol::SessionInfo, indent: &str| {
+                let title = titles
+                    .get(&s.session_id)
+                    .cloned()
+                    .or_else(|| s.summary.clone())
+                    .unwrap_or_else(|| s.session_id.chars().take(8).collect::<String>());
+                let title_display: String = title.chars().take(max_title).collect();
+                let title_str = if title.chars().count() > max_title {
+                    format!("{}…", title_display)
+                } else {
+                    title_display
+                };
+
+                let (glyph, glyph_color) = match s.state {
+                    mew_protocol::SessionState::Running => ("▶", app.theme.resolve("text.warning")),
+                    mew_protocol::SessionState::Active => ("●", app.theme.resolve("text.success")),
+                    mew_protocol::SessionState::Idle => ("○", app.theme.resolve("text.muted")),
+                };
+
+                let cost = s
+                    .usage
+                    .as_ref()
+                    .map(|u| format!("${:.2}", u.cost))
+                    .unwrap_or_default();
+
+                // Attention badge: [!] for pending perms, [?] for pending questions.
+                let badge = attention.get(&s.session_id);
+                let (perm_n, quest_n) = badge.unwrap_or(&(0, 0));
+                let badge_str = if *perm_n > 0 && *quest_n > 0 {
+                    format!(" [{}!{}?]", perm_n, quest_n)
+                } else if *perm_n > 0 {
+                    format!(" [{}!]", perm_n)
+                } else if *quest_n > 0 {
+                    format!(" [{}?]", quest_n)
+                } else {
+                    String::new()
+                };
+                let badge_color = if *perm_n > 0 {
+                    app.theme.resolve("text.warning")
+                } else {
+                    app.theme.resolve("text.accent")
+                };
+
+                let is_active = s.session_id == active_id;
+                let marker = if is_active {
+                    "▸"
+                } else if s.pinned {
+                    "P"
+                } else {
+                    " "
+                };
+                let marker_color = if is_active {
+                    app.theme.resolve("text.success")
+                } else if s.pinned {
+                    app.theme.resolve("text.warning")
+                } else {
+                    app.theme.resolve("text.muted")
+                };
+                let title_color = if is_active {
+                    app.theme.resolve("text.accent")
+                } else {
+                    app.theme.resolve("text.placeholder")
+                };
+
+                text.push_line(Line::from(vec![
+                    Span::styled(indent.to_string(), Style::default()),
+                    Span::styled(marker, Style::default().fg(marker_color)),
+                    Span::styled(format!(" {} ", glyph), Style::default().fg(glyph_color)),
+                    Span::styled(title_str, Style::default().fg(title_color)),
+                    Span::styled(
+                        format!("  {}", cost),
+                        Style::default().fg(app.theme.resolve("text.muted")),
+                    ),
+                    Span::styled(badge_str, Style::default().fg(badge_color)),
+                ]));
+                *visual_row += 1;
             };
 
-            let (glyph, glyph_color) = match s.state {
-                mew_protocol::SessionState::Running => ("▶", app.theme.resolve("text.warning")),
-                mew_protocol::SessionState::Active => ("●", app.theme.resolve("text.success")),
-                mew_protocol::SessionState::Idle => ("○", app.theme.resolve("text.muted")),
-            };
-
-            let cost = s
-                .usage
-                .as_ref()
-                .map(|u| format!("${:.2}", u.cost))
-                .unwrap_or_default();
-
-            // Attention badge: [!] for pending perms, [?] for pending questions.
-            let badge = attention.get(&s.session_id);
-            let (perm_n, quest_n) = badge.unwrap_or(&(0, 0));
-            let badge_str = if *perm_n > 0 && *quest_n > 0 {
-                format!(" [{}!{}?]", perm_n, quest_n)
-            } else if *perm_n > 0 {
-                format!(" [{}!]", perm_n)
-            } else if *quest_n > 0 {
-                format!(" [{}?]", quest_n)
-            } else {
-                String::new()
-            };
-            let badge_color = if *perm_n > 0 {
-                app.theme.resolve("text.warning")
-            } else {
-                app.theme.resolve("text.accent")
-            };
-
-            let is_active = s.session_id == active_id;
-            let marker = if is_active { "▸" } else { " " };
-            let title_color = if is_active {
-                app.theme.resolve("text.accent")
-            } else {
-                app.theme.resolve("text.placeholder")
-            };
-
+        // Sessions with a group render under a group header (groups sorted
+        // by their `order`); ungrouped sessions render flat as before.
+        let mut sorted_groups = groups;
+        sorted_groups.sort_by_key(|g| g.order);
+        for g in &sorted_groups {
+            let members: Vec<&mew_protocol::SessionInfo> = sessions
+                .iter()
+                .filter(|s| !s.archived && s.group_id.as_deref() == Some(g.id.as_str()))
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
             text.push_line(Line::from(vec![
+                Span::styled("  ▾ ", Style::default().fg(app.theme.resolve("text.muted"))),
                 Span::styled(
-                    marker,
-                    Style::default().fg(app.theme.resolve("text.success")),
+                    g.name.clone(),
+                    Style::default()
+                        .fg(app.theme.resolve("text.body"))
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!(" {} ", glyph), Style::default().fg(glyph_color)),
-                Span::styled(title_str, Style::default().fg(title_color)),
-                Span::styled(
-                    format!("  {}", cost),
-                    Style::default().fg(app.theme.resolve("text.muted")),
-                ),
-                Span::styled(badge_str, Style::default().fg(badge_color)),
             ]));
             *visual_row += 1;
+            for s in members {
+                push_session_row(text, visual_row, s, "  ");
+            }
+        }
+        for s in sessions
+            .iter()
+            .filter(|s| !s.archived && s.group_id.is_none())
+        {
+            push_session_row(text, visual_row, s, "");
         }
     }
 

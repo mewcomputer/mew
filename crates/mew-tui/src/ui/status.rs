@@ -96,9 +96,14 @@ fn build_pills(app: &App, theme: &crate::theme::Theme) -> Vec<Pill> {
 
     // thinking variant — appended after the model pill with a separator.
     // Uses a distinct amber color to differentiate from the model chip.
+    // Numeric budgets display as the bare token count (`budget:8192` → "8192").
     if let Some(ref variant) = app.active_thinking_variant {
+        let label = variant
+            .strip_prefix("budget:")
+            .map(|n| n.to_owned())
+            .unwrap_or_else(|| variant.clone());
         pills.push(Pill {
-            text: variant.clone(),
+            text: label,
             fg: theme.resolve("pill.thinking.fg"),
             bg: theme.resolve("pill.thinking.bg"),
         });

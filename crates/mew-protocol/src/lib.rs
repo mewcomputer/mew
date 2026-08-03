@@ -42,6 +42,17 @@ pub enum ClientMessage {
         client_kind: ClientKind,
     },
 
+    /// Create a new session and assign it to an existing group before it is
+    /// attached to the client.
+    NewSessionInGroup {
+        /// Working directory for the session. Defaults to the daemon's cwd.
+        cwd: Option<String>,
+        group_id: String,
+        /// What kind of client is connecting (TUI, Web, etc.).
+        #[serde(default)]
+        client_kind: ClientKind,
+    },
+
     /// Attach to an existing session (active or idle). If the session is idle,
     /// the daemon loads its persisted history from disk.
     AttachSession {
@@ -133,9 +144,13 @@ pub enum ClientMessage {
     },
 
     /// Set or clear the thinking/reasoning variant for the active session.
-    /// Pass an empty string or "none" to disable thinking.
+    /// Pass an empty string or "none" to disable thinking. Numeric token
+    /// budgets ride this message as the string convention `"budget:<n>"`
+    /// (e.g. `"budget:8192"`); the daemon clamps/snaps the value to the
+    /// model's declared range.
     SetThinkingVariant {
-        /// Variant name (e.g. "high", "max", "thinking") or empty/none to disable.
+        /// Variant name (e.g. "high", "max", "thinking"), `"budget:<n>"`,
+        /// or empty/none to disable.
         variant: String,
     },
 
@@ -290,6 +305,29 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_id: Option<String>,
     },
+
+    // -- Native terminal ----------------------------------------------------
+    /// Open one interactive shell for the current daemon connection.
+    /// The shell runs in the attached session's workspace.
+    TerminalOpen {
+        rows: u16,
+        cols: u16,
+    },
+    /// Write raw bytes to the active terminal's stdin.
+    TerminalInput {
+        terminal_id: String,
+        bytes: Vec<u8>,
+    },
+    /// Resize the active terminal grid without restarting the shell.
+    TerminalResize {
+        terminal_id: String,
+        rows: u16,
+        cols: u16,
+    },
+    /// Close the active terminal shell.
+    TerminalClose {
+        terminal_id: String,
+    },
 }
 
 /// What kind of client is connected to a session.
@@ -326,7 +364,7 @@ pub enum RemoteScope {
 }
 
 /// Info about a single available model, returned by `ListModels`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
     /// Fully-qualified ID: "provider/model" (e.g. "deepseek/deepseek-v4-flash").
     pub id: String,
@@ -341,16 +379,37 @@ pub struct ModelInfo {
     /// model doesn't support configurable thinking.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub thinking_variants: Vec<ThinkingVariantInfo>,
+    /// Numeric thinking-budget range, when the model accepts a
+    /// `thinking_budget` token cap (e.g. Qwen3.8-max). `None` means the
+    /// model has no configurable budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<ThinkingBudgetInfo>,
     /// Maximum context window in tokens, if known from the catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<i64>,
 }
 
 /// A named thinking/reasoning variant (e.g. "high", "max", "thinking").
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThinkingVariantInfo {
     /// Display name (e.g. "high", "max", "thinking").
     pub name: String,
+}
+
+/// Numeric thinking-budget range for models that accept a `thinking_budget`
+/// token cap. Budget selection rides `SetThinkingVariant` as the string
+/// convention `"budget:<n>"` (clamped/snapped to `min..=max` by `step` by
+/// the daemon); no dedicated message type exists for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThinkingBudgetInfo {
+    pub min: i64,
+    pub max: i64,
+    pub step: i64,
+    pub default: i64,
+    /// Canonical budget (in tokens) for each named effort variant, so UIs
+    /// can seed a slider position from the active effort level.
+    #[serde(default)]
+    pub by_effort: Vec<(String, i64)>,
 }
 
 /// Session lifecycle state as exposed by the daemon.
@@ -767,6 +826,7 @@ pub enum ServerMessage {
 
     // -- Phase 3: File service responses --
     DirListing {
+        session_id: String,
         path: String,
         entries: Vec<DirEntry>,
     },
@@ -889,10 +949,32 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_id: Option<String>,
     },
+
+    // -- Native terminal ----------------------------------------------------
+    /// Confirms that a terminal shell was created for this connection.
+    TerminalOpened {
+        terminal_id: String,
+    },
+    /// Raw bytes emitted by the terminal shell. The client owns ANSI parsing
+    /// and presentation so the daemon remains transport-only here.
+    TerminalOutput {
+        terminal_id: String,
+        bytes: Vec<u8>,
+    },
+    /// The terminal shell exited and will not accept more input.
+    TerminalExited {
+        terminal_id: String,
+        status: String,
+    },
+    /// A terminal operation failed without taking down the daemon connection.
+    TerminalError {
+        terminal_id: Option<String>,
+        message: String,
+    },
 }
 
 /// Wire-format info about a flagged file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlaggedFileWire {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -914,7 +996,7 @@ pub struct ProjectInfo {
 }
 
 /// Wire-format info about a persona, returned by `ListPersonas`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersonaInfo {
     /// Persona name (unique identifier).
     pub name: String,
@@ -938,14 +1020,14 @@ pub enum AlertKind {
 }
 
 /// A question for `AskUserRequest`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Question {
     pub prompt: String,
     pub options: Vec<QuestionOption>,
 }
 
 /// An option within a question.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuestionOption {
     pub label: String,
     pub description: String,
@@ -971,7 +1053,7 @@ pub struct Todo {
 }
 
 /// Metadata for a session group.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupInfo {
     pub id: String,
     pub name: String,
@@ -1479,6 +1561,27 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn new_session_in_group_roundtrip() {
+        let message = ClientMessage::NewSessionInGroup {
+            cwd: Some("/tmp/project".into()),
+            group_id: "grp_1".into(),
+            client_kind: ClientKind::Desktop,
+        };
+        match round_trip(&message) {
+            ClientMessage::NewSessionInGroup {
+                cwd,
+                group_id,
+                client_kind,
+            } => {
+                assert_eq!(cwd.as_deref(), Some("/tmp/project"));
+                assert_eq!(group_id, "grp_1");
+                assert_eq!(client_kind, ClientKind::Desktop);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
     // -- ClientMessage: exhaustive variant coverage --------------------------
 
     #[test]
@@ -1533,6 +1636,45 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn terminal_messages_roundtrip_binary_input_and_output() {
+        let input = ClientMessage::TerminalInput {
+            terminal_id: "term-1".into(),
+            bytes: vec![0x1b, b'[', b'2', b'J'],
+        };
+        match round_trip(&input) {
+            ClientMessage::TerminalInput { terminal_id, bytes } => {
+                assert_eq!(terminal_id, "term-1");
+                assert_eq!(bytes, vec![0x1b, b'[', b'2', b'J']);
+            }
+            _ => panic!("wrong client terminal variant"),
+        }
+
+        let output = ServerMessage::TerminalOutput {
+            terminal_id: "term-1".into(),
+            bytes: vec![0, 255, b'\n'],
+        };
+        match round_trip(&output) {
+            ServerMessage::TerminalOutput { terminal_id, bytes } => {
+                assert_eq!(terminal_id, "term-1");
+                assert_eq!(bytes, vec![0, 255, b'\n']);
+            }
+            _ => panic!("wrong server terminal variant"),
+        }
+    }
+
+    #[test]
+    fn terminal_open_and_exit_tags_are_stable() {
+        let open = encode_json(&ClientMessage::TerminalOpen { rows: 24, cols: 80 }).unwrap();
+        assert!(open.contains(r#""type":"terminal_open""#));
+        let exited = encode_json(&ServerMessage::TerminalExited {
+            terminal_id: "term-1".into(),
+            status: "exit status: 0".into(),
+        })
+        .unwrap();
+        assert!(exited.contains(r#""type":"terminal_exited""#));
     }
 
     #[test]
@@ -2867,6 +3009,7 @@ mod tests {
                 },
                 ThinkingVariantInfo { name: "max".into() },
             ],
+            thinking_budget: None,
             context_window: Some(128_000),
         };
         let j = encode_json(&m).unwrap();
@@ -2878,6 +3021,42 @@ mod tests {
     }
 
     #[test]
+    fn test_model_info_with_thinking_budget() {
+        let m = ModelInfo {
+            id: "qwen/qwen3.8-max".into(),
+            provider: "qwen".into(),
+            model: "qwen3.8-max".into(),
+            description: None,
+            thinking_variants: vec![
+                ThinkingVariantInfo { name: "low".into() },
+                ThinkingVariantInfo {
+                    name: "xhigh".into(),
+                },
+            ],
+            thinking_budget: Some(ThinkingBudgetInfo {
+                min: 0,
+                max: 262_144,
+                step: 1024,
+                default: 131_072,
+                by_effort: vec![("low".to_owned(), 4096), ("xhigh".to_owned(), 262_144)],
+            }),
+            context_window: None,
+        };
+        let j = encode_json(&m).unwrap();
+        assert!(j.contains(r#""thinking_budget""#));
+        let parsed: ModelInfo = serde_json::from_str(&j).unwrap();
+        let budget = parsed.thinking_budget.expect("budget present");
+        assert_eq!(
+            (budget.min, budget.max, budget.step, budget.default),
+            (0, 262_144, 1024, 131_072)
+        );
+        assert_eq!(
+            budget.by_effort,
+            vec![("low".to_owned(), 4096), ("xhigh".to_owned(), 262_144)]
+        );
+    }
+
+    #[test]
     fn test_model_info_without_thinking_variants_skips_field() {
         let m = ModelInfo {
             id: "test/model".into(),
@@ -2885,11 +3064,14 @@ mod tests {
             model: "model".into(),
             description: None,
             thinking_variants: vec![],
+            thinking_budget: None,
             context_window: None,
         };
         let j = encode_json(&m).unwrap();
         // Empty vec should be skipped in serialization.
         assert!(!j.contains(r#""thinking_variants""#));
+        // thinking_budget should be skipped when None.
+        assert!(!j.contains(r#""thinking_budget""#));
         // context_window should be skipped when None.
         assert!(!j.contains(r#""context_window""#));
     }

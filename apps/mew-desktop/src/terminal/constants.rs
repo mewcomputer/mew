@@ -1,0 +1,9 @@
+pub const DEFAULT_COLS: u16 = 80;
+pub const DEFAULT_ROWS: u16 = 24;
+pub const FONT_SIZE: f32 = 14.0;
+pub const PADDING_TOP: f32 = 0.0;
+pub const PADDING_LEFT: f32 = 4.0;
+pub const DEFAULT_FONT_FAMILY: &str = "Ioskeley Mono";
+pub const FALLBACK_CELL_WIDTH: f32 = 8.4;
+pub const FALLBACK_CELL_HEIGHT: f32 = 20.0;
+pub const LINE_HEIGHT_FACTOR: f32 = 1.5;

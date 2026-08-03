@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, Borders},
     Terminal,
 };
-use ratatui_mdstream::{StreamView, StreamViewState, Theme};
+use ratatui_mdstream::{StreamView, StreamViewState};
 
 fn main() -> io::Result<()> {
     enable_raw_mode()?;
