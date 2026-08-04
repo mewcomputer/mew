@@ -1629,6 +1629,53 @@ fn test_session_list_syncs_active_change_stats() {
 }
 
 #[test]
+fn test_session_list_sorted_by_last_seen() {
+    fn info(id: &str, created_at: i64, last_message_at: Option<i64>) -> mew_protocol::SessionInfo {
+        mew_protocol::SessionInfo {
+            session_id: id.into(),
+            state: mew_protocol::SessionState::Idle,
+            model: None,
+            provider: None,
+            created_at,
+            last_message_at,
+            summary: None,
+            client_count: 0,
+            cwd: None,
+            last_turn_failed: false,
+            archived: false,
+            pinned: false,
+            group_id: None,
+            change_stats: None,
+            usage: None,
+            pending_permissions: 0,
+            pending_questions: 0,
+            first_message: None,
+        }
+    }
+
+    let mut app = App::new();
+    // Deliberately out of order: "old" has the newest message, "fresh" has
+    // no last_message_at and falls back to created_at, "mid" sits between.
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionList {
+        sessions: vec![
+            info("mid", 100, Some(200)),
+            info("old", 10, Some(300)),
+            info("fresh", 250, None),
+        ],
+    });
+    let ids: Vec<&str> = app
+        .daemon_sessions
+        .iter()
+        .map(|s| s.session_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["old", "fresh", "mid"],
+        "sessions must be newest-first by last_message_at (created_at fallback)"
+    );
+}
+
+#[test]
 fn test_theme_no_arg_opens_picker() {
     let app = App::new();
     let result = app.handle_slash("/theme");

@@ -754,6 +754,14 @@ impl App {
                     self.change_stats = active.change_stats.clone().unwrap_or_default();
                 }
                 self.daemon_sessions = sessions.clone();
+                // The daemon assembles this list from HashMap iteration and
+                // readdir order; sort newest-first so the rail and picker
+                // reflect recency (last_message_at, falling back to created_at).
+                self.daemon_sessions.sort_by(|a, b| {
+                    let at = a.last_message_at.unwrap_or(a.created_at);
+                    let bt = b.last_message_at.unwrap_or(b.created_at);
+                    bt.cmp(&at).then_with(|| a.session_id.cmp(&b.session_id))
+                });
             }
             ServerMessage::SessionTitleChanged { session_id, title } => {
                 self.session_titles

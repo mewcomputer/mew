@@ -1,3 +1,16 @@
+# 2026-08-03 — sort TUI session rail/picker by last activity
+
+The daemon builds `SessionList` from HashMap iteration (active sessions)
+plus readdir order (idle sessions on disk), so the TUI's session rail and
+`/sessions` picker showed sessions in arbitrary order. Sort newest-first on
+ingestion in `App::apply_daemon_notification` using `last_message_at`
+(falling back to `created_at`), matching what the web UI already does
+client-side. Session id breaks recency ties so ordering is deterministic.
+
+New test `test_session_list_sorted_by_last_seen` covers the ordering and
+the `created_at` fallback. `cargo test -p mew-tui`: 185 passed; clippy and
+fmt clean.
+
 # 2026-08-03 — filter non-text-output models from the picker
 
 `alibaba-token-plan` (and the whole catalog) carried image/video/audio
