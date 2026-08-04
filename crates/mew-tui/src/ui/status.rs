@@ -287,16 +287,16 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let status = &app.status;
-    let total = status.input_tokens + status.output_tokens;
+    let used = status.context_tokens;
     let right = if status.context_window > 0 {
         format!(
             "{} / {}k tok  ·  ${:.2}",
-            fmt_tokens(total),
+            fmt_tokens(used),
             status.context_window / 1_000,
             status.cost,
         )
     } else {
-        format!("{} tok  ·  ${:.2}", fmt_tokens(total), status.cost)
+        format!("{} tok  ·  ${:.2}", fmt_tokens(used), status.cost)
     };
 
     let inner = Rect::new(area.x + 1, area.y, area.width.saturating_sub(2), 1);

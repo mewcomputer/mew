@@ -1,3 +1,25 @@
+# 2026-08-03 — status bar shows context occupancy, not lifetime totals
+
+The TUI status bar summed every request's input and output tokens for the
+whole session and displayed that lifetime total over the context window,
+which stops making sense after a couple of turns. The per-message usage
+from the daemon already carries what's needed: each `MessageEnd` reports
+the request's prompt size, which is the current context occupancy.
+
+- `Status.input_tokens`/`output_tokens` (cumulative) replaced with a
+  single `context_tokens` snapshot in `crates/mew-tui/src/app/mod.rs`.
+- `MessageEnd` handling now snapshots `usage.input` instead of `+=`;
+  zero usage (synthetic slash results, capture harness) keeps the last
+  real reading so `/cost` output doesn't reset the counter.
+- `crates/mew-tui/src/ui/status.rs` renders `context_tokens / window`,
+  e.g. "12.3k / 200k tok". Cost stays cumulative.
+- No wire change: the daemon streams per-message usage and the window
+  already; only the TUI's interpretation changed.
+
+New test `test_message_end_tracks_current_context_tokens` covers snapshot
+semantics and the zero-usage guard. `cargo test -p mew-tui`: 186 passed,
+golden frames unchanged; clippy/fmt clean; `mew` dispatch tests pass.
+
 # 2026-08-03 — sort TUI session rail/picker by last activity
 
 The daemon builds `SessionList` from HashMap iteration (active sessions)

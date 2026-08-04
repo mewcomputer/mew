@@ -480,8 +480,9 @@ impl PickerState {
 pub struct Status {
     pub model: String,
     pub provider: String,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
+    /// Tokens in the current context: the latest request's prompt size.
+    /// Snapshotted (not accumulated) so it tracks growth and compaction.
+    pub context_tokens: u32,
     pub cost: f64,
     pub session_id: String,
     pub context_window: u32,
@@ -492,8 +493,7 @@ impl Default for Status {
         Self {
             model: String::new(),
             provider: String::new(),
-            input_tokens: 0,
-            output_tokens: 0,
+            context_tokens: 0,
             cost: 0.0,
             session_id: String::new(),
             context_window: 0,
@@ -1870,8 +1870,13 @@ impl App {
                         self.pending_queued_send = true;
                     }
                 }
-                self.status.input_tokens += usage.input;
-                self.status.output_tokens += usage.output;
+                // The latest request's prompt size is the current context
+                // occupancy; snapshot it so the reading tracks growth and
+                // compaction. Zero usage marks a synthetic completion (slash
+                // output, harness) — keep the last real reading.
+                if usage.input > 0 {
+                    self.status.context_tokens = usage.input;
+                }
                 self.status.cost += cost;
                 if let Some(msg) = self.messages.last_mut() {
                     msg.time.completed = Some(chrono::Utc::now().timestamp_millis());

@@ -1683,6 +1683,38 @@ fn test_theme_no_arg_opens_picker() {
 }
 
 #[test]
+fn test_message_end_tracks_current_context_tokens() {
+    let mut app = App::new();
+    let message_end = |input: u32, output: u32| {
+        mew_agent::AgentEvent::Provider(mew_provider::ProviderEvent::MessageEnd {
+            finish: mew_message::Finish::Stop,
+            usage: mew_message::Tokens {
+                input,
+                output,
+                ..Default::default()
+            },
+            cost: 0.01,
+        })
+    };
+
+    // Each MessageEnd reports that request's prompt size, i.e. the current
+    // context occupancy. The status must snapshot it, not accumulate a
+    // lifetime total.
+    app.handle_agent_event(message_end(1_500, 200));
+    assert_eq!(app.status.context_tokens, 1_500);
+    app.handle_agent_event(message_end(2_100, 300));
+    assert_eq!(
+        app.status.context_tokens, 2_100,
+        "context usage must track the latest request, not sum all requests"
+    );
+
+    // Zero usage means a synthetic completion (slash output, harness);
+    // it must not clobber the live reading.
+    app.handle_agent_event(message_end(0, 0));
+    assert_eq!(app.status.context_tokens, 2_100);
+}
+
+#[test]
 fn test_theme_picker_lists_themes() {
     let mut app = App::new();
     let available = crate::theme::Theme::list_available();
