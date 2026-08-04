@@ -100,25 +100,6 @@ pub async fn handle_list_filesystem_dir(path: Option<String>) -> Result<ServerMe
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::filesystem_path_allowed;
-    use std::path::Path;
-
-    #[test]
-    fn filesystem_browser_stays_inside_home_and_skips_protected_roots() {
-        let home = Path::new("/Users/tester");
-        assert!(filesystem_path_allowed(
-            Path::new("/Users/tester/projects"),
-            home
-        ));
-        assert!(!filesystem_path_allowed(Path::new("/Users/other"), home));
-        assert!(!filesystem_path_allowed(Path::new("/System"), home));
-        assert!(!filesystem_path_allowed(Path::new("/Library"), home));
-        assert!(!filesystem_path_allowed(Path::new("/private/tmp"), home));
-    }
-}
-
 /// Handle `ListDir`.
 pub async fn handle_list_dir(
     sm: &SessionManager,
@@ -354,4 +335,23 @@ pub async fn handle_open_path(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::filesystem_path_allowed;
+    use std::path::Path;
+
+    #[test]
+    fn filesystem_browser_stays_inside_home_and_skips_protected_roots() {
+        let home = Path::new("/Users/tester");
+        assert!(filesystem_path_allowed(
+            Path::new("/Users/tester/projects"),
+            home
+        ));
+        assert!(!filesystem_path_allowed(Path::new("/Users/other"), home));
+        assert!(!filesystem_path_allowed(Path::new("/System"), home));
+        assert!(!filesystem_path_allowed(Path::new("/Library"), home));
+        assert!(!filesystem_path_allowed(Path::new("/private/tmp"), home));
+    }
 }

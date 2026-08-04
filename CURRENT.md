@@ -1,3 +1,78 @@
+# 2026-08-04 — grep tool: expose ignore/size/context controls and surface empty-result hints
+
+The `grep` tool silently dropped files excluded by `.gitignore`/`.ignore`,
+hidden files (outside git repos), binary-extension files, and files over the
+hard-coded 10 MiB ceiling *before* matching. When the only matches lived in
+dropped files the tool returned an empty string with no explanation, so the
+agent genuinely "couldn't see" matches that existed. `fff-search`'s
+`FilePicker` exposes no knob for the ignore/hidden filtering (confirmed across
+0.9.6 and 0.10.1), so the bypass had to be implemented at the mew-tools layer.
+
+## Changes
+
+- `crates/mew-tools/src/tools/grep.rs`:
+  - Added six params: `include_ignored`, `include_hidden`,
+    `max_file_size_mb` (0 = no limit), `context_lines`, `max_results`,
+    `case_sensitive`; documented them in the tool description and JSON schema.
+  - When `include_ignored` or `include_hidden` is set, file discovery switches
+    off `FilePicker::collect_files` (which hard-codes the filters) onto a manual
+    `ignore::WalkBuilder` walk that injects files via `FilePicker::add_new_file`
+    (`collect_files_with_overrides`). The normal path is unchanged. `ignore` was
+    already a direct dependency; grep's own prefilter still skips binary/oversize
+    files.
+  - Wired the size/context/results/case params into `GrepSearchOptions`.
+  - `context_lines` now emits before/after context around each match, using the
+    same `path:linenum:content` shape so the secret redaction filter stays
+    correct (`push_line` helper).
+  - A normal-mode search that scanned files but matched nothing now appends a
+    hint pointing at `include_ignored`/`include_hidden` — the exact case that
+    used to look like a silent "no matches" bug.
+  - Added tests for each new param and updated `test_grep_no_matches` for the
+    new hint behavior. `cargo test -p mew-tools`, clippy, and fmt are clean.
+
+# 2026-08-03 — Fix model picker dropping providers with shared model ids
+
+The daemon's model picker was built from `Catalog.models`, a flat
+`HashMap<String, Model>` keyed by model id. models.dev repeats the same model
+id under many providers (e.g. `deepseek-v4-flash`, `qwen3.7-plus`), so later
+providers overwrote earlier ones and the flattened `provider` field no longer
+matched the original provider. Providers that appeared early in the catalog
+(like `alibaba-token-plan`, `deepseek`, `z-ai`) ended up with zero visible
+models even though they were configured and credentialed.
+
+## Changes
+
+- `crates/mew-catalog/src/lib.rs`:
+  - `Catalog` now also keeps a `providers: HashMap<String, HashMap<String, Model>>`
+    map that preserves every provider/model pair, including duplicate ids.
+  - `parse()` populates the per-provider map for object, models.dev nested, and
+    array catalog formats.
+  - `merge_local()` adds custom models to both the flattened id map and the
+    per-provider map.
+  - Added tests for duplicate-id preservation across providers and for custom
+    model population of the provider map.
+- `crates/mew/src/commands/daemon.rs`:
+  - The model lister now iterates configured providers, matches each against the
+    per-provider catalog entries via `catalog_provider_matches`, and emits a
+    `ModelInfo` for every text-output model. This survives id collisions across
+    providers.
+- `crates/mew-daemon/src/files.rs`:
+  - Moved the `#[cfg(test)]` module to the end of the file to fix a pre-existing
+    `clippy::items_after_test_module` warning surfaced when running scoped clippy.
+
+## Verification
+
+- `cargo test -p mew -p mew-catalog -p mew-daemon`: all pass (130 mew, 52 catalog,
+  daemon lib + e2e/concurrency/tcp tests).
+- `cargo clippy -p mew -p mew-catalog -p mew-daemon --all-targets -- -D warnings`:
+  clean.
+- `cargo install --path crates/mew --force` succeeded.
+- A fresh daemon's `ListModels` now includes `alibaba-token-plan`, `deepseek`,
+  `z-ai`, and the previously visible providers.
+
+Worktree note: `crates/mew-tools/src/tools/grep.rs` has an unrelated pre-existing
+modification that was not touched.
+
 # 2026-08-03 — daemon broadcasts context occupancy to all frontends
 
 Follow-up to the TUI status-bar fix: the daemon now tracks and sends the

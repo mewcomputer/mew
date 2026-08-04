@@ -146,14 +146,20 @@ pub struct ThinkingVariant {
 /// The loaded model registry.
 #[derive(Debug, Clone)]
 pub struct Catalog {
+    /// Flattened lookup by model id. Collisions across providers are resolved
+    /// arbitrarily: the last provider parsed wins. Prefer `providers` for
+    /// provider-scoped iteration (e.g. the model picker).
     pub models: HashMap<String, Model>,
+    /// Models grouped by catalog provider id. Preserves every provider/model
+    /// pair, including duplicate ids across providers.
+    pub providers: HashMap<String, HashMap<String, Model>>,
 }
-
 impl Catalog {
     /// Creates an empty catalog (for fallback when loading fails).
     pub fn empty() -> Self {
         Self {
             models: HashMap::new(),
+            providers: HashMap::new(),
         }
     }
 
@@ -226,7 +232,12 @@ impl Catalog {
     /// Merges local model entries, overriding any catalog entries with the same ID.
     pub fn merge_local(&mut self, models: Vec<Model>) {
         for m in models {
-            self.models.insert(m.id.clone(), m);
+            let provider_id = m.provider.clone();
+            self.models.insert(m.id.clone(), m.clone());
+            self.providers
+                .entry(provider_id)
+                .or_default()
+                .insert(m.id.clone(), m);
         }
     }
 
@@ -775,11 +786,17 @@ fn parse(data: &[u8]) -> Result<Catalog, CatalogError> {
         // — we must fall through to the nested parser in that case.
         if !payload.models.is_empty() {
             let mut models = HashMap::with_capacity(payload.models.len());
+            let mut providers: HashMap<String, HashMap<String, Model>> = HashMap::new();
             for m in payload.models {
-                models.insert(m.id.clone(), m);
+                let provider_id = m.provider.clone();
+                models.insert(m.id.clone(), m.clone());
+                providers
+                    .entry(provider_id)
+                    .or_default()
+                    .insert(m.id.clone(), m);
             }
             debug!(count = models.len(), "parsed catalog (object format)");
-            return Ok(Catalog { models });
+            return Ok(Catalog { models, providers });
         }
     }
 
@@ -796,28 +813,36 @@ fn parse(data: &[u8]) -> Result<Catalog, CatalogError> {
             });
             if is_nested {
                 let mut models = HashMap::new();
+                let mut providers = HashMap::new();
                 for (provider_id, provider_val) in obj {
                     if let Some(provider_models) =
                         provider_val.get("models").and_then(|m| m.as_object())
                     {
+                        let mut provider_map = HashMap::new();
                         for (_model_key, model_val) in provider_models {
                             if let Some(m) = parse_models_dev_model(model_val, provider_id) {
-                                models.insert(m.id.clone(), m);
+                                models.insert(m.id.clone(), m.clone());
+                                provider_map.insert(m.id.clone(), m);
                             }
+                        }
+                        if !provider_map.is_empty() {
+                            providers.insert(provider_id.clone(), provider_map);
                         }
                     }
                 }
                 if !models.is_empty() {
                     debug!(
                         count = models.len(),
+                        providers = providers.len(),
                         "parsed catalog (models.dev nested format)"
                     );
-                    return Ok(Catalog { models });
+                    return Ok(Catalog { models, providers });
                 }
             } else if obj.is_empty() {
                 // Empty object {} — return empty catalog.
                 return Ok(Catalog {
                     models: HashMap::new(),
+                    providers: HashMap::new(),
                 });
             }
         }
@@ -826,11 +851,17 @@ fn parse(data: &[u8]) -> Result<Catalog, CatalogError> {
     // Fall back to array format: [...]
     let models_vec: Vec<Model> = serde_json::from_slice(data)?;
     let mut models = HashMap::with_capacity(models_vec.len());
+    let mut providers: HashMap<String, HashMap<String, Model>> = HashMap::new();
     for m in models_vec {
-        models.insert(m.id.clone(), m);
+        let provider_id = m.provider.clone();
+        models.insert(m.id.clone(), m.clone());
+        providers
+            .entry(provider_id)
+            .or_default()
+            .insert(m.id.clone(), m);
     }
     debug!(count = models.len(), "parsed catalog (array format)");
-    Ok(Catalog { models })
+    Ok(Catalog { models, providers })
 }
 
 /// Fetches umans's authoritative model configs from their public endpoint
@@ -1711,6 +1742,63 @@ mod tests {
         // Missing modalities.output must default to text-capable so
         // unknown/legacy entries stay selectable.
         assert!(cat.lookup("legacy-model").unwrap().text_output);
+    }
+
+    #[test]
+    fn test_parse_providers_keeps_duplicate_model_ids() {
+        // models.dev repeats the same model id under many providers. The
+        // per-provider map must preserve every provider/model pair even when
+        // the flattened id map can only keep one.
+        let json = br#"{
+            "alibaba-token-plan": {
+                "models": {
+                    "shared-model": {
+                        "id": "shared-model",
+                        "modalities": {"input": ["text"], "output": ["text"]},
+                        "limit": {"context": 131072}
+                    }
+                }
+            },
+            "opencode-zen": {
+                "models": {
+                    "shared-model": {
+                        "id": "shared-model",
+                        "modalities": {"input": ["text"], "output": ["text"]},
+                        "limit": {"context": 200000}
+                    }
+                }
+            }
+        }"#;
+        let cat = parse(json).unwrap();
+
+        // Flattened map is arbitrary: exactly one survives.
+        assert_eq!(cat.models.len(), 1);
+        // Per-provider map preserves both.
+        assert_eq!(cat.providers.len(), 2);
+        assert!(cat.providers["alibaba-token-plan"].contains_key("shared-model"));
+        assert!(cat.providers["opencode-zen"].contains_key("shared-model"));
+        assert_eq!(
+            cat.providers["alibaba-token-plan"]["shared-model"].context_window,
+            131_072
+        );
+        assert_eq!(
+            cat.providers["opencode-zen"]["shared-model"].context_window,
+            200_000
+        );
+    }
+
+    #[test]
+    fn test_merge_local_populates_providers_map() {
+        let mut cat = parse(&sample_json()).unwrap();
+        cat.merge_local(vec![Model {
+            id: "glm-5.3".into(),
+            provider: "z-ai".into(),
+            shape: "anthropic".into(),
+            context_window: 128_000,
+            ..Default::default()
+        }]);
+        assert!(cat.providers["z-ai"].contains_key("glm-5.3"));
+        assert_eq!(cat.providers["z-ai"]["glm-5.3"].shape, "anthropic");
     }
 
     #[test]

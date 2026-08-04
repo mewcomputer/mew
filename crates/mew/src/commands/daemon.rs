@@ -171,44 +171,46 @@ pub(crate) async fn build_daemon_server(
 
             if let Some(cat) = cat_lister.as_ref() {
                 for provider_id in &cred_pids {
-                    for m in cat.models.values() {
+                    for (catalog_provider_id, provider_models) in &cat.providers {
                         if !crate::setup::providers::catalog_provider_matches(
                             provider_id,
-                            &m.provider,
+                            catalog_provider_id,
                         ) {
                             continue;
                         }
-                        // Skip image/video/audio generation models — the
-                        // agent can't consume their output.
-                        if !m.text_output {
-                            continue;
+                        for m in provider_models.values() {
+                            // Skip image/video/audio generation models — the
+                            // agent can't consume their output.
+                            if !m.text_output {
+                                continue;
+                            }
+                            let thinking_variants = cat
+                                .thinking_variants(&m.id)
+                                .into_iter()
+                                .map(|v| mew_protocol::ThinkingVariantInfo { name: v.name })
+                                .collect();
+                            models.push(mew_protocol::ModelInfo {
+                                id: format!("{}/{}", provider_id, m.id),
+                                provider: provider_id.clone(),
+                                model: m.id.clone(),
+                                description: Some(format!(
+                                    "{} ctx · {}",
+                                    m.context_window,
+                                    if m.reasoning { "reasoning" } else { "standard" }
+                                )),
+                                thinking_variants,
+                                thinking_budget: cat.thinking_budget(&m.id).map(|b| {
+                                    mew_protocol::ThinkingBudgetInfo {
+                                        min: b.min,
+                                        max: b.max,
+                                        step: b.step,
+                                        default: b.default,
+                                        by_effort: b.by_effort,
+                                    }
+                                }),
+                                context_window: Some(m.context_window),
+                            });
                         }
-                        let thinking_variants = cat
-                            .thinking_variants(&m.id)
-                            .into_iter()
-                            .map(|v| mew_protocol::ThinkingVariantInfo { name: v.name })
-                            .collect();
-                        models.push(mew_protocol::ModelInfo {
-                            id: format!("{}/{}", provider_id, m.id),
-                            provider: provider_id.clone(),
-                            model: m.id.clone(),
-                            description: Some(format!(
-                                "{} ctx · {}",
-                                m.context_window,
-                                if m.reasoning { "reasoning" } else { "standard" }
-                            )),
-                            thinking_variants,
-                            thinking_budget: cat.thinking_budget(&m.id).map(|b| {
-                                mew_protocol::ThinkingBudgetInfo {
-                                    min: b.min,
-                                    max: b.max,
-                                    step: b.step,
-                                    default: b.default,
-                                    by_effort: b.by_effort,
-                                }
-                            }),
-                            context_window: Some(m.context_window),
-                        });
                     }
                 }
             }
