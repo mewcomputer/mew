@@ -17,7 +17,9 @@ use futures::{SinkExt, StreamExt};
 use mew_agent::{Agent, AgentEvent};
 use mew_daemon::DaemonServer;
 use mew_hooks::NopDispatcher;
-use mew_message::{Finish, PartId, TextPart, ToolCallPart, ToolState, ToolStatePending, ToolTime};
+use mew_message::{
+    Finish, PartId, TextPart, Tokens, ToolCallPart, ToolState, ToolStatePending, ToolTime,
+};
 use mew_protocol::{ClientKind, ClientMessage, ServerMessage};
 use mew_provider_fake::FakeProvider;
 use tempfile::TempDir;
@@ -1206,5 +1208,87 @@ async fn regenerate_title_returns_title_changed() {
             assert_eq!(title, "hello world");
         }
         _ => unreachable!("expected SessionTitleChanged"),
+    }
+}
+
+#[tokio::test]
+async fn usage_broadcast_and_session_list_carry_context_tokens() {
+    // The provider reports the request's prompt size; the daemon must
+    // surface it as the session's current context occupancy, both in the
+    // turn-end usage broadcast and in the session list.
+    let script = Arc::new(|| {
+        let mut events = FakeProvider::text_response("hi");
+        if let Some(mew_provider::ProviderEvent::MessageEnd { usage, .. }) = events.last_mut() {
+            *usage = Tokens {
+                input: 4_200,
+                output: 30,
+                ..Default::default()
+            };
+        }
+        events
+    });
+    let (_dir, socket) = spawn_daemon(make_text_agent_factory(script)).await;
+
+    let mut ws = connect(&socket).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Unknown,
+        },
+    )
+    .await;
+    let ready =
+        recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionReady { .. })).await;
+    let session_id = match ready {
+        ServerMessage::SessionReady { session_id, .. } => session_id,
+        _ => unreachable!(),
+    };
+
+    send(
+        &mut ws,
+        ClientMessage::Prompt {
+            text: "hi".into(),
+            attachments: vec![],
+        },
+    )
+    .await;
+
+    let usage_msg = recv_one_matching(&mut ws, |m| {
+        matches!(m, ServerMessage::SessionUsageChanged { .. })
+    })
+    .await;
+    match usage_msg {
+        ServerMessage::SessionUsageChanged {
+            session_id: sid,
+            usage,
+            context_tokens,
+        } => {
+            assert_eq!(sid, session_id);
+            assert_eq!(usage.input_tokens, 4_200);
+            assert_eq!(
+                context_tokens,
+                Some(4_200),
+                "turn-end broadcast must carry the current context size"
+            );
+        }
+        _ => unreachable!(),
+    }
+
+    send(&mut ws, ClientMessage::ListSessions).await;
+    let list = recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::SessionList { .. })).await;
+    match list {
+        ServerMessage::SessionList { sessions } => {
+            let info = sessions
+                .iter()
+                .find(|s| s.session_id == session_id)
+                .expect("active session must be listed");
+            assert_eq!(
+                info.context_tokens,
+                Some(4_200),
+                "session list must carry the current context size"
+            );
+        }
+        _ => unreachable!(),
     }
 }

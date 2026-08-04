@@ -387,12 +387,18 @@ impl SessionManager {
         // Active sessions.
         for (id, session) in active.iter() {
             let agent = session.agent.lock().await;
-            let meta = agent.session_meta().await;
             // Skip empty sessions (no messages yet).
             let message_count = agent.messages.try_lock().map(|m| m.len()).unwrap_or(0);
             if message_count == 0 {
                 continue;
             }
+            // Read meta from disk: usage/context_tokens are persisted there
+            // by the turn's MessageEnd intercepts, and the writer's
+            // in-memory copy lags behind.
+            let meta = match mew_session::Meta::read(&self.session_dir, id).await {
+                Ok(Some(meta)) => Some(meta),
+                _ => agent.session_meta().await,
+            };
             let (model, provider) = {
                 (
                     session.model.lock().await.clone(),
@@ -426,6 +432,7 @@ impl SessionManager {
                 group_id: meta.as_ref().and_then(|m| m.group_id.clone()),
                 change_stats: meta.as_ref().and_then(|m| m.change_stats.clone()),
                 usage: meta.as_ref().and_then(|m| m.usage.as_ref().map(Into::into)),
+                context_tokens: meta.as_ref().and_then(|m| m.context_tokens),
                 pending_permissions: session.pending_permissions.lock().await.len() as u32,
                 pending_questions: session.pending_questions_count().await,
                 first_message,
@@ -477,6 +484,7 @@ impl SessionManager {
                             group_id: meta.group_id.clone(),
                             change_stats: meta.change_stats.clone(),
                             usage: meta.usage.as_ref().map(Into::into),
+                            context_tokens: meta.context_tokens,
                             pending_permissions: 0,
                             pending_questions: 0,
                             first_message: first_user_message_from_disk(&path).await,

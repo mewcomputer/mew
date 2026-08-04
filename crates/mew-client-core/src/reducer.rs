@@ -28,6 +28,8 @@ pub struct ClientSession {
     pub messages: Vec<Message>,
     pub running: bool,
     pub usage: SessionUsageWire,
+    /// Current context occupancy (latest request's prompt size), if known.
+    pub context_tokens: Option<u64>,
     pub subagents: Vec<SubagentEntry>,
     pub todos: Vec<Todo>,
     pub flagged_files: Vec<FlaggedFileWire>,
@@ -48,6 +50,7 @@ impl ClientSession {
             messages: Vec::new(),
             running: false,
             usage: SessionUsageWire::default(),
+            context_tokens: None,
             subagents: Vec::new(),
             todos: Vec::new(),
             flagged_files: Vec::new(),
@@ -737,8 +740,14 @@ impl ClientState {
                 }
                 Vec::new()
             }
-            ServerMessage::SessionUsageChanged { session_id, usage } => {
-                self.session_mut(&session_id).usage = usage;
+            ServerMessage::SessionUsageChanged {
+                session_id,
+                usage,
+                context_tokens,
+            } => {
+                let session = self.session_mut(&session_id);
+                session.usage = usage;
+                session.context_tokens = context_tokens;
                 vec![ClientEvent::UsageChanged { session_id }]
             }
             ServerMessage::ModelList { models } => {
@@ -1387,6 +1396,7 @@ mod tests {
             group_id: None,
             change_stats: None,
             usage: None,
+            context_tokens: None,
             pending_permissions: 0,
             pending_questions: 0,
             first_message: None,
@@ -1595,6 +1605,7 @@ mod tests {
             group_id: None,
             change_stats: None,
             usage: None,
+            context_tokens: None,
             pending_permissions: 0,
             pending_questions: 0,
             first_message: Some("first prompt".into()),
@@ -1704,6 +1715,7 @@ mod tests {
                 cost: 0.5,
                 turns: 1,
             },
+            context_tokens: Some(9),
         });
 
         assert!(matches!(
@@ -1715,6 +1727,11 @@ mod tests {
         assert_eq!(usage.output_tokens, 4);
         assert_eq!(usage.cost, 0.5);
         assert_eq!(usage.turns, 1);
+        assert_eq!(
+            state.session("sess-1").unwrap().context_tokens,
+            Some(9),
+            "usage broadcast must carry the current context reading"
+        );
     }
 
     #[test]

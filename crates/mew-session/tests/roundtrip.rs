@@ -158,3 +158,32 @@ async fn reopen_existing_session_appends_without_truncating() {
     let loaded = Reader::load_from(dir.path(), "append").await.unwrap();
     assert_eq!(loaded.len(), 2, "reopen must append, not truncate");
 }
+
+#[tokio::test]
+async fn meta_context_tokens_round_trips() {
+    let dir = TempDir::new().unwrap();
+    let mut meta = Meta::new("sess-ctx");
+    assert_eq!(
+        meta.context_tokens, None,
+        "fresh meta has no context reading"
+    );
+    meta.context_tokens = Some(12_345);
+    let mut writer = Writer::open_at_with_meta(dir.path(), "sess-ctx", meta.clone())
+        .await
+        .unwrap();
+    writer
+        .write_message(&sample_user_message(
+            MessageId::new(),
+            SessionId::new(),
+            "hi",
+        ))
+        .await
+        .unwrap();
+    writer.flush().await.unwrap();
+
+    let loaded = Reader::load_meta_from(dir.path(), "sess-ctx")
+        .await
+        .expect("meta load should succeed")
+        .expect("meta should exist");
+    assert_eq!(loaded.context_tokens, Some(12_345));
+}

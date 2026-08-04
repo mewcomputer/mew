@@ -1118,6 +1118,7 @@ fn translate_message(
                     input_tokens: s.usage.as_ref().map(|u| u.input_tokens).unwrap_or(0),
                     output_tokens: s.usage.as_ref().map(|u| u.output_tokens).unwrap_or(0),
                     turns: s.usage.as_ref().map(|u| u.turns).unwrap_or(0),
+                    context_tokens: s.context_tokens,
                 })
                 .collect();
             events.push(CoreEvent::SessionList {

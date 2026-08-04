@@ -752,6 +752,11 @@ impl App {
                     .find(|s| s.session_id == self.status.session_id)
                 {
                     self.change_stats = active.change_stats.clone().unwrap_or_default();
+                    // Seed the context reading on attach/resume so the bar
+                    // isn't stuck at 0 until the next turn completes.
+                    if let Some(ct) = active.context_tokens {
+                        self.status.context_tokens = u32::try_from(ct).unwrap_or(u32::MAX);
+                    }
                 }
                 self.daemon_sessions = sessions.clone();
                 // The daemon assembles this list from HashMap iteration and

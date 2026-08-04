@@ -402,3 +402,49 @@ test("error and error_event are routed to distinct handlers", async () => {
   assert.equal(errorMessage, "before-session");
   assert.equal(errorEvent, "during-stream");
 });
+
+test("session-usage-changed carries the current context reading", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connectP = client.connect();
+  setImmediate(() => latest().open());
+  await connectP;
+
+  const got: Array<{ session_id: string; context_tokens?: number }> = [];
+  client.on("session-usage-changed", (data) => got.push(data));
+
+  latest().peerSend({
+    type: "session_usage_changed",
+    session_id: "sess_1",
+    usage: {
+      input_tokens: 5000,
+      output_tokens: 700,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      cost: 0.02,
+      turns: 3,
+    },
+    context_tokens: 4200,
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(got.length, 1);
+  assert.equal(got[0]!.session_id, "sess_1");
+  assert.equal(got[0]!.context_tokens, 4200);
+
+  // The field is optional on the wire (older daemons omit it).
+  latest().peerSend({
+    type: "session_usage_changed",
+    session_id: "sess_1",
+    usage: {
+      input_tokens: 1,
+      output_tokens: 1,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+      cost: 0,
+      turns: 1,
+    },
+  });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(got.length, 2);
+  assert.equal(got[1]!.context_tokens, undefined);
+});

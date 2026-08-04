@@ -229,6 +229,8 @@ pub struct SessionSummary {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub turns: u32,
+    /// Current context occupancy (latest request's prompt size), if known.
+    pub context_tokens: Option<u64>,
 }
 
 /// A known project directory, returned by `list_projects`.

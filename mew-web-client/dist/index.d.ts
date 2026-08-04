@@ -301,6 +301,10 @@ export interface ModelInfo {
     description?: string;
     /** Available thinking/reasoning variants for this model. */
     thinking_variants?: ThinkingVariantInfo[];
+    /** Numeric thinking-budget range, when the model accepts a
+     *  `thinking_budget` token cap (e.g. Qwen3.8-max). Absent when the model
+     *  has no configurable budget. */
+    thinking_budget?: ThinkingBudgetInfo | null;
     /** Maximum context window in tokens, if known from the catalog. */
     context_window?: number;
 }
@@ -318,6 +322,19 @@ export interface PersonaInfo {
 /** A named thinking/reasoning variant (e.g. "high", "max", "thinking"). */
 export interface ThinkingVariantInfo {
     name: string;
+}
+/** Numeric thinking-budget range for models that accept a `thinking_budget`
+ *  token cap. Budget selection rides `setThinkingVariant` as the string
+ *  convention `"budget:<n>"` (clamped/snapped to `min..=max` by `step` by
+ *  the daemon); see `setThinkingBudget`. */
+export interface ThinkingBudgetInfo {
+    min: number;
+    max: number;
+    step: number;
+    default: number;
+    /** Canonical budget (in tokens) for each named effort variant, so UIs can
+     *  seed a slider position from the active effort level. */
+    by_effort: [string, number][];
 }
 /** Session lifecycle state. */
 export type SessionState = "active" | "idle" | "running";
@@ -371,6 +388,8 @@ export interface SessionInfo {
     group_id?: string;
     change_stats?: ChangeStats;
     usage?: SessionUsageWire;
+    /** Current context occupancy (latest request's prompt size), if known. */
+    context_tokens?: number;
     pending_permissions?: number;
     pending_questions?: number;
     /** First user message text (truncated), used as a display title fallback. */
@@ -633,6 +652,7 @@ export type ServerMessage = {
     type: "session_usage_changed";
     session_id: string;
     usage: SessionUsageWire;
+    context_tokens?: number;
 } | {
     type: "session_alert";
     session_id: string;
@@ -865,6 +885,7 @@ export interface MewClientEvents {
     "session-usage-changed": (data: {
         session_id: string;
         usage: SessionUsageWire;
+        context_tokens?: number;
     }) => void;
     "session-alert": (data: {
         session_id: string;
@@ -1014,10 +1035,16 @@ export declare class MewClient {
      *  (handled by the bridge), so the caller doesn't need to await. */
     switchPersona(name: string): void;
     /** Set or clear the thinking/reasoning variant. Pass empty string or
-     *  "none" to disable. Resolves when the daemon confirms via
+     *  "none" to disable. Numeric token budgets ride this call as the string
+     *  convention `"budget:<n>"` (e.g. `"budget:8192"`); use
+     *  `setThinkingBudget` for that. Resolves when the daemon confirms via
      *  `thinking-variant-changed`. Returns the resolved variant name, or
      *  null if thinking was disabled. */
     setThinkingVariant(variant: string): Promise<string | null>;
+    /** Set a numeric token budget for thinking via `setThinkingVariant`
+     *  (`"budget:<n>"`). Only valid for models that declare a
+     *  `thinking_budget` range. */
+    setThinkingBudget(tokens: number): Promise<string | null>;
     /** Set the permission mode for the active session. Mode is one of:
      *  "standard", "permissive", "auto", "auto_plus", "dangerous".
      *  Resolves when the daemon confirms via `permission-mode-changed`. */

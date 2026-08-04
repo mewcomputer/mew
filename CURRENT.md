@@ -1,3 +1,29 @@
+# 2026-08-03 — daemon broadcasts context occupancy to all frontends
+
+Follow-up to the TUI status-bar fix: the daemon now tracks and sends the
+current context size so every frontend can show "used / window".
+
+- `Meta` gains `context_tokens` (latest request's prompt size), refreshed
+  by the daemon's `MessageEnd` intercept and persisted in `meta.json`.
+- Wire: optional `context_tokens` on `SessionInfo` and on
+  `SessionUsageChanged`; absent on older daemons decodes to `None`.
+- TUI seeds `status.context_tokens` from the session list on attach so a
+  resumed session doesn't sit at 0 until the next turn.
+- Consumers plumbed: `mew-client-core` (`ClientSession.context_tokens`),
+  `mew-mobile-core` (`SessionSummary`), `mew-web-client` types/events,
+  `mew-web-ui` store (`availableSessions[].context_tokens`).
+
+Latent bug fixed on the way: `run_turn` and `SessionManager::list()` read
+the writer's in-memory meta, which never sees the usage the intercept
+persists to disk — so `SessionUsageChanged` never fired and
+`set_last_turn_failed` clobbered the persisted usage each turn. Both now
+read meta from disk; new daemon e2e
+`usage_broadcast_and_session_list_carry_context_tokens` pins the wire
+behavior (it times out against the old code).
+
+Verification: `cargo test --all` green; repo clippy + arch-check clean;
+`just test-js` 18 pass; web-ui 107 pass; web-client/web-ui tsc clean.
+`mew-tui`: 181 lib tests.
 # 2026-08-03 — status bar shows context occupancy, not lifetime totals
 
 The TUI status bar summed every request's input and output tokens for the
@@ -17,7 +43,7 @@ the request's prompt size, which is the current context occupancy.
   already; only the TUI's interpretation changed.
 
 New test `test_message_end_tracks_current_context_tokens` covers snapshot
-semantics and the zero-usage guard. `cargo test -p mew-tui`: 186 passed,
+semantics and the zero-usage guard. `cargo test -p mew-tui`: 180 passed,
 golden frames unchanged; clippy/fmt clean; `mew` dispatch tests pass.
 
 # 2026-08-03 — sort TUI session rail/picker by last activity

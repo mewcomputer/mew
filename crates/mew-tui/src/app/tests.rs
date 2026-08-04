@@ -1619,6 +1619,7 @@ fn test_session_list_syncs_active_change_stats() {
                 files: vec!["a.rs".into()],
             }),
             usage: None,
+            context_tokens: None,
             pending_permissions: 0,
             pending_questions: 0,
             first_message: None,
@@ -1647,6 +1648,7 @@ fn test_session_list_sorted_by_last_seen() {
             group_id: None,
             change_stats: None,
             usage: None,
+            context_tokens: None,
             pending_permissions: 0,
             pending_questions: 0,
             first_message: None,
@@ -1673,6 +1675,48 @@ fn test_session_list_sorted_by_last_seen() {
         vec!["old", "fresh", "mid"],
         "sessions must be newest-first by last_message_at (created_at fallback)"
     );
+}
+
+#[test]
+fn test_session_list_seeds_active_context_tokens() {
+    let mut app = App::new();
+    app.status.session_id = "sess_1".into();
+    let mut info = mew_protocol::SessionInfo {
+        session_id: "sess_1".into(),
+        state: mew_protocol::SessionState::Active,
+        model: None,
+        provider: None,
+        created_at: 0,
+        last_message_at: None,
+        summary: None,
+        client_count: 1,
+        cwd: None,
+        last_turn_failed: false,
+        archived: false,
+        pinned: false,
+        group_id: None,
+        change_stats: None,
+        usage: None,
+        context_tokens: Some(99_000),
+        pending_permissions: 0,
+        pending_questions: 0,
+        first_message: None,
+    };
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionList {
+        sessions: vec![info.clone()],
+    });
+    assert_eq!(
+        app.status.context_tokens, 99_000,
+        "attaching must seed the context reading from the session list"
+    );
+
+    // A list without a reading (older daemon) leaves the live value alone.
+    app.status.context_tokens = 12_345;
+    info.context_tokens = None;
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionList {
+        sessions: vec![info],
+    });
+    assert_eq!(app.status.context_tokens, 12_345);
 }
 
 #[test]

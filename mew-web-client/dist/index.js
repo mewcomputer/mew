@@ -299,7 +299,9 @@ export class MewClient {
         this.send({ type: "switch_persona", name });
     }
     /** Set or clear the thinking/reasoning variant. Pass empty string or
-     *  "none" to disable. Resolves when the daemon confirms via
+     *  "none" to disable. Numeric token budgets ride this call as the string
+     *  convention `"budget:<n>"` (e.g. `"budget:8192"`); use
+     *  `setThinkingBudget` for that. Resolves when the daemon confirms via
      *  `thinking-variant-changed`. Returns the resolved variant name, or
      *  null if thinking was disabled. */
     setThinkingVariant(variant) {
@@ -311,6 +313,12 @@ export class MewClient {
             this.on("thinking-variant-changed", onChanged);
             this.send({ type: "set_thinking_variant", variant });
         });
+    }
+    /** Set a numeric token budget for thinking via `setThinkingVariant`
+     *  (`"budget:<n>"`). Only valid for models that declare a
+     *  `thinking_budget` range. */
+    setThinkingBudget(tokens) {
+        return this.setThinkingVariant(`budget:${tokens}`);
     }
     /** Set the permission mode for the active session. Mode is one of:
      *  "standard", "permissive", "auto", "auto_plus", "dangerous".
@@ -644,6 +652,7 @@ export class MewClient {
                 this.emit("session-usage-changed", {
                     session_id: msg.session_id,
                     usage: msg.usage,
+                    context_tokens: msg.context_tokens,
                 });
                 break;
             case "session_alert":

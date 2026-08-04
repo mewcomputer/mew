@@ -2294,23 +2294,25 @@ async fn run_turn(
     *session.current_turn_cancel.lock().await = None;
     *session.is_running.lock().await = false;
 
-    // Update last_turn_failed + increment turn count.
+    // Update last_turn_failed + increment turn count. Meta is read from
+    // disk: the MessageEnd intercepts persist usage and context occupancy
+    // there, while the agent's writer keeps a stale in-memory copy.
     let dir = session_mgr.session_dir.clone();
-    let usage_wire = {
-        let agent = session.agent.lock().await;
-        if let Some(mut meta) = agent.session_meta().await {
+    let (usage_wire, context_tokens) = match mew_session::Meta::read(&dir, &session.id).await {
+        Ok(Some(mut meta)) => {
             let _ = meta.set_last_turn_failed(&dir, had_error).await;
-            if let Some(u) = meta.usage.as_mut() {
+            let context_tokens = meta.context_tokens;
+            let wire = if let Some(u) = meta.usage.as_mut() {
                 u.add_turn();
                 let wire = mew_protocol::SessionUsageWire::from(&*u);
                 let _ = meta.set_usage(&dir, wire.clone().into()).await;
                 Some(wire)
             } else {
                 None
-            }
-        } else {
-            None
+            };
+            (wire, context_tokens)
         }
+        _ => (None, None),
     };
 
     // Broadcast idle state.
@@ -2324,6 +2326,7 @@ async fn run_turn(
             .broadcast_all(ServerMessage::SessionUsageChanged {
                 session_id: session.id.clone(),
                 usage: u.clone(),
+                context_tokens,
             })
             .await;
     }
@@ -2781,6 +2784,12 @@ async fn translate_event(
                             usage.cache_write as u64,
                             *cost,
                         );
+                        // The request's prompt size is the session's current
+                        // context occupancy. Zero usage marks a provider that
+                        // reported nothing; keep the last real reading.
+                        if usage.input > 0 {
+                            meta.context_tokens = Some(usage.input as u64);
+                        }
                         let usage_clone = u.clone();
                         let _ = meta.set_usage(&dir, usage_clone).await;
                     }

@@ -331,6 +331,8 @@ export interface SessionInfo {
   group_id?: string;
   change_stats?: ChangeStats;
   usage?: SessionUsageWire;
+  /** Current context occupancy (latest request's prompt size), if known. */
+  context_tokens?: number;
   pending_permissions?: number;
   pending_questions?: number;
   /** First user message text (truncated), used as a display title fallback. */
@@ -521,7 +523,12 @@ export type ServerMessage =
     }
   | { type: "git_status_result"; entries: GitEntry[] }
   | { type: "fs_changed"; paths: string[] }
-  | { type: "session_usage_changed"; session_id: string; usage: SessionUsageWire }
+  | {
+      type: "session_usage_changed";
+      session_id: string;
+      usage: SessionUsageWire;
+      context_tokens?: number;
+    }
   | {
       type: "session_alert";
       session_id: string;
@@ -693,7 +700,11 @@ export interface MewClientEvents {
   }) => void;
   "git-status-result": (data: { entries: GitEntry[] }) => void;
   "fs-changed": (data: { paths: string[] }) => void;
-  "session-usage-changed": (data: { session_id: string; usage: SessionUsageWire }) => void;
+  "session-usage-changed": (data: {
+    session_id: string;
+    usage: SessionUsageWire;
+    context_tokens?: number;
+  }) => void;
   "session-alert": (data: {
     session_id: string;
     title: string;
@@ -1432,6 +1443,7 @@ export class MewClient {
         this.emit("session-usage-changed", {
           session_id: msg.session_id,
           usage: msg.usage,
+          context_tokens: msg.context_tokens,
         });
         break;
       case "session_alert":

@@ -459,6 +459,9 @@ pub struct SessionInfo {
     /// Cumulative token usage and cost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<SessionUsageWire>,
+    /// Current context occupancy: latest request's prompt size in tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
     /// Count of pending permission requests (needs human approval).
     #[serde(default)]
     pub pending_permissions: u32,
@@ -853,6 +856,9 @@ pub enum ServerMessage {
     SessionUsageChanged {
         session_id: String,
         usage: SessionUsageWire,
+        /// Current context occupancy after the turn, if known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_tokens: Option<u64>,
     },
 
     // -- Notifications --
@@ -2698,6 +2704,7 @@ mod tests {
             group_id: None,
             change_stats: None,
             usage: None,
+            context_tokens: Some(45_000),
             pending_permissions: 0,
             pending_questions: 0,
             first_message: None,
@@ -2710,6 +2717,7 @@ mod tests {
         assert_eq!(decoded.created_at, 1_700_000_000);
         assert_eq!(decoded.last_message_at, Some(1_700_000_123));
         assert_eq!(decoded.client_count, 2);
+        assert_eq!(decoded.context_tokens, Some(45_000));
     }
 
     #[test]
@@ -2731,6 +2739,7 @@ mod tests {
             group_id: None,
             change_stats: None,
             usage: None,
+            context_tokens: None,
             pending_permissions: 0,
             pending_questions: 0,
             first_message: None,
@@ -2748,11 +2757,16 @@ mod tests {
             !json.contains(r#""last_message_at""#),
             "none last_message_at should be skipped: {json}"
         );
+        assert!(
+            !json.contains(r#""context_tokens""#),
+            "none context_tokens should be skipped: {json}"
+        );
         // Round-trip still decodes to None.
         let decoded = round_trip(&info);
         assert!(decoded.model.is_none());
         assert!(decoded.provider.is_none());
         assert!(decoded.last_message_at.is_none());
+        assert!(decoded.context_tokens.is_none());
     }
 
     #[test]
@@ -2791,6 +2805,7 @@ mod tests {
                 group_id: None,
                 change_stats: None,
                 usage: None,
+                context_tokens: Some(1_000),
                 pending_permissions: 0,
                 pending_questions: 0,
                 first_message: None,
@@ -2811,6 +2826,7 @@ mod tests {
                 group_id: None,
                 change_stats: None,
                 usage: None,
+                context_tokens: None,
                 pending_permissions: 0,
                 pending_questions: 0,
                 first_message: None,
@@ -2823,9 +2839,50 @@ mod tests {
                 assert_eq!(sessions[0].session_id, "sess_a");
                 assert_eq!(sessions[0].state, SessionState::Active);
                 assert_eq!(sessions[0].client_count, 1);
+                assert_eq!(sessions[0].context_tokens, Some(1_000));
                 assert_eq!(sessions[1].session_id, "sess_b");
                 assert_eq!(sessions[1].state, SessionState::Idle);
                 assert_eq!(sessions[1].last_message_at, Some(250));
+                assert_eq!(sessions[1].context_tokens, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_session_usage_changed_roundtrip() {
+        let m = ServerMessage::SessionUsageChanged {
+            session_id: "sess_u".into(),
+            usage: SessionUsageWire {
+                input_tokens: 5_000,
+                output_tokens: 700,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                cost: 0.02,
+                turns: 3,
+            },
+            context_tokens: Some(4_200),
+        };
+        match round_trip(&m) {
+            ServerMessage::SessionUsageChanged {
+                session_id,
+                usage,
+                context_tokens,
+            } => {
+                assert_eq!(session_id, "sess_u");
+                assert_eq!(usage.input_tokens, 5_000);
+                assert_eq!(usage.turns, 3);
+                assert_eq!(context_tokens, Some(4_200));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // context_tokens is optional on the wire: absent decodes to None.
+        let json = r#"{"type":"session_usage_changed","session_id":"sess_v","usage":{"input_tokens":1,"output_tokens":2,"cache_read_tokens":0,"cache_write_tokens":0,"cost":0.0,"turns":1}}"#;
+        let decoded: ServerMessage = decode_json(json).unwrap();
+        match decoded {
+            ServerMessage::SessionUsageChanged { context_tokens, .. } => {
+                assert_eq!(context_tokens, None);
             }
             _ => panic!("wrong variant"),
         }
@@ -3476,6 +3533,7 @@ mod tests {
                 group_id: None,
                 change_stats: None,
                 usage: None,
+                context_tokens: None,
                 pending_permissions: 0,
                 pending_questions: 0,
                 first_message: None,

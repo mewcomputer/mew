@@ -572,6 +572,7 @@ mod tests {
             group_id: None,
             change_stats: None,
             usage: None,
+            context_tokens: None,
             pending_permissions: 0,
             pending_questions: 0,
             first_message: Some("first prompt".into()),

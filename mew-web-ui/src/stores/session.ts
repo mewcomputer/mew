@@ -298,7 +298,7 @@ interface SessionState {
   onFilePreview: (path: string, content: string, truncated: boolean, language?: string) => void;
   onGitStatus: (entries: GitEntry[]) => void;
   onFsChanged: (paths: string[]) => void;
-  onSessionUsageChanged: (sessionId: string, usage: SessionUsageWire) => void;
+  onSessionUsageChanged: (sessionId: string, usage: SessionUsageWire, contextTokens?: number) => void;
   onSessionAlert: (sessionId: string, title: string, kind: AlertKind, detail?: string) => void;
   clearAlertsForSession: (sessionId: string) => void;
   dismissAlert: (sessionId: string, timestamp: number) => void;
@@ -890,15 +890,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     client.gitStatus(sid);
   },
 
-  onSessionUsageChanged: (sessionId, usage) =>
+  onSessionUsageChanged: (sessionId, usage, contextTokens) =>
     set((state) => {
       const sessionUsage = new Map(state.sessionUsage);
       sessionUsage.set(sessionId, usage);
-      // Also update availableSessions with the usage.
+      // Also update availableSessions with the usage and the current
+      // context reading.
       return {
         sessionUsage,
         availableSessions: state.availableSessions.map((s) =>
-          s.session_id === sessionId ? { ...s, usage } : s,
+          s.session_id === sessionId
+            ? { ...s, usage, context_tokens: contextTokens ?? s.context_tokens }
+            : s,
         ),
       };
     }),
@@ -1345,7 +1348,7 @@ export function bridgeClientToStore(client: MewClient) {
   );
 
   client.on("session-usage-changed", (data) =>
-    store.getState().onSessionUsageChanged(data.session_id, data.usage),
+    store.getState().onSessionUsageChanged(data.session_id, data.usage, data.context_tokens),
   );
 
   client.on("session-alert", (data) => {

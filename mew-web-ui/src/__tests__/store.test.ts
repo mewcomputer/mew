@@ -275,19 +275,24 @@ describe("session activity + usage", () => {
       ],
     });
 
-    store().onSessionUsageChanged("s1", {
-      input_tokens: 1000,
-      output_tokens: 500,
-      cache_read_tokens: 200,
-      cache_write_tokens: 100,
-      cost: 0.05,
-      turns: 3,
-    });
+    store().onSessionUsageChanged(
+      "s1",
+      {
+        input_tokens: 1000,
+        output_tokens: 500,
+        cache_read_tokens: 200,
+        cache_write_tokens: 100,
+        cost: 0.05,
+        turns: 3,
+      },
+      900,
+    );
 
     const s = useSessionStore.getState().availableSessions[0]!;
     expect(s.usage).toBeDefined();
     expect(s.usage!.cost).toBe(0.05);
     expect(s.usage!.turns).toBe(3);
+    expect(s.context_tokens).toBe(900);
   });
 });
 

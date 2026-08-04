@@ -68,6 +68,10 @@ pub struct Meta {
     /// Cumulative token usage and cost for the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<SessionUsage>,
+    /// Current context occupancy: the latest provider request's prompt size
+    /// in tokens. A snapshot (not cumulative), refreshed on every request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
 }
 
 /// Cumulative token usage and cost accumulated over a session's lifetime.
@@ -152,6 +156,7 @@ impl Meta {
             pinned: false,
             change_stats: None,
             usage: None,
+            context_tokens: None,
         }
     }
 
@@ -179,6 +184,7 @@ impl Meta {
             pinned: false,
             change_stats: None,
             usage: None,
+            context_tokens: None,
         }
     }
 
