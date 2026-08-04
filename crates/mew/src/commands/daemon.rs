@@ -94,7 +94,7 @@ pub(crate) async fn build_daemon_server(
                 .session_id
                 .strip_prefix("sess_")
                 .and_then(|s| ulid::Ulid::from_string(s).ok());
-            let agent = crate::setup::agent::build_session_agent(
+            let mut agent = crate::setup::agent::build_session_agent(
                 &cfg,
                 cat.as_ref(),
                 &provider_id,
@@ -109,6 +109,22 @@ pub(crate) async fn build_daemon_server(
                 None,
                 &[],
             )?;
+
+            // Apply the model's default thinking variant, matching the
+            // non-daemon `run` path. The daemon otherwise starts with
+            // `reasoning = None` even for models that think by default, making
+            // the CLI report thinking as off when it isn't.
+            match crate::setup::providers::resolve_reasoning(cat.as_ref(), &model_id, None) {
+                Some((config, name)) => {
+                    agent.set_reasoning(Some(config));
+                    agent.set_active_thinking_variant(Some(name));
+                }
+                None => {
+                    agent.set_reasoning(None);
+                    agent.set_active_thinking_variant(None);
+                }
+            }
+
             Ok((
                 agent,
                 Some((*model_id_display).clone()),
@@ -239,6 +255,19 @@ pub(crate) async fn build_daemon_server(
                         agent.set_default_max_output_tokens(raw_max.min(32768));
                     }
                 }
+                // Reset thinking to the new model's default so the active
+                // variant tracks the switched-to model rather than the
+                // previous one.
+                match crate::setup::providers::resolve_reasoning(cat_ref, model_id, None) {
+                    Some((config, name)) => {
+                        agent.set_reasoning(Some(config));
+                        agent.set_active_thinking_variant(Some(name));
+                    }
+                    None => {
+                        agent.set_reasoning(None);
+                        agent.set_active_thinking_variant(None);
+                    }
+                }
                 Ok((provider_id.to_string(), model_id.to_string()))
             },
         );
@@ -260,6 +289,7 @@ pub(crate) async fn build_daemon_server(
                 match crate::setup::providers::resolve_reasoning(cat_ref, model_id, Some(variant)) {
                     Some((config, resolved_name)) => {
                         agent.set_reasoning(Some(config));
+                        agent.set_active_thinking_variant(Some(resolved_name.clone()));
                         Ok(Some(resolved_name))
                     }
                     // Unknown variant — or "off" on a model without an
@@ -267,6 +297,7 @@ pub(crate) async fn build_daemon_server(
                     // the previous wire behavior.
                     None => {
                         agent.set_reasoning(None);
+                        agent.set_active_thinking_variant(None);
                         Ok(None)
                     }
                 }

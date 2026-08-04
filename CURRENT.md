@@ -1,3 +1,23 @@
+# 2026-08-04 — openai provider: tolerate usage chunks with no `choices` field
+
+Some OpenAI-compatible providers (vLLM, proxies) emit a final streaming data
+chunk that carries `usage` but has **no `choices` key at all** (not even
+`choices: []`). `CompletionChunk` required `choices`, so that chunk failed to
+deserialize and the SSE loop aborted mid-response with
+`unmarshal chunk: missing field choices at line 1 column N`.
+
+## Changes
+
+- `crates/mew-provider-openai/src/lib.rs`:
+  - Added `#[serde(default)]` to `CompletionChunk.choices`. The read loop
+    already treats empty choices as "nothing to render" and continues after
+    capturing usage, so an absent field now deserializes to an empty vec and the
+    stream completes normally.
+  - Added `test_fixture_usage_chunk_without_choices_field` + the
+    `src/testdata/usage-no-choices.sse` fixture asserting no `ProviderEvent::Error`
+    surfaces and usage is still captured. `cargo test -p mew-provider-openai`,
+    clippy, and fmt are clean.
+
 # 2026-08-04 — grep tool: expose ignore/size/context controls and surface empty-result hints
 
 The `grep` tool silently dropped files excluded by `.gitignore`/`.ignore`,
@@ -5444,3 +5464,40 @@ from the API response.
 
 New fixture `usage.sse` + test `test_fixture_usage_parsed_from_final_chunk`.
 `cargo test --all`: 1631 passed, 0 failed; clippy clean.
+
+# 2026-08-04 — daemon mode now reports the active thinking variant
+
+The TUI's thinking pill was blank in daemon mode, so a model that was thinking
+by default looked like "no thinking". Two compounding causes: the daemon never
+applied the model's default thinking config (unlike the non-daemon `run` path),
+leaving `agent.reasoning` as `None`; and the daemon only sent
+`ThinkingVariantChanged` in response to an explicit `SetThinkingVariant`, never
+on session attach.
+
+## Changes
+
+- `crates/mew-agent/src/agent.rs`: added `active_thinking_variant: Option<String>`
+  with `set_active_thinking_variant`/`active_thinking_variant` accessors. It holds
+  the human-readable variant name (`"high"`, `"budget:8192"`, ...) mirroring
+  `reasoning`, kept separate from the opaque `ReasoningConfig.params`.
+- `crates/mew/src/commands/daemon.rs`:
+  - Agent build now applies the model's default reasoning via
+    `resolve_reasoning(cat, model_id, None)` and records the resolved variant
+    name, matching the `run` command.
+  - The `SetThinkingVariant` setter records the resolved variant name alongside
+    `set_reasoning` (and clears it on disable).
+  - The model switcher resets reasoning + active variant to the switched-to
+    model's default, so the state never tracks a stale model.
+- `crates/mew-daemon/src/lib.rs`: both `NewSession` and `AttachSession` now send
+  `ThinkingVariantChanged` right after `SessionReady`, reporting the session's
+  current active variant. The `SwitchModel` handler broadcasts
+  `ThinkingVariantChanged` after `ModelSwitched` so the pill updates live.
+
+## Tests
+
+- `crates/mew-agent/src/tests.rs`: `test_active_thinking_variant_defaults_off_and_roundtrips`.
+- `crates/mew-daemon/tests/tcp.rs`: `new_session_reports_active_thinking_variant`
+  asserts `SessionReady` is followed by `ThinkingVariantChanged { variant: "high" }`.
+
+Verified: `cargo test -p mew-agent -p mew-daemon -p mew-tui` green, clippy clean
+(`-D warnings`), `just arch-check` passes.

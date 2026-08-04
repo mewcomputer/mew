@@ -854,6 +854,10 @@ where
                                 Some(agent.permission_mode().id().to_string()),
                             )
                         };
+                        let thinking_variant = {
+                            let agent = session.agent.lock().await;
+                            agent.active_thinking_variant().map(str::to_owned)
+                        };
                         // Persist cwd on the session meta.
                         if let Some(cwd_path) = &cwd {
                             let dir = session_manager.session_dir.clone();
@@ -872,6 +876,11 @@ where
                             model,
                             provider,
                             permission_mode,
+                        });
+                        // Report the new session's active thinking variant so
+                        // the frontend renders the pill immediately.
+                        reply(ServerMessage::ThinkingVariantChanged {
+                            variant: thinking_variant,
                         });
                         // Notify other clients that a new client joined.
                         if !was_first {
@@ -928,6 +937,10 @@ where
                                 Some(agent.permission_mode().id().to_string()),
                             )
                         };
+                        let thinking_variant = {
+                            let agent = session.agent.lock().await;
+                            agent.active_thinking_variant().map(str::to_owned)
+                        };
                         let cwd = session_manager
                             .session_cwd(&session_id)
                             .await
@@ -938,6 +951,12 @@ where
                             model,
                             provider,
                             permission_mode,
+                        });
+                        // Report the session's current thinking variant so the
+                        // frontend renders the pill immediately on attach instead
+                        // of showing "no thinking" until the user toggles it.
+                        reply(ServerMessage::ThinkingVariantChanged {
+                            variant: thinking_variant,
                         });
 
                         // Always send the current message history on attach.
@@ -1606,12 +1625,16 @@ where
                     let result = match &switcher {
                         Some(switcher) => {
                             let mut agent = session.agent.lock().await;
-                            switcher(&mut agent, &provider, &model)
+                            let switched = switcher(&mut agent, &provider, &model);
+                            // Capture the switched-to model's active thinking
+                            // variant before the agent guard drops.
+                            let variant = agent.active_thinking_variant().map(str::to_owned);
+                            switched.map(|(p, m)| (p, m, variant))
                         }
                         None => Err(anyhow::anyhow!("model switching not available")),
                     };
                     match result {
-                        Ok((new_provider, new_model)) => {
+                        Ok((new_provider, new_model, variant)) => {
                             info!(provider = %new_provider, model = %new_model, "model switched");
                             *session.provider.lock().await = Some(new_provider.clone());
                             *session.model.lock().await = Some(new_model.clone());
@@ -1620,6 +1643,11 @@ where
                                     provider: new_provider,
                                     model: new_model,
                                 })
+                                .await;
+                            // Keep the frontend's thinking pill in sync with
+                            // the switched-to model's default.
+                            session
+                                .broadcast(ServerMessage::ThinkingVariantChanged { variant })
                                 .await;
                         }
                         Err(e) => {

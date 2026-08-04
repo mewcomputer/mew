@@ -130,6 +130,57 @@ async fn tcp_listener_serves_session_ready() {
 }
 
 #[tokio::test]
+async fn new_session_reports_active_thinking_variant() {
+    // A daemon whose agent has a preset thinking variant must surface it as
+    // `ThinkingVariantChanged` right after `SessionReady`, so the TUI never
+    // shows "no thinking" while the model is actually thinking.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session_dir = dir.path().join("sessions");
+    std::mem::forget(dir);
+    let builder: mew_daemon::AgentBuilder = Arc::new(|params: mew_daemon::AgentBuildParams| {
+        let provider = Arc::new(FakeProvider::new(FakeProvider::text_response("hi")));
+        let dispatcher = Arc::new(NopDispatcher);
+        let mut agent = Agent::new(provider, dispatcher, Some(params.writer), Vec::new(), None);
+        agent.set_active_thinking_variant(Some("high".into()));
+        Ok((agent, None, None))
+    });
+    let server = DaemonServer::with_session_dir(builder, session_dir);
+    tokio::spawn(async move {
+        let _ = server.run_tcp(addr).await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut ws = connect_tcp(addr).await;
+    send(
+        &mut ws,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: mew_protocol::ClientKind::Unknown,
+        },
+    )
+    .await;
+
+    let msgs = recv_until(
+        &mut ws,
+        |m| matches!(m, ServerMessage::ThinkingVariantChanged { variant } if variant.as_deref() == Some("high")),
+    )
+    .await;
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, ServerMessage::SessionReady { .. })),
+        "SessionReady must precede ThinkingVariantChanged, got: {msgs:?}"
+    );
+    assert!(matches!(
+        msgs.last().unwrap(),
+        ServerMessage::ThinkingVariantChanged { variant } if variant.as_deref() == Some("high")
+    ));
+}
+
+#[tokio::test]
 async fn tcp_listener_streams_text_response() {
     let addr = spawn_daemon_tcp().await;
     let mut ws = connect_tcp(addr).await;

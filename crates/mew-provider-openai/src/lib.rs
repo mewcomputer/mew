@@ -682,6 +682,11 @@ impl Adapter {
 
 #[derive(Debug, serde::Deserialize)]
 struct CompletionChunk {
+    // `#[serde(default)]`: some OpenAI-compatible providers (vLLM, proxies)
+    // emit a usage-only final chunk with NO `choices` key at all. Defaulting to
+    // an empty vec lets it deserialize; the read loop already treats empty
+    // choices as "nothing to render" and continues after capturing usage.
+    #[serde(default)]
     choices: Vec<Choice>,
     /// Present on the final data chunk (with `stream_options.include_usage`).
     #[serde(default)]
@@ -1148,6 +1153,68 @@ mod tests {
             .expect("MessageEnd with usage");
         assert_eq!(usage.input, 1234, "prompt_tokens should map to input");
         assert_eq!(usage.output, 56, "completion_tokens should map to output");
+    }
+
+    #[tokio::test]
+    async fn test_fixture_usage_chunk_without_choices_field() {
+        // vLLM and some OpenAI-compatible proxies emit a final usage data chunk
+        // with NO `choices` key at all (not even `choices: []`). Before the
+        // `#[serde(default)]` fix this failed to deserialize and aborted the
+        // stream with "unmarshal chunk: missing field choices". The stream must
+        // now complete and surface usage instead of erroring.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let fixture = std::fs::read_to_string("src/testdata/usage-no-choices.sse")
+            .expect("read usage-no-choices fixture");
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(fixture, "text/event-stream"))
+            .mount(&mock_server)
+            .await;
+
+        let adapter = Adapter::new(
+            "test".to_string(),
+            mock_server.uri(),
+            "test-model".to_string(),
+            "test-key".to_string(),
+        );
+
+        let req = Request {
+            model: "test-model".into(),
+            messages: vec![],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            ..Default::default()
+        };
+
+        let mut stream = adapter.stream(req).await.expect("stream");
+        let mut events: Vec<ProviderEvent> = Vec::new();
+        while let Some(ev) = futures::StreamExt::next(&mut stream).await {
+            events.push(ev);
+        }
+
+        // No error event must surface — that was the regression.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::Error { .. })),
+            "choices-less usage chunk must not abort the stream: {:?}",
+            events
+        );
+
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                ProviderEvent::MessageEnd { usage, .. } => Some(usage),
+                _ => None,
+            })
+            .expect("MessageEnd with usage");
+        assert_eq!(usage.input, 10);
+        assert_eq!(usage.output, 2);
     }
 
     #[tokio::test]

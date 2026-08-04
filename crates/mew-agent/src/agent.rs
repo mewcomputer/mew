@@ -159,6 +159,11 @@ pub struct Agent {
     pub todos_path: Option<std::path::PathBuf>,
     /// Current reasoning/thinking configuration, if any.
     pub reasoning: Option<ReasoningConfig>,
+    /// Human-readable name of the currently applied thinking variant
+    /// (`"high"`, `"budget:8192"`, ...), or `None` when thinking is disabled
+    /// or the model has no configurable thinking. Mirrors `reasoning` so the
+    /// UI can display the active variant without re-deriving it from params.
+    pub active_thinking_variant: Option<String>,
     /// Active persona's system-prompt body. Prepended to `self.system` in
     /// the turn loop. `None` when no persona is active (default behavior).
     pub persona_prompt: Option<String>,
@@ -351,6 +356,7 @@ impl Agent {
             todos: Arc::new(tokio::sync::Mutex::new(crate::TodoList::new())),
             todos_path: None,
             reasoning: None,
+            active_thinking_variant: None,
             persona_prompt: None,
             active_tool_names: None,
             browser_enabled: false,
@@ -962,6 +968,18 @@ impl Agent {
 
     pub fn set_reasoning(&mut self, config: Option<ReasoningConfig>) {
         self.reasoning = config;
+    }
+
+    /// Set the human-readable name of the currently applied thinking variant.
+    /// Kept separate from `set_reasoning` so callers can track the display
+    /// name without coupling it to the opaque `ReasoningConfig.params`.
+    pub fn set_active_thinking_variant(&mut self, variant: Option<String>) {
+        self.active_thinking_variant = variant;
+    }
+
+    /// The name of the currently applied thinking variant, if any.
+    pub fn active_thinking_variant(&self) -> Option<&str> {
+        self.active_thinking_variant.as_deref()
     }
 
     /// Set the approximate-token threshold above which reasoning traces

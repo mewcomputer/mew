@@ -221,6 +221,25 @@ async fn test_set_system() {
 }
 
 #[tokio::test]
+async fn test_active_thinking_variant_defaults_off_and_roundtrips() {
+    let mut agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    // Defaults to "unset" (no thinking pill) until a variant is applied.
+    assert_eq!(agent.active_thinking_variant(), None);
+
+    agent.set_active_thinking_variant(Some("budget:8192".into()));
+    assert_eq!(agent.active_thinking_variant(), Some("budget:8192"));
+
+    agent.set_active_thinking_variant(None);
+    assert_eq!(agent.active_thinking_variant(), None);
+}
+
+#[tokio::test]
 async fn test_clear_context_empties_messages() {
     let agent = Agent::new(
         std::sync::Arc::new(FakeProvider::new(vec![])),
