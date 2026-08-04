@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use std::time::Duration;
 use tracing::warn;
 
 use mew_catalog::Catalog;
@@ -531,15 +530,6 @@ fn codex_logged_in() -> bool {
     mew_provider_responses::oauth::codex_token_path().exists()
 }
 
-pub(crate) fn provider_name_to_shape(pid: &str) -> &'static str {
-    match pid {
-        "opencode-zen" | "opencode-go" => "openai",
-        "z-ai" | "umans" => "anthropic",
-        "codex" => "responses",
-        _ => "openai",
-    }
-}
-
 /// Per-model transport overrides that the models.dev catalog cannot express
 /// (it has no per-model transport field). Applied after the provider default
 /// and any catalog shape, so the hardcode always wins.
@@ -783,161 +773,6 @@ pub(crate) fn make_provider_builder(
         };
         build_provider(&cfg, cat.as_ref(), pid, mid, raw).map_err(|e| e.to_string())
     })
-}
-
-pub(crate) async fn discover_models(
-    cfg: &Config,
-    cat: Option<&Catalog>,
-    raw: bool,
-) -> Vec<(String, String)> {
-    use std::collections::HashSet;
-
-    let mut seen = HashSet::new();
-    let mut models = Vec::new();
-
-    // Collect all provider IDs to query: configured + built-in.
-    let mut provider_ids: Vec<&str> = cfg.providers.keys().map(|s| s.as_str()).collect();
-    for pid in &["opencode-zen", "opencode-go", "z-ai"] {
-        if !provider_ids.contains(pid) {
-            provider_ids.push(pid);
-        }
-    }
-
-    // Query all providers concurrently with a 5s timeout per provider.
-    // This prevents one slow provider from blocking startup — total time
-    // is max(5s, slowest) instead of sum(all_provider_times).
-    let mut join_set = tokio::task::JoinSet::new();
-    for pid in provider_ids {
-        let provider = match build_provider(cfg, cat, pid, "", raw) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!("discovery: failed to build provider {}: {}", pid, e);
-                continue;
-            }
-        };
-        let pid = pid.to_string();
-        join_set.spawn(async move {
-            match tokio::time::timeout(Duration::from_secs(5), provider.list_models()).await {
-                Ok(Ok(list)) => Some((pid, list)),
-                Ok(Err(e)) => {
-                    warn!("discovery: provider {} list_models failed: {}", pid, e);
-                    None
-                }
-                Err(_) => {
-                    warn!("discovery: provider {} list_models timed out after 5s", pid);
-                    None
-                }
-            }
-        });
-    }
-
-    // Collect results as they complete.
-    while let Some(result) = join_set.join_next().await {
-        let Some((pid, list)) = result.ok().flatten() else {
-            continue;
-        };
-        tracing::info!("discovery: provider {} returned {} models", pid, list.len());
-        for m in list {
-            let full_id = if m.id.contains('/') {
-                m.id.clone()
-            } else {
-                format!("{}/{}", pid, m.id)
-            };
-            if seen.insert(full_id.clone()) {
-                let catalog_model = cat.and_then(|c| c.lookup(&m.id));
-                // Image/video/audio generation models aren't usable by the
-                // chat agent — drop them when the catalog identifies one.
-                // Unknown models stay (they may be new, pre-catalog).
-                if let Some(cm) = catalog_model {
-                    if !cm.text_output {
-                        continue;
-                    }
-                }
-                let desc = if let Some(cm) = catalog_model {
-                    format!("{} · {} · {} ctx", pid, cm.shape, cm.context_window)
-                } else {
-                    let shape = provider_name_to_shape(&pid);
-                    format!("{} · {}", pid, shape)
-                };
-                models.push((full_id, desc));
-            }
-        }
-    }
-
-    // Pull umans models from the catalog. umans only documents an OpenAI-shaped
-    // /v1/models/info (used by load_catalog above) and does not expose an
-    // Anthropic-shaped /v1/models endpoint, so `provider.list_models()` for
-    // umans returns nothing. The catalog has the authoritative entries
-    // (context windows, capabilities) — seed the picker from there.
-    //
-    // Gated on credential presence for the same reason as the catalog load:
-    // no key, no picker entries.
-    if provider_has_credential(cfg, "umans") {
-        if let Some(c) = cat {
-            for (model_id, model_info) in &c.models {
-                if model_info.provider != "umans" {
-                    continue;
-                }
-                let full_id = format!("umans/{}", model_id);
-                if seen.insert(full_id.clone()) {
-                    let desc = format!("umans · anthropic · {} ctx", model_info.context_window);
-                    models.push((full_id, desc));
-                }
-            }
-        }
-    }
-
-    // Pull codex (ChatGPT OAuth) models from the catalog as a baseline. The
-    // live list_models call above may have already added them (plan-filtered)
-    // — `seen` dedups. This seeds the picker when the live /models endpoint is
-    // unreachable (offline / auth failure) so standalone matches the daemon,
-    // which reads the catalog directly. Gated on OAuth login.
-    if codex_logged_in() {
-        if let Some(c) = cat {
-            for (model_id, model_info) in &c.models {
-                if model_info.provider != "codex" {
-                    continue;
-                }
-                let full_id = format!("codex/{}", model_id);
-                if seen.insert(full_id.clone()) {
-                    let desc = format!("codex · responses · {} ctx", model_info.context_window);
-                    models.push((full_id, desc));
-                }
-            }
-        }
-    }
-
-    // Add hardcoded fallbacks if nothing discovered.
-    if models.is_empty() {
-        tracing::warn!("discovery: no models from any provider, using fallbacks");
-        let mut fallbacks: Vec<(String, String)> = vec![
-            (
-                "opencode-zen/deepseek-v4-flash".into(),
-                "opencode-zen · openai".into(),
-            ),
-            ("z-ai/glm-5.1".into(), "z-ai · anthropic".into()),
-            (
-                "opencode-go/minimax-text-01".into(),
-                "opencode-go · anthropic".into(),
-            ),
-        ];
-        // Only advertise umans in the fallback list when a credential is set.
-        if provider_has_credential(cfg, "umans") {
-            fallbacks.push(("umans/umans-coder".into(), "umans · anthropic".into()));
-        }
-        // Only advertise kimi-for-coding in the fallback list when a credential is set.
-        if provider_has_credential(cfg, "kimi-for-coding") {
-            fallbacks.push(("kimi-for-coding/k3".into(), "kimi · openai".into()));
-        }
-        for (id, desc) in fallbacks {
-            if seen.insert(id.clone()) {
-                models.push((id, desc));
-            }
-        }
-    }
-
-    models.sort_by(|a, b| a.0.cmp(&b.0));
-    models
 }
 
 // ---------------------------------------------------------------------------
@@ -1730,8 +1565,6 @@ mod tests {
         assert!(find_router_provider(&cfg).is_none());
     }
 
-    // --- provider_name_to_shape ---
-
     // --- resolve_model ---
 
     #[test]
@@ -1797,21 +1630,6 @@ mod tests {
             Some("deepseek-v4-flash".into()),
         );
         assert_eq!(pid, "deepseek");
-    }
-
-    #[test]
-    fn provider_name_to_shape_known() {
-        assert_eq!(provider_name_to_shape("opencode-zen"), "openai");
-        assert_eq!(provider_name_to_shape("opencode-go"), "openai");
-        assert_eq!(provider_name_to_shape("z-ai"), "anthropic");
-        assert_eq!(provider_name_to_shape("umans"), "anthropic");
-        assert_eq!(provider_name_to_shape("kimi-for-coding"), "openai");
-        assert_eq!(provider_name_to_shape("codex"), "responses");
-    }
-
-    #[test]
-    fn provider_name_to_shape_unknown_defaults_to_openai() {
-        assert_eq!(provider_name_to_shape("nonexistent-provider"), "openai");
     }
 
     // --- hardcoded_shape_override ---

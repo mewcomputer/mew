@@ -109,6 +109,10 @@ impl Agent {
                 .collect();
             sort_tool_defs(&mut tool_defs);
 
+            // Ingest any user guidance queued since the last request so it
+            // steers the next provider request (even a tool-call continuation).
+            self.drain_guidance().await;
+
             // Check if compaction is needed (forced or auto).
             let force = {
                 let mut flag = self.force_compact.lock().await;

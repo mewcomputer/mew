@@ -1,118 +1,116 @@
-# Plan: Qwen3.8 thinking variants + token-budget slider
+# Plan: daemon-only TUI, immediate two-press cancel, and guided queued messages
 
-**Goal:** Give `qwen3.8-max` and `qwen3.8-max-preview` configurable thinking — effort levels `low` / `medium` / `xhigh` plus a token-budget slider shown alongside the thinking selection in all three frontends (TUI, web UI, GPUI desktop).
+## Context
 
-**Sequencing (revised):** Foundations first (catalog → config → resolution → protocol), then the **TUI end-to-end with extended controls (keyboard + mouse + number input) and a verification checkpoint**, then web UI and desktop GPUI, then full verification. Rationale: the TUI is the cheapest place to prove the whole pipeline (resolution, protocol, slider UX) before duplicating it in two other frontends.
+The local-mode TUI (`run_tui`) embeds the `Agent` directly and has no server-side
+serialization, so a cancelled turn can still be winding down while a new submit
+starts a second concurrent turn — the reported race. The daemon already
+serializes turns (`turn_lock` + `current_turn_cancel` in `mew-daemon/src/lib.rs`),
+so making the daemon the only runtime path removes the race at the source.
 
-**Key constraint (from QwenCloud docs):** `thinking_budget` is NOT supported by every thinking model (only Qwen3.8/3.7/3.6/3.5/3-VL/3, GLM, Kimi series), and for qwen3.8-max it is mutually exclusive with `reasoning_effort` — setting both errors. So the slider is gated by per-model capability metadata and only models that declare a budget range get it. Effort variants map to budgets: low→4096, medium→16384, xhigh→262144; model default is budget 131072 / effort xhigh. `qwen3.8-max*` enables thinking by default, so an explicit "off" must send `enable_thinking: false` (plain None leaves thinking on).
+Two UX problems compound it:
+- Esc only *arms* a 2-second hint on the first press; the user doesn't realize the
+  turn is still running and submits again, which **queues** messages that all fire
+  in a burst when the turn finally ends ("multiple requests at the same time").
+- Queued messages have no way to steer the *running* turn; they only become a new
+  turn after the current one finishes.
 
-## Phase A: Foundations
+Decisions (confirmed):
+1. **Sunset local mode** — the `mew` TUI always talks to a daemon (spawn one if
+   none is running). The deterministic harness (`mew-tui/src/harness.rs`) and
+   `tui-capture` harness mode stay — they are test tooling, not the user runtime.
+2. **Guide command** — a queued message can be injected into the running turn's
+   *next* provider request (even a tool-call continuation) to steer the LLM now.
+3. **Two-press Esc cancels immediately** — the second press cancels and the TUI
+   keeps the turn "active" until the turn actually ends, so later submits are
+   queued rather than sent into the daemon's "turn in progress" window.
 
-### A1. Catalog metadata (`crates/mew-catalog/src/lib.rs`)
+## Phase 1 — Agent runtime: guidance injection
 
-- Add `ThinkingBudget { min, max, step, default, by_effort: Vec<(String, i64)> }` (serde, `Default`).
-- Add `Model.thinking_budget: Option<ThinkingBudget>` (serde default, skip if none).
-- Add `Catalog::thinking_budget(&self, model_id) -> Option<ThinkingBudget>` mirroring `thinking_variants`: model field first, then a builtin rule.
-- Builtin rule: `id.contains("qwen") && (id.contains("3.8") || id.contains("3-8"))` → `ThinkingBudget { min: 0, max: 262144, step: 1024, default: 131072, by_effort: [("low",4096),("medium",16384),("xhigh",262144)] }`. (Matches both `qwen3.8-max` and `qwen3.8-max-preview`, incl. dated snapshots.)
-- In `builtin_thinking_variants`, add a qwen3.8 rule **before** the "no configurable thinking" bucket (which currently returns empty for all `qwen` ids):
-  - variants `low`/`medium`/`xhigh` with params `{"enable_thinking": true, "reasoning_effort": "<level>"}`, plus an explicit `off` variant with params `{"enable_thinking": false}`.
-- `default_thinking`: extend preference chain to `"high"` → `"thinking"` → `"xhigh"` → first. qwen3.8 defaults to `xhigh` (matches API default); existing models unaffected (they all have `high` or `thinking`).
-- `map_variant` (model-switch carry-over): when the source name is `budget:<n>` and the target model has `thinking_budget`, carry it over clamped/snapped to the target range. Also make the closest-effort tie-break prefer the higher level (docs map OpenAI `high`→`xhigh`, and `min_by_key` currently returns the lower on ties).
-- Unit tests: qwen3.8 variants (names, params, off variant), `thinking_budget` rule, `default_thinking` → xhigh, `map_variant` budget carry-over + `high`→`xhigh`, non-qwen3.8 models unchanged.
+Goal: let the daemon inject a short user message into the running turn's next
+provider request (mid-tool-loop), without starting a new turn.
 
-### A2. Config override (`crates/mew-config`, `crates/mew/src/setup/providers.rs`)
+- `crates/mew-agent/src/agent.rs`: add a shared pending-guidance queue on `Agent`
+  (e.g. `pending_guidance: Arc<tokio::sync::Mutex<VecDeque<String>>>`, or a
+  `tokio::sync::mpsc` channel). Because `run_with_parts` clones the agent but
+  shares `Arc` fields, the running turn sees the guidance.
+- `crates/mew-agent/src/turn.rs`: at the top of each `turn_loop` iteration (before
+  `prepare_and_compact_messages` builds the request), drain pending guidance and
+  append each as a user `Message` to `self.messages` so it is included in the next
+  request. If the turn already ended, the guidance stays queued and is picked up
+  by the next turn (matches the "else it gets picked up on the next turn" fallback).
+- Add a public method `Agent::enqueue_guidance(text)` (or `inject_guidance`).
+- Emit an `AgentEvent` (e.g. a `Message`/`ProviderEvent`-style marker) so the TUI
+  can show the injected guidance in the transcript.
 
-- `CustomModel.thinking_budget: Option<mew_catalog::ThinkingBudget>` (serde default) so users can add/override budget ranges via `config.toml`.
-- Thread through `build_custom_model` (explicit value, or `base` value when `merge`).
-- Add a catalog test asserting a custom model with only `thinking_budget` set still gets built-in effort variants (variants and budget are independent axes).
+## Phase 2 — Daemon + protocol: Guide message
 
-### A3. Resolution (`crates/mew/src/setup/providers.rs`)
+- `crates/mew-protocol`: add `ClientMessage::Guide { text }` (wire roundtrip
+  coverage). Keep it separate from `Prompt` (session-management vs streaming).
+- `crates/mew-daemon/src/lib.rs`: handle `ClientMessage::Guide`, resolve the
+  attached session, and call `agent.enqueue_guidance(text)`. Also broadcast a
+  user-message event so attached clients see it. Update the client/TS client if
+  the wire enum is shared there.
+- `crates/mew-daemon/src/client.rs`: add `DaemonClient::guide(text)`.
 
-- Change `resolve_reasoning` to return `Option<(ReasoningConfig, String)>` (config + canonical resolved name). Handle:
-  - `"off"` / `"none"`: if the model defines an explicit off variant, return its params (→ `enable_thinking: false`); else `None`.
-  - `"budget:<n>"`: parse `n`, clamp to the model's budget `min..=max`, snap to `step`, return params `{"enable_thinking": true, "thinking_budget": n}` and canonical name `budget:<n>`; no budget metadata or unparseable → `None` (treated as unknown variant, same as today).
-  - anything else: current lookup by name (params unchanged).
-- `ReasoningConfig`/`Request` docs in `crates/mew-provider/src/lib.rs`: add a qwen example (`{"enable_thinking": true, "thinking_budget": 8192}`).
-- Update call sites:
-  - `crates/mew/src/runtime/local.rs::set_thinking`: stop short-circuiting off before resolution — call `resolve_reasoning` for every non-empty name (empty → None).
-  - `crates/mew/src/commands/daemon.rs` thinking_setter: same; return the canonical resolved name (clamped budget) instead of the raw input.
-  - `crates/mew/src/commands/tui.rs` startup path: use the resolved name for `app.active_thinking_variant`.
-- Tests in `providers.rs` (follow existing style ~line 1157): budget parse/clamp/snap, off→`enable_thinking:false` for qwen3.8, off→None for models without an off variant, unknown budget → None.
+## Phase 3 — TUI: guided queued messages + reminder
 
-### A4. Protocol (`crates/mew-protocol/src/lib.rs`, `mew-web-client/src/index.ts`)
+- `crates/mew-tui/src/events.rs`: add `Action::GuideQueued(String)` (or reuse the
+  queued-send path with a mode). Wire a keybinding (Ctrl+Up / Shift+Up, or the
+  existing Up-Up) that, when a queued message exists, pops it and sends it as
+  guidance instead of cancelling-and-resubmitting.
+- `crates/mew-tui/src/app/mod.rs`: track queued messages with a "guide vs send"
+  intent; add a visible reminder (status pill + the existing input preview strip)
+  explaining the guide key and that queued messages will fire on the next turn.
+- `crates/mew/src/runtime/dispatch.rs`: add the dispatch arm for `Action::GuideQueued`
+  → `target.guide(text)`. Add a `CommandTarget::guide` method to both `LocalTarget`
+  (dropped in Phase 5) and `DaemonTarget`.
+- Update the help overlay (`ui/overlays.rs`) to document the guide key.
 
-- Add `ThinkingBudgetInfo { min, max, step, default, by_effort: Vec<(String,i64)> }` to the protocol (struct + JSON roundtrip test).
-- `ModelInfo.thinking_budget: Option<ThinkingBudgetInfo>` (serde default/skip).
-- No new message types: budget rides the existing `SetThinkingVariant { variant }` as the string convention `"budget:<n>"`; document it next to `ThinkingVariantInfo` and in `setThinkingVariant` docs.
-- Daemon model-list builder (`crates/mew/src/commands/daemon.rs`) populates `thinking_budget` from `cat.thinking_budget(&m.id)`.
-- TS: add `ThinkingBudgetInfo` and `ModelInfo.thinking_budget?: ThinkingBudgetInfo | null`; add `setThinkingBudget(tokens: number)` sugar that calls `setThinkingVariant(\`budget:${tokens}\`)`.
+## Phase 4 — TUI: two-press Esc that stops immediately + turn-alive guard
 
-## Phase B: TUI (proving ground — do first, verify, then port)
+- Keep the two-press Esc arm/cancel in `handle_normal_key` (`events.rs`).
+- On the second press (`Action::Cancel`), do **not** set `streaming=false`
+  immediately. Instead set a `cancelling` flag and keep streaming truthy until the
+  turn-ending `MessageEnd`/`Error` event actually arrives. This way submits during
+  the cancel-window are queued, not sent into the daemon's "turn in progress"
+  window.
+- `crates/mew/src/runtime/dispatch.rs`: `Action::Cancel` sends daemon cancel and
+  marks `cancelling`; does not clear `streaming`. `app/mod.rs` clears `cancelling`
+  + `streaming` on `MessageEnd`/`Error`.
+- If the daemon still replies with "turn in progress" (edge race), queue the
+  message instead of dropping it.
 
-### B1. TUI state and population (`crates/mew-tui`)
+## Phase 5 — Sunset local mode (daemon-only)
 
-- `App`: add `thinking_budget: HashMap<String, mew_protocol::ThinkingBudgetInfo>` (keyed by bare model id, like `thinking_variants`) and `budget_draft: Option<String>` (the budget value being typed/stepped; `None` when the budget row is not selected or no budget metadata exists). Populate `thinking_budget` in `app/mod.rs` `ModelList` handler (daemon mode) and `commands/tui.rs` (~line 620, local mode). `thinking_variants` type stays `Vec<String>` (no churn).
-- `app/pickers.rs::open_thinking_variant_picker_for`: when the model has budget metadata, append a budget row (id `"budget"`, label `"token budget"`) after the variant rows. Seed `budget_draft` from the active `budget:<n>` variant if set, else the `by_effort` mapping of the active effort, else `default`. Clear `budget_draft` in `close_picker`.
+- `crates/mew/src/commands/tui.rs`: make `chat_cmd` connect to a daemon, spawning
+  one if none is healthy (reuse the supervisor pattern from
+  `mew-desktop-supervisor`, or a CLI-side spawn of `mew daemon --socket ...`).
+  Remove the `run_tui` local path from the default UX.
+- Keep `mew-tui/src/harness.rs` and `tui-capture` harness mode (deterministic tests).
+- Keep `LocalTarget` only if the harness/tests still need it; otherwise remove it.
+- Update `mew-tui/src/harness.rs` `Backend`/`LocalBackend` if the guide/cancel
+  actions change the harness's action expectations.
 
-### B2. TUI budget row rendering (`crates/mew-tui/src/ui/overlays.rs::draw_picker`)
+## Phase 6 — Plan-presentation race
 
-- Render the budget row as a track line, e.g. `[█████░░░░░░░] 8192 tok`, computed from min/max/step/draft. When the user is typing digits (draft is being edited), show the typed value with a cursor underscore instead of the track.
-- Record the track's screen rect on `App` (`picker_budget_rect: Option<Rect>`, set during draw, cleared when the picker closes) so `handle_mouse_event` can hit-test it.
+- Investigate the plan-approval modal path (`PlanApprovalRequest`,
+  `plan_approval_confirm`). The turn pauses at plan approval while `streaming` is
+  still true; confirm the new turn-alive guard + daemon-only serialization covers
+  the case where the user submits during plan review. Add a queued/guard behavior
+  if needed.
 
-### B3. TUI input handling (`crates/mew-tui/src/events.rs`)
+## Phase 7 — Verification
 
-Keyboard (`handle_picker_key`, only when the budget row is selected in a `thinking_variant` picker):
-- `KeyCode::Left` / `Right`: adjust the draft by `step`, clamped to `min..=max` and snapped to `step` (seed from current draft if unset). **Note:** Left/Right currently move the filter cursor — that must remain the behavior for all other rows.
-- Digit chars (`0`-`9`): number input. If the draft equals the seeded value, typing replaces it; otherwise appends. (Letters still filter the picker as today.)
-- `Backspace`: pop the last digit; empty draft reseeds to the metadata default.
-- `Enter`: commit `SetThinkingVariant("budget:<n>")` and close the picker (existing Enter path — add a `"budget"` arm alongside `"thinking_variant"`).
-- `Esc`: closes the picker (existing behavior; typed draft is discarded).
+- Tests: protocol roundtrip for `Guide`; agent guidance injection (guidance is
+  included in the next request even when `Finish::ToolUse`); TUI queued-message
+  guide key; two-press Esc cancel keeps `streaming` until the turn ends.
+- Run `cargo test --all`, `cargo clippy --all -- -D warnings`, `cargo fmt`,
+  `just arch-check`, `just theme-codegen-check`, and the JS checks if the wire
+  protocol changed.
+- Update `CURRENT.md` with an append-only dated entry.
 
-Mouse (`handle_mouse_event` — currently gated to `Normal | SlashCommand`; extend to `CommandPalette` when the picker kind is `thinking_variant` and `picker_budget_rect` is set):
-- `Down(Left)` on the track: map column → value (`min + frac * (max-min)`, snapped to step), set the draft (no commit yet).
-- `Drag(Left)`: update the draft as the pointer moves (preview).
-- `Up(Left)`: commit `SetThinkingVariant("budget:<n>")` from the draft. **Do not close the picker** — the user may keep dragging or pick a variant.
-- `ScrollUp`/`ScrollDown` over the track: nudge the draft by `±step` and commit immediately (single discrete event, no spam).
-- Other rows/areas in picker mode: ignore (unchanged behavior; pickers were mouse-inert before).
+## Out of scope (for now)
 
-Status pill (`crates/mew-tui/src/ui/status.rs`): strip the `budget:` prefix (show the number).
-
-### B4. TUI tests (`crates/mew-tui/src/app/tests.rs`)
-
-- Budget row appears only when metadata is present.
-- Draft seeding: active `budget:<n>` wins, then `by_effort[active effort]`, then `default`.
-- Left/Right adjusts by step and clamps at min/max.
-- Digit typing replaces the seed, appends after a nudge; Backspace pops; empty reseeds.
-- Enter emits `Action::SetThinkingVariant("budget:<n>")` and closes.
-- Mouse: set `picker_budget_rect`, synthesize `MouseEvent` Down/Drag/Up/Scroll, assert draft updates and Up commits the right variant (use the crossterm `MouseEvent` type directly).
-- `ModelList` populates `thinking_budget` (daemon mode) and the local-mode startup path does too.
-- Existing tests updated where `ModelInfo` literals gain the new field.
-
-### B5. TUI verification checkpoint (before any web/desktop work)
-
-- `cargo test -p mew-catalog -p mew-protocol -p mew-tui -p mew`, then `cargo test --all`, `cargo clippy --all -- -D warnings`, `cargo fmt`, `just arch-check`.
-- Manual smoke via `mew tui-capture` harness if practical (deterministic local mode) — at minimum the unit tests cover resolution → action → daemon roundtrip paths.
-
-## Phase C: Port to the other frontends
-
-### C1. Web UI (`mew-web-ui/src/components/model-pill.tsx`)
-
-- When `currentModelInfo.thinking_budget` is set, render a "Budget" block under the variant rows: `<input type="range">` (min/max/step) + value label.
-- Slider value: current `budget:<n>` variant if active, else the active effort's mapped budget (`by_effort`), else `default`. Local display updates on input; commit via `client.setThinkingVariant("budget:<n>")` on pointer-up / key-up / blur **without closing the popup** (new `handleSetBudget`, unlike `handleSetVariant` which closes).
-- Pill badge (`currentThinkingVariant`): strip `budget:` prefix for display.
-- `mew-web-client` roundtrip/type tests if the existing test harness covers ModelInfo; otherwise rely on `tsc` + build.
-
-### C2. Desktop GPUI (`apps/mew-desktop`)
-
-- `shell/helpers.rs`: add `thinking_budget_for_model(...) -> Option<mew_protocol::ThinkingBudgetInfo>` mirroring `thinking_variants_for_model`.
-- `shell/preferences.rs::render_thinking_picker`: when budget metadata exists, render a custom slider below the options (this GPUI rev has no Slider element; `Div` has `on_drag`/`on_drag_move` + `on_mouse_down`): track + fill + thumb, value from the active variant (same resolution as web), click/drag sets value, commit on release; Left/Right via the existing `shell_key_down` path in `chat.rs` (which currently only handles Escape/copy/platform commands — add arrow handling when the thinking picker is open and the slider has focus).
-- `Shell` state: `thinking_budget_draft: Option<i64>` (reset in `lifecycle.rs`/`preferences.rs` close paths, same pattern as `thinking_picker_open`).
-- `shell/chat_render.rs`: model label strips `budget:` prefix (format helper).
-- Tests in `shell/tests.rs`: budget helper returns metadata only for models that declare it (update existing `ModelInfo` literals with the new field).
-
-## Phase D: Verification
-
-- `cargo test --all`, `cargo clippy --all -- -D warnings`, `cargo fmt`, `just arch-check`, `just theme-codegen-check`.
-- `pnpm --filter mew-web-client exec tsc --noEmit`, `pnpm --filter mew-web-ui test`, `pnpm --filter mew-web-ui build`.
-- `cargo check -p mew-desktop` (build is heavy; check + targeted tests).
-- Update `docs/using-mew/providers.md` if it has a model-config/thinking section (add a short "thinking variants and token budgets" note); `CURRENT.md` dated entry after verification.
+- Full removal of the harness / `tui-capture` local mode (kept as test tooling).
+- Remote/iroh daemon changes beyond what the shared `Guide` wire message needs.

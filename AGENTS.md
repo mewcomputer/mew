@@ -115,13 +115,13 @@ The canonical path is:
 frontend → transport → daemon → session → agent → provider
 ```
 
-The built-in TUI has two modes:
-
-- Standalone mode uses `runtime::local::LocalTarget` and owns an `Agent` in the
-  `mew` binary.
-- Daemon mode uses `runtime::daemon::DaemonTarget` and `DaemonClient`. The
-  daemon owns the `Agent`; the TUI receives the same logical `AgentEvent` stream
-  after wire translation.
+The built-in TUI is daemon-only: local mode was sunset. The `mew` chat command
+spawns a `mew daemon` on a loopback TCP port (if none is running) and connects
+via `runtime::daemon::DaemonTarget` + `DaemonClient`. The daemon owns the
+`Agent`; the TUI receives the same logical `AgentEvent` stream after wire
+translation. Because the daemon serializes turns (`turn_lock` +
+`current_turn_cancel`), concurrent-turn races are impossible. The deprecated
+`runtime::local::LocalTarget` was removed.
 
 The web path is `browser → mew-web-bridge → daemon`. The bridge relays WebSocket
 frames to the daemon's Unix socket and serves the compiled React assets. The

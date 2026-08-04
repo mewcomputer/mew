@@ -242,15 +242,7 @@ async fn execute_in_session(
     // Redact secrets before truncation.
     let (combined, redacted) = crate::secrets::redact_secret_words(&combined, &ctx.secrets);
 
-    let truncated = if combined.len() > OUTPUT_TRUNCATE_AT {
-        format!(
-            "{}...[truncated {} chars]",
-            &combined[..OUTPUT_TRUNCATE_AT],
-            combined.len() - OUTPUT_TRUNCATE_AT
-        )
-    } else {
-        combined
-    };
+    let truncated = truncate_output(combined);
     let truncated = crate::secrets::annotate_redaction(truncated, redacted);
 
     let error_msg = if result.timed_out {
@@ -271,6 +263,27 @@ async fn execute_in_session(
         metadata: None,
         file_delta: None,
     })
+}
+
+/// Truncate combined output to `OUTPUT_TRUNCATE_AT` chars. Counts chars,
+/// not bytes: byte slicing panics when a multibyte char straddles the
+/// limit, and the context-window budget the limit protects is
+/// char-proportional anyway.
+fn truncate_output(combined: String) -> String {
+    // Fast path: byte length <= limit implies char count <= limit.
+    if combined.len() <= OUTPUT_TRUNCATE_AT {
+        return combined;
+    }
+    let total_chars = combined.chars().count();
+    if total_chars <= OUTPUT_TRUNCATE_AT {
+        return combined;
+    }
+    let head: String = combined.chars().take(OUTPUT_TRUNCATE_AT).collect();
+    format!(
+        "{}...[truncated {} chars]",
+        head,
+        total_chars - OUTPUT_TRUNCATE_AT
+    )
 }
 
 /// Merge stdout and stderr lines into a single redacted/truncated output
@@ -299,15 +312,7 @@ fn finalize_output(
     // truncation count then refers to the redacted length.
     let (combined, redacted) = crate::secrets::redact_secret_words(&combined, secrets);
 
-    let truncated = if combined.len() > OUTPUT_TRUNCATE_AT {
-        format!(
-            "{}...[truncated {} chars]",
-            &combined[..OUTPUT_TRUNCATE_AT],
-            combined.len() - OUTPUT_TRUNCATE_AT
-        )
-    } else {
-        combined
-    };
+    let truncated = truncate_output(combined);
     let truncated = crate::secrets::annotate_redaction(truncated, redacted);
 
     ToolOutput {
@@ -381,5 +386,41 @@ mod tests {
         let out_pos = result.output.find("out").unwrap();
         let sep_pos = result.output.find("--- stderr ---").unwrap();
         assert!(out_pos < sep_pos);
+    }
+
+    #[test]
+    fn test_truncate_output_em_dash_at_cut_point() {
+        // Em dash (3 bytes) at bytes 29999..30002 straddles the char limit.
+        let mut out = "a".repeat(OUTPUT_TRUNCATE_AT - 1);
+        out.push('\u{2014}');
+        out.push_str("bbbbbbbbbb");
+        let truncated = truncate_output(out);
+        assert!(
+            truncated.contains("[truncated 10 chars]"),
+            "expected 10 dropped chars: {}",
+            &truncated[truncated.len().saturating_sub(40)..]
+        );
+        assert!(truncated.starts_with(&format!("{}\u{2014}", "a".repeat(OUTPUT_TRUNCATE_AT - 1))));
+    }
+
+    #[test]
+    fn test_truncate_output_short_multibyte_untouched() {
+        // 20000 em dashes = 60000 bytes, over the byte limit, but only
+        // 20000 chars → kept whole.
+        let out = "\u{2014}".repeat(20000);
+        assert_eq!(truncate_output(out.clone()), out);
+    }
+
+    #[test]
+    fn test_finalize_output_truncates_multibyte_safely() {
+        let mut line = "a".repeat(OUTPUT_TRUNCATE_AT - 1);
+        line.push('\u{2014}');
+        line.push_str("tail");
+        let out = finalize_output(vec![line], vec![], &crate::SecretSet::default(), None);
+        assert!(
+            out.output.contains("[truncated 4 chars]"),
+            "tail length: {}",
+            out.output.len()
+        );
     }
 }

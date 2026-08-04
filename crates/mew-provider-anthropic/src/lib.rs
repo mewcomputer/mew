@@ -271,12 +271,20 @@ impl Adapter {
         // We map our 3-variant enum onto "auto"/"any"/"none".
         if let Some(ref params) = req.params {
             if let Some(tc) = params.tool_choice {
-                let v = match tc {
-                    mew_provider::ToolChoice::Auto => json!("auto"),
-                    mew_provider::ToolChoice::Required => json!("any"),
-                    mew_provider::ToolChoice::None_ => json!("none"),
-                };
-                body["tool_choice"] = v;
+                // Extended thinking rejects tool_choice "any"/"tool". The
+                // reasoning truncator forces Required to break deliberation
+                // loops, but that is incompatible with thinking — drop it
+                // rather than fail the request.
+                let drop_required_in_thinking = matches!(tc, mew_provider::ToolChoice::Required)
+                    && thinking_mode_active(req.reasoning.as_ref());
+                if !drop_required_in_thinking {
+                    let v = match tc {
+                        mew_provider::ToolChoice::Auto => json!("auto"),
+                        mew_provider::ToolChoice::Required => json!("any"),
+                        mew_provider::ToolChoice::None_ => json!("none"),
+                    };
+                    body["tool_choice"] = v;
+                }
             }
         }
 
@@ -819,6 +827,26 @@ impl ToolCallAccumulator {
             }
         }
     }
+}
+
+/// Detect whether the request has extended thinking enabled, based on the
+/// Anthropic reasoning params. Extended thinking rejects `tool_choice` set to
+/// "any" or a specific tool, so the adapter uses this to avoid sending an
+/// incompatible value.
+fn thinking_mode_active(reasoning: Option<&mew_provider::ReasoningConfig>) -> bool {
+    let Some(cfg) = reasoning else {
+        return false;
+    };
+    // Anthropic shape: {"thinking": {"type": "enabled", "budget_tokens": N}}
+    if let Some(t) = cfg.params.get("thinking") {
+        if let Some(obj) = t.as_object() {
+            if let Some(typ) = obj.get("type").and_then(|v| v.as_str()) {
+                return typ == "enabled";
+            }
+        }
+        return true;
+    }
+    false
 }
 
 fn map_finish_reason(reason: &str) -> Finish {
@@ -1681,5 +1709,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body_max_tokens(&body), Some(4096));
+    }
+
+    fn tool_choice_request(
+        tool_choice: mew_provider::ToolChoice,
+        thinking: Option<mew_provider::ReasoningConfig>,
+    ) -> Request {
+        Request {
+            model: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            system: String::new(),
+            reasoning: thinking,
+            params: Some(ChatParams {
+                temperature: None,
+                top_p: None,
+                max_tokens: None,
+                tool_choice: Some(tool_choice),
+            }),
+            headers: reqwest::header::HeaderMap::new(),
+        }
+    }
+
+    fn anthropic_thinking_on() -> mew_provider::ReasoningConfig {
+        let mut cfg = mew_provider::ReasoningConfig::default();
+        cfg.params.insert(
+            "thinking".into(),
+            json!({"type": "enabled", "budget_tokens": 16000}),
+        );
+        cfg
+    }
+
+    #[tokio::test]
+    async fn test_tool_choice_required_dropped_in_thinking_mode() {
+        let adapter = Adapter::new(
+            "anthropic".into(),
+            "https://example.com".into(),
+            "test-model".into(),
+            "test-key".into(),
+        );
+        // Thinking on + Required -> tool_choice must be omitted.
+        let req = tool_choice_request(
+            mew_provider::ToolChoice::Required,
+            Some(anthropic_thinking_on()),
+        );
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            body_json.get("tool_choice").is_none(),
+            "tool_choice must be omitted in thinking mode, got {:?}",
+            body_json.get("tool_choice")
+        );
+
+        // Thinking off + Required -> tool_choice stays "any".
+        let req = tool_choice_request(mew_provider::ToolChoice::Required, None);
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["tool_choice"], "any");
+
+        // Thinking on + Auto -> tool_choice stays "auto".
+        let req = tool_choice_request(
+            mew_provider::ToolChoice::Auto,
+            Some(anthropic_thinking_on()),
+        );
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["tool_choice"], "auto");
     }
 }

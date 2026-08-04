@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 use mew_hooks::NopDispatcher;
@@ -123,6 +124,72 @@ impl Tool for EchoTool {
         _ctx: ToolCtx,
         input: serde_json::Value,
     ) -> Result<ToolOutput, mew_tools::ToolError> {
+        Ok(ToolOutput {
+            output: input.to_string(),
+            error: String::new(),
+            diff: None,
+            metadata: None,
+            file_delta: None,
+        })
+    }
+}
+
+/// A tool that signals when it starts executing and then blocks until a
+/// release signal arrives. Lets a test inject state (e.g. guidance) while a
+/// tool call is in flight, before the next provider request is built.
+struct BlockingTool {
+    started: tokio::sync::mpsc::Sender<()>,
+    release: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<()>>,
+    schema: serde_json::Value,
+}
+
+impl BlockingTool {
+    fn new() -> (
+        Arc<Self>,
+        tokio::sync::mpsc::Receiver<()>,
+        tokio::sync::mpsc::Sender<()>,
+    ) {
+        let (started_tx, started_rx) = tokio::sync::mpsc::channel(1);
+        let (release_tx, release_rx) = tokio::sync::mpsc::channel(1);
+        (
+            Arc::new(Self {
+                started: started_tx,
+                release: tokio::sync::Mutex::new(release_rx),
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "input": { "type": "string" }
+                    }
+                }),
+            }),
+            started_rx,
+            release_tx,
+        )
+    }
+}
+
+#[async_trait]
+impl Tool for BlockingTool {
+    fn name(&self) -> &str {
+        "blocking"
+    }
+    fn description(&self) -> &str {
+        "blocks until released"
+    }
+    fn schema(&self) -> &serde_json::Value {
+        &self.schema
+    }
+    fn sensitivity(&self) -> Sensitivity {
+        Sensitivity::Mutating
+    }
+    async fn execute(
+        &self,
+        _ctx: ToolCtx,
+        input: serde_json::Value,
+    ) -> Result<ToolOutput, mew_tools::ToolError> {
+        let _ = self.started.send(()).await;
+        let mut release = self.release.lock().await;
+        let _ = release.recv().await;
         Ok(ToolOutput {
             output: input.to_string(),
             error: String::new(),
@@ -1205,6 +1272,111 @@ async fn test_cancellation_during_stream() {
     let msgs = agent.messages.lock().await;
     assert!(!msgs.is_empty());
     assert_eq!(msgs[0].role, Role::User);
+}
+
+#[tokio::test]
+async fn test_guidance_injected_into_running_turn() {
+    // Script 1: a tool call, so the turn continues. Script 2: a text response
+    // that ends the turn. The blocking tool lets us inject guidance while the
+    // tool call is in flight, i.e. before the second provider request is built.
+    let tool_call = FakeProvider::tool_call("blocking", "c1", serde_json::json!({"input": "hi"}));
+    let done = FakeProvider::text_response("done");
+    let provider = Arc::new(CapturingProvider::new(vec![tool_call, done]));
+    let (tool, mut started_rx, release_tx) = BlockingTool::new();
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![tool],
+        None,
+    );
+    agent.set_permission_engine(Arc::new(mew_config::permissions::PermissionEngine::new(
+        vec![],
+    )));
+
+    let mut rx = agent.run("call the tool".into());
+    // Wait until the tool call is executing (turn loop is between requests).
+    // Auto-allow any permission request that precedes the tool execution.
+    loop {
+        tokio::select! {
+            started = started_rx.recv() => {
+                assert!(started.is_some(), "tool start signal dropped");
+                break;
+            }
+            ev = rx.recv() => match ev {
+                Some(AgentEvent::PermissionRequest { tx, .. }) => {
+                    let _ = tx.send(mew_hooks::PermissionDecision::AllowSession);
+                }
+                Some(_) => {}
+                None => panic!("turn ended before the tool started"),
+            },
+        }
+    }
+    // Inject guidance while the turn is mid-flight.
+    agent.enqueue_guidance("steer now".into()).await;
+    // Release the tool so the turn can build its next request.
+    release_tx.send(()).await.unwrap();
+
+    while let Some(ev) = rx.recv().await {
+        if matches!(ev, AgentEvent::Provider(ProviderEvent::MessageEnd { finish, .. })
+            if finish == Finish::Stop)
+        {
+            break;
+        }
+    }
+
+    let captured = provider.captured.lock().unwrap();
+    assert!(captured.len() >= 2, "expected at least two requests");
+    let second = &captured[1];
+    let has_guidance = second.messages.iter().any(|m| {
+        m.parts.iter().any(|p| {
+            matches!(
+                p,
+                Part::Text(TextPart { text, synthetic: true, .. }) if text.contains("steer now")
+            )
+        })
+    });
+    assert!(has_guidance, "guidance should appear in the next request");
+    // The guidance should be a user message.
+    assert!(second.messages.iter().any(|m| m.role == Role::User));
+}
+
+#[tokio::test]
+async fn test_guidance_queued_before_turn_is_included_in_first_request() {
+    let done = FakeProvider::text_response("done");
+    let provider = Arc::new(CapturingProvider::new(vec![done]));
+    let agent = Arc::new(Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    ));
+
+    agent.enqueue_guidance("lead with this".into()).await;
+    let mut rx = agent.run("hello".into());
+    while let Some(ev) = rx.recv().await {
+        if matches!(ev, AgentEvent::Provider(ProviderEvent::MessageEnd { finish, .. })
+            if finish == Finish::Stop)
+        {
+            break;
+        }
+    }
+
+    let captured = provider.captured.lock().unwrap();
+    let first = &captured[0];
+    let has_guidance = first.messages.iter().any(|m| {
+        m.parts.iter().any(|p| {
+            matches!(
+                p,
+                Part::Text(TextPart { text, synthetic: true, .. }) if text.contains("lead with this")
+            )
+        })
+    });
+    assert!(
+        has_guidance,
+        "pre-queued guidance should be in the first request"
+    );
 }
 
 #[tokio::test]

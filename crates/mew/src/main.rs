@@ -415,13 +415,8 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
 }
 
 /// Session-level info exposed to plugins via the `config_read` callback.
-/// Plugins can query `session_id`, `model`, `provider`, `workspace`, and
-/// `active_persona`. Updated when persona/model changes.
+/// Plugins can query `active_persona`. Updated when persona changes.
 pub(crate) struct PluginInfo {
-    pub(crate) session_id: String,
-    pub(crate) model: String,
-    pub(crate) provider: String,
-    pub(crate) workspace: String,
     pub(crate) active_persona: Option<String>,
 }
 

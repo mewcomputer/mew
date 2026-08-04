@@ -39,6 +39,10 @@ final class MockMobileCore: MobileCoreProtocol {
         DaemonId(nodeId: nodeId)
     }
 
+    func addDaemonWithToken(nodeId: String, name: String, token: String) -> DaemonId {
+        DaemonId(nodeId: nodeId)
+    }
+
     func removeDaemon(id: DaemonId) {}
 
     func listDaemons() -> [DaemonEntry] { daemonsResult }
@@ -58,8 +62,10 @@ final class MockMobileCore: MobileCoreProtocol {
 
     func cancel(id: DaemonId) { cancelCalls.append(id.nodeId) }
 
-    func respondPermission(id: DaemonId, requestId: UInt64, decision: Decision) {}
-    func respondAskUser(id: DaemonId, requestId: UInt64, answers: [String]) {}
+    func respondPermission(id: DaemonId, requestId: String, decision: Decision) {}
+    func respondAskUser(id: DaemonId, requestId: String, answers: [String]) {}
+    func respondPlanApproval(id: DaemonId, requestId: String, approved: Bool, feedback: String?) {}
+    func respondToGoal(id: DaemonId, requestId: String, accepted: Bool) {}
 
     func listSessions(id: DaemonId) { listSessionsCalls.append(id.nodeId) }
     func newSession(id: DaemonId, cwd: String?) { newSessionCalls.append(cwd) }
@@ -70,6 +76,12 @@ final class MockMobileCore: MobileCoreProtocol {
     func switchModel(id: DaemonId, provider: String, model: String) {
         switchModelCalls.append((id.nodeId, provider, model))
     }
+
+    func listPersonas(id: DaemonId) {}
+    func switchPersona(id: DaemonId, name: String) {}
+
+    func setAutoTitle(id: DaemonId, enabled: Bool) {}
+    func setAutoSummary(id: DaemonId, enabled: Bool) {}
 
     func setPermissionMode(id: DaemonId, mode: String) {
         setPermissionModeCalls.append((id.nodeId, mode))

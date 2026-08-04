@@ -172,6 +172,11 @@ export class MewClient {
     cancel() {
         this.send({ type: "cancel" });
     }
+    /** Inject guidance into the running turn's next request (steer the LLM).
+     *  If no turn is running, it is picked up by the next turn. */
+    guide(text) {
+        this.send({ type: "guide", text });
+    }
     /**
      * Send a slash command (e.g. `/clear`, `/compact`). Returns the
      * `slash_result.text` if the daemon produces one.

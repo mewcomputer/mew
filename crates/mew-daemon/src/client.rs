@@ -220,6 +220,15 @@ impl DaemonClient {
         let _ = self.state.ws_out.send(json).await;
     }
 
+    /// Inject a short user message as guidance into the running turn's next
+    /// provider request (even a tool-call continuation). If no turn is running,
+    /// the guidance is picked up by the next turn.
+    pub async fn guide(&self, text: String) {
+        let msg = ClientMessage::Guide { text };
+        let json = mew_protocol::encode_json(&msg).unwrap_or_default();
+        let _ = self.state.ws_out.send(json).await;
+    }
+
     /// Send a raw protocol message (for messages not covered by a dedicated
     /// method, e.g. `YieldControl`).
     pub async fn send_raw(&self, json: &str) -> Result<()> {

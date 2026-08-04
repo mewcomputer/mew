@@ -65,6 +65,10 @@ impl CommandTarget for DaemonTarget {
         self.client.cancel().await;
     }
 
+    async fn guide(&mut self, text: String) {
+        self.client.guide(text).await;
+    }
+
     async fn clear(&mut self) -> Result<(), Unsupported> {
         let client = self.client.clone();
         client

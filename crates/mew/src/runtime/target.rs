@@ -51,6 +51,11 @@ pub trait CommandTarget: Send {
     /// Cancel the current streaming turn.
     async fn cancel(&mut self);
 
+    /// Inject a short user message as guidance into the running turn's next
+    /// provider request (even a tool-call continuation), without starting a
+    /// new turn. If no turn is running, the guidance is picked up next turn.
+    async fn guide(&mut self, text: String);
+
     /// Clear the conversation context.
     async fn clear(&mut self) -> Result<(), Unsupported>;
 

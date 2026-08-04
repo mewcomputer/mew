@@ -258,6 +258,12 @@ struct SessionRailView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+
+                    if let pct = contextPercent(session) {
+                        Label("\(pct)% ctx", systemImage: "memorychip")
+                            .font(.caption)
+                            .foregroundStyle(pct >= 90 ? .orange : .secondary)
+                    }
                 }
             }
 
@@ -401,6 +407,27 @@ struct SessionRailView: View {
             return String(format: "$%.4f", cost)
         }
         return String(format: "$%.2f", cost)
+    }
+
+    /// Context occupancy as a percent of the session model's window.
+    /// Matches the session's model against the daemon's model list to find
+    /// the window; nil when either the reading or the window is unknown.
+    private func contextPercent(_ session: SessionSummary) -> Int? {
+        guard let used = session.contextTokens, used > 0,
+              let window = contextWindow(for: session), window > 0 else {
+            return nil
+        }
+        return Int((Double(used) / Double(window) * 100).rounded())
+    }
+
+    private func contextWindow(for session: SessionSummary) -> Int64? {
+        guard let model = session.model else { return nil }
+        return store.availableModels.first { m in
+            if let provider = session.provider {
+                return m.provider == provider && m.model == model
+            }
+            return m.model == model
+        }?.contextWindow
     }
 
     /// Lower rank sorts first: pending > running > active > idle.

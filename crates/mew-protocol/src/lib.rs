@@ -98,6 +98,14 @@ pub enum ClientMessage {
     /// Cancel the current turn.
     Cancel,
 
+    /// Inject a short user message as guidance into the running turn's *next*
+    /// provider request (even a tool-call continuation). Unlike `Prompt`, this
+    /// does not start a new turn; it steers the current one. If no turn is
+    /// running, the guidance is picked up by the next turn.
+    Guide {
+        text: String,
+    },
+
     /// Respond to a `PermissionRequest` from the daemon.
     PermissionResponse {
         request_id: String,
@@ -1690,6 +1698,17 @@ mod tests {
     }
 
     #[test]
+    fn client_message_guide_roundtrip() {
+        let m = ClientMessage::Guide {
+            text: "steer now".into(),
+        };
+        match round_trip(&m) {
+            ClientMessage::Guide { text } => assert_eq!(text, "steer now"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
     fn client_message_permission_response_all_decisions_roundtrip() {
         for (decision, expected) in [
             (PermissionDecision::AllowOnce, 0u8),
@@ -2519,6 +2538,7 @@ mod tests {
                 },
             ),
             ("cancel", ClientMessage::Cancel),
+            ("guide", ClientMessage::Guide { text: "x".into() }),
             (
                 "permission_response",
                 ClientMessage::PermissionResponse {

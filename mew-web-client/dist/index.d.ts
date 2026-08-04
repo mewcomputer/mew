@@ -37,6 +37,9 @@ export type ClientMessage = {
 } | {
     type: "cancel";
 } | {
+    type: "guide";
+    text: string;
+} | {
     type: "permission_response";
     request_id: string;
     decision: PermissionDecision;
@@ -992,6 +995,9 @@ export declare class MewClient {
     prompt(text: string, attachments?: Attachment[]): void;
     /** Send `cancel` to abort the current turn. */
     cancel(): void;
+    /** Inject guidance into the running turn's next request (steer the LLM).
+     *  If no turn is running, it is picked up by the next turn. */
+    guide(text: string): void;
     /**
      * Send a slash command (e.g. `/clear`, `/compact`). Returns the
      * `slash_result.text` if the daemon produces one.

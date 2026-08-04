@@ -158,11 +158,7 @@ impl Tool for Grep {
                 let file = result.files.get(m.file_index);
                 let path_str = file.map(|f| f.relative_path(&picker)).unwrap_or_default();
 
-                let line_str = if m.line_content.len() > MAX_LINE_LEN {
-                    format!("{}...", &m.line_content[..MAX_LINE_LEN])
-                } else {
-                    m.line_content.clone()
-                };
+                let line_str = truncate_match_line(&m.line_content);
 
                 let formatted = format!("{}:{}:{}", path_str, m.line_number, line_str);
 
@@ -210,6 +206,19 @@ impl Tool for Grep {
             Err(e) => Err(ToolError::Execution(format!("grep task panicked: {e}"))),
         }
     }
+}
+
+/// Truncate long match lines to `MAX_LINE_LEN` chars, not bytes: byte
+/// slicing panics when a multibyte char straddles the limit.
+fn truncate_match_line(line: &str) -> String {
+    if line.len() <= MAX_LINE_LEN {
+        return line.to_string();
+    }
+    let head: String = line.chars().take(MAX_LINE_LEN).collect();
+    if head.len() == line.len() {
+        return line.to_string();
+    }
+    format!("{head}...")
 }
 
 /// Drop results from secret files and redact lines containing secret words.
@@ -536,5 +545,36 @@ mod tests {
             result.output.contains("receive_message"),
             "fuzzy mode should find 'receive_message' despite typos"
         );
+    }
+
+    #[tokio::test]
+    async fn test_grep_long_line_multibyte_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        // Em dash (3 bytes) at bytes 499..502 straddles the 500-char
+        // truncation point; the match lives past the cut so the truncated
+        // head must stand in for the line content.
+        let mut line = "a".repeat(MAX_LINE_LEN - 1);
+        line.push('\u{2014}');
+        line.push_str("needle-tail");
+        tokio::fs::write(dir.path().join("long.txt"), &line)
+            .await
+            .unwrap();
+
+        let tool = Grep;
+        let ctx = dummy_ctx(dir.path().to_path_buf());
+        let input = serde_json::json!({"pattern": "needle"});
+        let result = tool.execute(ctx, input).await.unwrap();
+        assert!(
+            result.output.contains("long.txt:1:"),
+            "match line reported: {}",
+            result.output
+        );
+        assert!(
+            result.output.ends_with("..."),
+            "over-long line truncated: {}",
+            result.output
+        );
+        // The content past the cut point is dropped with the truncation.
+        assert!(!result.output.contains("needle-tail"));
     }
 }

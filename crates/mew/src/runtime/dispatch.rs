@@ -56,7 +56,12 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
         Action::SlashCommand(text) => handle_slash_command(cx, text).await,
         Action::Cancel => {
             cx.target.cancel().await;
-            cx.app.streaming = false;
+            // Keep `streaming` true until the turn actually ends (the turn is
+            // still winding down). This is the turn-alive guard: submits in
+            // this window are queued instead of racing the daemon's
+            // "turn in progress" window. The ending MessageEnd/Error event
+            // clears `cancelling` + `streaming`.
+            cx.app.cancelling = true;
             Flow::Continue
         }
         Action::Quit => {
@@ -139,7 +144,19 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             // Cancel the current turn, then submit the queued message.
             cx.target.cancel().await;
             cx.app.streaming = false;
+            cx.app.cancelling = false;
             handle_submit(cx, text).await;
+            Flow::Continue
+        }
+        Action::GuideQueued(text) => {
+            // Steer the running turn: inject the queued message as guidance
+            // into its next provider request without cancelling. Show it in
+            // the transcript so the user sees what was injected.
+            if text.trim().is_empty() {
+                return Flow::Continue;
+            }
+            cx.app.push_guidance(text.clone());
+            cx.target.guide(text).await;
             Flow::Continue
         }
         Action::PasteClipboardImage => {

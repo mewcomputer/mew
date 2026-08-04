@@ -59,6 +59,43 @@ New test `test_session_list_sorted_by_last_seen` covers the ordering and
 the `created_at` fallback. `cargo test -p mew-tui`: 185 passed; clippy and
 fmt clean.
 
+# 2026-08-03 — fix char-boundary panics when truncating multibyte text
+
+Byte-index slicing panics ("byte index N is not a char boundary") whenever
+a multibyte char straddles the cut point. An em dash is 3 bytes, so it
+triggers the panic whenever it lands across a limit. Fixed all three
+byte-slicing truncation sites by counting chars instead.
+
+- `crates/mew-tui/src/ui/chat.rs`: `tool_call_args_summary` used
+  `&s[..50]` (bash command) and `&s[..40]` (grep/echo args) to build the
+  tool-call header preview, crashing the TUI render pass. Now routes
+  through a `truncate_chars` helper.
+- `crates/mew-tools/src/tools/bash.rs`: both 30000-unit output
+  truncations used `&combined[..OUTPUT_TRUNCATE_AT]`, panicking the tool
+  on large multibyte output. Extracted a shared `truncate_output` helper
+  that counts chars, which also makes the `[truncated N chars]` notice
+  honest (it previously reported bytes).
+- `crates/mew-tools/src/tools/grep.rs`: `&m.line_content[..MAX_LINE_LEN]`
+  panicked on matched lines over 500 bytes with a multibyte char at the
+  boundary. Now uses a `truncate_match_line` helper.
+
+Tests (all red before the fix, panicking with the reported em-dash
+message): em dash straddling each cut point (40/50 in TUI previews, 500
+in grep lines, 30000 in bash output), plus multibyte strings whose byte
+length exceeds the limit but whose char count doesn't (must pass through
+untruncated).
+
+Verification:
+- `cargo test -p mew-tools`: 116 passed.
+- `cargo test -p mew-tui`: 184 passed, golden frames unchanged.
+- `cargo test --all`: all green.
+- `cargo clippy -p mew-tools -p mew-tui --all-targets -- -D warnings`:
+  clean.
+
+Drive-by note: `cargo test --all` emits an `unused variable: stars`
+warning in `crates/mew-hooks-runtime/examples/buddy-plugin.rs:537`
+(pre-existing, unrelated to this change).
+
 # 2026-08-03 — filter non-text-output models from the picker
 
 `alibaba-token-plan` (and the whole catalog) carried image/video/audio
@@ -5281,3 +5318,54 @@ Verification:
   bullet, numbering, wrap-alignment, and nested-list coverage.
 - `cargo test -p mew-tui --test golden_test`: 5 frames unchanged.
 - `cargo clippy -p ratatui-mdstream --all-targets -- -D warnings`: clean.
+
+## 2025-XX-XX — daemon-only TUI, guided queued messages, immediate two-press cancel
+
+Sunset local mode and reworked the TUI's turn/queued-message UX.
+
+- **Sunset local mode.** `mew chat` now spawns a `mew daemon` on a loopback TCP
+  port (if none is running) and connects via `chat_with_daemon`. Removed
+  `run_tui`, `runtime::local::LocalTarget`, and the local-only setup helpers
+  (dispatcher, plugin storage, MCP loaders, persona-switch drain, discover_models).
+  Kept `mew-tui/src/harness.rs` and `tui-capture` harness mode (deterministic test
+  tooling). Forwarded `--provider`/`--model`/`--raw`/permission-mode flags to the
+  spawned daemon. The daemon serializes turns, so concurrent-turn races are gone.
+- **Guide command.** Added `ClientMessage::Guide { text }` over the wire
+  (Rust + TS client). The daemon queues guidance on the session's agent; the
+  agent drains it into the running turn's next provider request (even a
+  tool-call continuation) via `Agent::enqueue_guidance`/`drain_guidance`. TUI:
+  `Action::GuideQueued` bound to Ctrl+Up, `push_guidance` renders a distinct `→`
+  user message, and a status pill shows "N queued · Ctrl+Up to guide".
+- **Two-press Esc + turn-alive guard.** `Action::Cancel` no longer clears
+  `streaming` immediately; it sets `app.cancelling` and keeps streaming true
+  until the turn-ending MessageEnd/Error arrives, so submits during the cancel
+  window are queued instead of racing the daemon. `cancelling` shows a status hint.
+- **Plan-presentation race.** Daemon-only serialization + the turn-alive guard
+  cover the plan-approval pause path (the turn stays "active" while paused).
+
+Verification:
+- `cargo test --all`: 1630 passed, 0 failed.
+- `cargo clippy --all -- -D warnings`: clean (only a dependency future-compat note).
+- `just arch-check`, `just theme-codegen-check`: pass.
+- `just test-js` (17), `pnpm --filter mew-web-ui test` (107), web-client tsc: pass.
+- New tests: agent guidance injection (mid-tool-call + pre-queued), protocol
+  Guide roundtrip, TS guide message, TUI Ctrl+Up guide key, turn-alive guard.
+
+## 2025-XX-XX — fix OpenAI-compatible token usage tracking (Alibaba Qwen)
+
+The TUI's token counter stuck at 0/1000k on Alibaba Qwen (and other
+OpenAI-compatible providers) because `mew-provider-openai` never parsed usage
+from the API response.
+
+- `read_stream` now captures the `usage` object from the final data chunk
+  (`prompt_tokens`/`completion_tokens`, with `input_tokens`/`output_tokens`
+  aliases for providers that name them that way) and surfaces it in
+  `MessageEnd`.
+- Deferred finalization: the finish_reason chunk arrives *before* the usage
+  chunk, so the loop no longer returns at finish_reason — it records the finish
+  and keeps reading until `[DONE]`/stream end so usage is captured.
+- Request body now sets `stream_options: { include_usage: true }`, which many
+  providers (Alibaba, DeepSeek) require to include usage at all.
+
+New fixture `usage.sse` + test `test_fixture_usage_parsed_from_final_chunk`.
+`cargo test --all`: 1631 passed, 0 failed; clippy clean.

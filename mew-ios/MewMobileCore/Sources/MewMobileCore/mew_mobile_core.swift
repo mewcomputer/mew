@@ -839,6 +839,12 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     func addDaemon(nodeId: String, name: String)  -> DaemonId
     
     /**
+     * Add a daemon from an invite payload and retain its pairing credential
+     * for reconnects.
+     */
+    func addDaemonWithToken(nodeId: String, name: String, token: String)  -> DaemonId
+    
+    /**
      * Archive or unarchive a session.
      */
     func archiveSession(id: DaemonId, sessionId: String, archived: Bool) 
@@ -940,6 +946,17 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
      * Respond to a permission request.
      */
     func respondPermission(id: DaemonId, requestId: String, decision: Decision) 
+    
+    /**
+     * Respond to a plan-approval request. `approved = false` with optional
+     * `feedback` requests changes.
+     */
+    func respondPlanApproval(id: DaemonId, requestId: String, approved: Bool, feedback: String?) 
+    
+    /**
+     * Respond to a goal proposal from the agent (`propose_goal`).
+     */
+    func respondToGoal(id: DaemonId, requestId: String, accepted: Bool) 
     
     /**
      * Enable or disable idle session summaries.
@@ -1077,6 +1094,22 @@ open func addDaemon(nodeId: String, name: String) -> DaemonId  {
             self.uniffiCloneHandle(),
         FfiConverterString.lower(nodeId),
         FfiConverterString.lower(name),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Add a daemon from an invite payload and retain its pairing credential
+     * for reconnects.
+     */
+open func addDaemonWithToken(nodeId: String, name: String, token: String) -> DaemonId  {
+    return try!  FfiConverterTypeDaemonId_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_add_daemon_with_token(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(nodeId),
+        FfiConverterString.lower(name),
+        FfiConverterString.lower(token),uniffiCallStatus
     )
 })
 }
@@ -1341,6 +1374,36 @@ open func respondPermission(id: DaemonId, requestId: String, decision: Decision)
 }
     
     /**
+     * Respond to a plan-approval request. `approved = false` with optional
+     * `feedback` requests changes.
+     */
+open func respondPlanApproval(id: DaemonId, requestId: String, approved: Bool, feedback: String?)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_respond_plan_approval(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(requestId),
+        FfiConverterBool.lower(approved),
+        FfiConverterOptionString.lower(feedback),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Respond to a goal proposal from the agent (`propose_goal`).
+     */
+open func respondToGoal(id: DaemonId, requestId: String, accepted: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_respond_to_goal(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(requestId),
+        FfiConverterBool.lower(accepted),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Enable or disable idle session summaries.
      */
 open func setAutoSummary(id: DaemonId, enabled: Bool)  {try! rustCall() {
@@ -1514,13 +1577,15 @@ public struct ChatMessage: Equatable, Hashable {
     public var id: String
     public var role: String
     public var parts: [MessagePart]
+    public var assistantMeta: MobileAssistantMeta?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, role: String, parts: [MessagePart]) {
+    public init(id: String, role: String, parts: [MessagePart], assistantMeta: MobileAssistantMeta?) {
         self.id = id
         self.role = role
         self.parts = parts
+        self.assistantMeta = assistantMeta
     }
 
     
@@ -1541,7 +1606,8 @@ public struct FfiConverterTypeChatMessage: FfiConverterRustBuffer {
             try ChatMessage(
                 id: FfiConverterString.read(from: &buf), 
                 role: FfiConverterString.read(from: &buf), 
-                parts: FfiConverterSequenceTypeMessagePart.read(from: &buf)
+                parts: FfiConverterSequenceTypeMessagePart.read(from: &buf), 
+                assistantMeta: FfiConverterOptionTypeMobileAssistantMeta.read(from: &buf)
         )
     }
 
@@ -1549,6 +1615,7 @@ public struct FfiConverterTypeChatMessage: FfiConverterRustBuffer {
         FfiConverterString.write(value.id, into: &buf)
         FfiConverterString.write(value.role, into: &buf)
         FfiConverterSequenceTypeMessagePart.write(value.parts, into: &buf)
+        FfiConverterOptionTypeMobileAssistantMeta.write(value.assistantMeta, into: &buf)
     }
 }
 
@@ -1596,6 +1663,10 @@ public struct DaemonEntry: Equatable, Hashable {
      * Whether to keep the connection alive while foregrounded.
      */
     public var keepConnected: Bool
+    /**
+     * Pairing credential supplied by an invite, when present.
+     */
+    public var pairingToken: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1617,13 +1688,17 @@ public struct DaemonEntry: Equatable, Hashable {
          */lastKnownVersion: String?, 
         /**
          * Whether to keep the connection alive while foregrounded.
-         */keepConnected: Bool) {
+         */keepConnected: Bool, 
+        /**
+         * Pairing credential supplied by an invite, when present.
+         */pairingToken: String?) {
         self.nodeId = nodeId
         self.name = name
         self.addedAt = addedAt
         self.lastConnectedAt = lastConnectedAt
         self.lastKnownVersion = lastKnownVersion
         self.keepConnected = keepConnected
+        self.pairingToken = pairingToken
     }
 
     
@@ -1647,7 +1722,8 @@ public struct FfiConverterTypeDaemonEntry: FfiConverterRustBuffer {
                 addedAt: FfiConverterUInt64.read(from: &buf), 
                 lastConnectedAt: FfiConverterOptionUInt64.read(from: &buf), 
                 lastKnownVersion: FfiConverterOptionString.read(from: &buf), 
-                keepConnected: FfiConverterBool.read(from: &buf)
+                keepConnected: FfiConverterBool.read(from: &buf), 
+                pairingToken: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1658,6 +1734,7 @@ public struct FfiConverterTypeDaemonEntry: FfiConverterRustBuffer {
         FfiConverterOptionUInt64.write(value.lastConnectedAt, into: &buf)
         FfiConverterOptionString.write(value.lastKnownVersion, into: &buf)
         FfiConverterBool.write(value.keepConnected, into: &buf)
+        FfiConverterOptionString.write(value.pairingToken, into: &buf)
     }
 }
 
@@ -1843,12 +1920,14 @@ public func FfiConverterTypeDaemonSnapshot_lower(_ value: DaemonSnapshot) -> Rus
 public struct DialInfo: Equatable, Hashable {
     public var nodeId: String
     public var name: String?
+    public var pairingToken: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(nodeId: String, name: String?) {
+    public init(nodeId: String, name: String?, pairingToken: String?) {
         self.nodeId = nodeId
         self.name = name
+        self.pairingToken = pairingToken
     }
 
     
@@ -1868,13 +1947,15 @@ public struct FfiConverterTypeDialInfo: FfiConverterRustBuffer {
         return
             try DialInfo(
                 nodeId: FfiConverterString.read(from: &buf), 
-                name: FfiConverterOptionString.read(from: &buf)
+                name: FfiConverterOptionString.read(from: &buf), 
+                pairingToken: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: DialInfo, into buf: inout [UInt8]) {
         FfiConverterString.write(value.nodeId, into: &buf)
         FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.pairingToken, into: &buf)
     }
 }
 
@@ -2057,6 +2138,222 @@ public func FfiConverterTypeMessagePart_lift(_ buf: RustBuffer) throws -> Messag
 #endif
 public func FfiConverterTypeMessagePart_lower(_ value: MessagePart) -> RustBuffer {
     return FfiConverterTypeMessagePart.lower(value)
+}
+
+
+/**
+ * Assistant metadata for a `ChatMessage`. Carries the model, cost,
+ * and optional turn manifest. Intentionally omits `provider_id`,
+ * `tokens`, `finish`, and `error` from the canonical `AssistantMeta`
+ * for v1 — the `TurnManifest` itself carries the token breakdown.
+ */
+public struct MobileAssistantMeta: Equatable, Hashable {
+    public var modelId: String
+    public var cost: Double
+    public var manifest: MobileTurnManifest?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(modelId: String, cost: Double, manifest: MobileTurnManifest?) {
+        self.modelId = modelId
+        self.cost = cost
+        self.manifest = manifest
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MobileAssistantMeta: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileAssistantMeta: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileAssistantMeta {
+        return
+            try MobileAssistantMeta(
+                modelId: FfiConverterString.read(from: &buf), 
+                cost: FfiConverterDouble.read(from: &buf), 
+                manifest: FfiConverterOptionTypeMobileTurnManifest.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileAssistantMeta, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.modelId, into: &buf)
+        FfiConverterDouble.write(value.cost, into: &buf)
+        FfiConverterOptionTypeMobileTurnManifest.write(value.manifest, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileAssistantMeta_lift(_ buf: RustBuffer) throws -> MobileAssistantMeta {
+    return try FfiConverterTypeMobileAssistantMeta.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileAssistantMeta_lower(_ value: MobileAssistantMeta) -> RustBuffer {
+    return FfiConverterTypeMobileAssistantMeta.lower(value)
+}
+
+
+/**
+ * Mirror of `mew_message::Segment` (without `source_id`).
+ */
+public struct MobileSegment: Equatable, Hashable {
+    public var label: String
+    public var kind: MobileSegmentKind
+    public var tokens: UInt32
+    public var tokensScaled: UInt32
+    public var children: [MobileSegment]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(label: String, kind: MobileSegmentKind, tokens: UInt32, tokensScaled: UInt32, children: [MobileSegment]) {
+        self.label = label
+        self.kind = kind
+        self.tokens = tokens
+        self.tokensScaled = tokensScaled
+        self.children = children
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MobileSegment: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileSegment: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileSegment {
+        return
+            try MobileSegment(
+                label: FfiConverterString.read(from: &buf), 
+                kind: FfiConverterTypeMobileSegmentKind.read(from: &buf), 
+                tokens: FfiConverterUInt32.read(from: &buf), 
+                tokensScaled: FfiConverterUInt32.read(from: &buf), 
+                children: FfiConverterSequenceTypeMobileSegment.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileSegment, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterTypeMobileSegmentKind.write(value.kind, into: &buf)
+        FfiConverterUInt32.write(value.tokens, into: &buf)
+        FfiConverterUInt32.write(value.tokensScaled, into: &buf)
+        FfiConverterSequenceTypeMobileSegment.write(value.children, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileSegment_lift(_ buf: RustBuffer) throws -> MobileSegment {
+    return try FfiConverterTypeMobileSegment.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileSegment_lower(_ value: MobileSegment) -> RustBuffer {
+    return FfiConverterTypeMobileSegment.lower(value)
+}
+
+
+/**
+ * Mirror of `mew_message::TurnManifest` for the mobile client.
+ * Drops `source_id` (ULID) — the mobile client renders the tree
+ * structure only; it doesn't hydrate by source ID.
+ */
+public struct MobileTurnManifest: Equatable, Hashable {
+    public var model: String
+    public var contextWindow: UInt32
+    public var inputTokens: UInt32?
+    public var outputTokens: UInt32?
+    public var cacheReadTokens: UInt32?
+    public var cacheWriteTokens: UInt32?
+    public var reasoningTokens: UInt32?
+    public var segments: [MobileSegment]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(model: String, contextWindow: UInt32, inputTokens: UInt32?, outputTokens: UInt32?, cacheReadTokens: UInt32?, cacheWriteTokens: UInt32?, reasoningTokens: UInt32?, segments: [MobileSegment]) {
+        self.model = model
+        self.contextWindow = contextWindow
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.cacheReadTokens = cacheReadTokens
+        self.cacheWriteTokens = cacheWriteTokens
+        self.reasoningTokens = reasoningTokens
+        self.segments = segments
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension MobileTurnManifest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileTurnManifest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileTurnManifest {
+        return
+            try MobileTurnManifest(
+                model: FfiConverterString.read(from: &buf), 
+                contextWindow: FfiConverterUInt32.read(from: &buf), 
+                inputTokens: FfiConverterOptionUInt32.read(from: &buf), 
+                outputTokens: FfiConverterOptionUInt32.read(from: &buf), 
+                cacheReadTokens: FfiConverterOptionUInt32.read(from: &buf), 
+                cacheWriteTokens: FfiConverterOptionUInt32.read(from: &buf), 
+                reasoningTokens: FfiConverterOptionUInt32.read(from: &buf), 
+                segments: FfiConverterSequenceTypeMobileSegment.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileTurnManifest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.model, into: &buf)
+        FfiConverterUInt32.write(value.contextWindow, into: &buf)
+        FfiConverterOptionUInt32.write(value.inputTokens, into: &buf)
+        FfiConverterOptionUInt32.write(value.outputTokens, into: &buf)
+        FfiConverterOptionUInt32.write(value.cacheReadTokens, into: &buf)
+        FfiConverterOptionUInt32.write(value.cacheWriteTokens, into: &buf)
+        FfiConverterOptionUInt32.write(value.reasoningTokens, into: &buf)
+        FfiConverterSequenceTypeMobileSegment.write(value.segments, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileTurnManifest_lift(_ buf: RustBuffer) throws -> MobileTurnManifest {
+    return try FfiConverterTypeMobileTurnManifest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileTurnManifest_lower(_ value: MobileTurnManifest) -> RustBuffer {
+    return FfiConverterTypeMobileTurnManifest.lower(value)
 }
 
 
@@ -2577,10 +2874,17 @@ public struct SessionSummary: Equatable, Hashable {
     public var inputTokens: UInt64
     public var outputTokens: UInt64
     public var turns: UInt32
+    /**
+     * Current context occupancy (latest request's prompt size), if known.
+     */
+    public var contextTokens: UInt64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sessionId: String, title: String, state: String, archived: Bool, pinned: Bool, pendingPermissions: UInt32, pendingQuestions: UInt32, usageCost: Double, cwd: String?, model: String?, provider: String?, createdAt: Int64, lastMessageAt: Int64?, lastTurnFailed: Bool, groupId: String?, inputTokens: UInt64, outputTokens: UInt64, turns: UInt32) {
+    public init(sessionId: String, title: String, state: String, archived: Bool, pinned: Bool, pendingPermissions: UInt32, pendingQuestions: UInt32, usageCost: Double, cwd: String?, model: String?, provider: String?, createdAt: Int64, lastMessageAt: Int64?, lastTurnFailed: Bool, groupId: String?, inputTokens: UInt64, outputTokens: UInt64, turns: UInt32, 
+        /**
+         * Current context occupancy (latest request's prompt size), if known.
+         */contextTokens: UInt64?) {
         self.sessionId = sessionId
         self.title = title
         self.state = state
@@ -2599,6 +2903,7 @@ public struct SessionSummary: Equatable, Hashable {
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.turns = turns
+        self.contextTokens = contextTokens
     }
 
     
@@ -2634,7 +2939,8 @@ public struct FfiConverterTypeSessionSummary: FfiConverterRustBuffer {
                 groupId: FfiConverterOptionString.read(from: &buf), 
                 inputTokens: FfiConverterUInt64.read(from: &buf), 
                 outputTokens: FfiConverterUInt64.read(from: &buf), 
-                turns: FfiConverterUInt32.read(from: &buf)
+                turns: FfiConverterUInt32.read(from: &buf), 
+                contextTokens: FfiConverterOptionUInt64.read(from: &buf)
         )
     }
 
@@ -2657,6 +2963,7 @@ public struct FfiConverterTypeSessionSummary: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.inputTokens, into: &buf)
         FfiConverterUInt64.write(value.outputTokens, into: &buf)
         FfiConverterUInt32.write(value.turns, into: &buf)
+        FfiConverterOptionUInt64.write(value.contextTokens, into: &buf)
     }
 }
 
@@ -2900,7 +3207,13 @@ public enum CoreEvent: Equatable, Hashable {
     /**
      * A turn ended (MessageEnd received).
      */
-    case turnEnded(daemon: String, sessionId: String, inputTokens: UInt64, outputTokens: UInt64, cost: Double, failed: Bool
+    case turnEnded(daemon: String, sessionId: String, inputTokens: UInt64, outputTokens: UInt64, cost: Double, failed: Bool, manifest: MobileTurnManifest?
+    )
+    /**
+     * A subagent finished executing. Carries manifests from the child
+     * agent's turns so the UI can show context usage.
+     */
+    case subagentEnd(daemon: String, parentCallId: String, childSessionId: String, outcome: String, manifests: [MobileTurnManifest]
     )
     /**
      * A permission request from the agent.
@@ -2911,6 +3224,17 @@ public enum CoreEvent: Equatable, Hashable {
      * An ask-user request from the agent.
      */
     case askUserRequested(daemon: String, sessionId: String, requestId: String, callId: String, questions: [String]
+    )
+    /**
+     * A plan-approval request from the agent (`handoff_plan`).
+     */
+    case planApprovalRequested(daemon: String, sessionId: String, requestId: String, callId: String, planPath: String, planMarkdown: String, persona: String
+    )
+    /**
+     * A goal proposal from the agent (`propose_goal`). The UI should present
+     * the objective for user approval and call `respond_to_goal`.
+     */
+    case goalProposed(daemon: String, sessionId: String, requestId: String, callId: String, objective: String
     )
     /**
      * A request was resolved (by this device or another). Dismiss the sheet.
@@ -3014,49 +3338,58 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
         case 7: return .partUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), partId: try FfiConverterString.read(from: &buf), partKind: try FfiConverterString.read(from: &buf), state: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 8: return .turnEnded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), inputTokens: try FfiConverterUInt64.read(from: &buf), outputTokens: try FfiConverterUInt64.read(from: &buf), cost: try FfiConverterDouble.read(from: &buf), failed: try FfiConverterBool.read(from: &buf)
+        case 8: return .turnEnded(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), inputTokens: try FfiConverterUInt64.read(from: &buf), outputTokens: try FfiConverterUInt64.read(from: &buf), cost: try FfiConverterDouble.read(from: &buf), failed: try FfiConverterBool.read(from: &buf), manifest: try FfiConverterOptionTypeMobileTurnManifest.read(from: &buf)
         )
         
-        case 9: return .permissionRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), input: try FfiConverterString.read(from: &buf)
+        case 9: return .subagentEnd(daemon: try FfiConverterString.read(from: &buf), parentCallId: try FfiConverterString.read(from: &buf), childSessionId: try FfiConverterString.read(from: &buf), outcome: try FfiConverterString.read(from: &buf), manifests: try FfiConverterSequenceTypeMobileTurnManifest.read(from: &buf)
         )
         
-        case 10: return .askUserRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), questions: try FfiConverterSequenceString.read(from: &buf)
+        case 10: return .permissionRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), input: try FfiConverterString.read(from: &buf)
         )
         
-        case 11: return .requestResolved(daemon: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf)
+        case 11: return .askUserRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), questions: try FfiConverterSequenceString.read(from: &buf)
         )
         
-        case 12: return .alert(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), kind: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
+        case 12: return .planApprovalRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), planPath: try FfiConverterString.read(from: &buf), planMarkdown: try FfiConverterString.read(from: &buf), persona: try FfiConverterString.read(from: &buf)
         )
         
-        case 13: return .attentionChanged(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), pendingPermissions: try FfiConverterUInt32.read(from: &buf), pendingQuestions: try FfiConverterUInt32.read(from: &buf)
+        case 13: return .goalProposed(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), objective: try FfiConverterString.read(from: &buf)
         )
         
-        case 14: return .todosUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), todos: try FfiConverterSequenceTypeTodoItem.read(from: &buf)
+        case 14: return .requestResolved(daemon: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf)
         )
         
-        case 15: return .permissionModeChanged(daemon: try FfiConverterString.read(from: &buf), mode: try FfiConverterString.read(from: &buf)
+        case 15: return .alert(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), kind: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 16: return .modelSwitched(daemon: try FfiConverterString.read(from: &buf), provider: try FfiConverterString.read(from: &buf), model: try FfiConverterString.read(from: &buf)
+        case 16: return .attentionChanged(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), pendingPermissions: try FfiConverterUInt32.read(from: &buf), pendingQuestions: try FfiConverterUInt32.read(from: &buf)
         )
         
-        case 17: return .thinkingVariantChanged(daemon: try FfiConverterString.read(from: &buf), variant: try FfiConverterOptionString.read(from: &buf)
+        case 17: return .todosUpdated(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), todos: try FfiConverterSequenceTypeTodoItem.read(from: &buf)
         )
         
-        case 18: return .modelList(daemon: try FfiConverterString.read(from: &buf), models: try FfiConverterSequenceTypeModelSummary.read(from: &buf)
+        case 18: return .permissionModeChanged(daemon: try FfiConverterString.read(from: &buf), mode: try FfiConverterString.read(from: &buf)
         )
         
-        case 19: return .slashResult(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf)
+        case 19: return .modelSwitched(daemon: try FfiConverterString.read(from: &buf), provider: try FfiConverterString.read(from: &buf), model: try FfiConverterString.read(from: &buf)
         )
         
-        case 20: return .daemonVersion(daemon: try FfiConverterString.read(from: &buf), version: try FfiConverterString.read(from: &buf)
+        case 20: return .thinkingVariantChanged(daemon: try FfiConverterString.read(from: &buf), variant: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 21: return .personaList(daemon: try FfiConverterString.read(from: &buf), personas: try FfiConverterSequenceTypePersonaInfo.read(from: &buf)
+        case 21: return .modelList(daemon: try FfiConverterString.read(from: &buf), models: try FfiConverterSequenceTypeModelSummary.read(from: &buf)
         )
         
-        case 22: return .personaSwitched(daemon: try FfiConverterString.read(from: &buf), name: try FfiConverterString.read(from: &buf)
+        case 22: return .slashResult(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 23: return .daemonVersion(daemon: try FfiConverterString.read(from: &buf), version: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 24: return .personaList(daemon: try FfiConverterString.read(from: &buf), personas: try FfiConverterSequenceTypePersonaInfo.read(from: &buf)
+        )
+        
+        case 25: return .personaSwitched(daemon: try FfiConverterString.read(from: &buf), name: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -3116,7 +3449,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             FfiConverterOptionString.write(state, into: &buf)
             
         
-        case let .turnEnded(daemon,sessionId,inputTokens,outputTokens,cost,failed):
+        case let .turnEnded(daemon,sessionId,inputTokens,outputTokens,cost,failed,manifest):
             writeInt(&buf, Int32(8))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
@@ -3124,10 +3457,20 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             FfiConverterUInt64.write(outputTokens, into: &buf)
             FfiConverterDouble.write(cost, into: &buf)
             FfiConverterBool.write(failed, into: &buf)
+            FfiConverterOptionTypeMobileTurnManifest.write(manifest, into: &buf)
+            
+        
+        case let .subagentEnd(daemon,parentCallId,childSessionId,outcome,manifests):
+            writeInt(&buf, Int32(9))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(parentCallId, into: &buf)
+            FfiConverterString.write(childSessionId, into: &buf)
+            FfiConverterString.write(outcome, into: &buf)
+            FfiConverterSequenceTypeMobileTurnManifest.write(manifests, into: &buf)
             
         
         case let .permissionRequested(daemon,sessionId,requestId,toolName,input):
-            writeInt(&buf, Int32(9))
+            writeInt(&buf, Int32(10))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(requestId, into: &buf)
@@ -3136,7 +3479,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .askUserRequested(daemon,sessionId,requestId,callId,questions):
-            writeInt(&buf, Int32(10))
+            writeInt(&buf, Int32(11))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(requestId, into: &buf)
@@ -3144,14 +3487,34 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             FfiConverterSequenceString.write(questions, into: &buf)
             
         
+        case let .planApprovalRequested(daemon,sessionId,requestId,callId,planPath,planMarkdown,persona):
+            writeInt(&buf, Int32(12))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
+            FfiConverterString.write(callId, into: &buf)
+            FfiConverterString.write(planPath, into: &buf)
+            FfiConverterString.write(planMarkdown, into: &buf)
+            FfiConverterString.write(persona, into: &buf)
+            
+        
+        case let .goalProposed(daemon,sessionId,requestId,callId,objective):
+            writeInt(&buf, Int32(13))
+            FfiConverterString.write(daemon, into: &buf)
+            FfiConverterString.write(sessionId, into: &buf)
+            FfiConverterString.write(requestId, into: &buf)
+            FfiConverterString.write(callId, into: &buf)
+            FfiConverterString.write(objective, into: &buf)
+            
+        
         case let .requestResolved(daemon,requestId):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(14))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(requestId, into: &buf)
             
         
         case let .alert(daemon,sessionId,kind,title,detail):
-            writeInt(&buf, Int32(12))
+            writeInt(&buf, Int32(15))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(kind, into: &buf)
@@ -3160,7 +3523,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .attentionChanged(daemon,sessionId,pendingPermissions,pendingQuestions):
-            writeInt(&buf, Int32(13))
+            writeInt(&buf, Int32(16))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterUInt32.write(pendingPermissions, into: &buf)
@@ -3168,58 +3531,58 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             
         
         case let .todosUpdated(daemon,sessionId,todos):
-            writeInt(&buf, Int32(14))
+            writeInt(&buf, Int32(17))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterSequenceTypeTodoItem.write(todos, into: &buf)
             
         
         case let .permissionModeChanged(daemon,mode):
-            writeInt(&buf, Int32(15))
+            writeInt(&buf, Int32(18))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(mode, into: &buf)
             
         
         case let .modelSwitched(daemon,provider,model):
-            writeInt(&buf, Int32(16))
+            writeInt(&buf, Int32(19))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(provider, into: &buf)
             FfiConverterString.write(model, into: &buf)
             
         
         case let .thinkingVariantChanged(daemon,variant):
-            writeInt(&buf, Int32(17))
+            writeInt(&buf, Int32(20))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterOptionString.write(variant, into: &buf)
             
         
         case let .modelList(daemon,models):
-            writeInt(&buf, Int32(18))
+            writeInt(&buf, Int32(21))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterSequenceTypeModelSummary.write(models, into: &buf)
             
         
         case let .slashResult(daemon,sessionId,text):
-            writeInt(&buf, Int32(19))
+            writeInt(&buf, Int32(22))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(text, into: &buf)
             
         
         case let .daemonVersion(daemon,version):
-            writeInt(&buf, Int32(20))
+            writeInt(&buf, Int32(23))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(version, into: &buf)
             
         
         case let .personaList(daemon,personas):
-            writeInt(&buf, Int32(21))
+            writeInt(&buf, Int32(24))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterSequenceTypePersonaInfo.write(personas, into: &buf)
             
         
         case let .personaSwitched(daemon,name):
-            writeInt(&buf, Int32(22))
+            writeInt(&buf, Int32(25))
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(name, into: &buf)
             
@@ -3425,6 +3788,110 @@ public func FfiConverterTypeDecision_lower(_ value: Decision) -> RustBuffer {
 
 
 /**
+ * Mirror of `mew_message::SegmentKind`.
+ */
+
+public enum MobileSegmentKind: Equatable, Hashable {
+    
+    case scaffold
+    case contextFile
+    case skill
+    case tools
+    case message
+    case part
+    case compactionSummary
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileSegmentKind: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileSegmentKind: FfiConverterRustBuffer {
+    typealias SwiftType = MobileSegmentKind
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileSegmentKind {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .scaffold
+        
+        case 2: return .contextFile
+        
+        case 3: return .skill
+        
+        case 4: return .tools
+        
+        case 5: return .message
+        
+        case 6: return .part
+        
+        case 7: return .compactionSummary
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MobileSegmentKind, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .scaffold:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .contextFile:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .skill:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .tools:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .message:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .part:
+            writeInt(&buf, Int32(6))
+        
+        
+        case .compactionSummary:
+            writeInt(&buf, Int32(7))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileSegmentKind_lift(_ buf: RustBuffer) throws -> MobileSegmentKind {
+    return try FfiConverterTypeMobileSegmentKind.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileSegmentKind_lower(_ value: MobileSegmentKind) -> RustBuffer {
+    return FfiConverterTypeMobileSegmentKind.lower(value)
+}
+
+
+
+/**
  * What kind of part this is.
  */
 
@@ -3505,6 +3972,30 @@ public func FfiConverterTypePartKind_lower(_ value: PartKind) -> RustBuffer {
     return FfiConverterTypePartKind.lower(value)
 }
 
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -3597,6 +4088,54 @@ fileprivate struct FfiConverterOptionTypeDaemonSnapshot: FfiConverterRustBuffer 
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeDaemonSnapshot.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeMobileAssistantMeta: FfiConverterRustBuffer {
+    typealias SwiftType = MobileAssistantMeta?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMobileAssistantMeta.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMobileAssistantMeta.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeMobileTurnManifest: FfiConverterRustBuffer {
+    typealias SwiftType = MobileTurnManifest?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMobileTurnManifest.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMobileTurnManifest.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -3747,6 +4286,56 @@ fileprivate struct FfiConverterSequenceTypeMessagePart: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeMessagePart.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeMobileSegment: FfiConverterRustBuffer {
+    typealias SwiftType = [MobileSegment]
+
+    public static func write(_ value: [MobileSegment], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMobileSegment.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MobileSegment] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MobileSegment]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeMobileSegment.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeMobileTurnManifest: FfiConverterRustBuffer {
+    typealias SwiftType = [MobileTurnManifest]
+
+    public static func write(_ value: [MobileTurnManifest], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMobileTurnManifest.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MobileTurnManifest] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MobileTurnManifest]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeMobileTurnManifest.read(from: &buf))
         }
         return seq
     }
@@ -4058,6 +4647,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_add_daemon() != 50889) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_add_daemon_with_token() != 63713) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_archive_session() != 3212) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4116,6 +4708,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_permission() != 29311) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_plan_approval() != 12621) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_respond_to_goal() != 11714) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_auto_summary() != 57757) {

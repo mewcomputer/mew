@@ -7,18 +7,15 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tracing::{info, warn};
 
 use mew_agent::{Agent, PromptCacheRetention};
 use mew_catalog::Catalog;
 use mew_config::Config;
-use mew_ext_broker::ExtensionBroker;
 use mew_ext_broker::{
     build_consent_prompt, build_delta_prompt, build_sensitive_cap_prompt, is_legacy_full,
-    reconstruct_caps, Capability, CapabilitySet, ConsentDecision, DiscoveredExtension,
-    ExtensionManifest,
+    reconstruct_caps, Capability, CapabilitySet, ConsentDecision, ExtensionManifest,
 };
-use mew_hooks::{Dispatcher, NopDispatcher, PluginHost};
+use mew_hooks::Dispatcher;
 
 /// Apply catalog pricing for `model_id` onto `agent`.
 ///
@@ -41,7 +38,6 @@ pub(crate) fn apply_catalog_pricing(agent: &mut Agent, cat: Option<&Catalog>, mo
         }
     }
 }
-use mew_mcp::McpClient;
 use mew_message::SessionId;
 use mew_session::Writer as SessionWriter;
 use mew_tools::tools::ask_user::AskUser;
@@ -174,121 +170,6 @@ pub(crate) fn build_secret_set(cfg: &Config) -> Arc<SecretSet> {
     })
 }
 
-pub(crate) fn plugin_storage_map() -> std::collections::HashMap<String, String> {
-    let dir = plugin_storage_dir();
-    if !dir.exists() {
-        return std::collections::HashMap::new();
-    }
-    let mut map = std::collections::HashMap::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(json_map) =
-                        serde_json::from_str::<std::collections::HashMap<String, String>>(&content)
-                    {
-                        for (k, v) in json_map {
-                            map.insert(format!("{}/{}", name, k), v);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    map
-}
-
-pub(crate) fn plugin_storage_dir() -> std::path::PathBuf {
-    mew_config::config_dir().join("plugin-storage")
-}
-
-pub(crate) fn write_plugin_storage(
-    map: &mut std::collections::HashMap<String, String>,
-    key: &str,
-    value: &str,
-) {
-    map.insert(key.to_string(), value.to_string());
-    let dir = plugin_storage_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    // Group by plugin name (first segment of key before /)
-    let mut per_plugin: std::collections::HashMap<
-        String,
-        std::collections::HashMap<String, String>,
-    > = std::collections::HashMap::new();
-    for (k, v) in map.iter() {
-        if let Some((plugin, subkey)) = k.split_once('/') {
-            per_plugin
-                .entry(plugin.to_string())
-                .or_default()
-                .insert(subkey.to_string(), v.clone());
-        }
-    }
-    for (plugin, data) in &per_plugin {
-        let path = dir.join(format!("{}.json", plugin));
-        let tmp = dir.join(format!("{}.tmp", plugin));
-        if let Ok(json) = serde_json::to_string(data) {
-            if std::fs::write(&tmp, &json).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn build_dispatcher(
-    notify: impl Fn(String) + Send + Sync + 'static,
-    config_read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
-    log_fn: impl Fn(String) + Send + Sync + 'static,
-    storage_read: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
-    storage_write: impl Fn(&str, &str) + Send + Sync + 'static,
-    storage_delete: impl Fn(&str) + Send + Sync + 'static,
-    set_ui: impl Fn(&str, &str) + Send + Sync + 'static,
-    disabled_plugins: &[String],
-    plugin_configs: std::collections::HashMap<String, mew_hooks::PluginHookConfig>,
-    discovered_extensions: &[DiscoveredExtension],
-) -> Arc<dyn Dispatcher> {
-    let host = PluginHost {
-        notify: Arc::new(notify),
-        config_read: Arc::new(config_read),
-        log: Arc::new(log_fn),
-        storage_read: Arc::new(storage_read),
-        storage_write: Arc::new(storage_write),
-        storage_delete: Arc::new(storage_delete),
-        set_ui: Arc::new(set_ui),
-    };
-
-    // Build consent resolver for legacy plugins.
-    let consent_state = mew_ext_broker::ConsentState::load();
-    let is_interactive = std::io::stdin().is_terminal();
-    use std::io::IsTerminal as _;
-    let resolver =
-        build_consent_resolver(is_interactive, Box::new(crate::prompt_yn), consent_state);
-
-    let dirs = mew_hooks_runtime::PluginLoader::default_dirs();
-    match ExtensionBroker::from_dirs_filtered_with_config(
-        dirs,
-        host.clone(),
-        disabled_plugins,
-        plugin_configs,
-        ExtensionBroker::default_timeout(),
-        Some(resolver),
-        discovered_extensions,
-    )
-    .await
-    {
-        Ok(d) => {
-            tracing::info!("plugin runtime loaded");
-            Arc::new(d)
-        }
-        Err(e) => {
-            tracing::warn!("plugin runtime unavailable, using no-op: {}", e);
-            Arc::new(NopDispatcher)
-        }
-    }
-}
-
 /// Prompt function type — takes a question string, returns y/n/None.
 type PromptFn = Box<dyn Fn(&str) -> Option<bool> + Send + Sync>;
 
@@ -306,6 +187,7 @@ type PromptFn = Box<dyn Fn(&str) -> Option<bool> + Send + Sync>;
 /// this function can be unit-tested with `false`.
 /// `prompt_fn` is injected so tests can use a mock instead of the
 /// real `prompt_yn`.
+#[allow(dead_code)] // kept for behavior tests; the local dispatcher is sunset
 pub(crate) fn build_consent_resolver(
     is_interactive: bool,
     prompt_fn: PromptFn,
@@ -450,6 +332,7 @@ pub(crate) fn build_consent_resolver(
 /// but still approve individual sensitive caps, and vice versa.
 ///
 /// Returns the approved `CapabilitySet` (always-granted + approved).
+#[allow(dead_code)] // kept for behavior tests; the local dispatcher is sunset
 fn prompt_and_consent_caps(
     name: &str,
     version: &str,
@@ -486,75 +369,6 @@ fn prompt_and_consent_caps(
     }
 
     approved
-}
-
-/// Load MCP server configs from standard locations.
-///
-/// Searches (in order):
-///   cwd/mcp.json, cwd/.mcp.json, cwd/.mew/mcp.json, cwd/.mew/.mcp.json
-/// Each file uses Claude-Code-compatible format:
-///   { "mcpServers": { "name": { "command": "...", "args": [...], "type": "stdio"|"http" } } }
-pub(crate) fn load_mcp_configs() -> Vec<mew_mcp::McpServerConfig> {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let paths = [
-        cwd.join("mcp.json"),
-        cwd.join(".mcp.json"),
-        cwd.join(".mew").join("mcp.json"),
-        cwd.join(".mew").join(".mcp.json"),
-    ];
-
-    let mut configs = Vec::new();
-
-    for path in &paths {
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                tracing::warn!("failed to read {}: {}", path.display(), e);
-                continue;
-            }
-        };
-
-        let v: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("failed to parse {}: {}", path.display(), e);
-                continue;
-            }
-        };
-
-        let Some(servers) = v.get("mcpServers").and_then(|s| s.as_object()) else {
-            continue;
-        };
-
-        for (name, cfg) in servers {
-            let command = cfg
-                .get("command")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let url = cfg.get("url").and_then(|v| v.as_str()).map(String::from);
-            let type_ = cfg.get("type").and_then(|v| v.as_str()).map(String::from);
-            let args = cfg
-                .get("args")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v: &serde_json::Value| v.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            configs.push(mew_mcp::McpServerConfig {
-                name: name.clone(),
-                type_,
-                url,
-                command,
-                args,
-            });
-        }
-    }
-
-    configs
 }
 
 /// Render any context files marked with `template: true` through minijinja
@@ -873,75 +687,6 @@ pub(crate) fn build_session_agent(
     }
 
     Ok(agent)
-}
-
-pub(crate) async fn connect_mcp_servers(
-    configs: &[mew_mcp::McpServerConfig],
-) -> (
-    Vec<Arc<dyn mew_tools::Tool>>,
-    Vec<Arc<McpClient>>,
-    Vec<String>,
-) {
-    let mut tools: Vec<Arc<dyn mew_tools::Tool>> = Vec::new();
-    let mut clients: Vec<Arc<McpClient>> = Vec::new();
-    let mut status: Vec<String> = Vec::new();
-
-    for cfg in configs {
-        info!(server = %cfg.name, "connecting MCP server");
-
-        let client = if let Some(ref url) = cfg.url {
-            match McpClient::connect_http(&cfg.name, url).await {
-                Ok(client) => {
-                    status.push(format!("{} connected (http)", cfg.name));
-                    client
-                }
-                Err(e) => {
-                    status.push(format!("{} connection failed", cfg.name));
-                    warn!(server = %cfg.name, error = %e, "MCP connect failed");
-                    continue;
-                }
-            }
-        } else if let Some(ref command) = cfg.command {
-            match McpClient::connect_stdio(&cfg.name, command, &cfg.args).await {
-                Ok(client) => {
-                    status.push(format!("{} connected (stdio)", cfg.name));
-                    client
-                }
-                Err(e) => {
-                    status.push(format!("{} connection failed", cfg.name));
-                    warn!(server = %cfg.name, error = %e, "MCP connect failed");
-                    continue;
-                }
-            }
-        } else {
-            status.push(format!("{} skipped (no url or command)", cfg.name));
-            warn!(server = %cfg.name, "MCP server has no url or command");
-            continue;
-        };
-
-        match client.list_tools().await {
-            Ok(mcp_tools) => {
-                let count = mcp_tools.len();
-                let client = Arc::new(client);
-                for def in &mcp_tools {
-                    tools.push(Arc::new(mew_mcp::McpTool::new(
-                        &cfg.name,
-                        def,
-                        client.clone(),
-                    )));
-                }
-                clients.push(client);
-                status.push(format!("{} ready ({} tools)", cfg.name, count));
-                info!(server = %cfg.name, tool_count = count, "MCP tools registered");
-            }
-            Err(e) => {
-                status.push(format!("{} tool listing failed", cfg.name));
-                warn!(server = %cfg.name, error = %e, "failed to list MCP tools");
-            }
-        }
-    }
-
-    (tools, clients, status)
 }
 
 #[cfg(test)]

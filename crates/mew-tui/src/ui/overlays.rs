@@ -1446,6 +1446,10 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect, tokens: &crate::theme::Theme
             Span::styled("cursor between lines / history", desc_style),
         ]),
         Line::from(vec![
+            Span::styled("  Ctrl+Up    ", key_style),
+            Span::styled("steer current turn (guide queued msg)", desc_style),
+        ]),
+        Line::from(vec![
             Span::styled("  @          ", key_style),
             Span::styled("file picker (@-mention)", desc_style),
         ]),

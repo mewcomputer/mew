@@ -2,15 +2,11 @@
 //!
 //! All `Action` and `SlashResult` matching lives in [`dispatch::handle_action`].
 //! The drain loop never interprets actions — it coalesces and replays them
-//! through `handle_action`. Two `CommandTarget` impls provide the
-//! backend-specific operations:
-//!
-//! - [`local::LocalTarget`] — owns the `Agent`, used in standalone TUI mode.
-//! - `daemon::DaemonTarget` — owns the `DaemonClient`, used in `--connect` mode.
+//! through `handle_action`. The daemon is the only runtime path: the TUI talks
+//! to a `mew` daemon via `daemon::DaemonTarget`, which owns the `DaemonClient`.
 
 pub mod daemon;
 pub mod dispatch;
-pub mod local;
 pub mod mentions;
 pub mod target;
 

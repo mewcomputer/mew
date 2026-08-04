@@ -1,6 +1,6 @@
 import { useSessionStore } from "../stores/session";
 import { cn } from "../lib/utils";
-import { formatTokens } from "../lib/format";
+import { contextPercent, formatTokens } from "../lib/format";
 import { getClient } from "../lib/client-ref";
 import { Users, Hand } from "lucide-react";
 
@@ -9,8 +9,8 @@ import { Users, Hand } from "lucide-react";
  *  Right: presence chips + yield control + daemon version. */
 export function StatusFooter() {
   const connectionState = useSessionStore((s) => s.connectionState);
-  const inputTokens = useSessionStore((s) => s.totalInputTokens);
-  const outputTokens = useSessionStore((s) => s.totalOutputTokens);
+  const contextTokens = useSessionStore((s) => s.contextTokens);
+  const contextWindow = useSessionStore((s) => s.contextWindow);
   const cost = useSessionStore((s) => s.totalCost);
   const subagents = useSessionStore((s) => s.subagents);
   const pendingPermissions = useSessionStore((s) => s.pendingPermissions);
@@ -72,8 +72,9 @@ export function StatusFooter() {
             <span className="capitalize">{connectionState}</span>
           </div>
           <div className="hidden items-center gap-2 sm:flex">
-            <Metric label="in" value={formatTokens(inputTokens)} />
-            <Metric label="out" value={formatTokens(outputTokens)} />
+            {(contextTokens > 0 || contextWindow > 0) && (
+              <Metric label="ctx" value={contextLabel(contextTokens, contextWindow)} />
+            )}
             <Metric label="cost" value={`$${cost.toFixed(4)}`} />
           </div>
           {runningSubs > 0 && (
@@ -151,4 +152,13 @@ function Metric({ label, value }: { label: string; value: string }) {
       <span className="font-medium">{value}</span>
     </div>
   );
+}
+
+/** "12.3k / 200k · 6%" when the window is known, otherwise just the count. */
+function contextLabel(used: number, window: number): string {
+  if (window > 0) {
+    const pct = contextPercent(used, window);
+    return `${formatTokens(used)} / ${formatTokens(window)} · ${pct ?? 0}%`;
+  }
+  return formatTokens(used);
 }

@@ -912,6 +912,15 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.scroll = app.max_scroll;
             return None;
         }
+        // Ctrl+Up with a queued message: steer the running turn by injecting
+        // the oldest queued message as guidance into its next request, instead
+        // of waiting for the turn to end (the Up-Up fallback).
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(text) = app.pop_queued_message() {
+                return Some(Action::GuideQueued(text));
+            }
+            return None;
+        }
         KeyCode::Char('x') if app.input.is_empty() => {
             // Cancel the most recently started running subagent. Only
             // triggers when the input is empty so it doesn't shadow the
@@ -1465,6 +1474,10 @@ pub enum Action {
     /// Cancel the current turn and immediately submit the given text as a
     /// new turn. Fires from Up-Up when there are queued messages.
     SendQueuedNow(String),
+    /// Inject the given text as guidance into the running turn's *next*
+    /// provider request (even a tool-call continuation), without cancelling.
+    /// Fires from Ctrl+Up when there are queued messages.
+    GuideQueued(String),
     /// Paste image data from the system clipboard (Ctrl+Shift+V). If the
     /// clipboard contains a PNG image, it is saved to a temp file and
     /// inserted as an @-mention so the existing image attachment pipeline

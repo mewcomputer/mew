@@ -370,6 +370,19 @@ test("cancel sends a cancel message", async () => {
   assert.equal(sent[sent.length - 1]!.type, "cancel");
 });
 
+test("guide sends a guide message", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connectP = client.connect();
+  setImmediate(() => latest().open());
+  await connectP;
+
+  client.guide("steer now");
+  const sent = latest().sent;
+  assert.equal(sent[sent.length - 1]!.type, "guide");
+  assert.equal((sent[sent.length - 1] as any).text, "steer now");
+});
+
 test("malformed JSON from peer surfaces as an error event", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });

@@ -1175,6 +1175,26 @@ where
                     session.cancel_turn().await;
                 }
             }
+            ClientMessage::Guide { text } => {
+                let Some(session) = attached_session.clone() else {
+                    reply(ServerMessage::Error {
+                        message: "no session — send NewSession or AttachSession first".into(),
+                    });
+                    continue;
+                };
+                if text.trim().is_empty() {
+                    continue;
+                }
+                // Queue guidance on the session's agent. The running turn's
+                // clone shares `pending_guidance`, so it'll be injected into
+                // the next provider request; if no turn is running, it's
+                // picked up by the next turn.
+                let agent = session.agent.lock().await;
+                agent.enqueue_guidance(text.clone()).await;
+                drop(agent);
+                // Broadcast so all attached clients render the guidance.
+                session.broadcast(ServerMessage::UserMessage { text }).await;
+            }
             ClientMessage::TerminalOpen { rows, cols } => {
                 let Some(session) = attached_session.clone() else {
                     reply(ServerMessage::TerminalError {

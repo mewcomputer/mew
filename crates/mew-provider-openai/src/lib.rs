@@ -155,6 +155,37 @@ impl Provider for Adapter {
     }
 }
 
+/// Detect whether the request has thinking/reasoning mode enabled, based on
+/// the provider-specific reasoning params merged into the body. Thinking-mode
+/// models reject `tool_choice` set to "required" or a specific-tool object, so
+/// the adapter uses this to avoid sending an incompatible value.
+fn thinking_mode_active(reasoning: Option<&mew_provider::ReasoningConfig>) -> bool {
+    let Some(cfg) = reasoning else {
+        return false;
+    };
+    let params = &cfg.params;
+    // Qwen/DashScope-style explicit flag.
+    if let Some(v) = params.get("enable_thinking") {
+        if let Some(b) = v.as_bool() {
+            return b;
+        }
+    }
+    // OpenAI-style reasoning effort implies a reasoning model.
+    if params.contains_key("reasoning_effort") {
+        return true;
+    }
+    // Object-style thinking config (GLM/MiniMax/Anthropic-shaped).
+    if let Some(t) = params.get("thinking") {
+        if let Some(obj) = t.as_object() {
+            if let Some(typ) = obj.get("type").and_then(|v| v.as_str()) {
+                return !matches!(typ, "disabled" | "off" | "none");
+            }
+        }
+        return true;
+    }
+    false
+}
+
 impl Adapter {
     fn find_tool_output(messages: &[Message], call_id: &str) -> String {
         for m in messages {
@@ -184,6 +215,11 @@ impl Adapter {
             "model": self.model,
             "messages": messages,
             "stream": true,
+            // Ask the provider to return usage in the final chunk. Without
+            // this, many OpenAI-compatible providers (Alibaba Qwen, DeepSeek,
+            // etc.) omit the `usage` object entirely and the token counter /
+            // cost stay at 0.
+            "stream_options": { "include_usage": true },
         });
 
         if !req.tools.is_empty() {
@@ -228,12 +264,22 @@ impl Adapter {
                     body_obj.insert("max_tokens".into(), json!(m));
                 }
                 if let Some(tc) = params.tool_choice {
-                    let v = match tc {
-                        mew_provider::ToolChoice::Auto => json!("auto"),
-                        mew_provider::ToolChoice::Required => json!("required"),
-                        mew_provider::ToolChoice::None_ => json!("none"),
-                    };
-                    body_obj.insert("tool_choice".into(), v);
+                    // Thinking-mode models (Qwen, etc.) reject `tool_choice`
+                    // set to "required" or a specific-tool object. The
+                    // reasoning truncator forces `Required` to break
+                    // deliberation loops, but that is incompatible with
+                    // thinking mode — drop it rather than fail the request.
+                    let drop_required_in_thinking =
+                        matches!(tc, mew_provider::ToolChoice::Required)
+                            && thinking_mode_active(req.reasoning.as_ref());
+                    if !drop_required_in_thinking {
+                        let v = match tc {
+                            mew_provider::ToolChoice::Auto => json!("auto"),
+                            mew_provider::ToolChoice::Required => json!("required"),
+                            mew_provider::ToolChoice::None_ => json!("none"),
+                        };
+                        body_obj.insert("tool_choice".into(), v);
+                    }
                 }
             }
         }
@@ -379,6 +425,13 @@ impl Adapter {
         let mut current_text_part: Option<TextPart> = None;
         let mut current_reasoning_part: Option<ReasoningPart> = None;
         let mut current_tool_calls: HashMap<u32, ToolCallAccumulator> = HashMap::new();
+        // Captured from the final chunk: OpenAI-compatible streams send a
+        // `usage` object (prompt_tokens / completion_tokens) in the last
+        // chunk, which is what powers the TUI's token counter.
+        let mut last_usage: Option<Tokens> = None;
+        // The finish reason may arrive in a chunk before the usage chunk and
+        // [DONE]. Defer finalization until the stream ends so usage is captured.
+        let mut pending_finish: Option<Finish> = None;
 
         while let Some(item) = stream.next().await {
             let event = match item {
@@ -404,7 +457,8 @@ impl Adapter {
                     &mut current_reasoning_part,
                     &mut current_tool_calls,
                     &mut tx,
-                    Finish::Stop,
+                    pending_finish.unwrap_or(Finish::Stop),
+                    last_usage,
                 )
                 .await;
                 return;
@@ -422,6 +476,16 @@ impl Adapter {
                     break;
                 }
             };
+
+            // Capture usage from any chunk that carries it (the final data
+            // chunk typically has `choices: []` + a `usage` object).
+            if let Some(usage) = &chunk.usage {
+                last_usage = Some(Tokens {
+                    input: usage.input_tokens.unwrap_or(0),
+                    output: usage.output_tokens.unwrap_or(0),
+                    ..Default::default()
+                });
+            }
 
             if chunk.choices.is_empty() {
                 continue;
@@ -558,26 +622,20 @@ impl Adapter {
             }
 
             if let Some(finish_reason) = &chunk.choices[0].finish_reason {
-                let finish = map_finish_reason(finish_reason);
-                Self::finalize_all(
-                    &mut current_text_part,
-                    &mut current_reasoning_part,
-                    &mut current_tool_calls,
-                    &mut tx,
-                    finish,
-                )
-                .await;
-                return;
+                // Record the finish but don't return yet: the usage chunk (if
+                // any) arrives after finish_reason and before [DONE].
+                pending_finish = Some(map_finish_reason(finish_reason));
             }
         }
 
-        // Stream ended without [DONE] or finish_reason.
+        // Stream ended without [DONE] (or we hit [DONE] which finalizes above).
         Self::finalize_all(
             &mut current_text_part,
             &mut current_reasoning_part,
             &mut current_tool_calls,
             &mut tx,
-            Finish::Stop,
+            pending_finish.unwrap_or(Finish::Stop),
+            last_usage,
         )
         .await;
     }
@@ -588,6 +646,7 @@ impl Adapter {
         current_tool_calls: &mut HashMap<u32, ToolCallAccumulator>,
         tx: &mut mpsc::Sender<ProviderEvent>,
         finish: Finish,
+        usage: Option<Tokens>,
     ) {
         if let Some(tp) = current_text_part.take() {
             let _ = tx
@@ -614,7 +673,7 @@ impl Adapter {
         let _ = tx
             .send(ProviderEvent::MessageEnd {
                 finish,
-                usage: Tokens::default(),
+                usage: usage.unwrap_or_default(),
                 cost: 0.0,
             })
             .await;
@@ -624,6 +683,20 @@ impl Adapter {
 #[derive(Debug, serde::Deserialize)]
 struct CompletionChunk {
     choices: Vec<Choice>,
+    /// Present on the final data chunk (with `stream_options.include_usage`).
+    #[serde(default)]
+    usage: Option<ChunkUsage>,
+}
+
+/// OpenAI-compatible usage object. `prompt_tokens`/`completion_tokens` mirror
+/// the Anthropic fields; some providers (e.g. Alibaba Qwen) use `input_tokens`
+/// / `output_tokens` instead, so both are accepted.
+#[derive(Debug, Default, serde::Deserialize)]
+struct ChunkUsage {
+    #[serde(alias = "prompt_tokens")]
+    input_tokens: Option<u32>,
+    #[serde(alias = "completion_tokens")]
+    output_tokens: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1027,6 +1100,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fixture_usage_parsed_from_final_chunk() {
+        // Alibaba Qwen and other OpenAI-compatible providers send a final
+        // data chunk with `choices: []` + a `usage` object. The adapter must
+        // surface it in MessageEnd so the TUI token counter works.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+        let fixture =
+            std::fs::read_to_string("src/testdata/usage.sse").expect("read usage fixture");
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(fixture, "text/event-stream"))
+            .mount(&mock_server)
+            .await;
+
+        let adapter = Adapter::new(
+            "test".to_string(),
+            mock_server.uri(),
+            "test-model".to_string(),
+            "test-key".to_string(),
+        );
+
+        let req = Request {
+            model: "test-model".into(),
+            messages: vec![],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            ..Default::default()
+        };
+
+        let mut stream = adapter.stream(req).await.expect("stream");
+        let mut events: Vec<ProviderEvent> = Vec::new();
+        while let Some(ev) = futures::StreamExt::next(&mut stream).await {
+            events.push(ev);
+        }
+
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                ProviderEvent::MessageEnd { usage, .. } => Some(usage),
+                _ => None,
+            })
+            .expect("MessageEnd with usage");
+        assert_eq!(usage.input, 1234, "prompt_tokens should map to input");
+        assert_eq!(usage.output, 56, "completion_tokens should map to output");
+    }
+
+    #[tokio::test]
     async fn test_fixture_reasoning_content_alias() {
         // Kimi K3 and DeepSeek emit reasoning under `reasoning_content` in the
         // streaming delta (not `reasoning`). The Delta struct aliases both
@@ -1347,5 +1471,108 @@ mod tests {
         assert_eq!(messages[1]["tool_call_id"], "bash:14");
         assert_eq!(messages[2]["role"], "user");
         assert_eq!(messages[2]["content"], "Here is the result");
+    }
+
+    fn tool_choice_request(
+        tool_choice: mew_provider::ToolChoice,
+        reasoning: Option<mew_provider::ReasoningConfig>,
+    ) -> Request {
+        Request {
+            model: "test-model".to_string(),
+            messages: vec![Message {
+                id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+                role: Role::User,
+                parts: vec![Part::Text(TextPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: "hi".to_string(),
+                    synthetic: false,
+                })],
+                time: mew_message::Time {
+                    created: 0,
+                    completed: None,
+                },
+                assistant: None,
+            }],
+            tools: vec![],
+            system: String::new(),
+            reasoning,
+            params: Some(mew_provider::ChatParams {
+                temperature: None,
+                top_p: None,
+                max_tokens: None,
+                tool_choice: Some(tool_choice),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn qwen_thinking_on() -> mew_provider::ReasoningConfig {
+        mew_provider::ReasoningConfig {
+            params: serde_json::json!({ "enable_thinking": true, "thinking_budget": 8192 })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_thinking_mode_detection() {
+        // No reasoning config -> not thinking.
+        assert!(!thinking_mode_active(None));
+        // Qwen thinking on.
+        assert!(thinking_mode_active(Some(&qwen_thinking_on())));
+        // Qwen thinking explicitly off.
+        let off = mew_provider::ReasoningConfig {
+            params: serde_json::json!({ "enable_thinking": false })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        };
+        assert!(!thinking_mode_active(Some(&off)));
+        // OpenAI reasoning_effort implies thinking.
+        let effort = mew_provider::ReasoningConfig {
+            params: serde_json::json!({ "reasoning_effort": "high" })
+                .as_object()
+                .cloned()
+                .unwrap(),
+        };
+        assert!(thinking_mode_active(Some(&effort)));
+    }
+
+    #[tokio::test]
+    async fn test_tool_choice_required_dropped_in_thinking_mode() {
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        // Thinking on + Required -> tool_choice must be omitted.
+        let req = tool_choice_request(mew_provider::ToolChoice::Required, Some(qwen_thinking_on()));
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            body_json.get("tool_choice").is_none(),
+            "tool_choice must be omitted in thinking mode, got {:?}",
+            body_json.get("tool_choice")
+        );
+
+        // Thinking off + Required -> tool_choice stays "required".
+        let req = tool_choice_request(mew_provider::ToolChoice::Required, None);
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["tool_choice"], "required");
+
+        // Thinking on + Auto -> tool_choice stays "auto" (only Required is
+        // incompatible).
+        let req = tool_choice_request(mew_provider::ToolChoice::Auto, Some(qwen_thinking_on()));
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body_json["tool_choice"], "auto");
     }
 }

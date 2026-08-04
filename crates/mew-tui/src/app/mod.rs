@@ -173,6 +173,10 @@ pub struct App {
     pub rendered_chat_width: u16,
     pub esc_cancel_pending: Option<Instant>,
     pub ctrl_c_quit_pending: Option<Instant>,
+    /// True while a cancel is in flight but the turn hasn't actually ended yet.
+    /// Keeps `streaming` truthy so submits during the window are queued rather
+    /// than being sent into the daemon's "turn in progress" race.
+    pub cancelling: bool,
     pub retry_status: Option<String>,
     pub mouse_capture: bool,
     pub pending_mouse_toggle: bool,
@@ -692,6 +696,7 @@ impl App {
             rendered_chat_width: 0,
             esc_cancel_pending: None,
             ctrl_c_quit_pending: None,
+            cancelling: false,
             retry_status: None,
             mouse_capture: true,
             pending_mouse_toggle: false,
@@ -1510,6 +1515,32 @@ impl App {
         });
     }
 
+    /// Push a guided user message. Rendered distinctly (steering the current
+    /// turn, not a fresh user turn). Marked `synthetic` so the transcript
+    /// doesn't treat it as a new prompt.
+    pub fn push_guidance(&mut self, text: String) {
+        let msg_id = ulid::Ulid::new();
+        self.push_message(Message {
+            id: msg_id,
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![Part::Text(mew_message::TextPart {
+                base: mew_message::PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: msg_id,
+                    session_id: ulid::Ulid::new(),
+                },
+                text,
+                synthetic: true,
+            })],
+            time: mew_message::Time {
+                created: chrono::Utc::now().timestamp_millis(),
+                completed: None,
+            },
+            assistant: None,
+        });
+    }
+
     /// Push a synthetic assistant message (e.g. `/cost` output, system
     /// alerts). Marks the chat dirty so it renders on the next draw.
     pub fn push_synthetic_message(&mut self, text: String) {
@@ -1866,6 +1897,7 @@ impl App {
                 // and request another stream. Stay in streaming mode.
                 if finish != mew_message::Finish::ToolUse {
                     self.streaming = false;
+                    self.cancelling = false;
                     self.esc_cancel_pending = None;
                     self.ctrl_c_quit_pending = None;
                     self.retry_status = None;
@@ -1901,6 +1933,7 @@ impl App {
             }
             AgentEvent::Provider(ProviderEvent::Error(err)) => {
                 self.streaming = false;
+                self.cancelling = false;
                 self.esc_cancel_pending = None;
                 self.ctrl_c_quit_pending = None;
                 self.retry_status = None;
@@ -2053,6 +2086,7 @@ impl App {
             }
             AgentEvent::Error(msg) => {
                 self.streaming = false;
+                self.cancelling = false;
                 self.esc_cancel_pending = None;
                 self.ctrl_c_quit_pending = None;
                 self.push_synthetic_message(format!("Error: {}", msg));

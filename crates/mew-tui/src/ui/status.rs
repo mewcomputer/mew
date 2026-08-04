@@ -169,6 +169,23 @@ fn build_pills(app: &App, theme: &crate::theme::Theme) -> Vec<Pill> {
         }
     }
 
+    // Queued messages (turn busy): the composer shows a preview strip; the
+    // status pill reinforces the count and the guide key so the user knows
+    // they'll fire on the next turn (or can be steered into the current one).
+    if !app.queued_messages.is_empty() {
+        let n = app.queued_messages.len();
+        let label = if n == 1 {
+            "1 queued · Ctrl+Up to guide".to_string()
+        } else {
+            format!("{} queued · Ctrl+Up to guide", n)
+        };
+        pills.push(Pill {
+            text: label,
+            fg: theme.resolve("pill.attention.fg"),
+            bg: theme.resolve("pill.attention.bg"),
+        });
+    }
+
     // Future pills slot in here: persona, perms, plugin-contributed, etc.
     pills
 }
@@ -320,7 +337,14 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     );
 
     // Left side: transient status overrides take precedence, then pills.
-    let left_line: Line<'static> = if app.esc_cancel_pending.is_some() {
+    let left_line: Line<'static> = if app.cancelling {
+        Line::from(Span::styled(
+            "cancelling…",
+            Style::default()
+                .fg(app.theme.resolve("text.warning"))
+                .bg(status_bg),
+        ))
+    } else if app.esc_cancel_pending.is_some() {
         Line::from(Span::styled(
             "esc again to stop agent",
             Style::default()

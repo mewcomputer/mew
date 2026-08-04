@@ -487,12 +487,6 @@ impl DaemonBackend {
         let mut target = crate::runtime::daemon::DaemonTarget::new(self.client.clone());
         let mut should_break = false;
         let plugin_info = Arc::new(std::sync::Mutex::new(crate::PluginInfo {
-            session_id: self.app.status.session_id.clone(),
-            model: "daemon".to_string(),
-            provider: "mewd".to_string(),
-            workspace: std::env::current_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default(),
             active_persona: None,
         }));
         let mut cx = crate::runtime::Ctx {

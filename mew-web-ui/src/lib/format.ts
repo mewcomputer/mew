@@ -12,6 +12,14 @@ export function formatTokens(n: number): string {
   return `${(n / 1_000_000).toFixed(2)}M`;
 }
 
+/** Context usage as an integer percent of the model's window. Returns null
+ *  when the window is unknown or non-positive (no meaningful percentage).
+ *  Values above 100 are preserved — an over-window context is informative. */
+export function contextPercent(used: number, window: number): number | null {
+  if (!Number.isFinite(used) || !Number.isFinite(window) || window <= 0) return null;
+  return Math.round((Math.max(0, used) / window) * 100);
+}
+
 /** Human-readable relative age from a unix timestamp (seconds). */
 export function formatRelativeAge(timestampMs: number): string {
   const diffMs = Date.now() - timestampMs;

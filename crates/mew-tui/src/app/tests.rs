@@ -2142,6 +2142,36 @@ fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
 }
 
 #[test]
+fn ctrl_up_guides_oldest_queued_message() {
+    use crate::events::Action;
+    let mut app = App::new();
+    app.streaming = true;
+    app.queued_messages = vec!["first".into(), "second".into()];
+
+    let ctrl_up = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Up,
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    let action = crate::events::handle_key_event(&mut app, ctrl_up);
+    assert!(matches!(action, Some(Action::GuideQueued(text)) if text == "first"));
+    // The guided message is popped from the queue; the rest remain.
+    assert_eq!(app.queued_messages, vec!["second".to_string()]);
+}
+
+#[test]
+fn ctrl_up_without_queued_message_is_noop() {
+    let mut app = App::new();
+    app.streaming = true;
+    app.queued_messages.clear();
+    let ctrl_up = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Up,
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    let action = crate::events::handle_key_event(&mut app, ctrl_up);
+    assert!(action.is_none());
+}
+
+#[test]
 fn test_thinking_picker_budget_row_only_with_metadata() {
     let mut app = App::new();
     app.status.model = "qwen3.8-max".into();

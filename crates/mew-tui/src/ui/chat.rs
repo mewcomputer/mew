@@ -298,18 +298,38 @@ pub(crate) fn build_chat_lines(
         }
         let is_last = msg_idx + 1 == msg_count;
         let is_streaming = app.streaming && is_last;
-        let (prefix, prefix_color, content_style) = match msg.role {
-            Role::User => (
-                ">",
-                app.theme.resolve("text.accent"),
-                Style::default().fg(app.theme.resolve("foreground")),
-            ),
-            Role::Assistant => (
-                "",
-                app.theme.resolve("text.muted"),
-                Style::default().fg(app.theme.resolve("foreground")),
-            ),
-            Role::System => unreachable!("system messages are hidden above"),
+        // A guided user message (steering the current turn) renders with a
+        // distinct arrow prefix instead of the normal ">" prompt marker.
+        let is_guidance = msg.role == Role::User
+            && msg.parts.iter().any(|p| {
+                matches!(
+                    p,
+                    Part::Text(mew_message::TextPart {
+                        synthetic: true,
+                        ..
+                    })
+                )
+            });
+        let (prefix, prefix_color, content_style) = if is_guidance {
+            (
+                "→",
+                app.theme.resolve("text.warning"),
+                Style::default().fg(app.theme.resolve("text.muted")),
+            )
+        } else {
+            match msg.role {
+                Role::User => (
+                    ">",
+                    app.theme.resolve("text.accent"),
+                    Style::default().fg(app.theme.resolve("foreground")),
+                ),
+                Role::Assistant => (
+                    "",
+                    app.theme.resolve("text.muted"),
+                    Style::default().fg(app.theme.resolve("foreground")),
+                ),
+                Role::System => unreachable!("system messages are hidden above"),
+            }
         };
 
         let mut message_had_content = false;
@@ -1058,6 +1078,19 @@ fn tool_call_label_and_color(app: &App, tc: &mew_message::ToolCallPart) -> (&'st
     }
 }
 
+/// Split `s` into (head, truncated) with at most `max` chars in head.
+/// Counts chars, not bytes: byte slicing panics when a multibyte char
+/// straddles the cut point.
+fn truncate_chars(s: &str, max: usize) -> (String, bool) {
+    // Fast path: byte length <= max implies char count <= max.
+    if s.len() <= max {
+        return (s.to_string(), false);
+    }
+    let head: String = s.chars().take(max).collect();
+    let truncated = head.len() < s.len();
+    (head, truncated)
+}
+
 fn tool_call_args_summary(tc: &mew_message::ToolCallPart) -> Option<String> {
     let input = tc.state.input();
     match tc.tool_name.as_str() {
@@ -1066,17 +1099,19 @@ fn tool_call_args_summary(tc: &mew_message::ToolCallPart) -> Option<String> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
         "bash" => input.get("command").and_then(|v| v.as_str()).map(|s| {
-            if s.len() > 50 {
-                format!("{}...", &s[..50])
+            let (head, truncated) = truncate_chars(s, 50);
+            if truncated {
+                format!("{head}...")
             } else {
-                s.to_string()
+                head
             }
         }),
         "grep" => input.get("pattern").and_then(|v| v.as_str()).map(|s| {
-            if s.len() > 40 {
-                format!("'{}...'", &s[..40])
+            let (head, truncated) = truncate_chars(s, 40);
+            if truncated {
+                format!("'{head}...'")
             } else {
-                format!("'{}'", s)
+                format!("'{head}'")
             }
         }),
         "glob" => input
@@ -1084,10 +1119,11 @@ fn tool_call_args_summary(tc: &mew_message::ToolCallPart) -> Option<String> {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
         "echo" => input.get("input").and_then(|v| v.as_str()).map(|s| {
-            if s.len() > 40 {
-                format!("'{}...'", &s[..40])
+            let (head, truncated) = truncate_chars(s, 40);
+            if truncated {
+                format!("'{head}...'")
             } else {
-                format!("'{}'", s)
+                format!("'{head}'")
             }
         }),
         _ => None,
@@ -1387,5 +1423,61 @@ mod tests {
             "second header should show 5.0s: {}",
             header_lines[1]
         );
+    }
+
+    fn tool_call_part(tool_name: &str, input: serde_json::Value) -> mew_message::ToolCallPart {
+        let msg_id = ulid::Ulid::new();
+        mew_message::ToolCallPart {
+            base: mew_message::PartBase {
+                id: ulid::Ulid::new(),
+                message_id: msg_id,
+                session_id: ulid::Ulid::new(),
+            },
+            tool_name: tool_name.to_string(),
+            call_id: "call-1".to_string(),
+            state: mew_message::ToolState::Pending(mew_message::ToolStatePending {
+                input,
+                time: mew_message::ToolTime {
+                    start: 0,
+                    end: None,
+                },
+            }),
+            raw_input: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_args_summary_bash_em_dash_at_cut_point() {
+        // Em dash (3 bytes) at bytes 49..52 straddles the 50-char cut point.
+        let command = format!("{}— {}", "a".repeat(49), "tail");
+        let part = tool_call_part("bash", serde_json::json!({ "command": command }));
+        let summary = tool_call_args_summary(&part).expect("bash summary");
+        assert_eq!(summary, format!("{}—...", "a".repeat(49)));
+    }
+
+    #[test]
+    fn test_args_summary_grep_em_dash_at_cut_point() {
+        // Em dash (3 bytes) at bytes 39..42 straddles the 40-char cut point.
+        let pattern = format!("{}—{}", "a".repeat(39), "tail");
+        let part = tool_call_part("grep", serde_json::json!({ "pattern": pattern }));
+        let summary = tool_call_args_summary(&part).expect("grep summary");
+        assert_eq!(summary, format!("'{}—...'", "a".repeat(39)));
+    }
+
+    #[test]
+    fn test_args_summary_echo_em_dash_at_cut_point() {
+        let input = format!("{}—{}", "b".repeat(39), "tail");
+        let part = tool_call_part("echo", serde_json::json!({ "input": input }));
+        let summary = tool_call_args_summary(&part).expect("echo summary");
+        assert_eq!(summary, format!("'{}—...'", "b".repeat(39)));
+    }
+
+    #[test]
+    fn test_args_summary_multibyte_within_char_limit_not_truncated() {
+        // 20 em dashes = 60 bytes > 50, but only 20 chars → no truncation.
+        let command = "\u{2014}".repeat(20);
+        let part = tool_call_part("bash", serde_json::json!({ "command": command }));
+        let summary = tool_call_args_summary(&part).expect("bash summary");
+        assert_eq!(summary, command);
     }
 }

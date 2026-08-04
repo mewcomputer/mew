@@ -53,6 +53,9 @@ impl runtime::target::CommandTarget for RecordingTarget {
     async fn cancel(&mut self) {
         self.record("cancel");
     }
+    async fn guide(&mut self, _text: String) {
+        self.record("guide");
+    }
     async fn clear(&mut self) -> Result<(), runtime::target::Unsupported> {
         self.record("clear");
         self.check()
@@ -243,16 +246,13 @@ async fn test_action_variant_table() {
             Action::SetThinkingVariant(_) => Action::SetThinkingVariant("off".into()),
             Action::AttachSession(_) => Action::AttachSession("sess_123".into()),
             Action::SendQueuedNow(_) => Action::SendQueuedNow("queued text".into()),
+            Action::GuideQueued(_) => Action::GuideQueued("guided text".into()),
             other => other,
         };
         let mut app = mew_tui::App::new();
         let mut target = RecordingTarget::new();
         let mut should_break = false;
         let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-            session_id: String::new(),
-            model: String::new(),
-            provider: String::new(),
-            workspace: String::new(),
             active_persona: None,
         }));
         let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -308,10 +308,6 @@ async fn test_synthetic_message_renders_immediately() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -350,10 +346,6 @@ async fn test_unknown_slash_falls_through() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -388,10 +380,6 @@ async fn test_daemon_quit() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -425,10 +413,6 @@ async fn test_paste_clipboard_image_ssh_warning() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -473,10 +457,6 @@ async fn test_paste_clipboard_image_no_tool_error() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -602,10 +582,6 @@ async fn test_unsupported_ops_render_alerts() {
     let mut target = RecordingTarget::failing();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -643,10 +619,6 @@ async fn test_set_permission_mode_not_dropped() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -693,10 +665,6 @@ async fn test_cycle_persona_forward_through_list() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -726,10 +694,6 @@ async fn test_cycle_persona_forward_wraps_to_default() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -761,10 +725,6 @@ async fn test_cycle_persona_backward_from_default_wraps_to_last() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -792,10 +752,6 @@ async fn test_cycle_persona_empty_list_sets_alert() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -851,10 +807,6 @@ async fn test_autotitle_autosummary_yield_reach_target() {
         let mut target = RecordingTarget::new();
         let mut should_break = false;
         let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-            session_id: String::new(),
-            model: String::new(),
-            provider: String::new(),
-            workspace: String::new(),
             active_persona: None,
         }));
         let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -883,10 +835,6 @@ async fn test_autotitle_unsupported_renders_alert() {
     let mut target = RecordingTarget::failing();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -916,10 +864,6 @@ async fn test_unflag_reaches_target_and_updates_display() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -954,10 +898,6 @@ async fn test_project_picker_flow_reaches_target() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -1015,10 +955,6 @@ async fn test_session_meta_actions_reach_target() {
     let mut target = RecordingTarget::new();
     let mut should_break = false;
     let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
-        session_id: String::new(),
-        model: String::new(),
-        provider: String::new(),
-        workspace: String::new(),
         active_persona: None,
     }));
     let (event_loop, _event_rx) = mew_tui::EventLoop::new();
@@ -1062,4 +998,43 @@ async fn test_session_meta_actions_reach_target() {
         "/rename should call rename_session; got: {:?}",
         target.calls
     );
+}
+
+// -----------------------------------------------------------------------
+// Turn-alive guard: Cancel keeps streaming true until the turn actually ends.
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_cancel_keeps_streaming_until_turn_ends() {
+    let mut app = mew_tui::App::new();
+    app.streaming = true;
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+
+    // Cancel must NOT clear streaming immediately (turn-alive guard).
+    let _ = runtime::handle_action(&mut cx, Action::Cancel).await;
+    assert!(
+        app.streaming,
+        "cancel should keep streaming true until turn ends"
+    );
+    assert!(app.cancelling, "cancel should mark cancelling");
+
+    // The turn-ending event clears both.
+    app.handle_agent_event(mew_agent::AgentEvent::Error("aborted".into()));
+    assert!(!app.streaming, "turn end should clear streaming");
+    assert!(!app.cancelling, "turn end should clear cancelling");
 }

@@ -476,7 +476,7 @@ final class AppStore: ObservableObject {
             // Update the message part in place
             updatePartInMessages(partId: partId)
 
-        case .turnEnded(let daemon, let sessionId, let inputTokens, let outputTokens, let cost, let failed):
+        case .turnEnded(let daemon, let sessionId, let inputTokens, let outputTokens, let cost, let failed, _):
             isStreaming = false
             streamingPartId = nil
             streamingText = ""
@@ -567,7 +567,8 @@ final class AppStore: ObservableObject {
                     toolTimeStart: nil,
                     toolTimeEnd: nil,
                     toolSensitivity: nil
-                )]
+                )],
+                assistantMeta: nil
             ))
 
         case .permissionModeChanged(let daemon, let mode):

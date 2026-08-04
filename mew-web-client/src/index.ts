@@ -43,6 +43,7 @@ export type ClientMessage =
   | { type: "set_auto_summary"; enabled: boolean }
   | { type: "prompt"; text: string; attachments: Attachment[] }
   | { type: "cancel" }
+  | { type: "guide"; text: string }
   | {
       type: "permission_response";
       request_id: string;
@@ -906,6 +907,12 @@ export class MewClient {
   /** Send `cancel` to abort the current turn. */
   cancel(): void {
     this.send({ type: "cancel" });
+  }
+
+  /** Inject guidance into the running turn's next request (steer the LLM).
+   *  If no turn is running, it is picked up by the next turn. */
+  guide(text: string): void {
+    this.send({ type: "guide", text });
   }
 
   /**

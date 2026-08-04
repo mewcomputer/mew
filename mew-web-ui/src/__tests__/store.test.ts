@@ -404,6 +404,40 @@ describe("assistant metadata preservation", () => {
     expect(messages[0]!.assistantMeta!.manifest!.model).toBe("deepseek-v3");
     expect(useSessionStore.getState().totalInputTokens).toBe(3000);
     expect(useSessionStore.getState().totalCost).toBe(0.02);
+    expect(useSessionStore.getState().contextTokens).toBe(3000);
+    expect(useSessionStore.getState().contextWindow).toBe(64000);
+  });
+
+  it("message_end snapshots context occupancy instead of accumulating", () => {
+    const fire = (input: number, contextWindow?: number) =>
+      store().onProviderEvent({
+        type: "message_end",
+        finish: "stop",
+        usage: { input, output: 10, reasoning: 0, cache_read: 0, cache_write: 0 },
+        cost: 0,
+        manifest: contextWindow
+          ? {
+              model: "m",
+              context_window: contextWindow,
+              input_tokens: input,
+              output_tokens: 10,
+              cache_read_tokens: 0,
+              cache_write_tokens: 0,
+              reasoning_tokens: 0,
+              segments: [],
+            }
+          : undefined,
+      });
+
+    fire(10_000, 200_000);
+    expect(useSessionStore.getState().contextTokens).toBe(10_000);
+    expect(useSessionStore.getState().contextWindow).toBe(200_000);
+
+    // A larger follow-up context replaces the reading, and a manifest without
+    // a window keeps the last known one.
+    fire(180_000);
+    expect(useSessionStore.getState().contextTokens).toBe(180_000);
+    expect(useSessionStore.getState().contextWindow).toBe(200_000);
   });
 
   it("message_end attaches assistantMeta even when last message is not assistant", () => {

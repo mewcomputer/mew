@@ -186,6 +186,11 @@ interface SessionState {
   totalOutputTokens: number;
   totalCost: number;
 
+  // Current context occupancy for the active session (snapshot, not
+  // cumulative): the latest request's prompt size and the model's window.
+  contextTokens: number;
+  contextWindow: number;
+
   // Model management
   availableModels: ModelInfo[];
   currentModel: string | null;
@@ -367,6 +372,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   totalInputTokens: 0,
   totalOutputTokens: 0,
   totalCost: 0,
+  contextTokens: 0,
+  contextWindow: 0,
   availableModels: [],
   currentModel: null,
   currentProvider: null,
@@ -623,6 +630,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           const totalOutputTokens = s.totalOutputTokens + ev.usage.output;
           const totalCost = s.totalCost + ev.cost;
 
+          // Current context occupancy: this request's prompt size, plus the
+          // window the manifest reports (keep the last known window if this
+          // manifest lacks one).
+          const contextTokens = ev.usage.input > 0 ? ev.usage.input : s.contextTokens;
+          const contextWindow = ev.manifest?.context_window
+            ? ev.manifest.context_window
+            : s.contextWindow;
+
           // Find the last assistant message (search backwards, not by
           // position — an error or tool-result message may have been
           // appended after the assistant message).
@@ -630,7 +645,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             .reverse()
             .findIndex((m) => m.role === "assistant");
           if (lastAssistantIdx === -1) {
-            return { totalInputTokens, totalOutputTokens, totalCost };
+            return {
+              totalInputTokens,
+              totalOutputTokens,
+              totalCost,
+              contextTokens,
+              contextWindow,
+            };
           }
           const idx = s.messages.length - 1 - lastAssistantIdx;
 
@@ -638,6 +659,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             totalInputTokens,
             totalOutputTokens,
             totalCost,
+            contextTokens,
+            contextWindow,
             messages: s.messages.map((m, i) =>
               i === idx
                 ? {
@@ -1157,6 +1180,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       totalInputTokens: 0,
       totalOutputTokens: 0,
       totalCost: 0,
+      contextTokens: 0,
+      contextWindow: 0,
       // Clear per-session state that shouldn't leak across sessions.
       sessionCwd: null,
       flaggedFiles: [],

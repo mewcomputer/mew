@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -203,6 +203,11 @@ pub struct Agent {
     /// actual switch (model pin, provider rebuild) is the main loop's
     /// responsibility, triggered by the `PersonaSwitchRequested` event.
     pub pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Short user messages queued to steer the *running* turn. Injected into
+    /// the next provider request (even a tool-call continuation) rather than
+    /// starting a new turn. If the turn ends first, the guidance is picked up
+    /// by the next turn. Shared via `Arc` so the running turn's clone sees it.
+    pub pending_guidance: Arc<tokio::sync::Mutex<VecDeque<String>>>,
     /// Current persona name, shared with the `switch_persona` tool so it
     /// can look up transition rules for the *active* persona before
     /// queuing a switch. Updated by `apply_persona` and `clear_persona`.
@@ -357,6 +362,7 @@ impl Agent {
             base_system: String::new(),
             personas: Vec::new(),
             pending_persona_switch: Arc::new(tokio::sync::Mutex::new(None)),
+            pending_guidance: Arc::new(tokio::sync::Mutex::new(VecDeque::new())),
             current_persona_name: Arc::new(tokio::sync::RwLock::new(None)),
             persona_name: None,
             autonomous_hint: None,
@@ -1166,6 +1172,50 @@ impl Agent {
         });
 
         rx
+    }
+
+    /// Queue a short user message to steer the running turn. The next provider
+    /// request (including a tool-call continuation) includes it as a user
+    /// message. If a turn is not running, the guidance is picked up by the next
+    /// turn. Safe to call from any thread; the queue is shared via `Arc`.
+    pub async fn enqueue_guidance(&self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.pending_guidance.lock().await.push_back(text);
+    }
+
+    /// Drain and append any queued guidance as user messages. Called at the top
+    /// of each turn-loop iteration so guidance lands in the next request.
+    pub(crate) async fn drain_guidance(&self) {
+        let pending: Vec<String> = {
+            let mut queue = self.pending_guidance.lock().await;
+            queue.drain(..).collect()
+        };
+        for text in pending {
+            let msg_id = ulid::Ulid::new();
+            let parts = vec![Part::Text(TextPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: msg_id,
+                    session_id: self.session_id,
+                },
+                text,
+                synthetic: true,
+            })];
+            self.append_message(Message {
+                id: msg_id,
+                session_id: self.session_id,
+                role: Role::User,
+                parts,
+                time: Time {
+                    created: chrono::Utc::now().timestamp_millis(),
+                    completed: None,
+                },
+                assistant: None,
+            })
+            .await;
+        }
     }
 
     /// Spawn a subagent in the background. Returns a task ID immediately.
