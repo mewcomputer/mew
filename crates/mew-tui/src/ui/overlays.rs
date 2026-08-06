@@ -1468,8 +1468,8 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect, tokens: &crate::theme::Theme
             Span::styled("expand/collapse tool-call batch", desc_style),
         ]),
         Line::from(vec![
-            Span::styled("  Ctrl+1/2/3 ", key_style),
-            Span::styled("toggle sidebar sections", desc_style),
+            Span::styled("  Ctrl+1     ", key_style),
+            Span::styled("toggle sidebar environment section", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  Ctrl+Shift+C", key_style),

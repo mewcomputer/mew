@@ -96,6 +96,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             main_area.height.saturating_sub(1),
         );
 
+        // Match the chat layout: paint the chat surface color behind the hero
+        // and centered input so the landing screen reads as the same canvas.
+        {
+            let landing_bg = Block::default()
+                .style(Style::default().bg(app.theme.resolve("chat.surface.background")));
+            f.render_widget(landing_bg, hero_area);
+        }
+
         let input_rect = welcome::draw_landing(f, app, hero_area, slash_height);
         if app.mode == Mode::UserQuestion {
             if let Some(ref uq) = app.user_question {

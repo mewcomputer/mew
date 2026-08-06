@@ -26,23 +26,25 @@ This opens the TUI. The layout has three areas:
 ```
 ┌──────────────────────────────────────────────┐
 │  status bar: model · provider · context      │
-├────────────├──────────────────────────────────┤
-│            │                                  │
-│  sidebar   │  chat                            │
-│            │                                  │
-│  context   │  > your messages                 │
-│  tools     │  assistant responses              │
-│  mcp       │  tool call cards                 │
-│            │                                  │
-├────────────├──────────────────────────────────┤
+├──────────────────────────────────┬───────────┤
+│                                  │  sidebar  │
+│  chat                            │           │
+│                                  │  session  │
+│  > your messages                 │  todos    │
+│  assistant responses             │  changes  │
+│  tool call cards                 │           │
+│                                  │           │
+├──────────────────────────────────┴───────────┤
 │  input bar (type your prompt here)           │
 └──────────────────────────────────────────────┘
 ```
 
 - **Status bar** (top): shows the current model, provider, and context
   window usage.
-- **Sidebar** (left): toggle sections with `Ctrl+1` (context), `Ctrl+2`
-  (tools), `Ctrl+3` (MCP servers). Collapse entirely with `Ctrl+1` again.
+- **Sidebar** (right): the current session at the top, then live activity
+  (todos, subagents, background jobs, file changes) as it happens. Press
+  `Ctrl+1` to expand the Environment section (loaded context files, MCP
+  servers).
 - **Chat** (center): messages stream in as the model responds. Tool calls
   appear as cards with their input and output.
 - **Input bar** (bottom): type your prompt and press `Enter`.

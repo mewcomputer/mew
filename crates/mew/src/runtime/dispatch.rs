@@ -96,16 +96,8 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             cx.app.clear_selection();
             Flow::Continue
         }
-        Action::ToggleSidebarContext => {
-            cx.app.toggle_sidebar_section("context");
-            Flow::Continue
-        }
-        Action::ToggleSidebarTools => {
-            cx.app.toggle_sidebar_section("tools");
-            Flow::Continue
-        }
-        Action::ToggleSidebarMcp => {
-            cx.app.toggle_sidebar_section("mcp");
+        Action::ToggleSidebarEnvironment => {
+            cx.app.toggle_sidebar_section("environment");
             Flow::Continue
         }
         Action::OpenSettings => {

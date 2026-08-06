@@ -5501,3 +5501,55 @@ on session attach.
 
 Verified: `cargo test -p mew-agent -p mew-daemon -p mew-tui` green, clippy clean
 (`-D warnings`), `just arch-check` passes.
+
+# 2026-08-05 — TUI sidebar restructure: activity-first, static info demoted
+
+Reworked the TUI sidebar around live state instead of static configuration.
+The Sessions list, Tools list, and Personas list are gone (session switching
+lives in the `/sessions` picker; tools and personas are discoverable
+elsewhere). Empty sections no longer render placeholder lines.
+
+## Changes
+
+- `crates/mew-tui/src/ui/sidebar.rs`: rewritten. New top-to-bottom order:
+  session header (title from `session_titles` → daemon summary → first
+  message, then id and message count), Todos, Companion, Subagents,
+  Background Jobs, Changes, Environment. Activity sections render only when
+  non-empty. Context files and MCP servers are merged into a single
+  Environment section, collapsed by default. Also fixes a latent off-by-one:
+  clickable header rows were recorded one row above where they render
+  (`visual_row` started at `area.y` while content renders at `area.y + 1`).
+- `crates/mew-tui/src/events.rs`: `ToggleSidebarContext/Tools/Mcp` actions
+  replaced by a single `ToggleSidebarEnvironment`; Ctrl+2 and Ctrl+3 bindings
+  removed, Ctrl+1 toggles Environment.
+- `crates/mew-tui/src/app/mod.rs`: `toggle_sidebar_section` now seeds the
+  collapse map from `App::sidebar_default_collapsed` so the first toggle of a
+  collapsed-by-default section actually expands it (previously the first
+  press was a no-op for such sections).
+- `crates/mew/src/runtime/dispatch.rs`: dispatch arm updated to match.
+- `crates/mew-tui/src/ui/overlays.rs`: help text updated (Ctrl+1 only).
+- Docs updated: `docs/getting-started/keyboard-shortcuts.md`,
+  `docs/getting-started/quick-start.md` (diagram also corrected: the sidebar
+  is on the right), `docs/using-mew/mcp-servers.md`.
+
+Session attention badges (`[1!]`/`[?]`) are no longer listed per session in
+the sidebar; the status bar still aggregates pending permissions/questions
+for non-active sessions.
+
+## Tests
+
+- `ui/sidebar.rs`: render tests for empty-sidebar hiding, session title and
+  fallbacks, todos visibility, Environment collapsed-by-default + toggle, and
+  Tools/Personas never rendering.
+- `app/tests.rs`: Ctrl+1 maps to `ToggleSidebarEnvironment`; first toggle of
+  Environment expands it.
+
+Verified: `cargo test -p mew-tui` (189 + 5 golden) and `cargo test --all`
+green, `cargo clippy --all -- -D warnings` clean, `just arch-check` passes,
+`cargo fmt --check` clean.
+
+Known pre-existing failure (reproduces on a clean tree, unrelated to this
+change): `mew::dispatch_table_tests::test_paste_clipboard_image_no_tool_error`
+fails when run via `cargo test -p mew` on this machine; it passes under
+`cargo test --all`. Looks environment-sensitive (clipboard tool availability)
+and needs its own investigation.

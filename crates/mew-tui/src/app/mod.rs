@@ -1261,12 +1261,20 @@ impl App {
         self.mark_chat_dirty();
     }
 
-    /// Toggle a sidebar section's collapsed state by name ("context", "tools", "mcp").
+    /// Whether a sidebar section defaults to collapsed. Activity sections
+    /// start expanded; the environment section holds static info and starts
+    /// collapsed.
+    pub fn sidebar_default_collapsed(section: &str) -> bool {
+        section == "environment"
+    }
+
+    /// Toggle a sidebar section's collapsed state by name ("todos",
+    /// "companion", "environment"). Clicking a section header routes here.
     pub fn toggle_sidebar_section(&mut self, section: &str) {
         let collapsed = self
             .sidebar_collapsed
             .entry(section.to_string())
-            .or_insert(false);
+            .or_insert_with(|| Self::sidebar_default_collapsed(section));
         *collapsed = !*collapsed;
     }
 

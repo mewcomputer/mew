@@ -2416,3 +2416,27 @@ fn test_model_list_populates_thinking_budget() {
         (0, 262_144, 1024, 131_072)
     );
 }
+
+#[test]
+fn test_ctrl_1_maps_to_environment_toggle() {
+    use crate::events::Action;
+    let mut app = App::new();
+    let key = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('1'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    let action = crate::events::handle_key_event(&mut app, key);
+    assert!(matches!(action, Some(Action::ToggleSidebarEnvironment)));
+}
+
+#[test]
+fn test_environment_toggle_first_press_expands() {
+    // Environment defaults to collapsed, so the first toggle must expand
+    // it (regression guard: the toggle must know the section's default).
+    let mut app = App::new();
+    assert!(App::sidebar_default_collapsed("environment"));
+    app.toggle_sidebar_section("environment");
+    assert_eq!(app.sidebar_collapsed.get("environment"), Some(&false));
+    app.toggle_sidebar_section("environment");
+    assert_eq!(app.sidebar_collapsed.get("environment"), Some(&true));
+}

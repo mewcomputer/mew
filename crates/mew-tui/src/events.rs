@@ -825,15 +825,9 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             }
             return None;
         }
-        // Ctrl+1/2/3: toggle sidebar sections
+        // Ctrl+1: toggle the sidebar environment section.
         KeyCode::Char('1') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            return Some(Action::ToggleSidebarContext);
-        }
-        KeyCode::Char('2') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            return Some(Action::ToggleSidebarTools);
-        }
-        KeyCode::Char('3') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            return Some(Action::ToggleSidebarMcp);
+            return Some(Action::ToggleSidebarEnvironment);
         }
         // Ctrl+Shift+C: copy selected text to clipboard.
         KeyCode::Char('C') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1446,10 +1440,8 @@ pub enum Action {
     InsertSubagentMention(String),
     /// Copy selected text to clipboard.
     CopySelection(String),
-    /// Toggle sidebar section collapsed state.
-    ToggleSidebarContext,
-    ToggleSidebarTools,
-    ToggleSidebarMcp,
+    /// Toggle the sidebar's Environment section collapsed state.
+    ToggleSidebarEnvironment,
     /// Open the settings page (populate plugins).
     OpenSettings,
     /// Cancel the most recently started running subagent. Carries the
