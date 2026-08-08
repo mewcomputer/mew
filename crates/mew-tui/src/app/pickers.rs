@@ -582,6 +582,48 @@ impl App {
         });
     }
 
+    /// Open a skill picker. `filter` is the text typed after the trigger
+    /// (e.g. `clar` from `@skill:clar`), used to pre-filter results.
+    /// `syntax` determines which insertion syntax is used on selection.
+    pub fn open_skill_picker(&mut self, filter: &str, syntax: SkillSyntax) {
+        let kind = match syntax {
+            SkillSyntax::AtSkill => "skill_at",
+            SkillSyntax::DollarAngle => "skill_dollar",
+        };
+        let filter_lower = filter.to_lowercase();
+        let mut items: Vec<PickerItem> = self
+            .skill_catalog
+            .iter()
+            .filter(|s| s.name.to_lowercase().contains(&filter_lower))
+            .map(|s| {
+                let label = match syntax {
+                    SkillSyntax::AtSkill => format!("@skill:{}", s.name),
+                    SkillSyntax::DollarAngle => format!("$<{}>", s.name),
+                };
+                PickerItem {
+                    id: s.name.clone(),
+                    label,
+                    description: s.description.clone(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        items.sort_by_key(|i| i.label.len());
+
+        self.mode = Mode::CommandPalette;
+        self.picker = Some(PickerState {
+            kind: kind.into(),
+            items,
+            filter: filter.to_string(),
+            selected: 0,
+            cursor: filter.len(),
+            scroll: 0,
+            visible_items: PICKER_VISIBLE_ITEMS,
+            hint: None,
+            budget: None,
+        });
+    }
+
     /// Open the command palette with a list of commands.
     /// Includes all built-in slash commands plus the original palette items.
     pub fn open_command_palette(&mut self) {

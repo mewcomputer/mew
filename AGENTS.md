@@ -238,6 +238,23 @@ Subagent definitions can pin a fully qualified `provider/model` or a router tier
 `max_duration_secs`. The runner gives active tasks a deterministic human display
 name and emits progress through `AgentEvent::SubagentStatus`.
 
+### Skill references in input
+
+In the TUI, skills can be referenced inline in the chat input using two
+equivalent syntaxes:
+
+- `@skill:name` — the namespace-prefixed form (e.g. `@skill:clarify`). This is
+  the preferred syntax; the `@skill:` prefix is extensible to other namespace
+  types in the future.
+- `$<name>` — a compatibility alias (e.g. `$<clarify>`).
+
+Both inline the skill body into the model-facing prompt at submit time. Typing
+`@skill:` or `$<` opens an autocomplete picker listing available skills. Skill
+references resolve client-side in the TUI (same as `@file` mentions); the web UI
+does not process skill references and sends them as literal text. Templated
+skills fall back to their raw body since the TUI lacks the template context;
+the model can still call the `skill` tool for the rendered version.
+
 ## Configuration and security boundaries
 
 Use `mew config path` to locate the platform-specific config directory. It holds

@@ -28,6 +28,56 @@ fn test_parse_file_mentions_none() {
     assert!(mentions.is_empty());
 }
 
+// --- Skill reference parser tests ---
+
+#[test]
+fn test_parse_skill_refs_at_syntax() {
+    let refs = parse_skill_refs("use @skill:clarify for this");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].name, "clarify");
+    assert_eq!(refs[0].raw, "@skill:clarify");
+}
+
+#[test]
+fn test_parse_skill_refs_dollar_syntax() {
+    let refs = parse_skill_refs("use $<clarify> for this");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].name, "clarify");
+    assert_eq!(refs[0].raw, "$<clarify>");
+}
+
+#[test]
+fn test_parse_skill_refs_mixed() {
+    let refs = parse_skill_refs("@skill:clarify and $<polish> please");
+    assert_eq!(refs.len(), 2);
+    assert_eq!(refs[0].name, "clarify");
+    assert_eq!(refs[1].name, "polish");
+}
+
+#[test]
+fn test_parse_skill_refs_none() {
+    assert!(parse_skill_refs("no skills here").is_empty());
+    assert!(parse_skill_refs("@src/main.rs is a file mention").is_empty());
+}
+
+#[test]
+fn test_parse_skill_refs_trailing_punct() {
+    let refs = parse_skill_refs("use @skill:clarify.");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].name, "clarify");
+
+    let refs = parse_skill_refs("use $<clarify>.");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].name, "clarify");
+}
+
+#[test]
+fn test_file_mentions_skip_skill_namespace() {
+    // @skill:clarify should NOT be treated as a file mention
+    let mentions = parse_file_mentions("@skill:clarify review @src/main.rs");
+    assert_eq!(mentions, vec!["src/main.rs"]);
+}
+
 #[test]
 fn test_builtin_slash_commands_has_core_commands() {
     let cmds = App::builtin_slash_commands();
@@ -828,6 +878,79 @@ fn test_insert_mention_replaces_trigger_at() {
     app.cursor = app.input.len();
     app.insert_mention("@lib.rs ");
     assert_eq!(app.input, "see @lib.rs ");
+}
+
+#[test]
+fn test_skill_picker_at_syntax() {
+    let mut app = App::new();
+    app.skill_catalog = vec![
+        mew_skills::Skill {
+            name: "clarify".into(),
+            description: "Improve UX copy".into(),
+            body: "body".into(),
+            path: std::path::PathBuf::from("(test)"),
+            template: false,
+        },
+        mew_skills::Skill {
+            name: "polish".into(),
+            description: "Final polish".into(),
+            body: "body".into(),
+            path: std::path::PathBuf::from("(test)"),
+            template: false,
+        },
+    ];
+
+    app.open_skill_picker("", SkillSyntax::AtSkill);
+    let picker = app.picker.as_ref().expect("picker should be open");
+    assert_eq!(picker.kind, "skill_at");
+    assert_eq!(picker.items.len(), 2);
+    assert!(picker.items.iter().any(|i| i.id == "clarify"));
+    assert!(picker.items.iter().any(|i| i.label == "@skill:clarify"));
+
+    // Simulate selection: insert_skill_mention with the AtSkill syntax.
+    // Input starts with just `@` (the trigger that opened the file picker).
+    app.input = "@".to_string();
+    app.cursor = 1;
+    app.insert_skill_mention("clarify", SkillSyntax::AtSkill);
+    assert_eq!(app.input, "@skill:clarify ");
+    assert_eq!(app.cursor, "@skill:clarify ".len());
+}
+
+#[test]
+fn test_skill_picker_dollar_syntax() {
+    let mut app = App::new();
+    app.skill_catalog = vec![mew_skills::Skill {
+        name: "clarify".into(),
+        description: "Improve UX copy".into(),
+        body: "body".into(),
+        path: std::path::PathBuf::from("(test)"),
+        template: false,
+    }];
+
+    app.open_skill_picker("", SkillSyntax::DollarAngle);
+    let picker = app.picker.as_ref().expect("picker should be open");
+    assert_eq!(picker.kind, "skill_dollar");
+    assert!(picker.items.iter().any(|i| i.label == "$<clarify>"));
+
+    // Input has `$<` (the trigger).
+    app.input = "$<".to_string();
+    app.cursor = 2;
+    app.insert_skill_mention("clarify", SkillSyntax::DollarAngle);
+    assert_eq!(app.input, "$<clarify> ");
+    assert_eq!(app.cursor, "$<clarify> ".len());
+}
+
+#[test]
+fn test_skill_catalog_loaded_via_loader() {
+    // Verify the mew_skills::Loader populates skill_catalog correctly,
+    // matching how tui.rs loads skills at startup.
+    let loader = mew_skills::Loader::new(std::env::current_dir().unwrap_or_default());
+    let skills = loader.load().unwrap_or_default();
+    // Built-in skills (at minimum mew-docs) should be present.
+    assert!(
+        skills.iter().any(|s| s.name == "mew-docs"),
+        "skill_catalog should contain built-in skills"
+    );
 }
 
 #[test]

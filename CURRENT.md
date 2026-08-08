@@ -1,3 +1,38 @@
+# 2026-08-08 — skill references: `@skill:name` and `$<name>` input syntax
+
+Added two user-facing syntaxes for referencing skills in TUI chat input. Both
+inline the skill body into the model-facing prompt at submit time, with TUI
+autocomplete for skill names.
+
+## Changes
+
+- `crates/mew-tui/Cargo.toml`: Added `mew-skills` workspace dependency.
+- `crates/mew-tui/src/app/mod.rs`:
+  - Added `SkillRef` struct, `SkillSyntax` enum, and `parse_skill_refs()`
+    function to extract `@skill:name` and `$<name>` tokens from input text.
+  - Added `skill_catalog: Vec<mew_skills::Skill>` field to `App`, initialized
+    empty in `App::new()`.
+  - Added `insert_skill_mention()` and `replace_trigger()` methods to `App`.
+  - Updated `parse_file_mentions()` to skip `@skill:` prefixed words.
+- `crates/mew/src/runtime/mentions.rs`: Extended `process_mentions()` with a
+  `skills` parameter. Skill refs are resolved and stripped before file mentions.
+- `crates/mew/src/runtime/dispatch.rs`: Updated both `process_mentions` call
+  sites to pass `&cx.app.skill_catalog`. Added `InsertSkillMention` dispatch arm.
+- `crates/mew-tui/src/app/pickers.rs`: Added `open_skill_picker()` method.
+- `crates/mew-tui/src/events.rs`: Added `InsertSkillMention` action variant,
+  `@skill:` and `$<` picker triggers, skill picker selection handlers, and
+  `is_inside_code_block()` helper for `$<` suppression in code blocks.
+- `crates/mew/src/commands/tui.rs`: Load skills at daemon-mode startup via
+  `mew_skills::Loader`.
+- `AGENTS.md`: Documented skill reference syntaxes.
+
+## Tests
+
+Parser tests (5), file-mention guard test (1), skill picker tests (2) in
+`mew-tui/src/app/tests.rs`. Resolution tests (5) in
+`mew/src/runtime/mentions.rs`. All pass. `cargo clippy`, `cargo fmt`, and
+`just arch-check` are clean.
+
 # 2026-08-04 — openai provider: tolerate usage chunks with no `choices` field
 
 Some OpenAI-compatible providers (vLLM, proxies) emit a final streaming data
@@ -5553,3 +5588,34 @@ change): `mew::dispatch_table_tests::test_paste_clipboard_image_no_tool_error`
 fails when run via `cargo test -p mew` on this machine; it passes under
 `cargo test --all`. Looks environment-sensitive (clipboard tool availability)
 and needs its own investigation.
+
+# 2026-08-05 — fix sidebar click-to-toggle drift
+
+Clicking a sidebar header needed several rows above the visible title to
+register. Two causes, both now fixed in `crates/mew-tui/src/ui/sidebar.rs`:
+
+1. Header sections incremented `visual_row` twice for the header line (once
+   at record time, once after pushing), drifting every later recorded row
+   down by one.
+2. Several rows were truncated with budgets that overflowed the inner width
+   (todo rows, job rows, change rows, progress rows, unbounded MCP/context
+   paths), so `Paragraph::wrap` split them into extra visual lines that the
+   row tracking never counted. Each wrapped line above a header shifted its
+   click target further away.
+
+Fix: a `truncate_to_fit` helper caps every row at its exact display-width
+budget (unicode-width aware, ellipsis inside the budget), and the header
+record/push/increment sequence is now single-count. With no line able to
+wrap, the recorded header rows match rendered rows exactly.
+
+## Tests
+
+- `test_sidebar_header_rows_align_with_rendered_headers`: fills todos,
+  companion, changes, and environment with overlong content and asserts each
+  recorded `(row, section)` points at the rendered header line. This failed
+  before the fix and guards the click-target invariant going forward.
+- `test_truncate_to_fit`: boundary, ellipsis, zero-budget, and wide-glyph
+  cases.
+
+Verified: `cargo test -p mew-tui` (191 + 5 golden) green, clippy and fmt
+clean.

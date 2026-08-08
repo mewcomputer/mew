@@ -120,6 +120,9 @@ pub struct App {
     pub permission_mode: mew_hooks::PermissionMode,
     pub mcp_status: Vec<(String, bool, usize)>,
     pub subagent_names: Vec<(String, String)>,
+    /// Loaded skills for autocomplete and inline skill-reference resolution.
+    /// Populated at startup from standard skill locations via `mew_skills::Loader`.
+    pub skill_catalog: Vec<mew_skills::Skill>,
     pub sidebar_collapsed: std::collections::HashMap<String, bool>,
     pub sidebar_header_rows: Vec<(u16, String)>,
     pub sidebar_rect: Rect,
@@ -661,6 +664,7 @@ impl App {
             permission_mode: Default::default(),
             mcp_status: Vec::new(),
             subagent_names: Vec::new(),
+            skill_catalog: Vec::new(),
             sidebar_collapsed: std::collections::HashMap::new(),
             sidebar_header_rows: Vec::new(),
             sidebar_rect: Rect::default(),
@@ -1663,6 +1667,44 @@ impl App {
         self.cursor += mention.len();
     }
 
+    /// Insert a skill reference into the input, replacing the trigger text
+    /// that opened the picker.
+    ///
+    /// When the picker is open, the input contains only the bare trigger:
+    /// `@` for the `@skill:` syntax (the `skill:` part lives in the picker
+    /// filter, not the input), and `$<` for the `$<name>` syntax. This
+    /// method replaces that trigger with the full skill token.
+    pub fn insert_skill_mention(&mut self, name: &str, syntax: SkillSyntax) {
+        match syntax {
+            SkillSyntax::AtSkill => {
+                // The input ends with `@` (same as a file mention trigger).
+                // Reuse `insert_mention` which pops the trailing `@`.
+                self.insert_mention(&format!("@skill:{name} "));
+            }
+            SkillSyntax::DollarAngle => {
+                // The input contains `$<` — replace it with the full token.
+                self.replace_trigger("$<", &format!("$<{name}> "));
+            }
+        }
+    }
+
+    /// Replace the trigger prefix and any text typed after it on the current
+    /// word with `replacement`.
+    fn replace_trigger(&mut self, trigger: &str, replacement: &str) {
+        // Find the trigger in the input at or before the cursor.
+        let before_cursor = &self.input[..self.cursor];
+        if let Some(pos) = before_cursor.rfind(trigger) {
+            // Remove from the trigger start to the cursor.
+            let after_cursor = &self.input[self.cursor..];
+            self.input = format!("{}{}{}", &self.input[..pos], replacement, after_cursor);
+            self.cursor = pos + replacement.len();
+        } else {
+            // Fallback: just append.
+            self.input.push_str(replacement);
+            self.cursor = self.input.len();
+        }
+    }
+
     /// Return the task id of the most recently started running subagent, if
     /// any. Used by the `x` key to cancel the most recent in-flight subagent.
     pub fn most_recent_running_subagent(&self) -> Option<String> {
@@ -2602,18 +2644,86 @@ pub(crate) fn byte_at_display_offset(s: &str, target_col: usize) -> usize {
 
 /// Extract `@path` file mentions from input text.
 /// Returns a list of path strings (without the `@` prefix).
+///
+/// Tokens starting with `@skill:` are skipped — they are skill references
+/// handled by [`parse_skill_refs`].
 pub fn parse_file_mentions(text: &str) -> Vec<String> {
     let mut mentions = Vec::new();
     for word in text.split_whitespace() {
         if let Some(path) = word.strip_prefix('@') {
             // Strip trailing punctuation.
             let path = path.trim_end_matches(|c: char| c.is_ascii_punctuation());
-            if !path.is_empty() {
-                mentions.push(path.to_string());
+            if path.is_empty() || path.starts_with("skill:") {
+                continue; // skill refs handled by parse_skill_refs
             }
+            mentions.push(path.to_string());
         }
     }
     mentions
+}
+
+/// Which syntax a skill reference uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SkillSyntax {
+    /// `@skill:name` — the namespace-prefixed primary form.
+    #[default]
+    AtSkill,
+    /// `$<name>` — the Codex-compatible alias.
+    DollarAngle,
+}
+
+/// A parsed skill reference from user input.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkillRef {
+    /// The raw token as it appeared in text, e.g. `@skill:clarify` or `$<clarify>`.
+    pub raw: String,
+    /// The skill name extracted from the reference.
+    pub name: String,
+}
+
+/// Extract skill references from input text. Recognizes both `@skill:name`
+/// and `$<name>` syntaxes. Does NOT extract `@path` file mentions (that's
+/// [`parse_file_mentions`]).
+pub fn parse_skill_refs(text: &str) -> Vec<SkillRef> {
+    let mut refs = Vec::new();
+    for word in text.split_whitespace() {
+        if let Some(name) = word.strip_prefix("@skill:") {
+            // Strip trailing punctuation so refs in sentences work
+            // (e.g. "@skill:clarify." at end of sentence).
+            let name = name.trim_end_matches(|c: char| c.is_ascii_punctuation());
+            if is_valid_skill_name(name) {
+                refs.push(SkillRef {
+                    raw: format!("@skill:{name}"),
+                    name: name.to_string(),
+                });
+            }
+        } else if let Some(rest) = word.strip_prefix("$<") {
+            // For `$<name>` syntax: the closing `>` is required.
+            // First check if `>` is present (with optional trailing punctuation
+            // after it, e.g. "$<clarify>," or "$<clarify>.").
+            // Find the last `>` and validate the content between `$<` and `>`.
+            if let Some(gt_pos) = rest.find('>') {
+                let name = &rest[..gt_pos];
+                // Ignore anything after `>` (trailing punctuation like "." or ",").
+                if is_valid_skill_name(name) {
+                    refs.push(SkillRef {
+                        raw: format!("$<{name}>"),
+                        name: name.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    refs
+}
+
+/// Check whether a string is a valid skill name: non-empty and matching
+/// `[a-zA-Z0-9_-]+`.
+fn is_valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 #[cfg(test)]

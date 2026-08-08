@@ -1048,6 +1048,20 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     app.open_file_picker("");
                 }
             }
+            // Auto-open skill picker when $< is typed at start or after a space.
+            if c == '<' {
+                let before = &app.input[..app.cursor.saturating_sub(1)];
+                // The char just before `<` must be `$`, and that `$` must be
+                // at word start (beginning of input or preceded by a space).
+                if let Some(dollar_pos) = before.rfind('$') {
+                    let before_dollar = &before[..dollar_pos];
+                    if (before_dollar.is_empty() || before_dollar.ends_with(' '))
+                        && !is_inside_code_block(&app.input)
+                    {
+                        app.open_skill_picker("", crate::app::SkillSyntax::DollarAngle);
+                    }
+                }
+            }
             None
         }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -1305,6 +1319,16 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     } else {
                         Some(Action::InsertAtMention(format!("@{}", id)))
                     }
+                } else if kind == "skill_at" {
+                    Some(Action::InsertSkillMention(
+                        id,
+                        crate::app::SkillSyntax::AtSkill,
+                    ))
+                } else if kind == "skill_dollar" {
+                    Some(Action::InsertSkillMention(
+                        id,
+                        crate::app::SkillSyntax::DollarAngle,
+                    ))
                 } else if kind == "session" {
                     Some(Action::AttachSession(id))
                 } else if kind == "project" {
@@ -1344,6 +1368,19 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 }
             }
             app.picker_insert(c);
+            // If the user typed `skill:` after `@` in the file picker,
+            // switch to the skill picker with any filter after the colon.
+            let switch_to_skill = app
+                .picker
+                .as_ref()
+                .is_some_and(|p| p.kind == "file" && p.filter.starts_with("skill:"));
+            if switch_to_skill {
+                let filter = app
+                    .picker
+                    .as_ref()
+                    .map_or(String::new(), |p| p.filter["skill:".len()..].to_string());
+                app.open_skill_picker(&filter, crate::app::SkillSyntax::AtSkill);
+            }
             None
         }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::META) => {
@@ -1438,6 +1475,9 @@ pub enum Action {
     InsertAtMention(String),
     /// Insert an @mention subagent reference.
     InsertSubagentMention(String),
+    /// Insert a skill reference into the input. Carries the skill name
+    /// and which syntax to use for insertion.
+    InsertSkillMention(String, crate::app::SkillSyntax),
     /// Copy selected text to clipboard.
     CopySelection(String),
     /// Toggle the sidebar's Environment section collapsed state.
@@ -1482,4 +1522,12 @@ pub enum Action {
     ToggleSessionArchived(String),
     /// Toggle the pinned flag on a daemon session (session picker ^P).
     ToggleSessionPinned(String),
+}
+
+/// Check whether the cursor position is inside a fenced code block
+/// (delimited by triple backticks). Used to suppress the `$<` skill
+/// picker trigger when typing inside code.
+fn is_inside_code_block(input: &str) -> bool {
+    let fence_count = input.matches("```").count();
+    fence_count % 2 == 1 // odd count means we're inside an unclosed fence
 }

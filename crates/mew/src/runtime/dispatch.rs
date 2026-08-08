@@ -90,6 +90,10 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             cx.app.insert_mention(&format!("@{} ", name));
             Flow::Continue
         }
+        Action::InsertSkillMention(name, syntax) => {
+            cx.app.insert_skill_mention(&name, syntax);
+            Flow::Continue
+        }
         Action::CopySelection(text) => {
             copy_to_clipboard(&text);
             cx.app.set_alert(format!("copied {} chars", text.len()));
@@ -243,8 +247,13 @@ async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String) {
     }
     let text = cx.target.intercept_user_input(text).await;
     let cwd = std::env::current_dir().unwrap_or_default();
-    let (enriched, display, attachments) =
-        process_mentions(&text, &cwd, &mut cx.app.context_files).await;
+    let (enriched, display, attachments) = process_mentions(
+        &text,
+        &cwd,
+        &mut cx.app.context_files,
+        &cx.app.skill_catalog,
+    )
+    .await;
     cx.app.push_user(display, attachments.clone());
     cx.app.streaming = true;
     let rx = cx.target.prompt(enriched, attachments);
@@ -301,8 +310,13 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
                 return Flow::Continue;
             }
             let cwd = std::env::current_dir().unwrap_or_default();
-            let (enriched, display, attachments) =
-                process_mentions(&text, &cwd, &mut cx.app.context_files).await;
+            let (enriched, display, attachments) = process_mentions(
+                &text,
+                &cwd,
+                &mut cx.app.context_files,
+                &cx.app.skill_catalog,
+            )
+            .await;
             cx.app.push_user(display, attachments.clone());
             cx.app.streaming = true;
             let rx = cx.target.prompt(enriched, attachments);

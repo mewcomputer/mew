@@ -2,7 +2,8 @@
 //!
 //! [`process_mentions`] resolves @mentions in user input. Text files are
 //! inlined into the model-facing text; image files become `Part::File`
-//! attachments.
+//! attachments. Skill references (`@skill:name` and `$<name>`) are also
+//! resolved here: the skill body is inlined into the model-facing text.
 
 use mew_message::Part;
 
@@ -31,10 +32,41 @@ pub async fn process_mentions(
     text: &str,
     cwd: &std::path::Path,
     context_files: &mut Vec<String>,
+    skills: &[mew_skills::Skill],
 ) -> (String, String, Vec<Part>) {
-    let mentions = mew_tui::app::parse_file_mentions(text);
+    // --- Phase 1: Resolve skill references ---
+    // Skill refs are resolved and stripped FIRST so that the file-mention
+    // pass below never sees `@skill:clarify` (which would otherwise be
+    // treated as a file path `skill:clarify`).
+    let skill_refs = mew_tui::app::parse_skill_refs(text);
     let mut enriched = text.to_string();
     let mut display = text.to_string();
+
+    for sr in &skill_refs {
+        let skill = skills.iter().find(|s| s.name == sr.name);
+        match skill {
+            Some(skill) => {
+                // Strip the raw token from both enriched and display text.
+                enriched = enriched.replace(&sr.raw, "");
+                display = display.replace(&sr.raw, "");
+                // Append the skill body (raw — templated skills fall back to
+                // the unrendered body since the TUI lacks template context).
+                enriched.push_str(&format!(
+                    "\n\n--- skill: {} ---\n{}",
+                    skill.name, skill.body
+                ));
+                display.push_str(&format!("\n<skill '{}' added to context>", skill.name));
+            }
+            None => {
+                let err = format!("[error: skill '{}' not found]", sr.name);
+                enriched = enriched.replace(&sr.raw, &err);
+                display = display.replace(&sr.raw, &err);
+            }
+        }
+    }
+
+    // --- Phase 2: Resolve file @mentions (existing logic) ---
+    let mentions = mew_tui::app::parse_file_mentions(&enriched);
     let mut attachments: Vec<Part> = Vec::new();
 
     for path_str in &mentions {
@@ -127,5 +159,86 @@ mod tests {
         assert_eq!(image_mime("foo.pdf"), None);
         assert_eq!(image_mime("foo"), None);
         assert_eq!(image_mime(""), None);
+    }
+
+    // --- Skill reference resolution tests ---
+
+    fn test_skill(name: &str, body: &str) -> mew_skills::Skill {
+        mew_skills::Skill {
+            name: name.to_string(),
+            description: format!("Description for {name}"),
+            body: body.to_string(),
+            path: std::path::PathBuf::from("(test)"),
+            template: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_resolves_at_skill() {
+        let skills = vec![test_skill("clarify", "Be clear and concise.")];
+        let mut ctx = Vec::new();
+        let cwd = std::path::Path::new(".");
+        let (enriched, display, _atts) =
+            process_mentions("@skill:clarify fix this", cwd, &mut ctx, &skills).await;
+        assert!(enriched.contains("Be clear and concise."));
+        assert!(display.contains("<skill 'clarify' added to context>"));
+        // The raw token should be stripped from enriched text.
+        assert!(!enriched.contains("@skill:clarify"));
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_resolves_dollar_skill() {
+        let skills = vec![test_skill("clarify", "Be clear and concise.")];
+        let mut ctx = Vec::new();
+        let cwd = std::path::Path::new(".");
+        let (enriched, display, _atts) =
+            process_mentions("$<clarify> fix this", cwd, &mut ctx, &skills).await;
+        assert!(enriched.contains("Be clear and concise."));
+        assert!(display.contains("<skill 'clarify' added to context>"));
+        assert!(!enriched.contains("$<clarify>"));
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_skill_not_found() {
+        let skills: Vec<mew_skills::Skill> = vec![];
+        let mut ctx = Vec::new();
+        let cwd = std::path::Path::new(".");
+        let (enriched, display, _atts) =
+            process_mentions("@skill:nonexistent fix this", cwd, &mut ctx, &skills).await;
+        assert!(enriched.contains("[error: skill 'nonexistent' not found]"));
+        assert!(display.contains("[error: skill 'nonexistent' not found]"));
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_mixed_skill_and_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        std::fs::write(cwd.join("main.rs"), "fn main() {}").unwrap();
+
+        let skills = vec![test_skill("clarify", "Be clear.")];
+        let mut ctx = Vec::new();
+        let (enriched, display, _atts) =
+            process_mentions("@skill:clarify review @main.rs", cwd, &mut ctx, &skills).await;
+        // Skill body inlined.
+        assert!(enriched.contains("Be clear."));
+        assert!(display.contains("<skill 'clarify' added to context>"));
+        // File content inlined.
+        assert!(enriched.contains("fn main() {}"));
+        assert!(display.contains("<main.rs added to context>"));
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_skill_body_inlined() {
+        let skills = vec![test_skill(
+            "audit",
+            "# Audit Instructions\nCheck accessibility and performance.",
+        )];
+        let mut ctx = Vec::new();
+        let cwd = std::path::Path::new(".");
+        let (enriched, _display, _atts) =
+            process_mentions("@skill:audit", cwd, &mut ctx, &skills).await;
+        assert!(enriched.contains("--- skill: audit ---"));
+        assert!(enriched.contains("# Audit Instructions"));
+        assert!(enriched.contains("Check accessibility and performance."));
     }
 }
