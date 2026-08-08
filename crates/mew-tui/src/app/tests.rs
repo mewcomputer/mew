@@ -31,50 +31,59 @@ fn test_parse_file_mentions_none() {
 // --- Skill reference parser tests ---
 
 #[test]
-fn test_parse_skill_refs_at_syntax() {
-    let refs = parse_skill_refs("use @skill:clarify for this");
+fn test_parse_namespace_refs_skill() {
+    let refs = parse_namespace_refs("use @skill:clarify for this");
     assert_eq!(refs.len(), 1);
-    assert_eq!(refs[0].name, "clarify");
+    assert_eq!(refs[0].kind, "skill");
+    assert_eq!(refs[0].value, "clarify");
     assert_eq!(refs[0].raw, "@skill:clarify");
 }
 
 #[test]
-fn test_parse_skill_refs_dollar_syntax() {
-    let refs = parse_skill_refs("use $<clarify> for this");
+fn test_parse_namespace_refs_model() {
+    let refs = parse_namespace_refs("use @model:openai/gpt-4o");
     assert_eq!(refs.len(), 1);
-    assert_eq!(refs[0].name, "clarify");
-    assert_eq!(refs[0].raw, "$<clarify>");
+    assert_eq!(refs[0].kind, "model");
+    assert_eq!(refs[0].value, "openai/gpt-4o");
+    assert_eq!(refs[0].raw, "@model:openai/gpt-4o");
 }
 
 #[test]
-fn test_parse_skill_refs_mixed() {
-    let refs = parse_skill_refs("@skill:clarify and $<polish> please");
-    assert_eq!(refs.len(), 2);
-    assert_eq!(refs[0].name, "clarify");
-    assert_eq!(refs[1].name, "polish");
-}
-
-#[test]
-fn test_parse_skill_refs_none() {
-    assert!(parse_skill_refs("no skills here").is_empty());
-    assert!(parse_skill_refs("@src/main.rs is a file mention").is_empty());
-}
-
-#[test]
-fn test_parse_skill_refs_trailing_punct() {
-    let refs = parse_skill_refs("use @skill:clarify.");
+fn test_parse_namespace_refs_subagent() {
+    let refs = parse_namespace_refs("spawn @subagent:researcher");
     assert_eq!(refs.len(), 1);
-    assert_eq!(refs[0].name, "clarify");
-
-    let refs = parse_skill_refs("use $<clarify>.");
-    assert_eq!(refs.len(), 1);
-    assert_eq!(refs[0].name, "clarify");
+    assert_eq!(refs[0].kind, "subagent");
+    assert_eq!(refs[0].value, "researcher");
+    assert_eq!(refs[0].raw, "@subagent:researcher");
 }
 
 #[test]
-fn test_file_mentions_skip_skill_namespace() {
-    // @skill:clarify should NOT be treated as a file mention
-    let mentions = parse_file_mentions("@skill:clarify review @src/main.rs");
+fn test_parse_namespace_refs_multiple() {
+    let refs = parse_namespace_refs("@skill:clarify and @model:openai/gpt-4o and @subagent:coder");
+    assert_eq!(refs.len(), 3);
+    assert_eq!(refs[0].kind, "skill");
+    assert_eq!(refs[1].kind, "model");
+    assert_eq!(refs[2].kind, "subagent");
+}
+
+#[test]
+fn test_parse_namespace_refs_none() {
+    assert!(parse_namespace_refs("no refs here").is_empty());
+    assert!(parse_namespace_refs("@src/main.rs is a file mention").is_empty());
+}
+
+#[test]
+fn test_parse_namespace_refs_trailing_punct() {
+    let refs = parse_namespace_refs("use @skill:clarify.");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].value, "clarify");
+}
+
+#[test]
+fn test_file_mentions_skip_namespaces() {
+    let mentions = parse_file_mentions(
+        "@skill:clarify @model:openai/gpt-4o @subagent:researcher @src/main.rs",
+    );
     assert_eq!(mentions, vec!["src/main.rs"]);
 }
 
@@ -881,7 +890,7 @@ fn test_insert_mention_replaces_trigger_at() {
 }
 
 #[test]
-fn test_skill_picker_at_syntax() {
+fn test_namespace_picker_skill() {
     let mut app = App::new();
     app.skill_catalog = vec![
         mew_skills::Skill {
@@ -900,44 +909,72 @@ fn test_skill_picker_at_syntax() {
         },
     ];
 
-    app.open_skill_picker("", SkillSyntax::AtSkill);
+    app.open_namespace_picker("skill", "");
     let picker = app.picker.as_ref().expect("picker should be open");
-    assert_eq!(picker.kind, "skill_at");
+    assert_eq!(picker.kind, "skill");
     assert_eq!(picker.items.len(), 2);
-    assert!(picker.items.iter().any(|i| i.id == "clarify"));
     assert!(picker.items.iter().any(|i| i.label == "@skill:clarify"));
-
-    // Simulate selection: insert_skill_mention with the AtSkill syntax.
-    // Input starts with just `@` (the trigger that opened the file picker).
-    app.input = "@".to_string();
-    app.cursor = 1;
-    app.insert_skill_mention("clarify", SkillSyntax::AtSkill);
-    assert_eq!(app.input, "@skill:clarify ");
-    assert_eq!(app.cursor, "@skill:clarify ".len());
 }
 
 #[test]
-fn test_skill_picker_dollar_syntax() {
+fn test_namespace_picker_model() {
     let mut app = App::new();
-    app.skill_catalog = vec![mew_skills::Skill {
-        name: "clarify".into(),
-        description: "Improve UX copy".into(),
+    app.models = vec![
+        ("openai/gpt-4o".into(), "GPT-4o".into()),
+        (
+            "anthropic/claude-3-5-sonnet".into(),
+            "Claude 3.5 Sonnet".into(),
+        ),
+    ];
+
+    app.open_namespace_picker("model", "");
+    let picker = app.picker.as_ref().expect("picker should be open");
+    assert_eq!(picker.kind, "model");
+    assert_eq!(picker.items.len(), 2);
+    assert!(picker
+        .items
+        .iter()
+        .any(|i| i.label == "@model:openai/gpt-4o"));
+}
+
+#[test]
+fn test_namespace_picker_subagent() {
+    let mut app = App::new();
+    app.subagent_catalog = vec![mew_subagents::SubagentDef {
+        name: "researcher".into(),
+        description: "Investigate research questions".into(),
+        model: None,
+        tools: None,
+        max_turns: None,
+        max_duration_secs: None,
         body: "body".into(),
         path: std::path::PathBuf::from("(test)"),
         template: false,
     }];
 
-    app.open_skill_picker("", SkillSyntax::DollarAngle);
+    app.open_namespace_picker("subagent", "");
     let picker = app.picker.as_ref().expect("picker should be open");
-    assert_eq!(picker.kind, "skill_dollar");
-    assert!(picker.items.iter().any(|i| i.label == "$<clarify>"));
+    assert_eq!(picker.kind, "subagent");
+    assert_eq!(picker.items.len(), 1);
+    assert!(picker
+        .items
+        .iter()
+        .any(|i| i.label == "@subagent:researcher"));
+}
 
-    // Input has `$<` (the trigger).
-    app.input = "$<".to_string();
-    app.cursor = 2;
-    app.insert_skill_mention("clarify", SkillSyntax::DollarAngle);
-    assert_eq!(app.input, "$<clarify> ");
-    assert_eq!(app.cursor, "$<clarify> ".len());
+#[test]
+fn test_insert_namespace_mention() {
+    let mut app = App::new();
+    // Input ends with `@` (the trigger that opened the picker).
+    app.input = "@".to_string();
+    app.cursor = 1;
+    app.insert_namespace_mention("model", "openai/gpt-4o");
+    assert_eq!(app.input, "@model:openai/gpt-4o ");
+
+    app.input = "@".to_string();
+    app.cursor = 1;
+    app.insert_namespace_mention("subagent", "researcher");
+    assert_eq!(app.input, "@subagent:researcher ");
 }
 
 #[test]

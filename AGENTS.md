@@ -238,22 +238,27 @@ Subagent definitions can pin a fully qualified `provider/model` or a router tier
 `max_duration_secs`. The runner gives active tasks a deterministic human display
 name and emits progress through `AgentEvent::SubagentStatus`.
 
-### Skill references in input
+### Namespace references in input
 
-In the TUI, skills can be referenced inline in the chat input using two
-equivalent syntaxes:
+In the TUI, skills, models, and subagents can be referenced inline in the chat
+input using `@namespace:value` syntax:
 
-- `@skill:name` — the namespace-prefixed form (e.g. `@skill:clarify`). This is
-  the preferred syntax; the `@skill:` prefix is extensible to other namespace
-  types in the future.
-- `$<name>` — a compatibility alias (e.g. `$<clarify>`).
+- `@skill:name` (e.g. `@skill:clarify`) — inlines the skill body into the
+  model-facing prompt. This is the primary skill-reference form.
+- `@model:provider/model` (e.g. `@model:openai/gpt-4o`) — inlines a model
+  reference marker, useful for indicating which model a subagent or tool call
+  should use.
+- `@subagent:name` (e.g. `@subagent:researcher`) — inlines the subagent's
+  description into the prompt, giving the model context about available
+  subagents.
 
-Both inline the skill body into the model-facing prompt at submit time. Typing
-`@skill:` or `$<` opens an autocomplete picker listing available skills. Skill
-references resolve client-side in the TUI (same as `@file` mentions); the web UI
-does not process skill references and sends them as literal text. Templated
-skills fall back to their raw body since the TUI lacks the template context;
-the model can still call the `skill` tool for the rendered version.
+The `@namespace:` prefix is extensible to other types in the future. Typing
+`@skill:`, `@model:`, or `@subagent:` opens an autocomplete picker listing
+available items. Namespace references resolve client-side in the TUI (same as
+`@file` mentions); the web UI does not process them and sends them as literal
+text. Templated skills fall back to their raw body since the TUI lacks the
+template context; the model can still call the `skill` tool for the rendered
+version.
 
 ## Configuration and security boundaries
 

@@ -1,37 +1,37 @@
-# 2026-08-08 — skill references: `@skill:name` and `$<name>` input syntax
+# 2026-08-08 — namespace references: `@skill:`, `@model:`, `@subagent:` input syntax
 
-Added two user-facing syntaxes for referencing skills in TUI chat input. Both
-inline the skill body into the model-facing prompt at submit time, with TUI
-autocomplete for skill names.
+Added inline namespace references for skills, models, and subagents in TUI chat
+input. All three use the `@namespace:value` syntax and resolve client-side at
+submit time, inlining content into the model-facing prompt.
 
 ## Changes
 
-- `crates/mew-tui/Cargo.toml`: Added `mew-skills` workspace dependency.
+- `crates/mew-tui/Cargo.toml`: Added `mew-skills` and `mew-subagents` deps.
 - `crates/mew-tui/src/app/mod.rs`:
-  - Added `SkillRef` struct, `SkillSyntax` enum, and `parse_skill_refs()`
-    function to extract `@skill:name` and `$<name>` tokens from input text.
-  - Added `skill_catalog: Vec<mew_skills::Skill>` field to `App`, initialized
-    empty in `App::new()`.
-  - Added `insert_skill_mention()` and `replace_trigger()` methods to `App`.
-  - Updated `parse_file_mentions()` to skip `@skill:` prefixed words.
-- `crates/mew/src/runtime/mentions.rs`: Extended `process_mentions()` with a
-  `skills` parameter. Skill refs are resolved and stripped before file mentions.
-- `crates/mew/src/runtime/dispatch.rs`: Updated both `process_mentions` call
-  sites to pass `&cx.app.skill_catalog`. Added `InsertSkillMention` dispatch arm.
-- `crates/mew-tui/src/app/pickers.rs`: Added `open_skill_picker()` method.
-- `crates/mew-tui/src/events.rs`: Added `InsertSkillMention` action variant,
-  `@skill:` and `$<` picker triggers, skill picker selection handlers, and
-  `is_inside_code_block()` helper for `$<` suppression in code blocks.
-- `crates/mew/src/commands/tui.rs`: Load skills at daemon-mode startup via
-  `mew_skills::Loader`.
-- `AGENTS.md`: Documented skill reference syntaxes.
+  - Added `NamespaceRef` struct and `parse_namespace_refs()` for `@skill:`,
+    `@model:`, `@subagent:` parsing. Replaced the prior skill-only parser.
+  - Added `skill_catalog` and `subagent_catalog` fields to `App`.
+  - Added `insert_skill_mention()` and `insert_namespace_mention()`.
+  - Updated `parse_file_mentions()` to skip all namespace prefixes.
+- `crates/mew/src/runtime/mentions.rs`: `process_mentions()` now takes
+  `skills` and `subagents` slices. Resolves skill (body), model (marker),
+  and subagent (description) references before file mentions.
+- `crates/mew/src/runtime/dispatch.rs`: Updated both call sites; added
+  `InsertSkillMention` and `InsertNamespaceMention` dispatch arms.
+- `crates/mew-tui/src/app/pickers.rs`: Generalized `open_skill_picker` into
+  `open_namespace_picker(kind, filter)` handling all three namespaces.
+- `crates/mew-tui/src/events.rs`: Generalized picker trigger to detect
+  `skill:`, `model:`, `subagent:` prefixes. Added `InsertNamespaceMention`
+  action variant.
+- `crates/mew/src/commands/tui.rs`: Loads skills and subagents at startup.
+- `AGENTS.md`: Documented namespace references.
 
 ## Tests
 
-Parser tests (5), file-mention guard test (1), skill picker tests (2) in
-`mew-tui/src/app/tests.rs`. Resolution tests (5) in
+Parser tests (6), file-mention guard test (1), picker tests (3), insert test
+(1) in `mew-tui/src/app/tests.rs`. Resolution tests (7) in
 `mew/src/runtime/mentions.rs`. All pass. `cargo clippy`, `cargo fmt`, and
-`just arch-check` are clean.
+`just arch-check` clean.
 
 # 2026-08-04 — openai provider: tolerate usage chunks with no `choices` field
 

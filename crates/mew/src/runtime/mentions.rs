@@ -33,35 +33,65 @@ pub async fn process_mentions(
     cwd: &std::path::Path,
     context_files: &mut Vec<String>,
     skills: &[mew_skills::Skill],
+    subagents: &[mew_subagents::SubagentDef],
 ) -> (String, String, Vec<Part>) {
-    // --- Phase 1: Resolve skill references ---
-    // Skill refs are resolved and stripped FIRST so that the file-mention
-    // pass below never sees `@skill:clarify` (which would otherwise be
-    // treated as a file path `skill:clarify`).
-    let skill_refs = mew_tui::app::parse_skill_refs(text);
+    // --- Phase 1: Resolve namespace references ---
+    // Namespace refs (@skill:, @model:, @subagent:) are resolved and stripped
+    // FIRST so that the file-mention pass below never sees them.
+    let refs = mew_tui::app::parse_namespace_refs(text);
     let mut enriched = text.to_string();
     let mut display = text.to_string();
 
-    for sr in &skill_refs {
-        let skill = skills.iter().find(|s| s.name == sr.name);
-        match skill {
-            Some(skill) => {
-                // Strip the raw token from both enriched and display text.
-                enriched = enriched.replace(&sr.raw, "");
-                display = display.replace(&sr.raw, "");
-                // Append the skill body (raw — templated skills fall back to
-                // the unrendered body since the TUI lacks template context).
-                enriched.push_str(&format!(
-                    "\n\n--- skill: {} ---\n{}",
-                    skill.name, skill.body
-                ));
-                display.push_str(&format!("\n<skill '{}' added to context>", skill.name));
+    for nr in &refs {
+        match nr.kind.as_str() {
+            "skill" => {
+                let skill = skills.iter().find(|s| s.name == nr.value);
+                match skill {
+                    Some(skill) => {
+                        enriched = enriched.replace(&nr.raw, "");
+                        display = display.replace(&nr.raw, "");
+                        enriched.push_str(&format!(
+                            "\n\n--- skill: {} ---\n{}",
+                            skill.name, skill.body
+                        ));
+                        display.push_str(&format!("\n<skill '{}' added to context>", skill.name));
+                    }
+                    None => {
+                        let err = format!("[error: skill '{}' not found]", nr.value);
+                        enriched = enriched.replace(&nr.raw, &err);
+                        display = display.replace(&nr.raw, &err);
+                    }
+                }
             }
-            None => {
-                let err = format!("[error: skill '{}' not found]", sr.name);
-                enriched = enriched.replace(&sr.raw, &err);
-                display = display.replace(&sr.raw, &err);
+            "model" => {
+                // Inline a model reference marker. The model sees this and
+                // can use the referenced model for tool calls (e.g. subagent
+                // spawning) that accept a model override.
+                enriched = enriched.replace(&nr.raw, "");
+                display = display.replace(&nr.raw, "");
+                enriched.push_str(&format!("\n\n[model reference: {}]", nr.value));
+                display.push_str(&format!("\n<model '{}' referenced>", nr.value));
             }
+            "subagent" => {
+                let subagent = subagents.iter().find(|s| s.name == nr.value);
+                match subagent {
+                    Some(sa) => {
+                        enriched = enriched.replace(&nr.raw, "");
+                        display = display.replace(&nr.raw, "");
+                        enriched.push_str(&format!(
+                            "\n\n--- subagent: {} ---\n{}",
+                            sa.name, sa.description
+                        ));
+                        display.push_str(&format!("\n<subagent '{}' added to context>", sa.name));
+                    }
+                    None => {
+                        let err = format!("[error: subagent '{}' not found]", nr.value);
+                        enriched = enriched.replace(&nr.raw, &err);
+                        display = display.replace(&nr.raw, &err);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -173,13 +203,27 @@ mod tests {
         }
     }
 
+    fn test_subagent(name: &str, description: &str) -> mew_subagents::SubagentDef {
+        mew_subagents::SubagentDef {
+            name: name.to_string(),
+            description: description.to_string(),
+            model: None,
+            tools: None,
+            max_turns: None,
+            max_duration_secs: None,
+            body: String::new(),
+            path: std::path::PathBuf::from("(test)"),
+            template: false,
+        }
+    }
+
     #[tokio::test]
-    async fn test_process_mentions_resolves_at_skill() {
+    async fn test_process_mentions_resolves_skill() {
         let skills = vec![test_skill("clarify", "Be clear and concise.")];
         let mut ctx = Vec::new();
         let cwd = std::path::Path::new(".");
         let (enriched, display, _atts) =
-            process_mentions("@skill:clarify fix this", cwd, &mut ctx, &skills).await;
+            process_mentions("@skill:clarify fix this", cwd, &mut ctx, &skills, &[]).await;
         assert!(enriched.contains("Be clear and concise."));
         assert!(display.contains("<skill 'clarify' added to context>"));
         // The raw token should be stripped from enriched text.
@@ -187,15 +231,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_process_mentions_resolves_dollar_skill() {
-        let skills = vec![test_skill("clarify", "Be clear and concise.")];
+    async fn test_process_mentions_resolves_model() {
         let mut ctx = Vec::new();
         let cwd = std::path::Path::new(".");
         let (enriched, display, _atts) =
-            process_mentions("$<clarify> fix this", cwd, &mut ctx, &skills).await;
-        assert!(enriched.contains("Be clear and concise."));
-        assert!(display.contains("<skill 'clarify' added to context>"));
-        assert!(!enriched.contains("$<clarify>"));
+            process_mentions("@model:openai/gpt-4o review this", cwd, &mut ctx, &[], &[]).await;
+        assert!(enriched.contains("[model reference: openai/gpt-4o]"));
+        assert!(display.contains("<model 'openai/gpt-4o' referenced>"));
+        assert!(!enriched.contains("@model:openai/gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_resolves_subagent() {
+        let subagents = vec![test_subagent(
+            "researcher",
+            "Investigate research questions.",
+        )];
+        let mut ctx = Vec::new();
+        let cwd = std::path::Path::new(".");
+        let (enriched, display, _atts) = process_mentions(
+            "@subagent:researcher look into this",
+            cwd,
+            &mut ctx,
+            &[],
+            &subagents,
+        )
+        .await;
+        assert!(enriched.contains("--- subagent: researcher ---"));
+        assert!(enriched.contains("Investigate research questions."));
+        assert!(display.contains("<subagent 'researcher' added to context>"));
+        assert!(!enriched.contains("@subagent:researcher"));
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_subagent_not_found() {
+        let mut ctx = Vec::new();
+        let cwd = std::path::Path::new(".");
+        let (enriched, display, _atts) =
+            process_mentions("@subagent:nonexistent", cwd, &mut ctx, &[], &[]).await;
+        assert!(enriched.contains("[error: subagent 'nonexistent' not found]"));
+        assert!(display.contains("[error: subagent 'nonexistent' not found]"));
     }
 
     #[tokio::test]
@@ -204,7 +279,7 @@ mod tests {
         let mut ctx = Vec::new();
         let cwd = std::path::Path::new(".");
         let (enriched, display, _atts) =
-            process_mentions("@skill:nonexistent fix this", cwd, &mut ctx, &skills).await;
+            process_mentions("@skill:nonexistent fix this", cwd, &mut ctx, &skills, &[]).await;
         assert!(enriched.contains("[error: skill 'nonexistent' not found]"));
         assert!(display.contains("[error: skill 'nonexistent' not found]"));
     }
@@ -217,8 +292,14 @@ mod tests {
 
         let skills = vec![test_skill("clarify", "Be clear.")];
         let mut ctx = Vec::new();
-        let (enriched, display, _atts) =
-            process_mentions("@skill:clarify review @main.rs", cwd, &mut ctx, &skills).await;
+        let (enriched, display, _atts) = process_mentions(
+            "@skill:clarify review @main.rs",
+            cwd,
+            &mut ctx,
+            &skills,
+            &[],
+        )
+        .await;
         // Skill body inlined.
         assert!(enriched.contains("Be clear."));
         assert!(display.contains("<skill 'clarify' added to context>"));
@@ -236,7 +317,7 @@ mod tests {
         let mut ctx = Vec::new();
         let cwd = std::path::Path::new(".");
         let (enriched, _display, _atts) =
-            process_mentions("@skill:audit", cwd, &mut ctx, &skills).await;
+            process_mentions("@skill:audit", cwd, &mut ctx, &skills, &[]).await;
         assert!(enriched.contains("--- skill: audit ---"));
         assert!(enriched.contains("# Audit Instructions"));
         assert!(enriched.contains("Check accessibility and performance."));

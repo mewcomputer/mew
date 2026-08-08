@@ -582,37 +582,55 @@ impl App {
         });
     }
 
-    /// Open a skill picker. `filter` is the text typed after the trigger
-    /// (e.g. `clar` from `@skill:clar`), used to pre-filter results.
-    /// `syntax` determines which insertion syntax is used on selection.
-    pub fn open_skill_picker(&mut self, filter: &str, syntax: SkillSyntax) {
-        let kind = match syntax {
-            SkillSyntax::AtSkill => "skill_at",
-            SkillSyntax::DollarAngle => "skill_dollar",
-        };
+    /// Open a namespace picker for `@skill:`, `@model:`, or `@subagent:` references.
+    /// `kind` is `"skill"`, `"model"`, or `"subagent"`. `filter` is the text
+    /// typed after the namespace prefix, used to pre-filter results.
+    pub fn open_namespace_picker(&mut self, kind: &str, filter: &str) {
         let filter_lower = filter.to_lowercase();
-        let mut items: Vec<PickerItem> = self
-            .skill_catalog
-            .iter()
-            .filter(|s| s.name.to_lowercase().contains(&filter_lower))
-            .map(|s| {
-                let label = match syntax {
-                    SkillSyntax::AtSkill => format!("@skill:{}", s.name),
-                    SkillSyntax::DollarAngle => format!("$<{}>", s.name),
-                };
-                PickerItem {
+        let mut items: Vec<PickerItem> = match kind {
+            "skill" => self
+                .skill_catalog
+                .iter()
+                .filter(|s| s.name.to_lowercase().contains(&filter_lower))
+                .map(|s| PickerItem {
                     id: s.name.clone(),
-                    label,
+                    label: format!("@skill:{}", s.name),
                     description: s.description.clone(),
                     ..Default::default()
-                }
-            })
-            .collect();
+                })
+                .collect(),
+            "model" => self
+                .models
+                .iter()
+                .filter(|(id, label)| {
+                    id.to_lowercase().contains(&filter_lower)
+                        || label.to_lowercase().contains(&filter_lower)
+                })
+                .map(|(id, label)| PickerItem {
+                    id: id.clone(),
+                    label: format!("@model:{id}"),
+                    description: label.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            "subagent" => self
+                .subagent_catalog
+                .iter()
+                .filter(|s| s.name.to_lowercase().contains(&filter_lower))
+                .map(|s| PickerItem {
+                    id: s.name.clone(),
+                    label: format!("@subagent:{}", s.name),
+                    description: s.description.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         items.sort_by_key(|i| i.label.len());
 
         self.mode = Mode::CommandPalette;
         self.picker = Some(PickerState {
-            kind: kind.into(),
+            kind: kind.to_string(),
             items,
             filter: filter.to_string(),
             selected: 0,

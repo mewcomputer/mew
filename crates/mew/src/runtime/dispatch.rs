@@ -90,8 +90,12 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             cx.app.insert_mention(&format!("@{} ", name));
             Flow::Continue
         }
-        Action::InsertSkillMention(name, syntax) => {
-            cx.app.insert_skill_mention(&name, syntax);
+        Action::InsertSkillMention(name) => {
+            cx.app.insert_skill_mention(&name);
+            Flow::Continue
+        }
+        Action::InsertNamespaceMention(kind, value) => {
+            cx.app.insert_namespace_mention(&kind, &value);
             Flow::Continue
         }
         Action::CopySelection(text) => {
@@ -252,6 +256,7 @@ async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String) {
         &cwd,
         &mut cx.app.context_files,
         &cx.app.skill_catalog,
+        &cx.app.subagent_catalog,
     )
     .await;
     cx.app.push_user(display, attachments.clone());
@@ -315,6 +320,7 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
                 &cwd,
                 &mut cx.app.context_files,
                 &cx.app.skill_catalog,
+                &cx.app.subagent_catalog,
             )
             .await;
             cx.app.push_user(display, attachments.clone());
