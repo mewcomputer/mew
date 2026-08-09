@@ -517,6 +517,56 @@ impl Agent {
                     turn_count = 0;
                     continue;
                 }
+
+                // Leak reminder: the model is about to end its turn with
+                // subagent tasks it never collected. Nudge it to collect or
+                // explicitly abandon them, capped per user turn so a model
+                // that keeps spawning instead of collecting can't loop.
+                if self.leak_reminder && self.leak_reminder_count < self.leak_reminder_max {
+                    let outstanding = self.list_subagents().await;
+                    if !outstanding.is_empty() {
+                        self.leak_reminder_count += 1;
+                        let mut lines = String::new();
+                        for (name, task_id, elapsed_ms) in &outstanding {
+                            lines.push_str(&format!(
+                                "- {} ({}, {}s elapsed)\n",
+                                task_id,
+                                name,
+                                elapsed_ms / 1000
+                            ));
+                        }
+                        let reminder_msg = Message {
+                            id: Ulid::new(),
+                            session_id: self.session_id,
+                            role: Role::User,
+                            parts: vec![Part::Text(TextPart {
+                                base: PartBase {
+                                    id: Ulid::new(),
+                                    message_id: Ulid::new(),
+                                    session_id: self.session_id,
+                                },
+                                text: format!(
+                                    "<subagent_task_reminder>\n\
+                                     You started subagent tasks that have not been collected:\n\
+                                     {lines}\n\
+                                     Collect their results with subagent_wait (pass task_ids, \
+                                     or all: true), or explicitly state that their results are \
+                                     no longer needed.\n\
+                                     </subagent_task_reminder>"
+                                ),
+                                synthetic: true,
+                            })],
+                            time: Time {
+                                created: Utc::now().timestamp_millis(),
+                                completed: None,
+                            },
+                            assistant: None,
+                        };
+                        self.append_message(reminder_msg).await;
+                        turn_count = 0;
+                        continue;
+                    }
+                }
                 return Ok(());
             }
 

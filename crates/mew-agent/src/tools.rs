@@ -8,7 +8,7 @@ use mew_message::{
 };
 use mew_tools::{Sensitivity, ToolCtx, ToolProgress};
 
-use crate::agent::{Agent, ShellJobState, ToolInput};
+use crate::agent::{format_subagent_result, Agent, ShellJobState, ToolInput};
 use crate::{AgentEvent, GoalDecision, GoalState, GoalStatus};
 use mew_subagents::SubagentRunOptions;
 
@@ -1159,49 +1159,7 @@ impl Agent {
             Ok(task_id) if async_mode => (task_id, true, vec![]),
             Ok(task_id) => {
                 let wait_result = self.wait_subagent(&task_id).await;
-                match wait_result {
-                    Ok(mew_subagents::SubagentResult::Complete {
-                        text,
-                        turns_used,
-                        hit_turn_limit,
-                        hit_time_limit,
-                        session_unavailable,
-                        manifests,
-                    }) => {
-                        let mut out = text.trim_end_matches('\n').to_string();
-                        if hit_turn_limit {
-                            out.insert_str(
-                                0,
-                                &format!(
-                                    "warning: subagent hit max_turns limit ({} turns); result may be incomplete\n\n",
-                                    turns_used
-                                ),
-                            );
-                        }
-                        if hit_time_limit {
-                            out.insert_str(
-                                0,
-                                "warning: subagent hit max_duration limit; result may be incomplete\n\n",
-                            );
-                        }
-                        if session_unavailable {
-                            out.insert_str(
-                                0,
-                                "warning: subagent transcript could not be written; result is unrecorded\n\n",
-                            );
-                        }
-                        (out, true, manifests)
-                    }
-                    Ok(mew_subagents::SubagentResult::Cancelled) => (
-                        "subagent was cancelled before completion".to_string(),
-                        false,
-                        vec![],
-                    ),
-                    Ok(mew_subagents::SubagentResult::Error { reason }) => {
-                        (format!("subagent failed: {}", reason), false, vec![])
-                    }
-                    Err(e) => (format!("error: {}", e), false, vec![]),
-                }
+                format_subagent_result(wait_result)
             }
             Err(e) => (format!("error: {}", e), false, vec![]),
         };
@@ -2247,52 +2205,39 @@ impl Agent {
             None => return,
         };
 
-        let task_id = input.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+        let single = input.get("task_id").and_then(|v| v.as_str());
+        let batch = input.get("task_ids").and_then(|v| v.as_array());
+        let all = input.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
 
-        let result = self.wait_subagent(task_id).await;
-
-        let (output, success, child_manifests) = match result {
-            Ok(mew_subagents::SubagentResult::Complete {
-                text,
-                turns_used,
-                hit_turn_limit,
-                hit_time_limit,
-                session_unavailable,
-                manifests,
-            }) => {
-                let mut out = text.trim_end_matches('\n').to_string();
-                if hit_turn_limit {
-                    out.insert_str(
-                        0,
-                        &format!(
-                            "warning: subagent hit max_turns limit ({} turns); result may be incomplete\n\n",
-                            turns_used
-                        ),
-                    );
-                }
-                if hit_time_limit {
-                    out.insert_str(
-                        0,
-                        "warning: subagent hit max_duration limit; result may be incomplete\n\n",
-                    );
-                }
-                if session_unavailable {
-                    out.insert_str(
-                        0,
-                        "warning: subagent transcript could not be written; result is unrecorded\n\n",
-                    );
-                }
-                (out, true, manifests)
-            }
-            Ok(mew_subagents::SubagentResult::Cancelled) => (
-                "subagent was cancelled before completion".to_string(),
+        let modes = single.is_some() as u8 + batch.is_some() as u8 + all as u8;
+        let (output, success, child_manifests) = if modes != 1 {
+            (
+                "subagent_wait requires exactly one of \"task_id\", \"task_ids\", or \"all\""
+                    .to_string(),
                 false,
                 vec![],
-            ),
-            Ok(mew_subagents::SubagentResult::Error { reason }) => {
-                (format!("subagent failed: {}", reason), false, vec![])
+            )
+        } else if let Some(task_id) = single {
+            let result = self.wait_subagent(task_id).await;
+            format_subagent_result(result)
+        } else {
+            // Batch mode: wait each task, collect results keyed by task_id.
+            // A failed task does not fail the batch; its per-task status
+            // carries the failure.
+            let ids: Vec<String> = if all {
+                self.subagent_task_ids().await
+            } else {
+                batch
+                    .expect("batch checked above")
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            };
+            if ids.is_empty() {
+                ("no outstanding subagent tasks".to_string(), true, vec![])
+            } else {
+                (self.wait_subagents_batch(ids).await, true, vec![])
             }
-            Err(e) => (format!("error: {}", e), false, vec![]),
         };
 
         let metadata = if !child_manifests.is_empty() {

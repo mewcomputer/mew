@@ -44,6 +44,58 @@ pub struct SubagentTask {
     pub child_session_id: Arc<tokio::sync::Mutex<Option<String>>>,
 }
 
+/// Format a subagent result for tool output: the text (with any
+/// incompleteness warnings prepended), whether the run succeeded, and the
+/// child's turn manifests. Shared by `subagent_start` (sync path) and
+/// `subagent_wait`.
+pub(crate) fn format_subagent_result(
+    result: Result<mew_subagents::SubagentResult, String>,
+) -> (String, bool, Vec<mew_message::TurnManifest>) {
+    match result {
+        Ok(mew_subagents::SubagentResult::Complete {
+            text,
+            turns_used,
+            hit_turn_limit,
+            hit_time_limit,
+            session_unavailable,
+            manifests,
+        }) => {
+            let mut out = text.trim_end_matches('\n').to_string();
+            if hit_turn_limit {
+                out.insert_str(
+                    0,
+                    &format!(
+                        "warning: subagent hit max_turns limit ({} turns); result may be incomplete\n\n",
+                        turns_used
+                    ),
+                );
+            }
+            if hit_time_limit {
+                out.insert_str(
+                    0,
+                    "warning: subagent hit max_duration limit; result may be incomplete\n\n",
+                );
+            }
+            if session_unavailable {
+                out.insert_str(
+                    0,
+                    "warning: subagent transcript could not be written; result is unrecorded\n\n",
+                );
+            }
+            (out, true, manifests)
+        }
+        Ok(mew_subagents::SubagentResult::Cancelled) => (
+            "subagent was cancelled before completion".to_string(),
+            false,
+            vec![],
+        ),
+        Ok(mew_subagents::SubagentResult::Error { reason }) => {
+            (format!("subagent failed: {}", reason), false, vec![])
+        }
+        Err(e) => (format!("error: {}", e), false, vec![]),
+    }
+}
+
 /// Lifecycle state of a background shell job.
 #[derive(Debug, Clone)]
 pub enum ShellJobState {
@@ -128,6 +180,14 @@ pub struct Agent {
     /// are depth 0; a subagent of a depth-N session would be depth N+1. The
     /// spawn is rejected if N+1 exceeds this cap.
     pub max_subagent_depth: u32,
+    /// When true, the turn loop reminds the model at turn end about subagent
+    /// tasks that were started but never collected with `subagent_wait`.
+    pub leak_reminder: bool,
+    /// Maximum leak-reminder loop-backs per user turn.
+    pub leak_reminder_max: u32,
+    /// Leak reminders issued this user turn. Lives on the per-turn clone, so
+    /// it resets to the long-lived agent's value (0) each user turn.
+    pub leak_reminder_count: u32,
     pub subagent_defs: Vec<SubagentDef>,
     pub subagent_runner: Option<Arc<dyn SubagentRunner>>,
     /// Background subagent tasks: task_id → task.
@@ -337,6 +397,9 @@ impl Agent {
                     .unwrap_or(100),
             ),
             max_subagent_depth: 3,
+            leak_reminder: true,
+            leak_reminder_max: 2,
+            leak_reminder_count: 0,
             subagent_defs: Vec::new(),
             // Defaults to enabled with the 5k-token threshold recommended
             // in the publish that motivated this feature. Use
@@ -1407,6 +1470,31 @@ impl Agent {
             .iter()
             .map(|(id, t)| (t.name.clone(), id.clone(), now - t.started_at))
             .collect()
+    }
+
+    /// Task IDs of all outstanding subagent tasks (running or finished but
+    /// not yet collected via `wait_subagent`).
+    pub async fn subagent_task_ids(&self) -> Vec<String> {
+        let tasks = self.subagent_tasks.lock().await;
+        tasks.keys().cloned().collect()
+    }
+
+    /// Wait for several subagent tasks and return their results as a JSON
+    /// object keyed by task_id: `{"<id>": {"status", "text"}}`. A failed
+    /// task does not fail the batch; its per-task status carries it.
+    pub(crate) async fn wait_subagents_batch(&self, ids: Vec<String>) -> String {
+        let mut results = serde_json::Map::new();
+        for id in &ids {
+            let (text, ok, _) = format_subagent_result(self.wait_subagent(id).await);
+            results.insert(
+                id.clone(),
+                serde_json::json!({
+                    "status": if ok { "complete" } else { "failed" },
+                    "text": text,
+                }),
+            );
+        }
+        serde_json::Value::Object(results).to_string()
     }
 
     // -----------------------------------------------------------------

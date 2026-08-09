@@ -551,6 +551,8 @@ pub(crate) fn build_session_agent(
     agent.flagged_files = flagged_files;
     agent.secrets = build_secret_set(cfg);
     agent.todos_path = todos_path;
+    agent.leak_reminder = cfg.orchestration.leak_reminder;
+    agent.leak_reminder_max = cfg.orchestration.leak_reminder_max;
     agent.set_permission_engine(permission_engine);
     maybe_set_classifier_provider(&mut agent, cfg, cat, raw, provider_id, model_id);
     agent.set_plan_path(&cfg.plan_path);

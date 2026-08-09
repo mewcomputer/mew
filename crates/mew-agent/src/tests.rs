@@ -3481,3 +3481,199 @@ async fn test_no_fallback_models_means_fatal_error() {
         "should have emitted a fatal 'provider stream' error"
     );
 }
+
+// ------------------------------------------------------------------
+// Subagent batch-wait tests
+// ------------------------------------------------------------------
+
+/// A stub runner that fails on prompts containing "fail" and completes
+/// otherwise. Reports Started so the task registry gets a child session id.
+struct StubRunner;
+
+#[async_trait]
+impl mew_subagents::SubagentRunner for StubRunner {
+    async fn run(
+        &self,
+        opts: mew_subagents::SubagentRunOptions<'_>,
+    ) -> Result<mew_subagents::SubagentResult, mew_subagents::SubagentError> {
+        let _ = opts
+            .event_tx
+            .send(mew_subagents::SubagentEvent::Started {
+                child_session_id: "child-session".into(),
+                display_name: None,
+            })
+            .await;
+        if opts.prompt.contains("fail") {
+            Ok(mew_subagents::SubagentResult::Error {
+                reason: "boom".into(),
+            })
+        } else {
+            Ok(mew_subagents::SubagentResult::Complete {
+                text: format!("done: {}", opts.prompt),
+                turns_used: 1,
+                hit_turn_limit: false,
+                hit_time_limit: false,
+                session_unavailable: false,
+                manifests: vec![],
+            })
+        }
+    }
+}
+
+fn stub_agent_with_subagents(provider: Arc<dyn Provider>) -> Agent {
+    let mut agent = Agent::new(
+        provider,
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.subagent_defs = vec![mew_subagents::SubagentDef {
+        name: "stub".into(),
+        description: "stub subagent".into(),
+        model: None,
+        tools: None,
+        max_turns: None,
+        max_duration_secs: None,
+        body: String::new(),
+        path: std::path::PathBuf::new(),
+        template: false,
+    }];
+    agent.subagent_runner = Some(std::sync::Arc::new(StubRunner));
+    agent
+}
+
+async fn start_stub(agent: &Agent, prompt: &str) -> String {
+    let (ev_tx, _ev_rx) = tokio::sync::mpsc::channel(16);
+    agent
+        .start_subagent("stub", prompt, None, &ev_tx)
+        .await
+        .expect("start_subagent")
+}
+
+#[tokio::test]
+async fn test_subagent_wait_batch_collects_results() {
+    let agent = stub_agent_with_subagents(std::sync::Arc::new(FakeProvider::new(vec![])));
+    let id_a = start_stub(&agent, "task a").await;
+    let id_b = start_stub(&agent, "task b").await;
+
+    let out = agent
+        .wait_subagents_batch(vec![id_a.clone(), id_b.clone()])
+        .await;
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed[&id_a]["status"], "complete");
+    assert_eq!(parsed[&id_a]["text"], "done: task a");
+    assert_eq!(parsed[&id_b]["status"], "complete");
+    assert_eq!(parsed[&id_b]["text"], "done: task b");
+
+    // Collected tasks leave the registry.
+    assert!(agent.subagent_task_ids().await.is_empty());
+}
+
+#[tokio::test]
+async fn test_subagent_wait_batch_isolates_failures() {
+    let agent = stub_agent_with_subagents(std::sync::Arc::new(FakeProvider::new(vec![])));
+    let ok = start_stub(&agent, "fine").await;
+    let bad = start_stub(&agent, "fail here").await;
+
+    let out = agent
+        .wait_subagents_batch(vec![ok.clone(), bad.clone()])
+        .await;
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed[&ok]["status"], "complete");
+    assert_eq!(parsed[&bad]["status"], "failed");
+    assert!(parsed[&bad]["text"].as_str().unwrap().contains("boom"));
+}
+
+#[tokio::test]
+async fn test_subagent_task_ids_lists_outstanding() {
+    let agent = stub_agent_with_subagents(std::sync::Arc::new(FakeProvider::new(vec![])));
+    let id = start_stub(&agent, "x").await;
+    let ids = agent.subagent_task_ids().await;
+    assert_eq!(ids, vec![id.clone()]);
+
+    // Draining via the batch path empties the outstanding set (the "all"
+    // tool path collects exactly these ids).
+    let out = agent.wait_subagents_batch(ids).await;
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed[&id]["status"], "complete");
+    assert!(agent.subagent_task_ids().await.is_empty());
+}
+
+#[tokio::test]
+async fn test_subagent_wait_batch_unknown_task_is_per_task_failure() {
+    let agent = stub_agent_with_subagents(std::sync::Arc::new(FakeProvider::new(vec![])));
+    let out = agent
+        .wait_subagents_batch(vec!["sa_nonexistent".to_string()])
+        .await;
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed["sa_nonexistent"]["status"], "failed");
+}
+
+// ------------------------------------------------------------------
+// Leak-reminder tests
+// ------------------------------------------------------------------
+
+async fn agent_messages_contain(agent: &Agent, needle: &str) -> bool {
+    let msgs = agent.messages.lock().await;
+    msgs.iter().any(|m| {
+        m.parts.iter().any(|p| match p {
+            Part::Text(t) => t.text.contains(needle),
+            _ => false,
+        })
+    })
+}
+
+#[tokio::test]
+async fn test_leak_reminder_fires_for_uncollected_subagent_tasks() {
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![
+        FakeProvider::text_response("first answer"),
+        FakeProvider::text_response("collected now"),
+    ]));
+    let mut agent = stub_agent_with_subagents(provider.clone());
+    agent.leak_reminder_max = 1;
+
+    // Completed-but-uncollected tasks count as leaks.
+    let _task = start_stub(&agent, "background work").await;
+
+    let mut rx = agent.run("hi".into());
+    while rx.recv().await.is_some() {}
+
+    assert!(
+        agent_messages_contain(&agent, "subagent_task_reminder").await,
+        "expected a synthetic leak-reminder message in history"
+    );
+    // One request before the reminder, one after the loop-back.
+    assert_eq!(provider.captured.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_leak_reminder_disabled_means_no_reminder() {
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "answer",
+    )]));
+    let mut agent = stub_agent_with_subagents(provider.clone());
+    agent.leak_reminder = false;
+
+    let _task = start_stub(&agent, "background work").await;
+
+    let mut rx = agent.run("hi".into());
+    while rx.recv().await.is_some() {}
+
+    assert!(!agent_messages_contain(&agent, "subagent_task_reminder").await);
+    assert_eq!(provider.captured.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_leak_reminder_not_fired_when_no_outstanding_tasks() {
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "answer",
+    )]));
+    let agent = stub_agent_with_subagents(provider.clone());
+
+    let mut rx = agent.run("hi".into());
+    while rx.recv().await.is_some() {}
+
+    assert!(!agent_messages_contain(&agent, "subagent_task_reminder").await);
+    assert_eq!(provider.captured.lock().unwrap().len(), 1);
+}
