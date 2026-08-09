@@ -3538,6 +3538,7 @@ fn stub_agent_with_subagents(provider: Arc<dyn Provider>) -> Agent {
         body: String::new(),
         path: std::path::PathBuf::new(),
         template: false,
+        can_spawn: false,
     }];
     agent.subagent_runner = Some(std::sync::Arc::new(StubRunner));
     agent
@@ -3608,6 +3609,39 @@ async fn test_subagent_wait_batch_unknown_task_is_per_task_failure() {
         .await;
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(parsed["sa_nonexistent"]["status"], "failed");
+}
+
+#[tokio::test]
+async fn test_subagent_concurrency_cap_rejects_overflow_and_frees_on_collect() {
+    let mut agent = stub_agent_with_subagents(std::sync::Arc::new(FakeProvider::new(vec![])));
+    agent.max_concurrent_subagents = 2;
+
+    let id_a = start_stub(&agent, "a").await;
+    let _id_b = start_stub(&agent, "b").await;
+
+    let err = {
+        let (ev_tx, _rx) = tokio::sync::mpsc::channel(16);
+        agent
+            .start_subagent("stub", "c", None, &ev_tx)
+            .await
+            .expect_err("third spawn must hit the cap")
+    };
+    assert!(err.contains("concurrency cap"), "unexpected error: {err}");
+
+    // Collecting a result frees a slot.
+    agent.wait_subagent(&id_a).await.expect("collect a");
+    let _id_c = start_stub(&agent, "c").await;
+}
+
+#[tokio::test]
+async fn test_subagent_concurrency_cap_zero_is_unlimited() {
+    let mut agent = stub_agent_with_subagents(std::sync::Arc::new(FakeProvider::new(vec![])));
+    agent.max_concurrent_subagents = 0;
+
+    for i in 0..6 {
+        start_stub(&agent, &format!("task {i}")).await;
+    }
+    assert_eq!(agent.subagent_task_ids().await.len(), 6);
 }
 
 // ------------------------------------------------------------------

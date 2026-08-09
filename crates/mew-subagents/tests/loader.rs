@@ -154,3 +154,25 @@ fn display_name_is_from_the_known_pool() {
         );
     }
 }
+
+#[test]
+fn loader_parses_can_spawn_frontmatter() {
+    let tmp = TempDir::new().unwrap();
+    write_subagent(
+        tmp.path(),
+        "orchestrator.md",
+        "---\nname: orchestrator\ndescription: nests\ncan_spawn: true\n---\nbody\n",
+    );
+    write_subagent(
+        tmp.path(),
+        "plain.md",
+        "---\nname: plain\ndescription: no nest\n---\nbody\n",
+    );
+
+    let defs = Loader::new(tmp.path()).load().expect("load");
+    let by_name: std::collections::HashMap<_, _> =
+        defs.iter().map(|d| (d.name.as_str(), d)).collect();
+
+    assert!(by_name.get("orchestrator").expect("orchestrator").can_spawn);
+    assert!(!by_name.get("plain").expect("plain").can_spawn);
+}

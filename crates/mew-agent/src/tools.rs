@@ -858,6 +858,7 @@ impl Agent {
         let (sa_event_tx, mut sa_event_rx) = mpsc::channel(256);
 
         let parent_session_id = self.session_id;
+        let parent_depth = self.session_depth().await;
         let runner_handle = tokio::spawn(async move {
             runner
                 .run(SubagentRunOptions {
@@ -868,6 +869,7 @@ impl Agent {
                     event_tx: sa_event_tx,
                     cancel,
                     model,
+                    parent_depth,
                 })
                 .await
         });

@@ -38,6 +38,7 @@ async fn extract_manifests(agent: &crate::Agent) -> Vec<TurnManifest> {
 }
 
 /// Simple subagent runner that spawns a child agent for each invocation.
+#[derive(Clone)]
 pub struct SimpleRunner {
     default_provider: Arc<dyn Provider>,
     tools: HashMap<String, Arc<dyn Tool>>,
@@ -51,6 +52,15 @@ pub struct SimpleRunner {
     /// `None` means use the global `mew_session::session_dir()`. Set this
     /// from tests to isolate the runner from the user's real sessions.
     session_root: Option<PathBuf>,
+    /// Subagent definitions, handed to children that are allowed to spawn
+    /// (`can_spawn: true` within the depth cap) so they can nest further.
+    defs: Vec<SubagentDef>,
+    /// Session's nesting cap, propagated to children that can spawn.
+    max_subagent_depth: u32,
+    /// Session's concurrency cap, propagated to children that can spawn.
+    max_concurrent_subagents: u32,
+    /// Fallback wall-clock cap for defs that don't set `max_duration_secs`.
+    default_max_duration_secs: u64,
 }
 
 impl SimpleRunner {
@@ -69,6 +79,10 @@ impl SimpleRunner {
             dispatcher,
             model_resolver: None,
             session_root: None,
+            defs: Vec::new(),
+            max_subagent_depth: 1,
+            max_concurrent_subagents: 4,
+            default_max_duration_secs: mew_subagents::DEFAULT_MAX_DURATION_SECS,
         }
     }
 
@@ -78,11 +92,51 @@ impl SimpleRunner {
         self
     }
 
+    /// Builder method to attach the subagent definitions and orchestration
+    /// limits used when a child is allowed to spawn further subagents.
+    pub fn with_spawn_policy(
+        mut self,
+        defs: Vec<SubagentDef>,
+        max_subagent_depth: u32,
+        max_concurrent_subagents: u32,
+        default_max_duration_secs: u64,
+    ) -> Self {
+        self.defs = defs;
+        self.max_subagent_depth = max_subagent_depth;
+        self.max_concurrent_subagents = max_concurrent_subagents;
+        self.default_max_duration_secs = default_max_duration_secs;
+        self
+    }
+
     /// Builder method to override the root directory for subagent session
     /// files. Used by tests to isolate from the global session dir.
     pub fn with_session_root(mut self, root: PathBuf) -> Self {
         self.session_root = Some(root);
         self
+    }
+
+    /// Whether a child of `def` spawned from `parent_depth` may itself
+    /// spawn subagents: the def must opt in, spawning from the child's
+    /// depth must stay within the cap, and there must be defs to spawn.
+    fn child_can_spawn(&self, def: &SubagentDef, parent_depth: u32) -> bool {
+        def.can_spawn && parent_depth + 2 <= self.max_subagent_depth && !self.defs.is_empty()
+    }
+
+    /// Tool set for a child agent: the def's allowlist (or everything), with
+    /// the spawn tools stripped unless the child may itself spawn.
+    fn child_tools(&self, def: &SubagentDef, parent_depth: u32) -> Vec<Arc<dyn Tool>> {
+        let mut tools: Vec<Arc<dyn Tool>> = if let Some(ref allowed) = def.tools {
+            allowed
+                .iter()
+                .filter_map(|name| self.tools.get(name).cloned())
+                .collect()
+        } else {
+            self.tools.values().cloned().collect()
+        };
+        if !self.child_can_spawn(def, parent_depth) {
+            tools.retain(|t| t.name() != "subagent_start" && t.name() != "subagent_wait");
+        }
+        tools
     }
 
     /// Resolve which provider to use for this subagent invocation. A
@@ -130,15 +184,8 @@ impl SubagentRunner for SimpleRunner {
         let model = opts.model.as_deref();
         let session_id = SessionId::new();
 
-        // Build tool subset if the subagent restricts tools.
-        let tools: Vec<Arc<dyn Tool>> = if let Some(ref allowed) = def.tools {
-            allowed
-                .iter()
-                .filter_map(|name| self.tools.get(name).cloned())
-                .collect()
-        } else {
-            self.tools.values().cloned().collect()
-        };
+        let child_can_spawn = self.child_can_spawn(def, opts.parent_depth);
+        let tools = self.child_tools(def, opts.parent_depth);
 
         // Open a subagent session file nested under the parent. If this fails
         // the subagent still runs, but we surface the failure via
@@ -184,6 +231,15 @@ impl SubagentRunner for SimpleRunner {
             Some(session_id),
         );
 
+        // Wire nesting when the policy allows it: the child gets a runner of
+        // its own, the defs it may invoke, and the session's limits.
+        if child_can_spawn {
+            agent.subagent_runner = Some(Arc::new(self.clone()));
+            agent.subagent_defs = self.defs.clone();
+            agent.max_subagent_depth = self.max_subagent_depth;
+            agent.max_concurrent_subagents = self.max_concurrent_subagents;
+        }
+
         // Set the subagent's body as the system prompt. If the def has
         // `template: true`, render it through minijinja with the subagent's
         // context (subagent_name, tools, model, etc).
@@ -219,7 +275,7 @@ impl SubagentRunner for SimpleRunner {
 
         let max_duration_secs = def
             .max_duration_secs
-            .unwrap_or(mew_subagents::DEFAULT_MAX_DURATION_SECS);
+            .unwrap_or(self.default_max_duration_secs);
 
         let display_name = mew_subagents::pick_display_name(session_id.0);
         let _ = event_tx
@@ -539,6 +595,7 @@ mod tests {
             body: String::new(),
             path: PathBuf::from("(test)"),
             template: false,
+            can_spawn: false,
         }
     }
 
@@ -605,6 +662,7 @@ mod tests {
                 event_tx: tx,
                 cancel,
                 model: None,
+                parent_depth: 0,
             })
             .await
             .unwrap();
@@ -752,6 +810,7 @@ mod tests {
                 event_tx: tx,
                 cancel,
                 model: None,
+                parent_depth: 0,
             })
             .await
             .expect("runner ok");
@@ -828,6 +887,7 @@ mod tests {
                 event_tx: tx,
                 cancel,
                 model: None,
+                parent_depth: 0,
             })
             .await
             .expect("runner ok");
@@ -875,6 +935,7 @@ mod tests {
                 event_tx: tx,
                 cancel,
                 model: None,
+                parent_depth: 0,
             })
             .await
             .unwrap();
@@ -967,6 +1028,7 @@ mod tests {
                 event_tx: tx,
                 cancel,
                 model: None,
+                parent_depth: 0,
             })
             .await
             .unwrap();
@@ -1070,6 +1132,7 @@ mod tests {
                 event_tx: tx,
                 cancel,
                 model: None,
+                parent_depth: 0,
             })
             .await
             .unwrap();
@@ -1118,6 +1181,7 @@ mod tests {
                 event_tx: tx,
                 cancel,
                 model: None,
+                parent_depth: 0,
             })
             .await;
         let events = drain.await.unwrap();
@@ -1141,5 +1205,93 @@ mod tests {
             mew_subagents::DISPLAY_NAMES.contains(&name),
             "display_name {name:?} should be from DISPLAY_NAMES"
         );
+    }
+
+    // --------------------------------------------------------------
+    // Spawn-policy tests (can_spawn + depth cap)
+    // --------------------------------------------------------------
+
+    /// A runner whose tool map includes the spawn tools, so tests can
+    /// observe whether a given child keeps or loses them.
+    fn policy_runner(defs: Vec<SubagentDef>, max_depth: u32) -> SimpleRunner {
+        let defs_arc = Arc::new(defs.clone());
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(mew_tools::tools::subagent_start::SubagentStart::new(
+                defs_arc,
+            )),
+            Arc::new(mew_tools::tools::subagent_wait::SubagentWait::new()),
+            exit_tool(),
+        ];
+        let provider = Arc::new(ScriptedProvider::new(vec![]));
+        SimpleRunner::new(provider, tools, Arc::new(mew_hooks::NopDispatcher))
+            .with_spawn_policy(defs, max_depth, 4, 300)
+    }
+
+    fn tool_names(tools: Vec<Arc<dyn Tool>>) -> Vec<String> {
+        let mut names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+        names.sort_unstable();
+        names
+    }
+
+    #[test]
+    fn child_tools_strip_spawn_tools_when_def_does_not_opt_in() {
+        let def = make_def(None, None); // can_spawn: false
+        let runner = policy_runner(vec![def.clone()], 3);
+        let names = tool_names(runner.child_tools(&def, 0));
+        assert!(!names.contains(&"subagent_start".to_string()));
+        assert!(!names.contains(&"subagent_wait".to_string()));
+        assert!(names.contains(&"exit_tool".to_string()));
+    }
+
+    #[test]
+    fn child_tools_keep_spawn_tools_when_opted_in_and_within_depth() {
+        let def = SubagentDef {
+            can_spawn: true,
+            ..make_def(None, None)
+        };
+        let runner = policy_runner(vec![def.clone()], 3);
+        let names = tool_names(runner.child_tools(&def, 0));
+        assert!(names.contains(&"subagent_start".to_string()));
+        assert!(names.contains(&"subagent_wait".to_string()));
+    }
+
+    #[test]
+    fn child_tools_strip_spawn_tools_at_depth_cap() {
+        let def = SubagentDef {
+            can_spawn: true,
+            ..make_def(None, None)
+        };
+        let runner = policy_runner(vec![def.clone()], 2);
+        // Child of a depth-1 session sits at depth 2 == cap; it cannot spawn.
+        let names = tool_names(runner.child_tools(&def, 1));
+        assert!(!names.contains(&"subagent_start".to_string()));
+        // ...but a depth-0 session's child (depth 1 < cap 2) can.
+        let names = tool_names(runner.child_tools(&def, 0));
+        assert!(names.contains(&"subagent_start".to_string()));
+    }
+
+    #[test]
+    fn child_tools_strip_spawn_tools_when_no_defs_loaded() {
+        let def = SubagentDef {
+            can_spawn: true,
+            ..make_def(None, None)
+        };
+        let runner = policy_runner(vec![], 3);
+        let names = tool_names(runner.child_tools(&def, 0));
+        assert!(!names.contains(&"subagent_start".to_string()));
+    }
+
+    #[test]
+    fn child_tools_respect_def_allowlist_over_spawn_policy() {
+        // Even with can_spawn, an explicit allowlist that omits the spawn
+        // tools wins.
+        let def = SubagentDef {
+            can_spawn: true,
+            tools: Some(vec!["exit_tool".into()]),
+            ..make_def(None, None)
+        };
+        let runner = policy_runner(vec![def.clone()], 3);
+        let names = tool_names(runner.child_tools(&def, 0));
+        assert_eq!(names, vec!["exit_tool".to_string()]);
     }
 }

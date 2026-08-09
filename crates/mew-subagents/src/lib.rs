@@ -79,6 +79,10 @@ pub struct SubagentDef {
     /// When true, render the body through minijinja before using it as
     /// the subagent's system prompt.
     pub template: bool,
+    /// When true, this subagent may itself spawn subagents (receives the
+    /// `subagent_start`/`subagent_wait` tools), subject to the session's
+    /// `max_subagent_depth` cap. Defaults to false: subagents cannot nest.
+    pub can_spawn: bool,
 }
 
 /// Default turn cap applied to any subagent invocation that doesn't set
@@ -153,6 +157,8 @@ struct Frontmatter {
     max_duration_secs: Option<u64>,
     #[serde(default)]
     template: bool,
+    #[serde(default)]
+    can_spawn: bool,
 }
 
 static NAME_RE: LazyLock<Regex> =
@@ -217,6 +223,10 @@ pub struct SubagentRunOptions<'a> {
     /// a fully-qualified `provider/model` or the tier keywords
     /// `micro`/`deci`/`nano` when the active provider is a router.
     pub model: Option<String>,
+    /// Nesting depth of the spawning session (top-level sessions are 0).
+    /// The runner uses this with `SubagentDef::can_spawn` and the session's
+    /// `max_subagent_depth` to decide whether the child may itself spawn.
+    pub parent_depth: u32,
 }
 
 #[async_trait::async_trait]
@@ -303,6 +313,7 @@ impl Loader {
                     .to_string(),
                 path: PathBuf::from("(built-in)"),
                 template: true,
+                can_spawn: false,
             },
             SubagentDef {
                 name: "plan-reviewer".into(),
@@ -316,6 +327,7 @@ impl Loader {
                     .to_string(),
                 path: PathBuf::from("(built-in)"),
                 template: true,
+                can_spawn: false,
             },
             SubagentDef {
                 name: "coder".into(),
@@ -329,6 +341,7 @@ impl Loader {
                     .to_string(),
                 path: PathBuf::from("(built-in)"),
                 template: true,
+                can_spawn: false,
             },
         ]
     }
@@ -348,8 +361,7 @@ fn load_agent_file(path: &Path) -> Result<SubagentDef, SubagentError> {
     } else {
         None
     };
-
-    let (name, description, model, tools, max_turns, max_duration_secs, body, template) =
+    let (name, description, model, tools, max_turns, max_duration_secs, body, template, can_spawn) =
         match parsed {
             Some((fm, body)) => {
                 validate_name(&fm.name)?;
@@ -362,6 +374,7 @@ fn load_agent_file(path: &Path) -> Result<SubagentDef, SubagentError> {
                     fm.max_duration_secs,
                     body,
                     fm.template,
+                    fm.can_spawn,
                 )
             }
             None => {
@@ -380,6 +393,7 @@ fn load_agent_file(path: &Path) -> Result<SubagentDef, SubagentError> {
                     None,
                     content,
                     false,
+                    false,
                 )
             }
         };
@@ -394,6 +408,7 @@ fn load_agent_file(path: &Path) -> Result<SubagentDef, SubagentError> {
         body,
         path: path.to_path_buf(),
         template,
+        can_spawn,
     })
 }
 

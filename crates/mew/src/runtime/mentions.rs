@@ -223,6 +223,7 @@ mod tests {
             body: String::new(),
             path: std::path::PathBuf::from("(test)"),
             template: false,
+            can_spawn: false,
         }
     }
 

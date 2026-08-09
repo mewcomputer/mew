@@ -1,3 +1,11 @@
+# 2026-08-09 — orchestration phase 1: fan-in + leak reminder
+
+`subagent_wait` now takes `task_ids[]` or `all: true` and returns per-task
+results keyed by task ID (a failed task no longer fails the batch). The turn
+loop reminds the model at turn end about uncollected subagent tasks, capped
+per user turn. New `[orchestration]` config section with `MEW_ORCHESTRATION__*`
+env overrides. Committed as d15e4aa on `wip/orchestration-improvements`.
+
 # 2026-08-09 — orchestration assessment doc
 
 Reviewed the task/orchestration stack (todos, subagents, goals, personas,

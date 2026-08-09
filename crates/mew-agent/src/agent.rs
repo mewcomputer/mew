@@ -180,6 +180,10 @@ pub struct Agent {
     /// are depth 0; a subagent of a depth-N session would be depth N+1. The
     /// spawn is rejected if N+1 exceeds this cap.
     pub max_subagent_depth: u32,
+    /// Maximum subagent runs active at once. `start_subagent` past the cap
+    /// fails with a structured error telling the model to collect results
+    /// first. 0 disables the cap.
+    pub max_concurrent_subagents: u32,
     /// When true, the turn loop reminds the model at turn end about subagent
     /// tasks that were started but never collected with `subagent_wait`.
     pub leak_reminder: bool,
@@ -397,6 +401,7 @@ impl Agent {
                     .unwrap_or(100),
             ),
             max_subagent_depth: 3,
+            max_concurrent_subagents: 4,
             leak_reminder: true,
             leak_reminder_max: 2,
             leak_reminder_count: 0,
@@ -1316,16 +1321,25 @@ impl Agent {
 
         // Depth cap: parent's depth + 1 must not exceed max_subagent_depth.
         // Top-level sessions are depth 0; their direct subagents are depth 1.
-        let parent_depth = if let Some(session) = &self.session {
-            session.lock().await.meta().depth
-        } else {
-            0
-        };
+        let parent_depth = self.session_depth().await;
         if parent_depth + 1 > self.max_subagent_depth {
             return Err(format!(
                 "subagent nesting depth exceeded (parent depth {}, max {})",
                 parent_depth, self.max_subagent_depth
             ));
+        }
+
+        // Concurrency cap: uncollected tasks (running or finished) count
+        // against it, so the model must collect results before spawning more.
+        if self.max_concurrent_subagents > 0 {
+            let active = self.subagent_tasks.lock().await.len() as u32;
+            if active >= self.max_concurrent_subagents {
+                return Err(format!(
+                    "subagent concurrency cap reached ({} of {} running or uncollected); \
+                     call subagent_wait (task_ids or all) to collect results first",
+                    active, self.max_concurrent_subagents
+                ));
+            }
         }
 
         let runner = self
@@ -1403,6 +1417,7 @@ impl Agent {
                     event_tx,
                     cancel,
                     model,
+                    parent_depth,
                 })
                 .await;
 
@@ -1470,6 +1485,15 @@ impl Agent {
             .iter()
             .map(|(id, t)| (t.name.clone(), id.clone(), now - t.started_at))
             .collect()
+    }
+
+    /// Nesting depth of this session (top-level sessions are 0).
+    pub(crate) async fn session_depth(&self) -> u32 {
+        if let Some(session) = &self.session {
+            session.lock().await.meta().depth
+        } else {
+            0
+        }
     }
 
     /// Task IDs of all outstanding subagent tasks (running or finished but
