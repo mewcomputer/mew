@@ -66,7 +66,93 @@ impl Agent {
         };
 
         self.append_message(user_msg).await;
+        self.inject_orphaned_subagent_tasks().await;
         self.turn_loop(ev_tx).await
+    }
+
+    /// On the first turn of a resumed session, surface any subagent tasks the
+    /// previous run left uncollected: one synthetic message listing them, with
+    /// each result recovered from the child transcript where possible. The
+    /// registry file is cleared afterwards so it surfaces exactly once.
+    async fn inject_orphaned_subagent_tasks(&mut self) {
+        let Some(path) = self.subagent_registry_path.clone() else {
+            return;
+        };
+        {
+            let mut handled = self.subagent_registry_handled.lock().await;
+            if *handled {
+                return;
+            }
+            *handled = true;
+        }
+        let records = match crate::subagent_registry::load(&path).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load subagent task registry");
+                return;
+            }
+        };
+        if records.is_empty() {
+            return;
+        }
+        // Surface once, then clear so the next resume doesn't repeat.
+        if let Err(e) = crate::subagent_registry::save(&path, &[]).await {
+            tracing::warn!(error = %e, "failed to clear subagent task registry");
+        }
+
+        let session_dir = path.parent().map(|p| p.to_path_buf());
+        let mut lines = String::new();
+        for r in &records {
+            let todo_note = match r.todo_id {
+                Some(id) => format!(", todo #{}", id),
+                None => String::new(),
+            };
+            let recovered = match (&session_dir, &r.child_session_id) {
+                (Some(dir), Some(child_id)) => {
+                    crate::subagent_registry::recover_child_text(dir, child_id).await
+                }
+                _ => None,
+            };
+            let outcome = match recovered {
+                Some(text) => {
+                    let trimmed: String = text.chars().take(2000).collect();
+                    format!("recovered result:\n{}", trimmed)
+                }
+                None => "result lost (transcript unavailable)".to_string(),
+            };
+            lines.push_str(&format!(
+                "- {} ({}{}): {}\n",
+                r.task_id, r.name, todo_note, outcome
+            ));
+        }
+        let msg = Message {
+            id: Ulid::new(),
+            session_id: self.session_id,
+            role: Role::User,
+            parts: vec![Part::Text(TextPart {
+                base: PartBase {
+                    id: Ulid::new(),
+                    message_id: Ulid::new(),
+                    session_id: self.session_id,
+                },
+                text: format!(
+                    "<orphaned_subagent_tasks>\n\
+                     The previous run of this session ended with {} subagent task(s) that \
+                     were never collected:\n\
+                     {lines}\
+                     Use these results or disregard them as you see fit.\n\
+                     </orphaned_subagent_tasks>",
+                    records.len()
+                ),
+                synthetic: true,
+            })],
+            time: Time {
+                created: Utc::now().timestamp_millis(),
+                completed: None,
+            },
+            assistant: None,
+        };
+        self.append_message(msg).await;
     }
 
     pub(crate) async fn turn_loop(

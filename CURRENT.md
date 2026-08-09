@@ -1,3 +1,11 @@
+# 2026-08-09 — orchestration phase 3: todo ↔ subagent links
+
+`subagent_start` accepts `todo_id` (validated); todo_list annotates linked
+todos, the leak reminder lists todo ids, and collecting a linked task suggests
+`todo_complete` (model still owns transitions). Committed as d269c9b. Deferred:
+TUI/web sidebar surfacing (todo_id is not on the wire yet — needs an
+AgentEvent/ServerMessage field).
+
 # 2026-08-09 — orchestration phase 2: concurrency cap + depth policy
 
 `max_concurrent_subagents` (default 4) enforced in `start_subagent` with a

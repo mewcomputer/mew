@@ -345,6 +345,7 @@ pub mod manifest;
 mod prompt_cache;
 mod reasoning_truncator;
 pub mod runner;
+mod subagent_registry;
 mod todos;
 mod tools;
 mod turn;
@@ -356,6 +357,7 @@ pub use prompt_cache::PromptCacheRetention;
 pub use reasoning_truncator::{
     ReasoningTruncator, DEFAULT_REASONING_TRUNCATION_THRESHOLD, TRUNCATION_ACK_TEXT,
 };
+pub use subagent_registry::SubagentTaskRecord;
 pub use todos::{Todo, TodoList, TodoStatus};
 
 #[cfg(test)]

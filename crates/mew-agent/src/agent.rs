@@ -212,6 +212,12 @@ pub struct Agent {
     pub subagent_runner: Option<Arc<dyn SubagentRunner>>,
     /// Background subagent tasks: task_id → task.
     pub subagent_tasks: Arc<tokio::sync::Mutex<HashMap<String, SubagentTask>>>,
+    /// Where outstanding subagent tasks are persisted (`subagent_tasks.json`
+    /// in the session dir). `None` when there's no session writer.
+    pub subagent_registry_path: Option<std::path::PathBuf>,
+    /// Set once a resumed session's orphaned-task records have been surfaced
+    /// to the model. Shared so only the first turn injects them.
+    pub subagent_registry_handled: Arc<tokio::sync::Mutex<bool>>,
     /// Background shell jobs: job_id → job. Populated by `shell_background`,
     /// drained by `job_block` / `job_cancel`.
     pub shell_jobs: Arc<tokio::sync::Mutex<HashMap<String, ShellJob>>>,
@@ -430,6 +436,8 @@ impl Agent {
             default_max_output_tokens: 0,
             subagent_runner: None,
             subagent_tasks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            subagent_registry_path: None,
+            subagent_registry_handled: Arc::new(tokio::sync::Mutex::new(false)),
             shell_jobs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             workspace_roots: Vec::new(),
             workspace_allowances: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
@@ -1320,6 +1328,33 @@ impl Agent {
         }
     }
 
+    /// Persist the outstanding-task registry to `<session>/subagent_tasks.json`.
+    /// Best-effort: failures are logged, not surfaced. Static so the event
+    /// pump (which owns clones, not `&self`) can call it when the child
+    /// session id lands.
+    pub(crate) async fn persist_subagent_registry(
+        tasks: &Arc<tokio::sync::Mutex<HashMap<String, SubagentTask>>>,
+        path: &Option<std::path::PathBuf>,
+    ) {
+        let Some(path) = path else { return };
+        let mut records = Vec::new();
+        {
+            let tasks = tasks.lock().await;
+            for (id, t) in tasks.iter() {
+                records.push(crate::subagent_registry::SubagentTaskRecord {
+                    task_id: id.clone(),
+                    name: t.name.clone(),
+                    todo_id: t.todo_id,
+                    child_session_id: t.child_session_id.lock().await.clone(),
+                    started_at: t.started_at,
+                });
+            }
+        }
+        if let Err(e) = crate::subagent_registry::save(path, &records).await {
+            tracing::warn!(error = %e, "failed to persist subagent task registry");
+        }
+    }
+
     /// Spawn a subagent in the background. Returns a task ID immediately.
     /// `todo_id` links the task to a todo: the link shows up in todo_list
     /// output, the leak reminder, and the collection result.
@@ -1387,6 +1422,8 @@ impl Agent {
         let parent_session_id = self.session_id;
         let child_session_id_slot = Arc::new(tokio::sync::Mutex::new(None::<String>));
         let child_id_for_pump = child_session_id_slot.clone();
+        let tasks_for_pump = self.subagent_tasks.clone();
+        let registry_path_for_pump = self.subagent_registry_path.clone();
 
         tokio::spawn(async move {
             let (event_tx, mut event_rx) = mpsc::channel(256);
@@ -1404,6 +1441,12 @@ impl Agent {
                             display_name,
                         } => {
                             *pump_child_id.lock().await = Some(child_session_id.clone());
+                            // Re-persist now that the child session id is known.
+                            Self::persist_subagent_registry(
+                                &tasks_for_pump,
+                                &registry_path_for_pump,
+                            )
+                            .await;
                             AgentEvent::SubagentStart {
                                 parent_call_id: pump_cid.clone(),
                                 name: name_clone.clone(),
@@ -1462,6 +1505,8 @@ impl Agent {
                 todo_id,
             },
         );
+        drop(tasks);
+        Self::persist_subagent_registry(&self.subagent_tasks, &self.subagent_registry_path).await;
 
         Ok(task_id)
     }
@@ -1496,6 +1541,7 @@ impl Agent {
             .ok_or_else(|| format!("task {} already awaited", task_id))?;
 
         drop(tasks);
+        Self::persist_subagent_registry(&self.subagent_tasks, &self.subagent_registry_path).await;
 
         let result = result_rx
             .await

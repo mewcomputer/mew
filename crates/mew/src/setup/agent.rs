@@ -554,7 +554,11 @@ pub(crate) fn build_session_agent(
 
     let permission_engine = build_permission_engine(cfg, mode);
 
+    let subagent_registry_path = writer
+        .as_ref()
+        .and_then(|w| w.path().parent().map(|p| p.join("subagent_tasks.json")));
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
+    agent.subagent_registry_path = subagent_registry_path;
     agent.set_browser_enabled(browser_enabled);
     agent.set_model_info(model_id, provider_id);
     agent.template_ctx = template_ctx;

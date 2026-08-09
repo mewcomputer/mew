@@ -3769,3 +3769,116 @@ async fn test_leak_reminder_lists_linked_todo() {
 
     assert!(agent_messages_contain(&agent, "todo #1").await);
 }
+
+// ------------------------------------------------------------------
+// Registry persistence / resume tests
+// ------------------------------------------------------------------
+
+/// Build a session dir containing a finished child transcript plus a registry
+/// file listing one orphaned task pointed at it. Returns the registry path.
+async fn seed_orphaned_registry(root: &std::path::Path) -> std::path::PathBuf {
+    let parent_id = "sess_parent";
+    let child_id = "sess_child";
+    let mut writer = mew_session::Writer::open_subagent_at(root, parent_id, child_id, "stub")
+        .await
+        .expect("open child");
+    let msg = Message {
+        id: mew_message::MessageId::new(),
+        session_id: mew_message::SessionId::new(),
+        role: Role::Assistant,
+        parts: vec![Part::Text(TextPart {
+            base: PartBase {
+                id: mew_message::PartId::new(),
+                message_id: mew_message::MessageId::new(),
+                session_id: mew_message::SessionId::new(),
+            },
+            text: "orphaned child answer".into(),
+            synthetic: false,
+        })],
+        time: Time {
+            created: 0,
+            completed: None,
+        },
+        assistant: None,
+    };
+    writer.write_message(&msg).await.expect("write child msg");
+
+    let session_dir = root.join(parent_id);
+    let registry_path = session_dir.join("subagent_tasks.json");
+    let records = vec![crate::SubagentTaskRecord {
+        task_id: "sa_orphan".into(),
+        name: "stub".into(),
+        todo_id: Some(1),
+        child_session_id: Some(child_id.into()),
+        started_at: 0,
+    }];
+    crate::subagent_registry::save(&registry_path, &records)
+        .await
+        .expect("save registry");
+    registry_path
+}
+
+#[tokio::test]
+async fn test_resume_surfaces_orphaned_tasks_once_with_recovered_text() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let registry_path = seed_orphaned_registry(tmp.path()).await;
+
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![
+        FakeProvider::text_response("answer one"),
+        FakeProvider::text_response("answer two"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.subagent_registry_path = Some(registry_path.clone());
+
+    let mut rx = agent.run("hi".into());
+    while rx.recv().await.is_some() {}
+
+    assert!(agent_messages_contain(&agent, "orphaned_subagent_tasks").await);
+    assert!(agent_messages_contain(&agent, "sa_orphan").await);
+    assert!(agent_messages_contain(&agent, "orphaned child answer").await);
+    assert!(agent_messages_contain(&agent, "todo #1").await);
+
+    // Registry cleared after surfacing.
+    let leftover = crate::subagent_registry::load(&registry_path)
+        .await
+        .unwrap();
+    assert!(leftover.is_empty());
+
+    // Second turn does not repeat the injection.
+    let before = agent.messages.lock().await.len();
+    let mut rx = agent.run("again".into());
+    while rx.recv().await.is_some() {}
+    let after = agent.messages.lock().await.len();
+    // user + assistant only; no second orphan message.
+    assert_eq!(after - before, 2);
+}
+
+#[tokio::test]
+async fn test_collected_task_removed_from_registry_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let registry_path = tmp.path().join("sess").join("subagent_tasks.json");
+    let mut agent = stub_agent_with_subagents(std::sync::Arc::new(FakeProvider::new(vec![])));
+    agent.subagent_registry_path = Some(registry_path.clone());
+
+    let id_a = start_stub(&agent, "a").await;
+    let _id_b = start_stub(&agent, "b").await;
+
+    // Both outstanding tasks persisted.
+    let records = crate::subagent_registry::load(&registry_path)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 2);
+
+    agent.wait_subagent(&id_a).await.expect("collect a");
+    let records = crate::subagent_registry::load(&registry_path)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_ne!(records[0].task_id, id_a);
+}
