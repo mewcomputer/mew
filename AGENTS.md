@@ -235,8 +235,15 @@ into a freshly rebuilt system prompt each turn.
 
 Subagent definitions can pin a fully qualified `provider/model` or a router tier
 (`nano`, `micro`, `deci`), restrict tools, and set `max_turns` or
-`max_duration_secs`. The runner gives active tasks a deterministic human display
-name and emits progress through `AgentEvent::SubagentStatus`.
+`max_duration_secs`. They can also opt into nested spawning with
+`can_spawn: true` (subject to `orchestration.max_subagent_depth`) and require a
+typed final output with `output_schema` (YAML map or `@path` JSON file; the
+runner validates the child's final output as JSON and grants one corrective
+turn on failure). Session-level orchestration guardrails (concurrency cap,
+leak reminders) live under `[orchestration]` in config.toml; see
+`docs/development/dev-orchestration.md`. The runner gives active tasks a
+deterministic human display name and emits progress through
+`AgentEvent::SubagentStatus`.
 
 ### Namespace references in input
 

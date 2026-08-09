@@ -3539,6 +3539,7 @@ fn stub_agent_with_subagents(provider: Arc<dyn Provider>) -> Agent {
         path: std::path::PathBuf::new(),
         template: false,
         can_spawn: false,
+        output_schema: None,
     }];
     agent.subagent_runner = Some(std::sync::Arc::new(StubRunner));
     agent

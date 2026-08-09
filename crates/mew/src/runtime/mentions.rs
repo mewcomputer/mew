@@ -224,6 +224,7 @@ mod tests {
             path: std::path::PathBuf::from("(test)"),
             template: false,
             can_spawn: false,
+            output_schema: None,
         }
     }
 

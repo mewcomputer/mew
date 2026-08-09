@@ -83,6 +83,12 @@ pub struct SubagentDef {
     /// `subagent_start`/`subagent_wait` tools), subject to the session's
     /// `max_subagent_depth` cap. Defaults to false: subagents cannot nest.
     pub can_spawn: bool,
+    /// Optional JSON Schema the child's final output must satisfy (parsed as
+    /// JSON before validation). The runner gives the child one corrective
+    /// turn on validation failure; a second failure returns the raw text
+    /// with a `schema_invalid` warning. Set via the `output_schema`
+    /// frontmatter field (YAML map or `@path` relative to the def file).
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// Default turn cap applied to any subagent invocation that doesn't set
@@ -159,6 +165,11 @@ struct Frontmatter {
     template: bool,
     #[serde(default)]
     can_spawn: bool,
+    /// JSON Schema for the subagent's final output: a YAML map, or a string
+    /// of the form `@relative/path.json` resolved against the def file's
+    /// directory.
+    #[serde(default)]
+    output_schema: Option<serde_yaml::Value>,
 }
 
 static NAME_RE: LazyLock<Regex> =
@@ -314,6 +325,7 @@ impl Loader {
                 path: PathBuf::from("(built-in)"),
                 template: true,
                 can_spawn: false,
+                output_schema: None,
             },
             SubagentDef {
                 name: "plan-reviewer".into(),
@@ -328,6 +340,7 @@ impl Loader {
                 path: PathBuf::from("(built-in)"),
                 template: true,
                 can_spawn: false,
+                output_schema: None,
             },
             SubagentDef {
                 name: "coder".into(),
@@ -342,6 +355,7 @@ impl Loader {
                 path: PathBuf::from("(built-in)"),
                 template: true,
                 can_spawn: false,
+                output_schema: None,
             },
         ]
     }
@@ -361,42 +375,55 @@ fn load_agent_file(path: &Path) -> Result<SubagentDef, SubagentError> {
     } else {
         None
     };
-    let (name, description, model, tools, max_turns, max_duration_secs, body, template, can_spawn) =
-        match parsed {
-            Some((fm, body)) => {
-                validate_name(&fm.name)?;
-                (
-                    fm.name,
-                    fm.description,
-                    fm.model,
-                    fm.tools,
-                    fm.max_turns,
-                    fm.max_duration_secs,
-                    body,
-                    fm.template,
-                    fm.can_spawn,
-                )
-            }
-            None => {
-                let file_stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-                validate_name(&file_stem)?;
-                (
-                    file_stem,
-                    String::new(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    content,
-                    false,
-                    false,
-                )
-            }
-        };
+    let (
+        name,
+        description,
+        model,
+        tools,
+        max_turns,
+        max_duration_secs,
+        body,
+        template,
+        can_spawn,
+        output_schema,
+    ) = match parsed {
+        Some((fm, body)) => {
+            validate_name(&fm.name)?;
+            let output_schema = resolve_output_schema(fm.output_schema, path)?;
+            (
+                fm.name,
+                fm.description,
+                fm.model,
+                fm.tools,
+                fm.max_turns,
+                fm.max_duration_secs,
+                body,
+                fm.template,
+                fm.can_spawn,
+                output_schema,
+            )
+        }
+        None => {
+            let file_stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            validate_name(&file_stem)?;
+            (
+                file_stem,
+                String::new(),
+                None,
+                None,
+                None,
+                None,
+                content,
+                false,
+                false,
+                None,
+            )
+        }
+    };
 
     Ok(SubagentDef {
         name,
@@ -409,7 +436,39 @@ fn load_agent_file(path: &Path) -> Result<SubagentDef, SubagentError> {
         path: path.to_path_buf(),
         template,
         can_spawn,
+        output_schema,
     })
+}
+
+/// Resolve the frontmatter `output_schema` to a parsed JSON Schema.
+/// A YAML map converts directly; a string of the form `@relative/path.json`
+/// is read relative to the def file's directory.
+fn resolve_output_schema(
+    raw: Option<serde_yaml::Value>,
+    def_path: &Path,
+) -> Result<Option<serde_json::Value>, SubagentError> {
+    let Some(raw) = raw else { return Ok(None) };
+    if let serde_yaml::Value::String(s) = &raw {
+        if let Some(rel) = s.strip_prefix('@') {
+            let schema_path = def_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(rel);
+            let content = std::fs::read_to_string(&schema_path)?;
+            let value: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+                SubagentError::Execution(format!(
+                    "output_schema @{}: invalid JSON: {}",
+                    schema_path.display(),
+                    e
+                ))
+            })?;
+            return Ok(Some(value));
+        }
+    }
+    let value = serde_json::to_value(&raw).map_err(|e| {
+        SubagentError::Execution(format!("output_schema is not valid JSON Schema: {}", e))
+    })?;
+    Ok(Some(value))
 }
 
 fn validate_name(name: &str) -> Result<(), SubagentError> {

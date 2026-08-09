@@ -1,3 +1,11 @@
+# 2026-08-09 — orchestration phase 4: durable task registry
+
+Outstanding subagent tasks persist to `<session>/subagent_tasks.json`; on
+resume, orphans are surfaced once in a synthetic message with each child's
+final text recovered from its transcript where possible. Committed as d6d756a.
+Side finding: `test_paste_clipboard_image_no_tool_error` fails on unmodified
+main in this environment (pre-existing, unrelated).
+
 # 2026-08-09 — orchestration phase 3: todo ↔ subagent links
 
 `subagent_start` accepts `todo_id` (validated); todo_list annotates linked

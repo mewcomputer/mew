@@ -951,6 +951,7 @@ fn test_namespace_picker_subagent() {
         path: std::path::PathBuf::from("(test)"),
         template: false,
         can_spawn: false,
+        output_schema: None,
     }];
 
     app.open_namespace_picker("subagent", "");
