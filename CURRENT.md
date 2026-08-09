@@ -1,3 +1,15 @@
+# 2026-08-09 — orchestration phase 5: typed handoffs (plan complete)
+
+Subagent frontmatter gains `output_schema` (YAML map or `@path`); the runner
+validates the child's final output as JSON, grants one corrective turn on
+failure, and returns raw text with a `schema_invalid` warning on a second
+failure. Committed as 88b72c2. Also fixed a commit-hygiene miss: phase 4's
+registry module was left untracked; autosquashed into f067183. All five phases
+of `docs/development/dev-orchestration.md` are now on
+`wip/orchestration-improvements`. Deferred: TUI/web sidebar surfacing of
+todo↔task links (needs a wire field); subagent turn-counting question remains
+open.
+
 # 2026-08-09 — orchestration phase 4: durable task registry
 
 Outstanding subagent tasks persist to `<session>/subagent_tasks.json`; on
