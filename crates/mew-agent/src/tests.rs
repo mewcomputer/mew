@@ -3545,9 +3545,13 @@ fn stub_agent_with_subagents(provider: Arc<dyn Provider>) -> Agent {
 }
 
 async fn start_stub(agent: &Agent, prompt: &str) -> String {
+    start_stub_linked(agent, prompt, None).await
+}
+
+async fn start_stub_linked(agent: &Agent, prompt: &str, todo_id: Option<usize>) -> String {
     let (ev_tx, _ev_rx) = tokio::sync::mpsc::channel(16);
     agent
-        .start_subagent("stub", prompt, None, &ev_tx)
+        .start_subagent("stub", prompt, None, todo_id, &ev_tx)
         .await
         .expect("start_subagent")
 }
@@ -3622,7 +3626,7 @@ async fn test_subagent_concurrency_cap_rejects_overflow_and_frees_on_collect() {
     let err = {
         let (ev_tx, _rx) = tokio::sync::mpsc::channel(16);
         agent
-            .start_subagent("stub", "c", None, &ev_tx)
+            .start_subagent("stub", "c", None, None, &ev_tx)
             .await
             .expect_err("third spawn must hit the cap")
     };
@@ -3710,4 +3714,58 @@ async fn test_leak_reminder_not_fired_when_no_outstanding_tasks() {
 
     assert!(!agent_messages_contain(&agent, "subagent_task_reminder").await);
     assert_eq!(provider.captured.lock().unwrap().len(), 1);
+}
+
+// ------------------------------------------------------------------
+// Todo-link tests
+// ------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_subagent_start_rejects_unknown_todo_link() {
+    let agent = stub_agent_with_subagents(std::sync::Arc::new(FakeProvider::new(vec![])));
+    let (ev_tx, _rx) = tokio::sync::mpsc::channel(16);
+    let err = agent
+        .start_subagent("stub", "x", None, Some(99), &ev_tx)
+        .await
+        .expect_err("linking to a missing todo must fail");
+    assert!(err.contains("no todo with id 99"), "unexpected: {err}");
+}
+
+#[tokio::test]
+async fn test_collected_linked_task_suggests_todo_complete() {
+    let agent = stub_agent_with_subagents(std::sync::Arc::new(FakeProvider::new(vec![])));
+    {
+        let mut todos = agent.todos.lock().await;
+        todos.create(vec![("do the thing".to_string(), vec![])]);
+    }
+    let id = start_stub_linked(&agent, "work", Some(1)).await;
+
+    let (result, todo_id) = agent.wait_subagent(&id).await.expect("collect");
+    assert_eq!(todo_id, Some(1));
+    let (text, ok, _) = crate::agent::format_subagent_result(Ok((result, todo_id)));
+    assert!(ok);
+    assert!(
+        text.contains("linked to todo #1"),
+        "expected todo suggestion in output: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_leak_reminder_lists_linked_todo() {
+    let provider = std::sync::Arc::new(CapturingProvider::new(vec![
+        FakeProvider::text_response("first answer"),
+        FakeProvider::text_response("collected now"),
+    ]));
+    let mut agent = stub_agent_with_subagents(provider.clone());
+    agent.leak_reminder_max = 1;
+    {
+        let mut todos = agent.todos.lock().await;
+        todos.create(vec![("do the thing".to_string(), vec![])]);
+    }
+    let _task = start_stub_linked(&agent, "background work", Some(1)).await;
+
+    let mut rx = agent.run("hi".into());
+    while rx.recv().await.is_some() {}
+
+    assert!(agent_messages_contain(&agent, "todo #1").await);
 }

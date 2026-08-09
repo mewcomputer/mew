@@ -42,16 +42,24 @@ pub struct SubagentTask {
     /// Session id of the subagent's own session file, set when the runner
     /// reports its `Started` event. Used for the session pop-in feature.
     pub child_session_id: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Todo this task is executing, when the spawn was linked to one.
+    /// Surfaced in todo_list output, the leak reminder, and the collection
+    /// result.
+    pub todo_id: Option<usize>,
 }
 
-/// Format a subagent result for tool output: the text (with any
-/// incompleteness warnings prepended), whether the run succeeded, and the
-/// child's turn manifests. Shared by `subagent_start` (sync path) and
-/// `subagent_wait`.
+/// Format a collected subagent result for tool output: the text (with any
+/// incompleteness warnings prepended and a linked-todo note appended),
+/// whether the run succeeded, and the child's turn manifests. Shared by
+/// `subagent_start` (sync path) and `subagent_wait`.
 pub(crate) fn format_subagent_result(
-    result: Result<mew_subagents::SubagentResult, String>,
+    collected: Result<(mew_subagents::SubagentResult, Option<usize>), String>,
 ) -> (String, bool, Vec<mew_message::TurnManifest>) {
-    match result {
+    let (result, todo_id) = match collected {
+        Ok((result, todo_id)) => (Ok(result), todo_id),
+        Err(e) => (Err(e), None),
+    };
+    let (mut out, success, manifests) = match result {
         Ok(mew_subagents::SubagentResult::Complete {
             text,
             turns_used,
@@ -93,7 +101,15 @@ pub(crate) fn format_subagent_result(
             (format!("subagent failed: {}", reason), false, vec![])
         }
         Err(e) => (format!("error: {}", e), false, vec![]),
+    };
+    if let Some(id) = todo_id {
+        out.push_str(&format!(
+            "\n\nnote: this task was linked to todo #{} — if the work is finished, \
+             mark it done with todo_complete.",
+            id
+        ));
     }
+    (out, success, manifests)
 }
 
 /// Lifecycle state of a background shell job.
@@ -1305,11 +1321,14 @@ impl Agent {
     }
 
     /// Spawn a subagent in the background. Returns a task ID immediately.
+    /// `todo_id` links the task to a todo: the link shows up in todo_list
+    /// output, the leak reminder, and the collection result.
     pub async fn start_subagent(
         &self,
         name: &str,
         prompt: &str,
         model: Option<&str>,
+        todo_id: Option<usize>,
         ev_tx: &mpsc::Sender<AgentEvent>,
     ) -> Result<String, String> {
         let def = self
@@ -1318,6 +1337,12 @@ impl Agent {
             .find(|d| d.name == name)
             .ok_or_else(|| format!("unknown subagent: {}", name))?
             .clone();
+
+        if let Some(id) = todo_id {
+            if self.todos.lock().await.get(id).is_none() {
+                return Err(format!("cannot link subagent: no todo with id {}", id));
+            }
+        }
 
         // Depth cap: parent's depth + 1 must not exceed max_subagent_depth.
         // Top-level sessions are depth 0; their direct subagents are depth 1.
@@ -1434,6 +1459,7 @@ impl Agent {
                 result_rx: Some(result_rx),
                 cancel: task_cancel,
                 child_session_id: child_session_id_slot,
+                todo_id,
             },
         );
 
@@ -1453,11 +1479,12 @@ impl Agent {
         }
     }
 
-    /// Wait for a background subagent to complete. Returns the structured result.
+    /// Wait for a background subagent to complete. Returns the structured
+    /// result plus the task's linked todo, if any.
     pub async fn wait_subagent(
         &self,
         task_id: &str,
-    ) -> Result<mew_subagents::SubagentResult, String> {
+    ) -> Result<(mew_subagents::SubagentResult, Option<usize>), String> {
         let mut tasks = self.subagent_tasks.lock().await;
         let mut task = tasks
             .remove(task_id)
@@ -1474,16 +1501,18 @@ impl Agent {
             .await
             .map_err(|_| "subagent task cancelled".to_string())?;
 
-        result.map_err(|e| format!("subagent error: {}", e))
+        result
+            .map(|r| (r, task.todo_id))
+            .map_err(|e| format!("subagent error: {}", e))
     }
 
-    /// List running subagent tasks (name, task_id, elapsed_ms).
-    pub async fn list_subagents(&self) -> Vec<(String, String, i64)> {
+    /// List running subagent tasks (name, task_id, elapsed_ms, linked todo).
+    pub async fn list_subagents(&self) -> Vec<(String, String, i64, Option<usize>)> {
         let tasks = self.subagent_tasks.lock().await;
         let now = chrono::Utc::now().timestamp_millis();
         tasks
             .iter()
-            .map(|(id, t)| (t.name.clone(), id.clone(), now - t.started_at))
+            .map(|(id, t)| (t.name.clone(), id.clone(), now - t.started_at, t.todo_id))
             .collect()
     }
 

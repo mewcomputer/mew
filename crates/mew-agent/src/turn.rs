@@ -527,12 +527,17 @@ impl Agent {
                     if !outstanding.is_empty() {
                         self.leak_reminder_count += 1;
                         let mut lines = String::new();
-                        for (name, task_id, elapsed_ms) in &outstanding {
+                        for (name, task_id, elapsed_ms, todo_id) in &outstanding {
+                            let todo_note = match todo_id {
+                                Some(id) => format!(", todo #{}", id),
+                                None => String::new(),
+                            };
                             lines.push_str(&format!(
-                                "- {} ({}, {}s elapsed)\n",
+                                "- {} ({}, {}s elapsed{})\n",
                                 task_id,
                                 name,
-                                elapsed_ms / 1000
+                                elapsed_ms / 1000,
+                                todo_note
                             ));
                         }
                         let reminder_msg = Message {

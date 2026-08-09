@@ -1150,13 +1150,19 @@ impl Agent {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let model = input.get("model").and_then(|v| v.as_str());
+        let todo_id = input
+            .get("todo_id")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
 
         // Default (async=false): block until the subagent finishes, return the
         // result inline. This is the common case — the model doesn't have to
         // remember to call subagent_wait.
         // Async mode (async=true): return a task_id; the model calls
         // subagent_wait later. Use this for parallelism.
-        let start_result = self.start_subagent(name, prompt, model, ev_tx).await;
+        let start_result = self
+            .start_subagent(name, prompt, model, todo_id, ev_tx)
+            .await;
         let (output, success, child_manifests) = match start_result {
             Ok(task_id) if async_mode => (task_id, true, vec![]),
             Ok(task_id) => {
@@ -2108,6 +2114,22 @@ impl Agent {
         };
 
         // Mutate under the lock, then render + snapshot for persistence.
+        // Annotate todos that have a subagent task executing them.
+        let subagent_notes: std::collections::HashMap<usize, String> = {
+            let tasks = self.subagent_tasks.lock().await;
+            let now = Utc::now().timestamp_millis();
+            tasks
+                .values()
+                .filter_map(|t| {
+                    t.todo_id.map(|id| {
+                        (
+                            id,
+                            format!("subagent {} ({}s)", t.name, (now - t.started_at) / 1000),
+                        )
+                    })
+                })
+                .collect()
+        };
         let (output, success, snapshot) = {
             let mut list = self.todos.lock().await;
             let op = apply_todo_op(&tc.tool_name, &input, &mut list);
@@ -2119,7 +2141,7 @@ impl Agent {
                     } else {
                         format!("{}\n", note)
                     };
-                    text.push_str(&snapshot.render());
+                    text.push_str(&snapshot.render_annotated(&subagent_notes));
                     (text, true)
                 }
                 Err(e) => (e, false),

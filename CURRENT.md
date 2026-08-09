@@ -1,3 +1,13 @@
+# 2026-08-09 — orchestration phase 2: concurrency cap + depth policy
+
+`max_concurrent_subagents` (default 4) enforced in `start_subagent` with a
+structured "collect first" error. Subagent defs gain `can_spawn` frontmatter;
+children get the spawn tools only when opted in and within
+`max_subagent_depth` (default 1), replacing enforcement-by-construction-order.
+`default_max_duration_secs` config now feeds the runner. Committed as 9084baf.
+Open note: user suspects subagent turn counting may be off (turn cap vs
+wall-clock cap interaction) — investigate before phase 5.
+
 # 2026-08-09 — orchestration phase 1: fan-in + leak reminder
 
 `subagent_wait` now takes `task_ids[]` or `all: true` and returns per-task

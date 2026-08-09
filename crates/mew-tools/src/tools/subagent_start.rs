@@ -52,6 +52,10 @@ impl SubagentStart {
                 "model": {
                     "type": "string",
                     "description": "Optional model override. Use \"micro\" or \"deci\" to select the router's configured tier, or pass a fully-qualified \"provider/model\"."
+                },
+                "todo_id": {
+                    "type": "integer",
+                    "description": "Optional todo ID this subagent is executing. Links the task to the todo: todo_list shows it, and collecting the result reminds you to mark the todo done."
                 }
             },
             "required": ["name", "prompt"]
