@@ -86,14 +86,6 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             cx.app.insert_mention(&mention);
             Flow::Continue
         }
-        Action::InsertSubagentMention(name) => {
-            cx.app.insert_mention(&format!("@{} ", name));
-            Flow::Continue
-        }
-        Action::InsertSkillMention(name) => {
-            cx.app.insert_skill_mention(&name);
-            Flow::Continue
-        }
         Action::InsertNamespaceMention(kind, value) => {
             cx.app.insert_namespace_mention(&kind, &value);
             Flow::Continue

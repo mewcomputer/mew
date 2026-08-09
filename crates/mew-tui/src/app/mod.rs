@@ -119,7 +119,6 @@ pub struct App {
     pub active_persona_color: Option<String>,
     pub permission_mode: mew_hooks::PermissionMode,
     pub mcp_status: Vec<(String, bool, usize)>,
-    pub subagent_names: Vec<(String, String)>,
     /// Loaded skills for autocomplete and inline skill-reference resolution.
     /// Populated at startup from standard skill locations via `mew_skills::Loader`.
     pub skill_catalog: Vec<mew_skills::Skill>,
@@ -666,7 +665,6 @@ impl App {
             active_persona_color: None,
             permission_mode: Default::default(),
             mcp_status: Vec::new(),
-            subagent_names: Vec::new(),
             skill_catalog: Vec::new(),
             subagent_catalog: Vec::new(),
             sidebar_collapsed: std::collections::HashMap::new(),
@@ -1674,10 +1672,6 @@ impl App {
     /// Insert a skill reference into the input, replacing the `@` trigger
     /// that opened the picker. The `skill:` portion lived in the picker
     /// filter, not the input, so the input ends with just `@`.
-    pub fn insert_skill_mention(&mut self, name: &str) {
-        self.insert_mention(&format!("@skill:{name} "));
-    }
-
     /// Insert a model or subagent namespace reference into the input,
     /// replacing the `@` trigger that opened the picker.
     pub fn insert_namespace_mention(&mut self, kind: &str, value: &str) {
@@ -2642,10 +2636,17 @@ pub fn parse_file_mentions(text: &str) -> Vec<String> {
     mentions
 }
 
+/// Known namespace prefixes for inline references.
+pub const NAMESPACE_PREFIXES: &[(&str, &str)] = &[
+    ("skill", "skill:"),
+    ("model", "model:"),
+    ("subagent", "subagent:"),
+];
+
 /// Returns true if the path (after the `@`) begins with a known namespace
-/// prefix used by inline references (`skill:`, `model:`, `subagent:`).
+/// prefix used by inline references.
 fn is_namespace_prefix(path: &str) -> bool {
-    path.starts_with("skill:") || path.starts_with("model:") || path.starts_with("subagent:")
+    NAMESPACE_PREFIXES.iter().any(|(_, p)| path.starts_with(p))
 }
 
 /// A parsed namespace reference from user input (e.g. `@skill:clarify`,
@@ -2664,17 +2665,16 @@ pub struct NamespaceRef {
 /// `skill:`, `model:`, and `subagent:` namespaces. Does NOT extract
 /// `@path` file mentions (that's [`parse_file_mentions`]).
 pub fn parse_namespace_refs(text: &str) -> Vec<NamespaceRef> {
-    let namespaces = ["skill:", "model:", "subagent:"];
     let mut refs = Vec::new();
     for word in text.split_whitespace() {
         if let Some(rest) = word.strip_prefix('@') {
             let rest = rest.trim_end_matches(|c: char| c.is_ascii_punctuation());
-            for ns in namespaces {
-                if let Some(value) = rest.strip_prefix(ns) {
+            for &(kind, prefix) in NAMESPACE_PREFIXES {
+                if let Some(value) = rest.strip_prefix(prefix) {
                     if !value.is_empty() {
                         refs.push(NamespaceRef {
-                            raw: format!("@{ns}{value}"),
-                            kind: ns.trim_end_matches(':').to_string(),
+                            raw: format!("@{prefix}{value}"),
+                            kind: kind.to_string(),
                             value: value.to_string(),
                         });
                     }

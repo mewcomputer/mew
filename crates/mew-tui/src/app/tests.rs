@@ -911,7 +911,7 @@ fn test_namespace_picker_skill() {
 
     app.open_namespace_picker("skill", "");
     let picker = app.picker.as_ref().expect("picker should be open");
-    assert_eq!(picker.kind, "skill");
+    assert_eq!(picker.kind, "ns_skill");
     assert_eq!(picker.items.len(), 2);
     assert!(picker.items.iter().any(|i| i.label == "@skill:clarify"));
 }
@@ -929,7 +929,7 @@ fn test_namespace_picker_model() {
 
     app.open_namespace_picker("model", "");
     let picker = app.picker.as_ref().expect("picker should be open");
-    assert_eq!(picker.kind, "model");
+    assert_eq!(picker.kind, "ns_model");
     assert_eq!(picker.items.len(), 2);
     assert!(picker
         .items
@@ -954,7 +954,7 @@ fn test_namespace_picker_subagent() {
 
     app.open_namespace_picker("subagent", "");
     let picker = app.picker.as_ref().expect("picker should be open");
-    assert_eq!(picker.kind, "subagent");
+    assert_eq!(picker.kind, "ns_subagent");
     assert_eq!(picker.items.len(), 1);
     assert!(picker
         .items

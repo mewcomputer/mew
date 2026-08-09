@@ -517,17 +517,6 @@ impl App {
 
         let prefix_lower = prefix.to_lowercase();
 
-        for (name, description) in &self.subagent_names {
-            if name.to_lowercase().contains(&prefix_lower) {
-                items.push(PickerItem {
-                    id: name.clone(),
-                    label: format!("@{} [subagent]", name),
-                    description: description.clone(),
-                    ..Default::default()
-                });
-            }
-        }
-
         let walker = ignore::WalkBuilder::new(&cwd)
             .max_depth(Some(4))
             .hidden(false)
@@ -630,7 +619,7 @@ impl App {
 
         self.mode = Mode::CommandPalette;
         self.picker = Some(PickerState {
-            kind: kind.to_string(),
+            kind: format!("ns_{kind}"),
             items,
             filter: filter.to_string(),
             selected: 0,

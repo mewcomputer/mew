@@ -1264,12 +1264,12 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         KeyCode::Enter => {
             let picker_data = app.picker.as_ref().and_then(|p| {
                 p.selected_item()
-                    .map(|item| (item.id.clone(), p.kind.clone(), item.label.clone()))
+                    .map(|item| (item.id.clone(), p.kind.clone()))
             });
             // The thinking picker's budget row commits its draft as
             // `budget:<n>` instead of the raw row id.
             let budget_variant = app.picker.as_ref().and_then(selected_thinking_variant);
-            if let Some((id, kind, label)) = picker_data {
+            if let Some((id, kind)) = picker_data {
                 app.close_picker();
                 if kind == "command" {
                     if id.starts_with('/') {
@@ -1300,15 +1300,9 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 } else if kind == "permission_mode" {
                     mew_hooks::PermissionMode::from_id(&id).map(Action::SetPermissionMode)
                 } else if kind == "file" {
-                    if label.contains("[subagent]") {
-                        Some(Action::InsertSubagentMention(id))
-                    } else {
-                        Some(Action::InsertAtMention(format!("@{}", id)))
-                    }
-                } else if kind == "skill" {
-                    Some(Action::InsertSkillMention(id))
-                } else if kind == "model" || kind == "subagent" {
-                    Some(Action::InsertNamespaceMention(kind, id))
+                    Some(Action::InsertAtMention(format!("@{}", id)))
+                } else if let Some(ns_kind) = kind.strip_prefix("ns_") {
+                    Some(Action::InsertNamespaceMention(ns_kind.to_string(), id))
                 } else if kind == "session" {
                     Some(Action::AttachSession(id))
                 } else if kind == "project" {
@@ -1350,18 +1344,18 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.picker_insert(c);
             // If the user typed a namespace prefix (skill:, model:, subagent:)
             // after `@` in the file picker, switch to the appropriate picker.
-            let picker_kind =
-                app.picker
-                    .as_ref()
-                    .filter(|p| p.kind == "file")
-                    .and_then(|p| match p.filter.as_str() {
-                        f if f.starts_with("skill:") => Some(("skill", &f["skill:".len()..])),
-                        f if f.starts_with("model:") => Some(("model", &f["model:".len()..])),
-                        f if f.starts_with("subagent:") => {
-                            Some(("subagent", &f["subagent:".len()..]))
-                        }
-                        _ => None,
-                    });
+            let picker_kind = app
+                .picker
+                .as_ref()
+                .filter(|p| p.kind == "file")
+                .and_then(|p| {
+                    let f = p.filter.as_str();
+                    crate::app::NAMESPACE_PREFIXES
+                        .iter()
+                        .find_map(|(kind, prefix)| {
+                            f.strip_prefix(prefix).map(|filter| (*kind, filter))
+                        })
+                });
             if let Some((kind, filter)) = picker_kind {
                 let filter = filter.to_string();
                 app.open_namespace_picker(kind, &filter);
@@ -1458,11 +1452,7 @@ pub enum Action {
     SwitchModel(String),
     /// Insert an @mention path into the input.
     InsertAtMention(String),
-    /// Insert an @mention subagent reference.
-    InsertSubagentMention(String),
-    /// Insert a skill reference into the input.
-    InsertSkillMention(String),
-    /// Insert a model or subagent namespace reference into the input.
+    /// Insert a namespace reference (skill, model, or subagent) into the input.
     InsertNamespaceMention(String, String),
     /// Copy selected text to clipboard.
     CopySelection(String),

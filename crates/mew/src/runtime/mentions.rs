@@ -2,8 +2,9 @@
 //!
 //! [`process_mentions`] resolves @mentions in user input. Text files are
 //! inlined into the model-facing text; image files become `Part::File`
-//! attachments. Skill references (`@skill:name` and `$<name>`) are also
-//! resolved here: the skill body is inlined into the model-facing text.
+//! attachments. Namespace references (`@skill:name`, `@model:provider/model`,
+//! `@subagent:name`) are also resolved here: skills inline their body, models
+//! inline a reference marker, and subagents inline their description.
 
 use mew_message::Part;
 
@@ -38,9 +39,15 @@ pub async fn process_mentions(
     // --- Phase 1: Resolve namespace references ---
     // Namespace refs (@skill:, @model:, @subagent:) are resolved and stripped
     // FIRST so that the file-mention pass below never sees them.
+    //
+    // To prevent inlined content (skill bodies, descriptions) from being
+    // corrupted by subsequent token replacements, we strip ALL tokens from
+    // the text first, then append the inlined content afterward.
     let refs = mew_tui::app::parse_namespace_refs(text);
     let mut enriched = text.to_string();
     let mut display = text.to_string();
+    let mut enriched_tail = String::new();
+    let mut display_tail = String::new();
 
     for nr in &refs {
         match nr.kind.as_str() {
@@ -50,11 +57,12 @@ pub async fn process_mentions(
                     Some(skill) => {
                         enriched = enriched.replace(&nr.raw, "");
                         display = display.replace(&nr.raw, "");
-                        enriched.push_str(&format!(
+                        enriched_tail.push_str(&format!(
                             "\n\n--- skill: {} ---\n{}",
                             skill.name, skill.body
                         ));
-                        display.push_str(&format!("\n<skill '{}' added to context>", skill.name));
+                        display_tail
+                            .push_str(&format!("\n<skill '{}' added to context>", skill.name));
                     }
                     None => {
                         let err = format!("[error: skill '{}' not found]", nr.value);
@@ -64,13 +72,10 @@ pub async fn process_mentions(
                 }
             }
             "model" => {
-                // Inline a model reference marker. The model sees this and
-                // can use the referenced model for tool calls (e.g. subagent
-                // spawning) that accept a model override.
                 enriched = enriched.replace(&nr.raw, "");
                 display = display.replace(&nr.raw, "");
-                enriched.push_str(&format!("\n\n[model reference: {}]", nr.value));
-                display.push_str(&format!("\n<model '{}' referenced>", nr.value));
+                enriched_tail.push_str(&format!("\n\n[model reference: {}]", nr.value));
+                display_tail.push_str(&format!("\n<model '{}' referenced>", nr.value));
             }
             "subagent" => {
                 let subagent = subagents.iter().find(|s| s.name == nr.value);
@@ -78,11 +83,12 @@ pub async fn process_mentions(
                     Some(sa) => {
                         enriched = enriched.replace(&nr.raw, "");
                         display = display.replace(&nr.raw, "");
-                        enriched.push_str(&format!(
+                        enriched_tail.push_str(&format!(
                             "\n\n--- subagent: {} ---\n{}",
                             sa.name, sa.description
                         ));
-                        display.push_str(&format!("\n<subagent '{}' added to context>", sa.name));
+                        display_tail
+                            .push_str(&format!("\n<subagent '{}' added to context>", sa.name));
                     }
                     None => {
                         let err = format!("[error: subagent '{}' not found]", nr.value);
@@ -94,6 +100,9 @@ pub async fn process_mentions(
             _ => {}
         }
     }
+
+    enriched.push_str(&enriched_tail);
+    display.push_str(&display_tail);
 
     // --- Phase 2: Resolve file @mentions (existing logic) ---
     let mentions = mew_tui::app::parse_file_mentions(&enriched);
