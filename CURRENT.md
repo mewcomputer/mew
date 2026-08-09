@@ -1,3 +1,11 @@
+# 2026-08-09 — orchestration assessment doc
+
+Reviewed the task/orchestration stack (todos, subagents, goals, personas,
+hooks, background jobs) and wrote `docs/development/dev-orchestration.md`:
+an assessment of gaps (model-driven sequencing, no fan-in, unbounded fan-out,
+in-memory task registry, todo/execution disconnect, free-text handoffs,
+depth-1 nesting) plus six ordered improvement paths. No code changes.
+
 # 2026-08-08 — namespace references: `@skill:`, `@model:`, `@subagent:` input syntax
 
 Added inline namespace references for skills, models, and subagents in TUI chat
