@@ -63,7 +63,10 @@ pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCom
 
     if cmds.len() > visible {
         let scrollbar_area = Rect::new(area.x + area.width - 1, area.y, 1, area.height);
-        let mut scrollbar_state = ScrollbarState::new(cmds.len())
+        // content_length is the scroll range (max_scroll + 1), not the item
+        // count: ratatui only reaches the track end when position ==
+        // content_length - 1, and our scroll tops out at len - visible.
+        let mut scrollbar_state = ScrollbarState::new(cmds.len().saturating_sub(visible) + 1)
             .viewport_content_length(visible)
             .position(app.slash_scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -158,47 +161,49 @@ pub(super) fn draw_permission_modal(
     );
 
     let tool_input = serde_json::to_string_pretty(&perm.input).unwrap_or_default();
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                "tool  ",
-                Style::default()
-                    .fg(tokens.resolve("text.muted"))
-                    .bg(tokens.resolve("status_bar.background")),
-            ),
-            Span::styled(
-                &perm.tool_name,
-                Style::default()
-                    .fg(tokens.resolve("foreground"))
-                    .bg(tokens.resolve("status_bar.background"))
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "input",
+    let mut content = Text::default();
+    content.push_line(Line::from(vec![
+        Span::styled(
+            "tool  ",
             Style::default()
                 .fg(tokens.resolve("text.muted"))
                 .bg(tokens.resolve("status_bar.background")),
-        )]),
-        Line::from(Span::styled(
-            tool_input,
+        ),
+        Span::styled(
+            &perm.tool_name,
             Style::default()
-                .fg(tokens.resolve("text.placeholder"))
-                .bg(tokens.resolve("status_bar.background")),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "choose:",
-            Style::default()
-                .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("status_bar.background")),
-        )),
-    ];
+                .fg(tokens.resolve("foreground"))
+                .bg(tokens.resolve("status_bar.background"))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    content.push_line(Line::from(""));
+    content.push_line(Line::from(vec![Span::styled(
+        "input",
+        Style::default()
+            .fg(tokens.resolve("text.muted"))
+            .bg(tokens.resolve("status_bar.background")),
+    )]));
+    // Pre-wrap the pretty-printed JSON to the content width. Lines are exact
+    // display rows (no ratatui `Wrap`), so `max_scroll` — computed from the
+    // same wrapping — can reach the true bottom of the content.
+    let json_style = Style::default()
+        .fg(tokens.resolve("text.placeholder"))
+        .bg(tokens.resolve("status_bar.background"));
+    for raw in tool_input.lines() {
+        for wrapped in wrap_text(raw, inner.width as usize) {
+            content.push_line(Line::from(Span::styled(wrapped, json_style)));
+        }
+    }
+    content.push_line(Line::from(""));
+    content.push_line(Line::from(Span::styled(
+        "choose:",
+        Style::default()
+            .fg(tokens.resolve("text.muted"))
+            .bg(tokens.resolve("status_bar.background")),
+    )));
     let content_height = inner.height.saturating_sub(2).max(3);
-    let paragraph = Paragraph::new(Text::from(lines))
-        .wrap(Wrap { trim: true })
-        .scroll((perm.scroll, 0));
+    let paragraph = Paragraph::new(content).scroll((perm.scroll, 0));
     let content_area = Rect {
         x: inner.x,
         y: inner.y,
@@ -660,31 +665,113 @@ pub(super) fn draw_picker(
 ) {
     let width = 60u16.min(area.width.saturating_sub(4));
 
-    // Determine lines per item. Headers take 1 line; regular items take 1 or 2
-    // depending on whether they have a description. Use the max across all
-    // non-header items so the height accommodates descriptions.
-    let item_lines: u16 = picker
-        .items
-        .iter()
-        .filter(|i| !i.header)
-        .map(|i| if i.description.is_empty() { 1 } else { 2 })
-        .max()
-        .unwrap_or(1);
-
-    let max_items = PICKER_VISIBLE_ITEMS as u16;
-    // Reserve space for section headers (each takes 1 line).
-    let header_count = picker.items.iter().filter(|i| i.header).count() as u16;
-    let content_height = max_items * item_lines + header_count;
-    let height = (4 + content_height).min(area.height.saturating_sub(4));
-
-    let list_area_height = height.saturating_sub(4);
-    let visible_items = (list_area_height / item_lines).max(1) as usize;
-
-    picker.visible_items = visible_items;
-
     // `filtered` is cloned to owned items so the budget-track bookkeeping
-    // below can mutate the picker while iterating the visible rows.
+    // below can mutate the picker while iterating the rows.
     let filtered: Vec<PickerItem> = picker.filtered().into_iter().cloned().collect();
+
+    // The budget track is only hit-testable while its row is visible.
+    if let Some(budget) = picker.budget.as_mut() {
+        if !filtered.iter().any(|i| i.id == "budget") {
+            budget.track_rect = None;
+        }
+    }
+
+    // Model the list as flat display rows. Each item contributes its wrapped
+    // label/description rows; headers and the budget row contribute one. The
+    // rows are display-width exact, so popup height, the visible window, the
+    // scroll offset, and the scrollbar all agree with what the render emits.
+    let list_width = width.saturating_sub(4).saturating_sub(1) as usize;
+    let mut flat_rows: Vec<Line<'static>> = Vec::new();
+    let mut flat_items: Vec<usize> = Vec::new();
+    // Row start of each filtered item, with a trailing sentinel == total_rows.
+    let mut starts: Vec<usize> = Vec::with_capacity(filtered.len() + 1);
+    let mut acc = 0;
+    for (i, item) in filtered.iter().enumerate() {
+        starts.push(acc);
+        let rows: Vec<Line<'static>> = if item.header {
+            // Section headers render as a non-selectable muted label.
+            let style = Style::default()
+                .fg(tokens.resolve("text.muted"))
+                .bg(tokens.resolve("status_bar.background"))
+                .add_modifier(Modifier::DIM);
+            wrap_text(&item.label, list_width)
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, style)))
+                .collect()
+        } else if item.id == "budget" {
+            // The thinking picker's budget row renders as a slider track.
+            let line = if let Some(budget) = picker.budget.as_mut() {
+                budget_track_line(budget, i == picker.selected, tokens)
+            } else {
+                Line::from(vec![Span::styled("budget", Style::default())])
+            };
+            vec![line]
+        } else {
+            let is_selected = i == picker.selected;
+            let label_style = if is_selected {
+                Style::default()
+                    .fg(tokens.resolve("selection.foreground"))
+                    .bg(tokens.resolve("selection.background"))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(tokens.resolve("text.body"))
+                    .bg(tokens.resolve("status_bar.background"))
+            };
+            let desc_style = if is_selected {
+                Style::default()
+                    .fg(tokens.resolve("selection.foreground"))
+                    .bg(tokens.resolve("selection.background"))
+            } else {
+                Style::default()
+                    .fg(tokens.resolve("text.muted"))
+                    .bg(tokens.resolve("status_bar.background"))
+            };
+            let mut rows: Vec<Line<'static>> = wrap_text(&item.label, list_width)
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, label_style)))
+                .collect();
+            if !item.description.is_empty() {
+                rows.extend(
+                    wrap_text(&item.description, list_width)
+                        .into_iter()
+                        .map(|l| Line::from(Span::styled(l, desc_style))),
+                );
+            }
+            rows
+        };
+        acc += rows.len();
+        for line in rows {
+            flat_items.push(i);
+            flat_rows.push(line);
+        }
+    }
+    starts.push(acc);
+    let total_rows: usize = flat_rows.len();
+
+    // Cap the popup at a bounded row budget so long lists don't fill the
+    // screen; longer content is reached by scrolling.
+    let content_height = total_rows.clamp(1, PICKER_VISIBLE_ITEMS * 2) as u16;
+    let height = (4 + content_height).min(area.height.saturating_sub(4));
+    let list_area_height = height.saturating_sub(4);
+    let visible_rows = list_area_height.max(1) as usize;
+    picker.visible_items = visible_rows;
+
+    // Keep the selected item fully in view. Runs every draw so arrow keys and
+    // wheel-driven selection moves scroll the list along with them.
+    if !filtered.is_empty() {
+        let sel = picker.selected.min(starts.len() - 2);
+        let sel_start = starts[sel];
+        let sel_end = starts[sel + 1];
+        // Pin to the item's first row when the item is taller than the
+        // window or already scrolled past; otherwise bring its end into view.
+        if sel_end - sel_start >= visible_rows || sel_start < picker.scroll {
+            picker.scroll = sel_start;
+        } else if sel_end > picker.scroll + visible_rows {
+            picker.scroll = sel_end.saturating_sub(visible_rows);
+        }
+    }
+    picker.scroll = picker.scroll.min(total_rows.saturating_sub(visible_rows));
 
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
@@ -758,71 +845,21 @@ pub(super) fn draw_picker(
     );
 
     let mut list_text = Text::default();
-
-    // The budget track is only hit-testable while its row is visible.
-    if let Some(budget) = picker.budget.as_mut() {
-        if !filtered.iter().any(|i| i.id == "budget") {
-            budget.track_rect = None;
-        }
-    }
-
-    let start = picker.scroll;
-    let mut row_y = list_area.y;
-    for (i, item) in filtered.iter().enumerate().skip(start).take(visible_items) {
-        // Section headers render as a non-selectable muted label.
-        if item.header {
-            list_text.push_line(Line::from(vec![Span::styled(
-                &item.label,
-                Style::default()
-                    .fg(tokens.resolve("text.muted"))
-                    .bg(tokens.resolve("status_bar.background"))
-                    .add_modifier(Modifier::DIM),
-            )]));
-            row_y += 1;
-            continue;
-        }
-        // The thinking picker's budget row renders as a slider track.
-        if item.id == "budget" {
-            let line = if let Some(budget) = picker.budget.as_mut() {
+    let window_start = picker.scroll;
+    for (row_y, (item_idx, line)) in (list_area.y..).zip(
+        flat_items
+            .iter()
+            .zip(flat_rows)
+            .skip(window_start)
+            .take(visible_rows),
+    ) {
+        // The budget row records its track rect for mouse hit-testing.
+        if filtered.get(*item_idx).map(|it| it.id == "budget") == Some(true) {
+            if let Some(budget) = picker.budget.as_mut() {
                 budget.track_rect = Some(Rect::new(list_area.x, row_y, BUDGET_TRACK_WIDTH, 1));
-                budget_track_line(budget, i == picker.selected, tokens)
-            } else {
-                Line::from(vec![Span::styled("budget", Style::default())])
-            };
-            list_text.push_line(line);
-            row_y += 1;
-            continue;
+            }
         }
-        let is_selected = i == picker.selected;
-        let label_style = if is_selected {
-            Style::default()
-                .fg(tokens.resolve("selection.foreground"))
-                .bg(tokens.resolve("selection.background"))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(tokens.resolve("text.body"))
-                .bg(tokens.resolve("status_bar.background"))
-        };
-        let desc_style = if is_selected {
-            Style::default()
-                .fg(tokens.resolve("selection.foreground"))
-                .bg(tokens.resolve("selection.background"))
-        } else {
-            Style::default()
-                .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("status_bar.background"))
-        };
-
-        list_text.push_line(Line::from(vec![Span::styled(&item.label, label_style)]));
-        row_y += 1;
-        if !item.description.is_empty() {
-            list_text.push_line(Line::from(vec![Span::styled(
-                &item.description,
-                desc_style,
-            )]));
-            row_y += 1;
-        }
+        list_text.push_line(line);
     }
 
     if filtered.is_empty() {
@@ -834,16 +871,21 @@ pub(super) fn draw_picker(
         )));
     }
 
-    let list_para = Paragraph::new(list_text).wrap(Wrap { trim: true });
+    // Lines are pre-wrapped to the list width, so no ratatui `Wrap`: every
+    // emitted row matches the row math above exactly.
+    let list_para = Paragraph::new(list_text);
     f.render_widget(list_para, list_area);
 
-    if filtered.len() > visible_items {
+    if total_rows > visible_rows {
         let scrollbar_area = list_area.inner(Margin {
             horizontal: 0,
             vertical: 0,
         });
-        let mut scrollbar_state = ScrollbarState::new(filtered.len())
-            .viewport_content_length(visible_items)
+        // content_length is the scroll range (max_scroll + 1) so the thumb
+        // travels the full track; the app's scroll tops out at
+        // total_rows - visible_rows.
+        let mut scrollbar_state = ScrollbarState::new(total_rows.saturating_sub(visible_rows) + 1)
+            .viewport_content_length(visible_rows)
             .position(picker.scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
@@ -1270,38 +1312,10 @@ pub(super) fn draw_plan_approval(
 /// Word-wrap a single line of feedback text to `max_width` display columns.
 /// Returns one or more chunks, each fitting within the width.
 fn wrap_feedback_line(text: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 || text.is_empty() {
+    if max_width == 0 {
         return vec![String::new()];
     }
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-    let mut current_w = 0usize;
-    for word in text.split_inclusive(' ') {
-        let word_w = display_width(word);
-        if current_w + word_w > max_width && !current.is_empty() {
-            chunks.push(std::mem::take(&mut current));
-            current_w = 0;
-        }
-        if word_w > max_width {
-            // Hard-break oversized words.
-            for ch in word.chars() {
-                let ch_w = display_width(&ch.to_string());
-                if current_w + ch_w > max_width && !current.is_empty() {
-                    chunks.push(std::mem::take(&mut current));
-                    current_w = 0;
-                }
-                current.push(ch);
-                current_w += ch_w;
-            }
-        } else {
-            current.push_str(word);
-            current_w += word_w;
-        }
-    }
-    if !current.is_empty() || chunks.is_empty() {
-        chunks.push(current);
-    }
-    chunks
+    wrap_text(text, max_width)
 }
 
 fn format_tools(list: &Option<Vec<String>>) -> String {

@@ -1121,7 +1121,15 @@ impl Agent {
     pub async fn load_messages(&self, messages: Vec<Message>) {
         // Session history is lossless, while the model-visible context may
         // start at the latest persisted compaction marker.
-        *self.messages.lock().await = crate::turn::context_from_history(messages);
+        let mut context = crate::turn::context_from_history(messages);
+        // Repair orphaned Pending tool calls — these arise when a session
+        // was interrupted mid-turn (crash, kill, daemon restart). The
+        // assistant message has a ToolCallPart in Pending state but no
+        // corresponding ToolResultPart. Wire builders skip Pending calls,
+        // but repairing them here also keeps the session history consistent
+        // and gives the model context about the failed tool.
+        crate::turn::repair_orphaned_tool_calls(&mut context, self.session_id);
+        *self.messages.lock().await = context;
         // Clear the token count cache — message IDs may have changed on
         // session resume or after compaction.
         self.token_count_cache.lock().unwrap().clear();

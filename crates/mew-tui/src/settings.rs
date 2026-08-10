@@ -1199,7 +1199,9 @@ impl SettingsState {
         f.render_widget(Paragraph::new(lines).style(Style::default().bg(bg)), inner);
 
         if self.left_items.len() > visible {
-            let mut state = ScrollbarState::new(self.left_items.len())
+            // content_length is the scroll range (max_scroll + 1) so the
+            // thumb reaches the track end at the bottom of the list.
+            let mut state = ScrollbarState::new(self.left_items.len().saturating_sub(visible) + 1)
                 .viewport_content_length(visible)
                 .position(self.scroll);
             let sb = Scrollbar::new(ScrollbarOrientation::VerticalRight)

@@ -5705,3 +5705,98 @@ wrap, the recorded header rows match rendered rows exactly.
 
 Verified: `cargo test -p mew-tui` (191 + 5 golden) green, clippy and fmt
 clean.
+
+## 2026-08-10 — namespace picker: truncate list lines so row math stays exact
+
+The shared `draw_picker` rendered labels/descriptions with
+`Paragraph::wrap`, but its height math (`item_lines` of 1 or 2, popup
+height, `visible_items`, scrollbar viewport) assumes exactly one row per
+rendered line. Long skill/subagent descriptions (and long labels) wrapped
+into extra visual rows, overflowing the popup and mis-stating
+`visible_items`.
+
+Fix: reuse the sidebar's `truncate_to_fit` (made `pub(super)` in
+`ui/sidebar.rs`) in `draw_picker`; header labels, item labels, and
+descriptions are all truncated to `list_area.width`, so `.wrap()` is now a
+no-op and every item occupies exactly its counted rows.
+
+## Tests
+
+- `test_namespace_picker_truncates_long_descriptions`: harness-renders a
+  skill picker with an overlong description and asserts the description row
+  ends with the ellipsis (one line) and the full text never wraps across
+  rows.
+
+Verified: `cargo test -p mew-tui` (209 unit + 5 golden) green, clippy
+`--all-targets -D warnings` and fmt clean. Worktree also carries
+pre-existing uncommitted edits in the three mew-provider-* crates (not
+touched by this change).
+
+## 2026-08-10 — @ picker and permission modal: display-row scrolling with real wrapping
+
+Both surfaces previously faked scrolling:
+
+- The picker (`@` file/namespace menu, model/persona/theme pickers) truncated
+  long labels/descriptions to one line so its "1-or-2 rows per item" math held.
+  Scroll was per-item, descriptions got ellipsized instead of readable, and the
+  scrollbar counted items, not rows.
+- The permission modal rendered the tool input with `Paragraph::wrap` but
+  computed `max_scroll` from raw JSON lines, so long inputs could not be scrolled
+  to the true bottom and the fixed header/footer rows weren't counted.
+
+Fix: both surfaces now build exact display rows (Unicode width aware) using the
+shared `wrap_text_to_width` (promoted `pub(super)` → `pub(crate)`; the duplicate
+`wrap_feedback_line` now delegates to it) and render without ratatui `Wrap`, so
+rendered rows == counted rows == scrollbar rows.
+
+- `draw_picker`: flat row model — every item contributes its wrapped label/
+  description rows; popup height, `visible_items`, scroll offset, and the
+  scrollbar are all row-based. The draw pass keeps the selected item's row span
+  fully in view (replaces `PickerState::adjust_scroll`, removed). Descriptions
+  wrap instead of truncating.
+- `PermissionState::max_scroll(chat_width, chat_height)`: counts wrapped display
+  rows of the pretty-printed JSON; draw renders pre-wrapped lines.
+- Mouse: the wheel scrolls any picker list (moves selection) and scrolls the
+  permission modal; the thinking picker's budget track still handles the wheel
+  over the track, clicks, and drags.
+
+## Tests
+
+- `test_namespace_picker_wraps_long_descriptions` (replaces the truncation
+  test): full description renders across ≥2 wrapped rows, no ellipsis.
+- `test_picker_row_scroll_keeps_selection_visible`: jumping to the last of 12
+  wrapped items scrolls and keeps it visible.
+- `test_picker_mouse_wheel_scrolls_selection`: wheel moves selection, clicks
+  stay inert.
+- `test_permission_max_scroll_accounts_for_wrapping`: one raw line → many
+  wrapped rows → non-trivial scroll range; narrower popup → larger range; short
+  input → `None`.
+- `test_permission_mouse_wheel_scrolls`: wheel clamps at `max_scroll` and
+  scrolls back up.
+
+Verified: `cargo test --all` green (mew-tui 213 unit + 5 golden + doc),
+`cargo clippy --all-targets -- -D warnings` clean, fmt clean. Worktree still
+carries the pre-existing uncommitted mew-provider-* edits (untouched).
+
+## 2026-08-10 — scrollbar thumb reaches track bottom (all four TUI scrollbars)
+
+Bug: every TUI scrollbar (chat, slash autocomplete, @-picker, settings left
+list) passed `ScrollbarState::new(total)` while position maxes at
+`total - viewport`. ratatui only parks the thumb at the track end when
+`position == content_length - 1`, so at max scroll the thumb stopped short
+by roughly `track*(viewport-1)/(total-1+viewport)` rows — e.g. ~4 rows of
+dead track for a 300-line chat in a 40-row viewport.
+
+Fix: `content_length = max_scroll + 1` (= total - viewport + 1) at all four
+sites (`ui/chat.rs`, `ui/overlays.rs` x2, `settings.rs`). This makes
+`content_length - 1` equal the app's true bottom position, the thumb length
+the true proportion viewport/total, and the thumb travel the full track.
+
+Tests (app/tests.rs): `test_picker_scrollbar_travels_full_track` (thumb at
+track top at scroll 0, at track bottom at max), `test_chat_scrollbar_reaches_bottom`
+(thumb on chat area's last row when auto-scrolled), and
+`test_slash_scrollbar_reaches_bottom`. Verified the chat test fails with the
+old math (reproduces the bug) and passes with the fix.
+
+Verified: `cargo test -p mew-tui` green (216 unit + 5 golden + doc),
+`cargo clippy -p mew-tui --all-targets -- -D warnings` clean, fmt clean.

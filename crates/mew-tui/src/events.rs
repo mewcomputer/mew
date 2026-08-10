@@ -310,10 +310,14 @@ fn insert_paste(app: &mut crate::app::App, content: &str) {
 }
 
 pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
-    // The thinking picker's budget track is mouse-interactive; all other
-    // picker content stays inert.
+    // The thinking picker's budget track is mouse-interactive; the wheel
+    // scrolls every picker list. All other picker content stays inert.
     if app.mode == crate::app::Mode::CommandPalette {
         return handle_picker_mouse_event(app, mouse);
+    }
+    // The permission modal scrolls with the wheel like the chat view.
+    if app.mode == crate::app::Mode::PermissionPrompt {
+        return handle_permission_mouse_event(app, mouse);
     }
     if !matches!(
         app.mode,
@@ -455,26 +459,39 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
     }
 }
 
-/// Mouse handling while a picker is open. Only the thinking picker's budget
+/// Mouse handling while a picker is open. The thinking picker's budget
 /// track is interactive: click/drag sets the draft, release commits it as
-/// `budget:<n>` (the picker stays open), and the wheel nudges by one step
-/// and commits immediately.
+/// `budget:<n>` (the picker stays open), and the wheel over the track nudges
+/// by one step and commits immediately. The wheel anywhere else on the list
+/// scrolls it by moving the selection; the draw pass keeps the selected
+/// item's wrapped rows in view.
 fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
     let row = mouse.row.saturating_sub(1);
     let col = mouse.column.saturating_sub(1);
-    // Validate the picker and snapshot the track state (read-only borrow).
+    // Snapshot the budget track state (read-only borrow). Only the thinking
+    // picker's budget row is a hit target; everything else is list space.
     let (in_track, dragging) = {
         let picker = app.picker.as_ref()?;
-        if picker.kind != "thinking_variant" {
-            return None;
-        }
-        let budget = picker.budget.as_ref()?;
-        let rect = budget.track_rect?;
-        (rect.contains((col, row).into()), budget.dragging)
+        let in_track = match (picker.kind.as_str(), picker.budget.as_ref()) {
+            ("thinking_variant", Some(b)) => b
+                .track_rect
+                .map(|r| r.contains((col, row).into()))
+                .unwrap_or(false),
+            _ => false,
+        };
+        let dragging = picker.budget.as_ref().map(|b| b.dragging).unwrap_or(false);
+        (in_track, dragging)
     };
-    // Down/scroll need the track; Up only needs an active drag (the pointer
-    // may have left the track mid-drag).
-    if !in_track && !dragging {
+    // Track interactions need the track; Up only needs an active drag (the
+    // pointer may have left the track mid-drag). The wheel scrolls the list
+    // everywhere else.
+    if !in_track
+        && !dragging
+        && !matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+        )
+    {
         return None;
     }
     match mouse.kind {
@@ -492,6 +509,14 @@ fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Op
                 "budget:{}",
                 budget.snapped()
             )))
+        }
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                app.picker_up();
+            } else {
+                app.picker_down();
+            }
+            None
         }
         MouseEventKind::Down(MouseButton::Left) if in_track => {
             let picker = app.picker.as_mut()?;
@@ -527,6 +552,29 @@ fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Op
     }
 }
 
+/// Wheel over the permission modal scrolls the wrapped tool-input content.
+fn handle_permission_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
+    app.permission.as_ref()?;
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            if let Some(ref mut perm) = app.permission {
+                perm.scroll = perm.scroll.saturating_sub(1);
+            }
+            None
+        }
+        MouseEventKind::ScrollDown => {
+            if let Some(ref mut perm) = app.permission {
+                perm.scroll = perm.scroll.saturating_add(1).min(
+                    perm.max_scroll(app.chat_area.width, app.chat_area.height)
+                        .unwrap_or(perm.scroll),
+                );
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     let page_lines = (app.chat_area.height.saturating_sub(8)).max(3);
     match key.code {
@@ -550,10 +598,10 @@ fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Act
         }
         KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm
-                    .scroll
-                    .saturating_add(1)
-                    .min(perm.max_scroll(app.chat_area.height).unwrap_or(perm.scroll));
+                perm.scroll = perm.scroll.saturating_add(1).min(
+                    perm.max_scroll(app.chat_area.width, app.chat_area.height)
+                        .unwrap_or(perm.scroll),
+                );
             }
             None
         }
@@ -567,10 +615,10 @@ fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Act
         }
         KeyCode::PageDown => {
             if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm
-                    .scroll
-                    .saturating_add(page_lines)
-                    .min(perm.max_scroll(app.chat_area.height).unwrap_or(perm.scroll));
+                perm.scroll = perm.scroll.saturating_add(page_lines).min(
+                    perm.max_scroll(app.chat_area.width, app.chat_area.height)
+                        .unwrap_or(perm.scroll),
+                );
             }
             None
         }
@@ -1227,7 +1275,6 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         if let Some(ref mut picker) = app.picker {
             if picker.kind == "thinking_variant" {
                 picker.move_selection(1);
-                picker.adjust_scroll();
                 // Return the selected variant as an action (the budget row
                 // commits its draft as `budget:<n>`).
                 let item = app.picker.as_ref().and_then(selected_thinking_variant);

@@ -192,7 +192,13 @@ impl Adapter {
             for p in &m.parts {
                 if let Part::ToolCall(tc) = p {
                     if tc.call_id == call_id {
-                        return tc.state.output().unwrap_or("").to_string();
+                        // Return the output for Completed/Running states.
+                        // For Error state, return the error message so the
+                        // provider sees a non-empty tool result.
+                        return match &tc.state {
+                            ToolState::Error(e) => e.error.clone(),
+                            _ => tc.state.output().unwrap_or("").to_string(),
+                        };
                     }
                 }
             }
@@ -202,8 +208,28 @@ impl Adapter {
 
     async fn build_request_body(&self, req: &Request) -> Result<Vec<u8>, ProviderError> {
         let mut messages: Vec<serde_json::Value> = Vec::new();
+        // Track call_ids issued by the most recent assistant message in the
+        // wire. Tool results are only emitted if they match — providers
+        // reject role:tool messages that don't follow a preceding
+        // tool_calls message.
+        let mut last_assistant_call_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         for m in &req.messages {
-            let msgs = self.build_wire_message(&req.messages, m).await;
+            let msgs = self
+                .build_wire_message(&req.messages, m, &last_assistant_call_ids)
+                .await;
+            // Update the tracking set if this message emitted tool_calls.
+            if m.role == Role::Assistant {
+                last_assistant_call_ids.clear();
+                for p in &m.parts {
+                    if let Part::ToolCall(tc) = p {
+                        if !matches!(tc.state, ToolState::Pending(_)) {
+                            last_assistant_call_ids.insert(tc.call_id.clone());
+                        }
+                    }
+                }
+            }
             messages.extend(msgs);
         }
 
@@ -287,7 +313,12 @@ impl Adapter {
         serde_json::to_vec(&body).map_err(ProviderError::Json)
     }
 
-    async fn build_wire_message(&self, all: &[Message], m: &Message) -> Vec<serde_json::Value> {
+    async fn build_wire_message(
+        &self,
+        all: &[Message],
+        m: &Message,
+        last_assistant_call_ids: &std::collections::HashSet<String>,
+    ) -> Vec<serde_json::Value> {
         let mut out: Vec<serde_json::Value> = Vec::new();
 
         match m.role {
@@ -331,7 +362,11 @@ impl Adapter {
                                 text_content.push_str(&format!("\n[File: {}]", filename));
                             }
                         }
-                        Part::ToolResult(pt) => {
+                        Part::ToolResult(pt) if last_assistant_call_ids.contains(&pt.call_id) => {
+                            // Only emit role:tool messages that respond to a
+                            // tool_call in the immediately preceding assistant
+                            // message. Providers reject role:tool messages
+                            // that don't follow a preceding tool_calls message.
                             let output = Self::find_tool_output(all, &pt.call_id);
                             tool_results.push(json!({
                                 "role": "tool",
@@ -372,6 +407,14 @@ impl Adapter {
                             reasoning.push_str(&pt.text);
                         }
                         Part::ToolCall(pt) => {
+                            // Skip tool calls that are still Pending — they have
+                            // no result yet, and emitting them creates an
+                            // assistant message with tool_calls but no matching
+                            // role:tool response, which providers reject with
+                            // "insufficient tool messages following toolcalls".
+                            if matches!(pt.state, ToolState::Pending(_)) {
+                                continue;
+                            }
                             // Backends reject non-object arguments (sessions
                             // persisted before object-input was enforced can
                             // still carry Null, which stringifies to "null").
@@ -826,6 +869,10 @@ mod tests {
     use mew_message::AssistantMeta;
     use mew_message::{ToolResultPart, ToolStateCompleted};
 
+    fn empty_call_ids() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
     fn make_minimal_png() -> Vec<u8> {
         vec![
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
@@ -863,7 +910,9 @@ mod tests {
             },
             assistant: None,
         };
-        let wire = adapter.build_wire_message(&[], &msg).await;
+        let wire = adapter
+            .build_wire_message(&[], &msg, &empty_call_ids())
+            .await;
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0]["role"], "user");
         assert_eq!(wire[0]["content"], "Hello");
@@ -899,8 +948,11 @@ mod tests {
                     },
                     tool_name: "echo".to_string(),
                     call_id: "call_123".to_string(),
-                    state: ToolState::Pending(ToolStatePending {
+                    state: ToolState::Completed(ToolStateCompleted {
                         input: serde_json::json!({"input": "hi"}),
+                        output: String::new(),
+                        metadata: None,
+                        diff: None,
                         time: ToolTime {
                             start: 0,
                             end: None,
@@ -923,7 +975,9 @@ mod tests {
                 manifest: None,
             }),
         };
-        let wire = adapter.build_wire_message(&[], &msg).await;
+        let wire = adapter
+            .build_wire_message(&[], &msg, &empty_call_ids())
+            .await;
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0]["role"], "assistant");
         assert!(wire[0]["tool_calls"].is_array());
@@ -954,8 +1008,11 @@ mod tests {
                 },
                 tool_name: "write".to_string(),
                 call_id: "call_null".to_string(),
-                state: ToolState::Pending(ToolStatePending {
+                state: ToolState::Completed(ToolStateCompleted {
                     input: serde_json::Value::Null,
+                    output: String::new(),
+                    metadata: None,
+                    diff: None,
                     time: ToolTime {
                         start: 0,
                         end: None,
@@ -977,11 +1034,85 @@ mod tests {
                 manifest: None,
             }),
         };
-        let wire = adapter.build_wire_message(&[], &msg).await;
+        let wire = adapter
+            .build_wire_message(&[], &msg, &empty_call_ids())
+            .await;
         assert_eq!(wire.len(), 1);
         assert_eq!(
             wire[0]["tool_calls"][0]["function"]["arguments"], "{}",
             "null tool input must serialize as \"{{}}\""
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_skips_pending_tool_calls() {
+        // A Pending tool call (never executed) must NOT be emitted as
+        // tool_calls in the wire — it has no matching tool result, and
+        // emitting it triggers "insufficient tool messages following
+        // toolcalls message" from OpenAI-compatible providers.
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![
+                Part::Text(TextPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    text: "Let me check.".to_string(),
+                    synthetic: false,
+                }),
+                Part::ToolCall(ToolCallPart {
+                    base: PartBase {
+                        id: ulid::Ulid::new(),
+                        message_id: ulid::Ulid::new(),
+                        session_id: ulid::Ulid::new(),
+                    },
+                    tool_name: "read".to_string(),
+                    call_id: "call_pending".to_string(),
+                    state: ToolState::Pending(ToolStatePending {
+                        input: serde_json::json!({"path": "foo.rs"}),
+                        time: ToolTime {
+                            start: 0,
+                            end: None,
+                        },
+                    }),
+                    raw_input: String::new(),
+                }),
+            ],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: Some(AssistantMeta {
+                provider_id: String::new(),
+                model_id: String::new(),
+                cost: 0.0,
+                tokens: Tokens::default(),
+                finish: None,
+                error: None,
+                manifest: None,
+            }),
+        };
+        let wire = adapter
+            .build_wire_message(&[], &msg, &empty_call_ids())
+            .await;
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["role"], "assistant");
+        // Text content should still be emitted.
+        assert_eq!(wire[0]["content"], "Let me check.");
+        // tool_calls must NOT be present — the Pending call has no result.
+        assert!(
+            wire[0].get("tool_calls").is_none(),
+            "Pending tool calls must not appear in wire messages"
         );
     }
 
@@ -1031,7 +1162,9 @@ mod tests {
             },
             assistant: None,
         };
-        let wire = adapter.build_wire_message(&[], &msg).await;
+        let wire = adapter
+            .build_wire_message(&[], &msg, &empty_call_ids())
+            .await;
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0]["role"], "user");
         let content = wire[0]["content"].as_array().unwrap();
@@ -1042,6 +1175,83 @@ mod tests {
         let data_url = content[1]["image_url"]["url"].as_str().unwrap();
         assert!(data_url.starts_with("data:image/png;base64,"));
         assert!(data_url.len() > "data:image/png;base64,".len());
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_drops_orphan_tool_results() {
+        // A ToolResultPart whose call_id is NOT in the previous assistant
+        // message must NOT be emitted as a role:tool message — providers
+        // reject tool messages that don't follow a tool_calls message.
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![Part::ToolResult(ToolResultPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                call_id: "call_orphan".to_string(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        // Pass empty call_ids — no preceding assistant message had this call.
+        let wire = adapter
+            .build_wire_message(&[], &msg, &empty_call_ids())
+            .await;
+        // The tool result is dropped; the user message has no text/image,
+        // so nothing is emitted at all.
+        assert!(
+            wire.is_empty(),
+            "orphan tool result should be dropped, got: {wire:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_emits_tool_results_for_preceding_calls() {
+        // ToolResultPart whose call_id IS in the preceding assistant
+        // message must be emitted as role:tool.
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![Part::ToolResult(ToolResultPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                call_id: "call_valid".to_string(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let mut call_ids = std::collections::HashSet::new();
+        call_ids.insert("call_valid".to_string());
+        let wire = adapter.build_wire_message(&[], &msg, &call_ids).await;
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["role"], "tool");
+        assert_eq!(wire[0]["tool_call_id"], "call_valid");
     }
 
     // -----------------------------------------------------------------------

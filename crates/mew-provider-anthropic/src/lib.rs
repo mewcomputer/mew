@@ -163,7 +163,13 @@ impl Adapter {
             for p in &m.parts {
                 if let Part::ToolCall(tc) = p {
                     if tc.call_id == call_id {
-                        return tc.state.output().unwrap_or("").to_string();
+                        // Return the output for Completed/Running states.
+                        // For Error state, return the error message so the
+                        // provider sees a non-empty tool result.
+                        return match &tc.state {
+                            ToolState::Error(e) => e.error.clone(),
+                            _ => tc.state.output().unwrap_or("").to_string(),
+                        };
                     }
                 }
             }
@@ -173,8 +179,27 @@ impl Adapter {
 
     async fn build_request_body(&self, req: &Request) -> Result<Vec<u8>, ProviderError> {
         let mut messages: Vec<serde_json::Value> = Vec::new();
+        // Track tool_use ids issued by the most recent assistant message.
+        // tool_result blocks are only emitted if they match — the API rejects
+        // tool_results that don't follow a preceding tool_use.
+        let mut last_assistant_call_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         for m in &req.messages {
-            if let Some(msg) = self.build_wire_message(&req.messages, m).await {
+            if let Some(msg) = self
+                .build_wire_message(&req.messages, m, &last_assistant_call_ids)
+                .await
+            {
+                if m.role == Role::Assistant {
+                    last_assistant_call_ids.clear();
+                    for p in &m.parts {
+                        if let Part::ToolCall(tc) = p {
+                            if !matches!(tc.state, ToolState::Pending(_)) {
+                                last_assistant_call_ids.insert(tc.call_id.clone());
+                            }
+                        }
+                    }
+                }
                 messages.push(msg);
             }
         }
@@ -291,7 +316,12 @@ impl Adapter {
         serde_json::to_vec(&body).map_err(ProviderError::Json)
     }
 
-    async fn build_wire_message(&self, all: &[Message], m: &Message) -> Option<serde_json::Value> {
+    async fn build_wire_message(
+        &self,
+        all: &[Message],
+        m: &Message,
+        last_assistant_call_ids: &std::collections::HashSet<String>,
+    ) -> Option<serde_json::Value> {
         let mut content: Vec<serde_json::Value> = Vec::new();
 
         match m.role {
@@ -302,7 +332,11 @@ impl Adapter {
                         Part::Text(pt) => {
                             content.push(json!({"type": "text", "text": pt.text}));
                         }
-                        Part::ToolResult(pt) => {
+                        Part::ToolResult(pt) if last_assistant_call_ids.contains(&pt.call_id) => {
+                            // Only emit tool_result blocks that respond to a
+                            // tool_use in the immediately preceding assistant
+                            // message. The API rejects tool_results without
+                            // a preceding tool_use.
                             let output = Self::find_tool_output(all, &pt.call_id);
                             content.push(json!({
                                 "type": "tool_result",
@@ -363,6 +397,13 @@ impl Adapter {
                             }
                         }
                         Part::ToolCall(pt) => {
+                            // Skip tool calls that are still Pending — they
+                            // have no result yet. Emitting a tool_use without
+                            // a matching tool_result block causes API errors
+                            // on replay after interrupted sessions.
+                            if matches!(pt.state, ToolState::Pending(_)) {
+                                continue;
+                            }
                             // The API rejects non-object input (sessions
                             // persisted before object-input was enforced can
                             // still carry Null).
@@ -888,6 +929,10 @@ mod tests {
     use super::*;
     use mew_message::{AssistantMeta, TextPart, ToolResultPart};
 
+    fn empty_call_ids() -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+
     fn make_minimal_png() -> Vec<u8> {
         vec![
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
@@ -925,7 +970,9 @@ mod tests {
             },
             assistant: None,
         };
-        let wire = adapter.build_wire_message(&[], &msg).await;
+        let wire = adapter
+            .build_wire_message(&[], &msg, &empty_call_ids())
+            .await;
         assert!(wire.is_some());
         let wire = wire.unwrap();
         assert_eq!(wire["role"], "user");
@@ -974,8 +1021,11 @@ mod tests {
                     },
                     tool_name: "echo".to_string(),
                     call_id: "call_456".to_string(),
-                    state: ToolState::Pending(ToolStatePending {
+                    state: ToolState::Completed(mew_message::ToolStateCompleted {
                         input: serde_json::json!({"input": "hi"}),
+                        output: String::new(),
+                        metadata: None,
+                        diff: None,
                         time: ToolTime {
                             start: 0,
                             end: None,
@@ -998,7 +1048,9 @@ mod tests {
                 manifest: None,
             }),
         };
-        let wire = adapter.build_wire_message(&[], &msg).await;
+        let wire = adapter
+            .build_wire_message(&[], &msg, &empty_call_ids())
+            .await;
         assert!(wire.is_some());
         let wire = wire.unwrap();
         assert_eq!(wire["role"], "assistant");
@@ -1055,7 +1107,9 @@ mod tests {
             },
             assistant: None,
         };
-        let wire = adapter.build_wire_message(&[], &msg).await;
+        let wire = adapter
+            .build_wire_message(&[], &msg, &empty_call_ids())
+            .await;
         assert!(wire.is_some());
         let wire = wire.unwrap();
         let content = wire["content"].as_array().unwrap();
@@ -1092,8 +1146,11 @@ mod tests {
                 },
                 tool_name: "write".to_string(),
                 call_id: "call_null".to_string(),
-                state: ToolState::Pending(ToolStatePending {
+                state: ToolState::Completed(mew_message::ToolStateCompleted {
                     input: serde_json::Value::Null,
+                    output: String::new(),
+                    metadata: None,
+                    diff: None,
                     time: ToolTime {
                         start: 0,
                         end: None,
@@ -1115,7 +1172,10 @@ mod tests {
                 manifest: None,
             }),
         };
-        let wire = adapter.build_wire_message(&[], &msg).await.unwrap();
+        let wire = adapter
+            .build_wire_message(&[], &msg, &empty_call_ids())
+            .await
+            .unwrap();
         let content = wire["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "tool_use");
         assert!(
@@ -1191,7 +1251,11 @@ mod tests {
             assistant: None,
         };
         let all = vec![assistant_msg.clone(), user_msg.clone()];
-        let wire = adapter.build_wire_message(&all, &user_msg).await;
+        // The preceding assistant message issued call_789, so it must be in
+        // the tracking set for the tool_result to be emitted.
+        let mut call_ids = std::collections::HashSet::new();
+        call_ids.insert("call_789".to_string());
+        let wire = adapter.build_wire_message(&all, &user_msg, &call_ids).await;
         assert!(wire.is_some());
         let wire = wire.unwrap();
         let content = wire["content"].as_array().unwrap();
@@ -1247,7 +1311,9 @@ mod tests {
             },
             assistant: None,
         };
-        let wire = adapter.build_wire_message(&[], &msg).await;
+        let wire = adapter
+            .build_wire_message(&[], &msg, &empty_call_ids())
+            .await;
         assert!(wire.is_some());
         let wire = wire.unwrap();
         let content = wire["content"].as_array().unwrap();

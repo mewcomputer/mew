@@ -1040,6 +1040,47 @@ fn test_namespace_picker_skill() {
 }
 
 #[test]
+fn test_namespace_picker_wraps_long_descriptions() {
+    // Descriptions longer than the picker list width wrap onto multiple
+    // display rows instead of being truncated; the row model accounts for
+    // every wrapped row so scrolling and the popup height stay exact.
+    let mut h = crate::harness::Harness::new(80, 24);
+    h.app.skill_catalog = vec![mew_skills::Skill {
+        name: "clarify".into(),
+        description:
+            "Improve unclear UX copy, error messages, microcopy, labels, and instructions to make interfaces easier to understand"
+                .into(),
+        body: "body".into(),
+        path: std::path::PathBuf::from("(test)"),
+        template: false,
+    }];
+    h.app.open_namespace_picker("skill", "");
+    let rendered = h.render();
+    assert!(
+        rendered.contains("@skill:clarify"),
+        "item label should render:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("understand"),
+        "full description must render (wrapped across rows):\n{rendered}"
+    );
+    let desc_row_count = rendered
+        .lines()
+        .filter(|l| l.contains("UX copy") || l.contains("understand"))
+        .count();
+    assert!(
+        desc_row_count >= 2,
+        "description should wrap across ≥2 rows, got {desc_row_count}:\n{rendered}"
+    );
+    let picker = h.app.picker.as_ref().unwrap();
+    assert!(
+        picker.visible_items >= 2,
+        "visible window covers the wrapped rows, got {}",
+        picker.visible_items
+    );
+}
+
+#[test]
 fn test_namespace_picker_model() {
     let mut app = App::new();
     app.models = vec![
@@ -2654,7 +2695,9 @@ fn test_budget_mouse_wheel_nudges_and_commits() {
     // Wheel up nudges up.
     let action = crate::events::handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollUp));
     assert_eq!(thinking_action(action), Some("budget:131072".into()));
-    // Wheel outside the track is ignored.
+    // Wheel outside the track scrolls the list (moves selection) and leaves
+    // the budget draft untouched.
+    let selected_before = app.picker.as_ref().unwrap().selected;
     let off = MouseEvent {
         kind: MouseEventKind::ScrollUp,
         column: 2,
@@ -2662,6 +2705,285 @@ fn test_budget_mouse_wheel_nudges_and_commits() {
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
     assert!(crate::events::handle_mouse_event(&mut app, off).is_none());
+    assert_ne!(
+        app.picker.as_ref().unwrap().selected,
+        selected_before,
+        "wheel off the track should scroll the list"
+    );
+    assert_eq!(
+        budget_draft(&app),
+        "131072",
+        "budget draft must be untouched"
+    );
+}
+
+#[test]
+fn test_picker_mouse_wheel_scrolls_selection() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let mut app = App::new();
+    app.open_command_palette();
+    let mouse = |kind: MouseEventKind| MouseEvent {
+        kind,
+        column: 40,
+        row: 10,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    assert_eq!(app.picker.as_ref().unwrap().selected, 0);
+    crate::events::handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollDown));
+    assert_eq!(app.picker.as_ref().unwrap().selected, 1);
+    crate::events::handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollUp));
+    assert_eq!(app.picker.as_ref().unwrap().selected, 0);
+    // Non-wheel events stay inert on picker content.
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 40,
+        row: 10,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    assert!(crate::events::handle_mouse_event(&mut app, click).is_none());
+}
+
+#[test]
+fn test_picker_row_scroll_keeps_selection_visible() {
+    // Scroll offsets are measured in wrapped display rows: reaching the last
+    // item advances the scroll so the selected item's full row span is in
+    // view.
+    let mut h = crate::harness::Harness::new(80, 24);
+    h.app.skill_catalog = (0..12)
+        .map(|n| mew_skills::Skill {
+            name: format!("skill{n}"),
+            description:
+                "a fairly long description that wraps across several rows inside the picker list"
+                    .into(),
+            body: "body".into(),
+            path: std::path::PathBuf::from("(test)"),
+            template: false,
+        })
+        .collect();
+    h.app.open_namespace_picker("skill", "");
+    // Move to the last item (11 steps from index 0).
+    for _ in 0..11 {
+        h.app.picker_down();
+    }
+    h.render();
+    let picker = h.app.picker.as_ref().unwrap();
+    assert_eq!(picker.selected, 11);
+    assert!(
+        picker.scroll > 0,
+        "reaching the last item must scroll, scroll={}",
+        picker.scroll
+    );
+    let rendered = h.render();
+    assert!(
+        rendered.contains("@skill:skill11"),
+        "selected item must be visible:\n{rendered}"
+    );
+}
+
+/// Locate the scrollbar column in a rendered frame. Returns the thumb rows
+/// and the top/bottom rows of the scrollbar's full span (thumb and track
+/// together) — the thumb replaces track cells, so the track symbol only
+/// shows where the thumb isn't. Box borders also use '│', but they never
+/// share a column with '█', so the column containing both is uniquely the
+/// scrollbar column.
+fn scrollbar_span(rendered: &str) -> Option<(Vec<usize>, usize, usize)> {
+    let rows: Vec<&str> = rendered.lines().collect();
+    let width = rows.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    for x in 0..width {
+        let mut thumb = Vec::new();
+        let mut span: Vec<usize> = Vec::new();
+        for (y, line) in rows.iter().enumerate() {
+            match line.chars().nth(x) {
+                Some('│') => span.push(y),
+                Some('█') => {
+                    thumb.push(y);
+                    span.push(y);
+                }
+                _ => {}
+            }
+        }
+        if !span.is_empty() && !thumb.is_empty() {
+            return Some((thumb, *span.first()?, *span.last()?));
+        }
+    }
+    None
+}
+
+#[test]
+fn test_picker_scrollbar_travels_full_track() {
+    // Scrollbar content_length must be the scroll range (max_scroll + 1), not
+    // the total row count: ratatui only parks the thumb at the track end when
+    // position == content_length - 1, so the old `content_length = total`
+    // call left the thumb short of the bottom at max scroll.
+    let mut h = crate::harness::Harness::new(80, 24);
+    h.app.skill_catalog = (0..12)
+        .map(|n| mew_skills::Skill {
+            name: format!("skill{n}"),
+            description:
+                "a fairly long description that wraps across several rows inside the picker list"
+                    .into(),
+            body: "body".into(),
+            path: std::path::PathBuf::from("(test)"),
+            template: false,
+        })
+        .collect();
+    h.app.open_namespace_picker("skill", "");
+
+    // At the top the thumb starts on the scrollbar column's topmost row.
+    let (thumb, top, _bottom) = scrollbar_span(&h.render()).expect("picker scrollbar must render");
+    assert_eq!(
+        thumb.first(),
+        Some(&top),
+        "at scroll=0 the thumb must start at the top of the track"
+    );
+
+    // Jump to the very bottom: select the last item (which advances scroll)
+    // and force the offset to max; the draw pass keeps the selection in view
+    // and clamps scroll to max_scroll.
+    for _ in 0..11 {
+        h.app.picker_down();
+    }
+    h.app.picker.as_mut().unwrap().scroll = usize::MAX;
+    let (thumb, _top, bottom) = scrollbar_span(&h.render()).expect("picker scrollbar must render");
+    assert_eq!(
+        thumb.last(),
+        Some(&bottom),
+        "at max scroll the thumb must reach the bottom of the track"
+    );
+}
+
+#[test]
+fn test_chat_scrollbar_reaches_bottom() {
+    // The chat scrollbar must park its thumb on the chat area's last row when
+    // auto-scrolled to the bottom, not leave a gap of dead track.
+    let mut h = crate::harness::Harness::new(80, 24);
+    let long = (0..40)
+        .map(|i| format!("line {i}: {}", "word ".repeat(20)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    h.say(&long);
+    h.render(); // populates chat_area and builds the rendered chat
+    let area = h.app.chat_area;
+    assert!(area.height > 0, "chat area must be laid out");
+    // Auto-scroll pins to the bottom; verify content actually overflows.
+    assert!(
+        h.app.max_scroll > 0,
+        "chat must overflow to show a scrollbar, max_scroll={}",
+        h.app.max_scroll
+    );
+    let sb_col = area.right().saturating_sub(1) as usize;
+    let rendered = h.render();
+    let rows: Vec<&str> = rendered.lines().collect();
+    let thumb_last_row = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.chars().nth(sb_col) == Some('█'))
+        .map(|(i, _)| i)
+        .next_back();
+    assert_eq!(
+        thumb_last_row,
+        Some(area.bottom().saturating_sub(1) as usize),
+        "thumb must sit on the chat area's last row at the bottom"
+    );
+}
+
+#[test]
+fn test_slash_scrollbar_reaches_bottom() {
+    // Same scroll-range fix for the slash-command autocomplete popup.
+    let mut h = crate::harness::Harness::new(80, 24);
+    h.app.dynamic_slash_commands = (0..20)
+        .map(|n| crate::app::SlashCommand {
+            name: format!("command{n}"),
+            description: "a slash command with a description".into(),
+        })
+        .collect();
+    h.type_str("/");
+    assert_eq!(h.app.mode, crate::app::Mode::SlashCommand);
+    // Force the popup to the bottom; the draw pass clamps slash_scroll.
+    h.app.slash_scroll = usize::MAX;
+    let (thumb, _top, bottom) = scrollbar_span(&h.render()).expect("slash scrollbar must render");
+    assert_eq!(
+        thumb.last(),
+        Some(&bottom),
+        "at max scroll the thumb must reach the bottom of the track"
+    );
+}
+
+#[test]
+fn test_permission_max_scroll_accounts_for_wrapping() {
+    // max_scroll must count wrapped display rows, not raw lines, so scroll
+    // keys can reach the true bottom of long tool inputs.
+    let perm = PermissionState {
+        tool_name: "bash".into(),
+        call_id: "c1".into(),
+        input: serde_json::json!({ "data": "x".repeat(800) }),
+        tx: None,
+        selected: 0,
+        scroll: 0,
+    };
+    // One raw line, but many wrapped rows at the default popup width: the
+    // scroll range must be non-trivial.
+    let max = perm
+        .max_scroll(80, 24)
+        .expect("wrapped input needs scrolling");
+    assert!(max > 0, "wrapped content should scroll, got {max}");
+    // A narrower terminal wraps to more rows, so the range grows.
+    let narrow = perm.max_scroll(40, 24).expect("still scrolls when narrow");
+    assert!(
+        narrow > max,
+        "narrower popup wraps to more rows: {narrow} vs {max}"
+    );
+
+    // Short inputs fit without scrolling.
+    let short = PermissionState {
+        tool_name: "bash".into(),
+        call_id: "c2".into(),
+        input: serde_json::json!({ "ok": true }),
+        tx: None,
+        selected: 0,
+        scroll: 0,
+    };
+    assert_eq!(short.max_scroll(80, 24), None);
+}
+
+#[test]
+fn test_permission_mouse_wheel_scrolls() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+
+    let mut app = App::new();
+    app.mode = crate::app::Mode::PermissionPrompt;
+    app.permission = Some(PermissionState {
+        tool_name: "bash".into(),
+        call_id: "c1".into(),
+        input: serde_json::json!({ "data": "x".repeat(800) }),
+        tx: None,
+        selected: 0,
+        scroll: 0,
+    });
+    app.chat_area = ratatui::layout::Rect::new(0, 0, 80, 24);
+    let mouse = |kind: MouseEventKind| MouseEvent {
+        kind,
+        column: 30,
+        row: 10,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    // Wheel down scrolls toward the bottom, clamped at max_scroll.
+    let expected_max = {
+        let perm = app.permission.as_ref().unwrap();
+        perm.max_scroll(80, 24)
+            .expect("wrapped input needs scrolling")
+    };
+    assert!(expected_max > 0);
+    for _ in 0..10 {
+        crate::events::handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollDown));
+    }
+    let perm = app.permission.as_ref().unwrap();
+    assert_eq!(perm.scroll, expected_max, "clamped at max_scroll");
+    // Wheel up scrolls back toward the top.
+    crate::events::handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollUp));
+    let perm = app.permission.as_ref().unwrap();
+    assert_eq!(perm.scroll, expected_max - 1);
 }
 
 #[test]

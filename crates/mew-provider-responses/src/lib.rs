@@ -272,12 +272,18 @@ impl Provider for Adapter {
 impl Adapter {
     /// Build a lookup map of call_id → tool output string, scanning all
     /// messages once. O(N×P) instead of O(N²×P) when called per tool result.
-    fn build_tool_output_map(messages: &[Message]) -> std::collections::HashMap<&str, &str> {
+    fn build_tool_output_map(messages: &[Message]) -> std::collections::HashMap<&str, String> {
         let mut map = std::collections::HashMap::new();
         for m in messages {
             for p in &m.parts {
                 if let Part::ToolCall(tc) = p {
-                    map.insert(tc.call_id.as_str(), tc.state.output().unwrap_or(""));
+                    // For Error state, return the error message so the
+                    // provider sees a non-empty tool result.
+                    let output = match &tc.state {
+                        ToolState::Error(e) => e.error.clone(),
+                        _ => tc.state.output().unwrap_or("").to_string(),
+                    };
+                    map.insert(tc.call_id.as_str(), output);
                 }
             }
         }
@@ -290,8 +296,25 @@ impl Adapter {
         // Build the tool output lookup once for O(1) access in build_wire_message.
         let tool_outputs = Self::build_tool_output_map(&req.messages);
 
+        // Track call_ids issued by the most recent assistant message.
+        // function_call_output items are only emitted if they match — the API
+        // rejects outputs that don't follow a preceding function_call.
+        let mut last_assistant_call_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         for m in &req.messages {
-            self.build_wire_message(m, &tool_outputs, &mut input).await;
+            self.build_wire_message(m, &tool_outputs, &mut input, &last_assistant_call_ids)
+                .await;
+            if m.role == Role::Assistant {
+                last_assistant_call_ids.clear();
+                for p in &m.parts {
+                    if let Part::ToolCall(tc) = p {
+                        if !matches!(tc.state, ToolState::Pending(_)) {
+                            last_assistant_call_ids.insert(tc.call_id.clone());
+                        }
+                    }
+                }
+            }
         }
 
         let mut body = json!({
@@ -424,8 +447,9 @@ impl Adapter {
     async fn build_wire_message(
         &self,
         m: &Message,
-        tool_outputs: &std::collections::HashMap<&str, &str>,
+        tool_outputs: &std::collections::HashMap<&str, String>,
         input: &mut Vec<serde_json::Value>,
+        last_assistant_call_ids: &std::collections::HashSet<String>,
     ) {
         match m.role {
             Role::System => {
@@ -465,15 +489,27 @@ impl Adapter {
                                 "image_url": fp.url,
                             }));
                         }
-                        Part::ToolResult(tr) => {
-                            let output =
-                                tool_outputs.get(tr.call_id.as_str()).copied().unwrap_or("");
+                        Part::ToolResult(tr)
+                            if last_assistant_call_ids.contains(tr.call_id.as_str()) =>
+                        {
+                            // Only emit function_call_output items that respond
+                            // to a function_call in the immediately preceding
+                            // assistant message. The API rejects outputs that
+                            // don't follow a preceding function_call.
+                            let output = tool_outputs
+                                .get(tr.call_id.as_str())
+                                .cloned()
+                                .unwrap_or_default();
                             tool_results.push(json!({
                                 "type": "function_call_output",
                                 "call_id": tr.call_id,
                                 "output": output,
                             }));
                         }
+                        // ToolResult with a call_id not in the preceding
+                        // assistant message is dropped — the API rejects
+                        // orphan outputs.
+                        Part::ToolResult(_) => {}
                         Part::Compaction(_) | Part::Reasoning(_) => {}
                         Part::ToolCall(_) => {
                             // Tool calls from the user role are unusual;
@@ -510,6 +546,13 @@ impl Adapter {
                             }
                         }
                         Part::ToolCall(tc) => {
+                            // Skip tool calls that are still Pending — they
+                            // have no result yet. Emitting a function_call
+                            // without a matching function_call_output causes
+                            // API errors on replay after interrupted sessions.
+                            if matches!(tc.state, ToolState::Pending(_)) {
+                                continue;
+                            }
                             // Backends reject non-object arguments (sessions
                             // persisted before object-input was enforced can
                             // still carry Null, which stringifies to "null").
@@ -1354,8 +1397,11 @@ mod tests {
                 },
                 tool_name: "bash".to_string(),
                 call_id: "call_123".to_string(),
-                state: ToolState::Pending(ToolStatePending {
+                state: ToolState::Completed(mew_message::ToolStateCompleted {
                     input: json!({"command": "ls"}),
+                    output: String::new(),
+                    metadata: None,
+                    diff: None,
                     time: ToolTime {
                         start: 0,
                         end: None,
@@ -1409,8 +1455,11 @@ mod tests {
                 },
                 tool_name: "write".to_string(),
                 call_id: "call_null".to_string(),
-                state: ToolState::Pending(ToolStatePending {
+                state: ToolState::Completed(mew_message::ToolStateCompleted {
                     input: serde_json::Value::Null,
+                    output: String::new(),
+                    metadata: None,
+                    diff: None,
                     time: ToolTime {
                         start: 0,
                         end: None,

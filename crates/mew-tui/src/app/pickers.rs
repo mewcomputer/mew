@@ -480,14 +480,12 @@ impl App {
     pub fn picker_down(&mut self) {
         if let Some(ref mut p) = self.picker {
             p.move_selection(1);
-            p.adjust_scroll();
         }
     }
 
     pub fn picker_up(&mut self) {
         if let Some(ref mut p) = self.picker {
             p.move_selection(-1);
-            p.adjust_scroll();
         }
     }
 

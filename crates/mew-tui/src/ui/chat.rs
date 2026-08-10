@@ -229,7 +229,11 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(paragraph, chat_inner);
 
     if total_lines > chat_inner.height {
-        let mut scrollbar_state = ScrollbarState::new(total_lines as usize)
+        // ratatui's ScrollbarState only puts the thumb at the track end when
+        // `position == content_length - 1`. Our scroll ranges 0..=max_scroll
+        // (= total - viewport), so the content length must be max_scroll + 1
+        // for the thumb to reach the bottom instead of stalling short of it.
+        let mut scrollbar_state = ScrollbarState::new(max_scroll as usize + 1)
             .viewport_content_length(chat_inner.height as usize)
             .position(scroll_offset);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -1003,8 +1007,9 @@ fn build_tool_row(
 
 /// Word-aware wrap `text` into chunks of at most `max_width` display
 /// columns each. Prefers breaking at whitespace; hard-breaks a single
-/// oversized word across chunks.
-pub(super) fn wrap_text_to_width(text: &str, max_width: u16) -> Vec<String> {
+/// oversized word across chunks. Shared by the chat surface, the picker
+/// list, and the permission modal so scroll math and rendering agree.
+pub(crate) fn wrap_text_to_width(text: &str, max_width: u16) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
     }

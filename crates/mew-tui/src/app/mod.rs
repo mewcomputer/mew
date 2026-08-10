@@ -349,7 +349,11 @@ pub struct PickerState {
     pub filter: String,
     pub selected: usize,
     pub cursor: usize,
+    /// Vertical scroll offset in rendered display rows (each wrapped line
+    /// counts as one row). Set by the draw pass, which also keeps the
+    /// selected item's row span in view.
     pub scroll: usize,
+    /// Number of display rows the list area can show. Set by the draw pass.
     pub visible_items: usize,
     pub hint: Option<String>,
     /// Numeric budget row state for the thinking-variant picker. `None` for
@@ -482,16 +486,6 @@ impl PickerState {
         }
         self.selected = new as usize;
     }
-
-    /// Ensure scroll keeps selected item in view.
-    pub fn adjust_scroll(&mut self) {
-        let visible = self.visible_items;
-        if self.selected < self.scroll {
-            self.scroll = self.selected;
-        } else if self.selected >= self.scroll + visible {
-            self.scroll = self.selected.saturating_sub(visible - 1);
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -532,26 +526,35 @@ pub struct PermissionState {
 }
 
 impl PermissionState {
+    /// Width of the popup's inner content area for the given main-area width,
+    /// mirroring the layout math in `draw_permission_modal`.
+    fn inner_width(chat_width: u16) -> u16 {
+        60u16.min(chat_width.saturating_sub(4)).saturating_sub(4)
+    }
+
     /// Maximum scroll offset that keeps the tool input content in view.
-    /// `chat_height` is the terminal's main-area height (used to derive the
-    /// popup height). Returns `None` if there is no meaningful scroll range.
-    pub fn max_scroll(&self, chat_height: u16) -> Option<u16> {
+    /// `chat_width`/`chat_height` are the terminal's main-area dimensions
+    /// (used to derive the popup size). The offset is measured in rendered
+    /// rows, so wrapped content is counted exactly. Returns `None` when the
+    /// content fits without scrolling.
+    pub fn max_scroll(&self, chat_width: u16, chat_height: u16) -> Option<u16> {
         let popup_height = Self::popup_height(chat_height);
-        let content_height = popup_height.saturating_sub(8).max(3);
-        let lines = self.input_lines();
-        let total = lines as u16;
+        let content_height = popup_height.saturating_sub(4).max(3);
+        let total = 5u16 + self.input_rows(chat_width) as u16;
         if total <= content_height {
             return None;
         }
         Some(total.saturating_sub(content_height))
     }
 
-    /// Number of text lines the rendered tool input would occupy before wrapping.
-    fn input_lines(&self) -> usize {
-        serde_json::to_string_pretty(&self.input)
-            .unwrap_or_default()
-            .lines()
-            .count()
+    /// Number of display rows the tool input occupies once wrapped to the
+    /// popup's content width (Unicode width aware, matching the render).
+    fn input_rows(&self, chat_width: u16) -> usize {
+        let json = serde_json::to_string_pretty(&self.input).unwrap_or_default();
+        let width = Self::inner_width(chat_width);
+        json.lines()
+            .map(|l| crate::ui::chat::wrap_text_to_width(l, width).len())
+            .sum()
     }
 
     /// Height of the popup for the given terminal main-area height.

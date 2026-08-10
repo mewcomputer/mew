@@ -1042,6 +1042,109 @@ fn is_compaction_message(message: &Message) -> bool {
         .any(|part| matches!(part, Part::Compaction(_)))
 }
 
+/// Repair orphaned Pending tool calls in the message history.
+///
+/// When a session is interrupted mid-turn (crash, kill, daemon restart),
+/// the assistant message may carry `ToolCallPart`s in `Pending` state with
+/// no corresponding `ToolResultPart` in any subsequent user message. Wire
+/// builders skip Pending calls, but this function also transitions them to
+/// `Error` state and appends matching `ToolResultPart`s so the session
+/// history stays consistent and the model sees what happened.
+pub(crate) fn repair_orphaned_tool_calls(
+    messages: &mut Vec<Message>,
+    session_id: mew_message::SessionId,
+) {
+    // Collect call_ids that already have a ToolResultPart somewhere in history.
+    let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for msg in messages.iter() {
+        for part in &msg.parts {
+            if let Part::ToolResult(tr) = part {
+                resolved.insert(tr.call_id.clone());
+            }
+        }
+    }
+
+    // Find orphaned Pending tool calls and collect their call_ids + assistant
+    // message indices so we can patch them in place.
+    let now = chrono::Utc::now().timestamp();
+    let mut to_repair: Vec<(usize, String)> = Vec::new();
+    for (i, msg) in messages.iter().enumerate() {
+        if msg.role != Role::Assistant {
+            continue;
+        }
+        for part in &msg.parts {
+            if let Part::ToolCall(tc) = part {
+                if matches!(tc.state, ToolState::Pending(_)) && !resolved.contains(&tc.call_id) {
+                    to_repair.push((i, tc.call_id.clone()));
+                }
+            }
+        }
+    }
+
+    if to_repair.is_empty() {
+        return;
+    }
+
+    tracing::info!(
+        count = to_repair.len(),
+        "repairing orphaned pending tool calls on session load"
+    );
+
+    // Transition each orphaned Pending call to Error state.
+    for (msg_idx, call_id) in &to_repair {
+        let msg = &mut messages[*msg_idx];
+        for part in &mut msg.parts {
+            if let Part::ToolCall(tc) = part {
+                if tc.call_id == *call_id {
+                    let input = tc.state.input().clone();
+                    tc.state = ToolState::Error(ToolStateError {
+                        input,
+                        error: "interrupted: session was resumed before this tool call completed"
+                            .to_string(),
+                        time: ToolTime {
+                            start: now,
+                            end: Some(now),
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    // Append a user message with the missing ToolResultParts so the
+    // conversation alternation (assistant → user) is maintained and the
+    // wire builders find a result for each call_id.
+    let result_parts: Vec<Part> = to_repair
+        .iter()
+        .map(|(_, call_id)| {
+            Part::ToolResult(ToolResultPart {
+                base: PartBase {
+                    id: Ulid::new(),
+                    message_id: Ulid::new(),
+                    session_id,
+                },
+                call_id: call_id.clone(),
+            })
+        })
+        .collect();
+
+    let result_msg = Message {
+        id: Ulid::new(),
+        session_id,
+        role: Role::User,
+        parts: result_parts,
+        time: Time {
+            created: now,
+            completed: None,
+        },
+        assistant: None,
+    };
+
+    // Insert the result message after the last orphaned assistant message.
+    let insert_after = to_repair.last().unwrap().0;
+    messages.insert(insert_after + 1, result_msg);
+}
+
 /// Rebuild the model-visible context from the lossless session history.
 ///
 /// Compaction markers are appended after the messages they replace. The
@@ -1275,5 +1378,128 @@ mod tests {
             defs.into_iter().map(|def| def.name).collect::<Vec<_>>(),
             vec!["bash", "read", "write"]
         );
+    }
+
+    fn pending_tool_call(call_id: &str) -> Part {
+        Part::ToolCall(ToolCallPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+            },
+            tool_name: "bash".to_string(),
+            call_id: call_id.to_string(),
+            state: ToolState::Pending(mew_message::ToolStatePending {
+                input: serde_json::json!({"command": "ls"}),
+                time: ToolTime {
+                    start: 0,
+                    end: None,
+                },
+            }),
+            raw_input: "{}".to_string(),
+        })
+    }
+
+    #[test]
+    fn repair_orphaned_tool_calls_transitions_pending_to_error() {
+        // An assistant message with a Pending tool call and no matching
+        // ToolResultPart should be repaired: the call transitions to Error
+        // and a user message with the matching ToolResultPart is appended.
+        let mut messages = vec![make_msg(
+            Role::Assistant,
+            vec![text_part("let me check"), pending_tool_call("call_orphan")],
+        )];
+        let session_id = messages[0].session_id;
+
+        repair_orphaned_tool_calls(&mut messages, session_id);
+
+        // The assistant message now has an Error-state tool call.
+        let Part::ToolCall(tc) = &messages[0].parts[1] else {
+            panic!("expected tool call");
+        };
+        let ToolState::Error(ref e) = tc.state else {
+            panic!("expected error state, got {:?}", tc.state);
+        };
+        assert!(e.error.contains("interrupted"));
+
+        // A new user message was appended with the matching ToolResultPart.
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, Role::User);
+        let Part::ToolResult(tr) = &messages[1].parts[0] else {
+            panic!("expected tool result");
+        };
+        assert_eq!(tr.call_id, "call_orphan");
+    }
+
+    #[test]
+    fn repair_orphaned_tool_calls_skips_already_resolved() {
+        // A Pending tool call that already has a matching ToolResultPart
+        // should not be touched (the result is already in the conversation).
+        let tool_result = make_msg(
+            Role::User,
+            vec![Part::ToolResult(ToolResultPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                call_id: "call_resolved".to_string(),
+            })],
+        );
+        let mut messages = vec![
+            make_msg(Role::Assistant, vec![pending_tool_call("call_resolved")]),
+            tool_result,
+        ];
+        let session_id = messages[0].session_id;
+
+        repair_orphaned_tool_calls(&mut messages, session_id);
+
+        // Nothing was added — the call already had a result.
+        assert_eq!(messages.len(), 2);
+        // The tool call is still Pending (no Error transition).
+        let Part::ToolCall(tc) = &messages[0].parts[0] else {
+            panic!("expected tool call");
+        };
+        assert!(matches!(tc.state, ToolState::Pending(_)));
+    }
+
+    #[test]
+    fn repair_orphaned_tool_calls_collects_multiple_orphans() {
+        // Multiple Pending tool calls on the same assistant message should
+        // all be repaired in a single user message.
+        let mut messages = make_msg(
+            Role::Assistant,
+            vec![pending_tool_call("call_a"), pending_tool_call("call_b")],
+        );
+        let session_id = messages.session_id;
+        let mut msgs = vec![messages];
+
+        repair_orphaned_tool_calls(&mut msgs, session_id);
+
+        assert_eq!(msgs.len(), 2);
+        let Part::ToolCall(tc_a) = &msgs[0].parts[0] else {
+            panic!();
+        };
+        let Part::ToolCall(tc_b) = &msgs[0].parts[1] else {
+            panic!();
+        };
+        assert!(matches!(tc_a.state, ToolState::Error(_)));
+        assert!(matches!(tc_b.state, ToolState::Error(_)));
+
+        // Both results in the appended user message.
+        assert_eq!(msgs[1].parts.len(), 2);
+        let mut call_ids: Vec<&str> = msgs[1]
+            .parts
+            .iter()
+            .filter_map(|p| {
+                if let Part::ToolResult(tr) = p {
+                    Some(tr.call_id.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        call_ids.sort();
+        assert_eq!(call_ids, vec!["call_a", "call_b"]);
     }
 }
