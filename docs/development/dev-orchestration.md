@@ -142,6 +142,78 @@ This is the point where orchestration becomes runtime-driven. Worth building
 only after A–E, because they define the semantics (caps, links, schemas,
 durability) a scheduler would need anyway.
 
+## Status (2026-08-09)
+
+Paths A–E are implemented on `wip/orchestration-improvements` and reviewed
+(two code-reviewer passes; see CURRENT.md for the fix list). What shipped:
+`subagent_wait` batch mode + turn-end leak reminder (A); concurrency cap,
+`can_spawn` depth policy, `default_max_duration_secs` (B); `todo_id` linking
+(C); `<session>/subagent_tasks.json` registry with orphan surfacing (D);
+`output_schema` validation with one corrective turn (E). All tunable via the
+`[orchestration]` config section. F remains out of scope.
+
+## Design note: subagent cancel and fork tools
+
+Not implemented — this is the agreed direction, written down so the semantics
+survive context. The bias is deliberate: wait is the default, and the model
+should not be able to casually discard work.
+
+### Rationale: cancel is for wrongness, not slowness
+
+Agents overuse cancel when a subagent is merely slower than expected. The
+current design already resists that:
+
+- The model has no cancel tool today. `cancel_subagent` exists only as a
+  user-side dispatch command (and the daemon target returns `Unsupported`
+  today — half-stubbed).
+- The concurrency cap and leak reminder force the model to wait and collect
+  before spawning more, which is the common case.
+- The model can already distinguish "slow but progressing" from "stalled":
+  subagent text streams through `AgentEvent::ToolProgress` and the tool-call
+  state updates as the child runs.
+
+So the rule: a bare cancel is the last resort, not the first reaction to
+impatience.
+
+### Proposed shapes
+
+1. **`subagent_nudge` / interrupt (soft-first).** Injects a message into the
+   live child session ("wrap up — the parent needs your result now"). The
+   child keeps its transcript; the run continues to its normal completion.
+   Cheap, non-destructive, and covers the "slow" case without killing work.
+   Hard cancel stays available as the second resort.
+2. **`subagent_cancel` (non-destructive).** Kills the child's cancel token
+   (plumbing already exists: `Agent::cancel_subagent`, per-task child tokens).
+   Cancelled runs already surface partial results — partial manifests ride on
+   `SubagentEnd`, and the registry recovers the child transcript via
+   `recover_child_text` — so cancel must return "here is what it produced
+   before it stopped", never a silent void.
+3. **`subagent_fork` = restart from the child's transcript.** Seed a new child
+   session with the old child's messages plus a new prompt. Plumbing already
+   exists: child transcripts persist under `<session>/subagents/<child_id>`,
+   the registry records `child_session_id`, and `recover_child_text` reads
+   them. Fork duplicates context, not processes.
+4. **Combine "cancel and refork with what it produced"** as the high-use
+   action. A bare cancel with no replacement plan is what gets overused;
+   tying cancellation to a continuation makes the cost visible and the
+   partial output useful.
+
+### Open question: opt-in like `can_spawn`?
+
+`can_spawn` set the precedent: nesting is opt-in via frontmatter. Decide
+whether cancel/fork should be per-def opt-in too (`cancelable: true` /
+`forkable: true`), which would also curb overuse by construction, or available
+for every subagent. Lean: opt-in, matching `can_spawn`.
+
+### When to build
+
+Not until the wait-first semantics have proven themselves in real use. The
+cheap first step when we do build: wire `subagent_nudge` (smallest, pure win,
+no destruction) and decide the opt-in question. Cancel/fork ride on the same
+tool-schema and def-frontmatter surface as everything else in this doc.
+
+## Recommendation
+
 ## Recommendation
 
 Do A + B now; they are small and remove the two worst failure modes (orphaned
