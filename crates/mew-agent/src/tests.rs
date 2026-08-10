@@ -3576,6 +3576,56 @@ async fn test_subagent_wait_batch_collects_results() {
     assert!(agent.subagent_task_ids().await.is_empty());
 }
 
+/// A stub runner that sleeps 150ms before completing, so batch-wait
+/// concurrency can be measured.
+struct SlowRunner;
+
+#[async_trait]
+impl mew_subagents::SubagentRunner for SlowRunner {
+    async fn run(
+        &self,
+        opts: mew_subagents::SubagentRunOptions<'_>,
+    ) -> Result<mew_subagents::SubagentResult, mew_subagents::SubagentError> {
+        let _ = opts
+            .event_tx
+            .send(mew_subagents::SubagentEvent::Started {
+                child_session_id: "child-session".into(),
+                display_name: None,
+            })
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        Ok(mew_subagents::SubagentResult::Complete {
+            text: format!("done: {}", opts.prompt),
+            turns_used: 1,
+            hit_turn_limit: false,
+            hit_time_limit: false,
+            session_unavailable: false,
+            manifests: vec![],
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_subagent_wait_batch_awaits_tasks_concurrently() {
+    let mut agent = stub_agent_with_subagents(std::sync::Arc::new(FakeProvider::new(vec![])));
+    agent.subagent_runner = Some(std::sync::Arc::new(SlowRunner));
+
+    let id_a = start_stub(&agent, "a").await;
+    let id_b = start_stub(&agent, "b").await;
+
+    let start = std::time::Instant::now();
+    let out = agent.wait_subagents_batch(vec![id_a, id_b]).await;
+    let elapsed = start.elapsed();
+
+    // Two 150ms tasks: concurrent collection ~150ms, sequential ~300ms.
+    assert!(
+        elapsed < std::time::Duration::from_millis(250),
+        "batch wait took {elapsed:?}; tasks were awaited sequentially"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(parsed.as_object().map(|m| m.len()), Some(2));
+}
+
 #[tokio::test]
 async fn test_subagent_wait_batch_isolates_failures() {
     let agent = stub_agent_with_subagents(std::sync::Arc::new(FakeProvider::new(vec![])));

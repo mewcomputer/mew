@@ -422,7 +422,7 @@ impl Agent {
                     .and_then(|v| v.parse::<u32>().ok())
                     .unwrap_or(100),
             ),
-            max_subagent_depth: 3,
+            max_subagent_depth: 1,
             max_concurrent_subagents: 4,
             leak_reminder: true,
             leak_reminder_max: 2,
@@ -1580,20 +1580,29 @@ impl Agent {
 
     /// Wait for several subagent tasks and return their results as a JSON
     /// object keyed by task_id: `{"<id>": {"status", "text"}}`. A failed
-    /// task does not fail the batch; its per-task status carries it.
+    /// task does not fail the batch; its per-task status carries it. Tasks
+    /// are awaited concurrently so the batch's total latency tracks the
+    /// slowest task, not the sum.
     pub(crate) async fn wait_subagents_batch(&self, ids: Vec<String>) -> String {
-        let mut results = serde_json::Map::new();
-        for id in &ids {
-            let (text, ok, _) = format_subagent_result(self.wait_subagent(id).await);
-            results.insert(
-                id.clone(),
-                serde_json::json!({
-                    "status": if ok { "complete" } else { "failed" },
-                    "text": text,
-                }),
-            );
+        let results = futures::future::join_all(ids.into_iter().map(|id| {
+            let agent = self.clone();
+            async move {
+                let (text, ok, _) = format_subagent_result(agent.wait_subagent(&id).await);
+                (
+                    id,
+                    serde_json::json!({
+                        "status": if ok { "complete" } else { "failed" },
+                        "text": text,
+                    }),
+                )
+            }
+        }))
+        .await;
+        let mut map = serde_json::Map::new();
+        for (id, value) in results {
+            map.insert(id, value);
         }
-        serde_json::Value::Object(results).to_string()
+        serde_json::Value::Object(map).to_string()
     }
 
     // -----------------------------------------------------------------

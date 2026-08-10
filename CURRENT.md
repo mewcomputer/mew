@@ -1,3 +1,16 @@
+# 2026-08-09 — code-review pass on orchestration branch (2 subagents)
+
+Two code-reviewer subagents (deepseek-v4-flash) reviewed the diff, fed as
+verbatim unified diffs (their sandbox had no repo access). Verified every
+claim against the live code afterward. Real findings: P1 registry write
+atomicity (plain fs::write, concurrent persist paths), P1 sequential batch
+waits, P1 hit_turn_cap/default-cap mismatch, P2 no model-facing abandon tool,
+P2 Finished-event vs result text mismatch on schema_invalid, P2 handled-flag
+set before load + clear-before-append, P2 broken schemas not load-validated.
+False positives ruled out: schema_invalid bypass (exit_answer falls through),
+parent_depth propagation (child session meta carries depth), legacy subagent
+tool (never registered). See docs/development/dev-orchestration.md.
+
 # 2026-08-09 — orchestration phase 5: typed handoffs (plan complete)
 
 Subagent frontmatter gains `output_schema` (YAML map or `@path`); the runner

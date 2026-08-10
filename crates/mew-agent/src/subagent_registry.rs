@@ -9,6 +9,12 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::LazyLock;
+
+/// Serializes registry writes across all call sites (spawn insert, pump
+/// re-persist, collection removal). Writes are rare and tiny, so a single
+/// global lock is fine.
+static WRITE_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// One outstanding subagent task, persisted on spawn and removed on collect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,13 +33,23 @@ pub struct SubagentTaskRecord {
 /// Persist the registry (creates parent dirs). Best-effort: callers log and
 /// continue on failure.
 pub(crate) async fn save(path: &Path, records: &[SubagentTaskRecord]) -> Result<(), String> {
+    // Serialize writers: persist is called from the spawn path, the event
+    // pump, and collection, which can run concurrently. Without this,
+    // interleaved truncate+writes corrupt the file.
+    let _guard = WRITE_LOCK.lock().await;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| e.to_string())?;
     }
     let data = serde_json::to_string_pretty(records).map_err(|e| e.to_string())?;
-    tokio::fs::write(path, data)
+    // Write to a temp file and rename so a crash mid-write never leaves a
+    // truncated registry, and readers never observe a partially-written one.
+    let tmp = path.with_extension("json.tmp");
+    tokio::fs::write(&tmp, data)
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::rename(&tmp, path)
         .await
         .map_err(|e| e.to_string())
 }
@@ -112,6 +128,44 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("nope").join("subagent_tasks.json");
         assert!(load(&path).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_saves_never_corrupt_the_file() {
+        // The spawn path, the event pump, and collection persist concurrently.
+        // With temp+rename and a write mutex, every interleaving leaves a
+        // complete, parseable file.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("sess").join("subagent_tasks.json");
+        let mut handles = Vec::new();
+        for i in 0..16u32 {
+            let path = path.clone();
+            handles.push(tokio::spawn(async move {
+                let records: Vec<SubagentTaskRecord> = (0..i)
+                    .map(|n| SubagentTaskRecord {
+                        task_id: format!("sa_{}_{}", i, n),
+                        name: "researcher".into(),
+                        todo_id: None,
+                        child_session_id: None,
+                        started_at: i as i64,
+                    })
+                    .collect();
+                save(&path, &records).await.expect("save");
+            }));
+        }
+        for h in handles {
+            h.await.expect("join");
+        }
+        let loaded = load(&path)
+            .await
+            .expect("file must parse after concurrent writes");
+        // The file is one of the complete snapshots (or an empty one from a
+        // serialized ordering), never a torn mix.
+        let ok = loaded.len() <= 16
+            && loaded
+                .iter()
+                .all(|r| r.name == "researcher" && r.started_at >= 0 && r.started_at < 16);
+        assert!(ok, "registry corrupted by concurrent writes: {loaded:?}");
     }
 
     #[tokio::test]

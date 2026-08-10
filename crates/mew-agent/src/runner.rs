@@ -28,23 +28,39 @@ fn extract_completed_output(state: &ToolState) -> Option<String> {
 /// we collect all of them in order. Takes `&Agent` (shared reference) —
 /// since `agent.messages` is `Arc<Mutex<...>>`, the borrow is cheap and
 /// the agent remains owned by the caller.
+/// Result of checking a subagent's final text against its output schema.
+/// `InvalidSchema` means the def's schema itself won't compile — a def bug
+/// that a corrective turn can never fix — while `InvalidOutput` is a fixable
+/// output problem.
+enum SchemaCheck {
+    Valid,
+    InvalidOutput(String),
+    InvalidSchema(String),
+}
+
 /// Validate a subagent's final text against its output schema: the text must
 /// parse as JSON (a surrounding ``` fence is tolerated) and satisfy the
 /// schema. Returns the validation error(s) on failure.
-fn validate_against_schema(schema: &serde_json::Value, text: &str) -> Result<(), String> {
+fn validate_against_schema(schema: &serde_json::Value, text: &str) -> SchemaCheck {
     let candidate = strip_json_fence(text);
-    let instance: serde_json::Value =
-        serde_json::from_str(candidate).map_err(|e| format!("output is not valid JSON: {e}"))?;
-    let validator = jsonschema::validator_for(schema)
-        .map_err(|e| format!("def's output_schema is invalid: {e}"))?;
+    let instance: serde_json::Value = match serde_json::from_str(candidate) {
+        Ok(v) => v,
+        Err(e) => return SchemaCheck::InvalidOutput(format!("output is not valid JSON: {e}")),
+    };
+    let validator = match jsonschema::validator_for(schema) {
+        Ok(v) => v,
+        Err(e) => {
+            return SchemaCheck::InvalidSchema(format!("def's output_schema is invalid: {e}"))
+        }
+    };
     let errors: Vec<String> = validator
         .iter_errors(&instance)
         .map(|e| e.to_string())
         .collect();
     if errors.is_empty() {
-        Ok(())
+        SchemaCheck::Valid
     } else {
-        Err(errors.join("; "))
+        SchemaCheck::InvalidOutput(errors.join("; "))
     }
 }
 
@@ -352,6 +368,7 @@ impl SubagentRunner for SimpleRunner {
         // the raw text flagged schema_invalid.
         let mut correction_used = false;
         let mut schema_invalid = false;
+        let mut schema_error: Option<String> = None;
 
         'runs: loop {
             while let Some(event) = rx.recv().await {
@@ -484,16 +501,16 @@ impl SubagentRunner for SimpleRunner {
             // break). Validate the effective final output against the def's
             // output schema, if any, and give the child one corrective turn.
             let effective_text = exit_answer.clone().unwrap_or_else(|| result_text.clone());
-            let hit_turn_cap = def
-                .max_turns
-                .map(|limit| turns_used >= limit)
-                .unwrap_or(false);
+            // Same effective limit the loop breaks on (MessageEnd), so a run
+            // that exhausted its budget never gets a corrective turn.
+            let turn_limit = def.max_turns.unwrap_or(mew_subagents::DEFAULT_MAX_TURNS);
+            let hit_turn_cap = turns_used >= turn_limit;
             let can_correct =
                 !correction_used && last_error.is_none() && !hit_time_limit && !hit_turn_cap;
             if let Some(schema) = &def.output_schema {
                 match validate_against_schema(schema, &effective_text) {
-                    Ok(()) => {}
-                    Err(err) if can_correct => {
+                    SchemaCheck::Valid => {}
+                    SchemaCheck::InvalidOutput(err) if can_correct => {
                         correction_used = true;
                         result_text.clear();
                         exit_answer = None;
@@ -507,7 +524,13 @@ impl SubagentRunner for SimpleRunner {
                         rx = agent.run(correction);
                         continue 'runs;
                     }
-                    Err(_) => {
+                    SchemaCheck::InvalidSchema(err) => {
+                        // A broken def schema can never validate; flag it
+                        // without burning a corrective turn.
+                        schema_invalid = true;
+                        schema_error = Some(err);
+                    }
+                    SchemaCheck::InvalidOutput(_) => {
                         schema_invalid = true;
                     }
                 }
@@ -538,6 +561,25 @@ impl SubagentRunner for SimpleRunner {
             .map(|limit| turns_used >= limit)
             .unwrap_or(false);
 
+        // Apply the schema warning before the Finished event so both
+        // observers of the run agree on the final output.
+        if schema_invalid {
+            match schema_error {
+                Some(err) => result_text.insert_str(
+                    0,
+                    &format!(
+                        "warning: schema_invalid: def's output_schema is invalid ({err}); \
+                         returning raw text\n\n"
+                    ),
+                ),
+                None => result_text.insert_str(
+                    0,
+                    "warning: schema_invalid: final output did not satisfy the required \
+                     output schema after one corrective turn; returning raw text\n\n",
+                ),
+            }
+        }
+
         let child_manifests = extract_manifests(&agent).await;
 
         let _ = event_tx
@@ -547,14 +589,6 @@ impl SubagentRunner for SimpleRunner {
                 manifests: child_manifests.clone(),
             })
             .await;
-
-        if schema_invalid {
-            result_text.insert_str(
-                0,
-                "warning: schema_invalid: final output did not satisfy the required \
-                 output schema after one corrective turn; returning raw text\n\n",
-            );
-        }
 
         Ok(SubagentResult::Complete {
             text: result_text,
@@ -1535,15 +1569,84 @@ mod tests {
         assert_eq!(*provider.calls.lock().unwrap(), 1);
     }
 
+    #[tokio::test]
+    async fn test_broken_output_schema_skips_corrective_turn() {
+        // A schema that won't compile can never validate; the runner must
+        // not burn a corrective turn on it.
+        let def = typed_def(serde_json::json!({"type": "nonsense"}));
+        let (result, provider) = run_typed(vec![turn("{\"answer\": 1}")], def).await;
+        match result {
+            SubagentResult::Complete { text, .. } => {
+                assert!(
+                    text.starts_with("warning: schema_invalid"),
+                    "expected schema_invalid warning: {text}"
+                );
+                assert!(
+                    text.contains("output_schema is invalid"),
+                    "expected schema error detail: {text}"
+                );
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+        assert_eq!(
+            *provider.calls.lock().unwrap(),
+            1,
+            "broken schema must not trigger a corrective turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_turn_cap_prevents_corrective_turn() {
+        // def without max_turns: exhausting the DEFAULT_MAX_TURNS budget must
+        // suppress the corrective turn (no budget left to correct with).
+        let script: Vec<mew_provider::ProviderEvent> = (0..mew_subagents::DEFAULT_MAX_TURNS)
+            .flat_map(|i| turn(&format!("turn {i}")))
+            .collect();
+        let def = SubagentDef {
+            output_schema: Some(serde_json::json!({"type": "object", "required": ["answer"]})),
+            ..make_def(None, Some(60))
+        };
+        let (result, provider) = run_typed(vec![script], def).await;
+        match result {
+            SubagentResult::Complete { text, .. } => {
+                assert!(
+                    text.starts_with("warning: schema_invalid"),
+                    "expected schema_invalid warning: {text}"
+                );
+            }
+            other => panic!("expected Complete, got {other:?}"),
+        }
+        assert_eq!(
+            *provider.calls.lock().unwrap(),
+            1,
+            "exhausted turn budget must not grant a corrective turn"
+        );
+    }
+
     #[test]
     fn test_validate_against_schema_pure() {
+        use SchemaCheck::*;
         let schema = serde_json::json!({"type": "object", "required": ["answer"]});
-        assert!(validate_against_schema(&schema, "{\"answer\": 1}").is_ok());
-        assert!(validate_against_schema(&schema, "not json")
-            .unwrap_err()
-            .contains("not valid JSON"));
-        assert!(validate_against_schema(&schema, "{\"other\": 1}").is_err());
-        assert!(validate_against_schema(&schema, "[1, 2]").is_err());
-        assert!(validate_against_schema(&serde_json::json!({"type": "nonsense"}), "{}").is_err());
+        assert!(matches!(
+            validate_against_schema(&schema, "{\"answer\": 1}"),
+            Valid
+        ));
+        assert!(matches!(
+            validate_against_schema(&schema, "not json"),
+            InvalidOutput(e) if e.contains("not valid JSON")
+        ));
+        assert!(matches!(
+            validate_against_schema(&schema, "{\"other\": 1}"),
+            InvalidOutput(_)
+        ));
+        assert!(matches!(
+            validate_against_schema(&schema, "[1, 2]"),
+            InvalidOutput(_)
+        ));
+        // A schema that won't compile is InvalidSchema, not InvalidOutput.
+        assert!(matches!(
+            validate_against_schema(&serde_json::json!({"type": "nonsense"}), "{}"),
+            InvalidSchema(_)
+        ));
     }
 }

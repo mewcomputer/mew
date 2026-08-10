@@ -73,7 +73,8 @@ impl Agent {
     /// On the first turn of a resumed session, surface any subagent tasks the
     /// previous run left uncollected: one synthetic message listing them, with
     /// each result recovered from the child transcript where possible. The
-    /// registry file is cleared afterwards so it surfaces exactly once.
+    /// registry file is cleared after the message is appended so it surfaces
+    /// exactly once.
     async fn inject_orphaned_subagent_tasks(&mut self) {
         let Some(path) = self.subagent_registry_path.clone() else {
             return;
@@ -83,6 +84,9 @@ impl Agent {
             if *handled {
                 return;
             }
+            // Mark handled *before* the async work so a re-entrant turn can't
+            // double-inject. If load fails below, the records are lost for
+            // this process lifetime — acceptable tradeoff for surface-once.
             *handled = true;
         }
         let records = match crate::subagent_registry::load(&path).await {
@@ -94,10 +98,6 @@ impl Agent {
         };
         if records.is_empty() {
             return;
-        }
-        // Surface once, then clear so the next resume doesn't repeat.
-        if let Err(e) = crate::subagent_registry::save(&path, &[]).await {
-            tracing::warn!(error = %e, "failed to clear subagent task registry");
         }
 
         let session_dir = path.parent().map(|p| p.to_path_buf());
@@ -153,6 +153,13 @@ impl Agent {
             assistant: None,
         };
         self.append_message(msg).await;
+
+        // Surface once: clear the registry only after the message is safely
+        // appended, so a crash between here and the clear at worst re-surfaces
+        // the orphans on the next resume instead of losing them.
+        if let Err(e) = crate::subagent_registry::save(&path, &[]).await {
+            tracing::warn!(error = %e, "failed to clear subagent task registry");
+        }
     }
 
     pub(crate) async fn turn_loop(
@@ -641,8 +648,9 @@ impl Agent {
                                      You started subagent tasks that have not been collected:\n\
                                      {lines}\n\
                                      Collect their results with subagent_wait (pass task_ids, \
-                                     or all: true), or explicitly state that their results are \
-                                     no longer needed.\n\
+                                     or all: true). Note: uncollected tasks keep occupying a \
+                                     concurrency slot, and the agent cannot discard them on its \
+                                     own.\n\
                                      </subagent_task_reminder>"
                                 ),
                                 synthetic: true,
