@@ -9,8 +9,10 @@ use ratatui::{
 use crate::app::App;
 
 pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
+    // Drop finished subagents (and stale done-todo timestamps) so the
+    // sections below only ever show recent activity.
+    app.prune_sidebar_state();
     app.sidebar_rect = area;
-    app.sidebar_header_rows.clear();
     // Content renders into the padded inner rect below, so row tracking
     // starts one line down to stay aligned with what the user sees (the
     // click handler compares these rows against mouse coordinates). Every
@@ -23,8 +25,8 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // Session header: always on top.
     draw_session_header(&mut text, &mut visual_row, app, area.width);
 
-    // Activity sections render only when they have content.
-    if !app.todos.is_empty() {
+    // Activity sections render only when they have visible content.
+    if app.todos.iter().any(|t| app.todo_visible(t)) {
         push_divider(&mut text, &mut visual_row, app, area.width);
         draw_todos_section(&mut text, &mut visual_row, app, area.width);
     }
@@ -144,16 +146,17 @@ fn draw_todos_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area
     let collapsed = app.sidebar_collapsed.get("todos").copied().unwrap_or(false);
     let arrow = if collapsed { "▶" } else { "▼" };
     app.sidebar_header_rows.push((*visual_row, "todos".into()));
-    let todo_total = app.todos.len();
-    let todo_done = app
-        .todos
+    // Only todos still visible: done todos older than the retention window
+    // are hidden (view-only; the agent's list still holds them).
+    let visible: Vec<&mew_agent::Todo> = app.todos.iter().filter(|t| app.todo_visible(t)).collect();
+    let todo_done = visible
         .iter()
         .filter(|t| t.status == mew_agent::TodoStatus::Done)
         .count();
     text.push_line(Line::from(vec![
         Span::styled(arrow, Style::default().fg(app.theme.resolve("text.muted"))),
         Span::styled(
-            format!(" Todos ({}/{})", todo_done, todo_total),
+            format!(" Todos ({}/{})", todo_done, visible.len()),
             Style::default()
                 .fg(app.theme.resolve("text.body"))
                 .add_modifier(Modifier::BOLD),
@@ -167,7 +170,7 @@ fn draw_todos_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area
 
     // `  [x] ` (6) + `#` + id + ` ` precede the label.
     let inner = area_width.saturating_sub(2) as usize;
-    for t in &app.todos {
+    for t in visible {
         let (mark, color) = match t.status {
             mew_agent::TodoStatus::Done => ("x", app.theme.resolve("text.muted")),
             mew_agent::TodoStatus::InProgress => ("~", app.theme.resolve("text.warning")),
@@ -591,6 +594,86 @@ mod tests {
         let out = render(&mut app, 32, 40);
         assert!(out.contains("Todos (0/1)"), "missing header:\n{out}");
         assert!(out.contains("write tests"), "missing todo:\n{out}");
+    }
+
+    #[test]
+    fn test_sidebar_hides_expired_finished_subagents() {
+        let mut app = App::new();
+        app.status.session_id = "abcdef1234567890".into();
+        app.sidebar_finished_ttl = 0; // hide finished entries immediately
+        app.subagents.push(crate::app::SubagentState {
+            task_id: "running".into(),
+            name: "researcher".into(),
+            started_at: std::time::Instant::now(),
+            status: crate::app::SubagentStatus::Running,
+            last_progress: None,
+            display_name: Some("Curie".into()),
+            finished_at: None,
+        });
+        app.subagents.push(crate::app::SubagentState {
+            task_id: "done".into(),
+            name: "coder".into(),
+            started_at: std::time::Instant::now(),
+            status: crate::app::SubagentStatus::Completed,
+            last_progress: None,
+            display_name: Some("Ada".into()),
+            finished_at: Some(std::time::Instant::now()),
+        });
+
+        let out = render(&mut app, 32, 40);
+        assert!(out.contains("Subagents"), "missing header:\n{out}");
+        assert!(out.contains("Curie"), "running subagent must show:\n{out}");
+        assert!(
+            !out.contains("Ada"),
+            "expired finished subagent must hide:\n{out}"
+        );
+        assert!(!out.contains("done"), "no 'done' suffix expected:\n{out}");
+    }
+
+    #[test]
+    fn test_sidebar_hides_expired_done_todos() {
+        let mut app = App::new();
+        app.status.session_id = "abcdef1234567890".into();
+        app.todos = vec![
+            mew_agent::Todo {
+                id: 1,
+                content: "active work".into(),
+                status: mew_agent::TodoStatus::InProgress,
+                depends_on: Vec::new(),
+            },
+            mew_agent::Todo {
+                id: 2,
+                content: "old finished work".into(),
+                status: mew_agent::TodoStatus::Done,
+                depends_on: Vec::new(),
+            },
+        ];
+        app.handle_agent_event(mew_agent::AgentEvent::TodosUpdated {
+            todos: app.todos.clone(),
+        });
+        app.sidebar_finished_ttl = 0; // hide done todos immediately
+
+        let out = render(&mut app, 32, 40);
+        assert!(
+            out.contains("Todos (0/1)"),
+            "header must count visible only:\n{out}"
+        );
+        assert!(
+            out.contains("active work"),
+            "in-progress todo must show:\n{out}"
+        );
+        assert!(
+            !out.contains("old finished work"),
+            "expired done todo must hide:\n{out}"
+        );
+
+        // All-hidden: the whole section disappears.
+        app.todos.clear();
+        app.handle_agent_event(mew_agent::AgentEvent::TodosUpdated {
+            todos: app.todos.clone(),
+        });
+        let out = render(&mut app, 32, 40);
+        assert!(!out.contains("Todos"), "empty section must hide:\n{out}");
     }
 
     #[test]

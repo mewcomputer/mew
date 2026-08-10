@@ -1,3 +1,13 @@
+# 2026-08-09 — sidebar retention for finished subagents and done todos
+
+New `tui.sidebar_finished_ttl_secs` config (default 180, 0 = hide
+immediately). Completed/cancelled/failed subagent entries are pruned from the
+sidebar once older than the TTL (SubagentState gained `finished_at`); done
+todos are hidden view-only after the same TTL (todo_done_at tracks when each
+todo became Done; the agent-owned list is untouched). Section headers count
+only visible entries. Tests: app-level (finished_at, prune, done visibility)
+and sidebar render (finished entries hide, all-hidden section disappears).
+
 # 2026-08-09 — review findings fixed
 
 Committed f6debc8: atomic registry writes (temp+rename + write mutex),

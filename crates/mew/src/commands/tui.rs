@@ -54,6 +54,7 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
         &cfg.tui.theme
     };
     app.theme = mew_tui::theme::Theme::load(theme_name);
+    app.sidebar_finished_ttl = cfg.tui.sidebar_finished_ttl_secs;
     app.status.model = "daemon".to_string();
     app.status.provider = "mewd".to_string();
     app.recent_models = state.recent_models.clone();

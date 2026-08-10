@@ -51,12 +51,30 @@ pub struct Config {
 }
 
 /// TUI configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiConfig {
     /// Theme name. "dark" (default), "light", or the name of a JSON theme
     /// file in `~/.config/mew/themes/` or `.mew/themes/`.
     #[serde(default)]
     pub theme: String,
+    /// How long (seconds) sidebar entries stay visible after finishing:
+    /// completed subagents and done todos are hidden once they are older
+    /// than this. 0 hides them immediately. Defaults to 180 (3 minutes).
+    #[serde(default = "default_sidebar_finished_ttl_secs")]
+    pub sidebar_finished_ttl_secs: u64,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            theme: String::new(),
+            sidebar_finished_ttl_secs: default_sidebar_finished_ttl_secs(),
+        }
+    }
+}
+
+fn default_sidebar_finished_ttl_secs() -> u64 {
+    180
 }
 
 /// Subagent orchestration guardrails.
@@ -923,6 +941,19 @@ responses_lite = true
         assert_eq!(cfg.orchestration.default_max_duration_secs, 300);
         assert!(cfg.orchestration.leak_reminder);
         assert_eq!(cfg.orchestration.leak_reminder_max, 2);
+    }
+
+    #[test]
+    fn test_tui_sidebar_retention_default() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.tui.sidebar_finished_ttl_secs, 180);
+
+        let toml = r#"
+[tui]
+sidebar_finished_ttl_secs = 0
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.tui.sidebar_finished_ttl_secs, 0);
     }
 
     #[test]

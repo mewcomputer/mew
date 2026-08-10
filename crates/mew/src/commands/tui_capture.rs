@@ -276,6 +276,7 @@ impl DaemonBackend {
             &cfg.tui.theme
         };
         app.theme = mew_tui::theme::Theme::load(theme_name);
+        app.sidebar_finished_ttl = cfg.tui.sidebar_finished_ttl_secs;
         debug!(theme = %app.theme.name, "loaded theme");
 
         // Populate the sidebar session rail.

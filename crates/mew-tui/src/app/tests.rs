@@ -466,6 +466,129 @@ fn test_subagent_start_without_display_name_falls_back() {
 }
 
 #[test]
+fn test_subagent_end_records_finished_at() {
+    use mew_agent::AgentEvent;
+    let mut app = App::new();
+    app.handle_agent_event(AgentEvent::SubagentStart {
+        parent_call_id: "task-1".into(),
+        name: "researcher".into(),
+        child_session_id: "child-1".into(),
+        display_name: Some("Curie".into()),
+    });
+    assert!(app.subagents[0].finished_at.is_none());
+
+    app.handle_agent_event(AgentEvent::SubagentEnd {
+        parent_call_id: "task-1".into(),
+        child_session_id: "child-1".into(),
+        outcome: mew_agent::SubagentOutcome::Completed,
+        manifests: Vec::new(),
+    });
+    assert!(
+        matches!(app.subagents[0].status, SubagentStatus::Completed),
+        "expected Completed, got {:?}",
+        app.subagents[0].status
+    );
+    assert!(
+        app.subagents[0].finished_at.is_some(),
+        "finished_at must be set when a run ends"
+    );
+}
+
+#[test]
+fn test_prune_sidebar_state_removes_expired_finished_subagents() {
+    use mew_agent::AgentEvent;
+    let mut app = App::new();
+    // TTL 0: any finished subagent expires immediately; running ones stay.
+    app.sidebar_finished_ttl = 0;
+
+    app.handle_agent_event(AgentEvent::SubagentStart {
+        parent_call_id: "running".into(),
+        name: "researcher".into(),
+        child_session_id: "c1".into(),
+        display_name: None,
+    });
+    app.handle_agent_event(AgentEvent::SubagentStart {
+        parent_call_id: "done".into(),
+        name: "coder".into(),
+        child_session_id: "c2".into(),
+        display_name: None,
+    });
+    app.handle_agent_event(AgentEvent::SubagentEnd {
+        parent_call_id: "done".into(),
+        child_session_id: "c2".into(),
+        outcome: mew_agent::SubagentOutcome::Completed,
+        manifests: Vec::new(),
+    });
+
+    app.prune_sidebar_state();
+    assert_eq!(app.subagents.len(), 1, "finished subagent should be pruned");
+    assert_eq!(app.subagents[0].task_id, "running");
+
+    // With a large TTL, a finished entry survives.
+    app.sidebar_finished_ttl = 3600;
+    app.handle_agent_event(AgentEvent::SubagentStart {
+        parent_call_id: "done-2".into(),
+        name: "coder".into(),
+        child_session_id: "c3".into(),
+        display_name: None,
+    });
+    app.handle_agent_event(AgentEvent::SubagentEnd {
+        parent_call_id: "done-2".into(),
+        child_session_id: "c3".into(),
+        outcome: mew_agent::SubagentOutcome::Failed {
+            reason: "boom".into(),
+        },
+        manifests: Vec::new(),
+    });
+    app.prune_sidebar_state();
+    assert_eq!(
+        app.subagents.len(),
+        2,
+        "recently finished entries stay within TTL"
+    );
+}
+
+#[test]
+fn test_done_todo_visibility_follows_ttl() {
+    let mut app = App::new();
+    app.todos = vec![
+        mew_agent::Todo {
+            id: 1,
+            content: "in progress".into(),
+            status: mew_agent::TodoStatus::InProgress,
+            depends_on: Vec::new(),
+        },
+        mew_agent::Todo {
+            id: 2,
+            content: "finished".into(),
+            status: mew_agent::TodoStatus::Done,
+            depends_on: Vec::new(),
+        },
+    ];
+    // Simulate TodosUpdated: fresh done timestamp.
+    app.handle_agent_event(AgentEvent::TodosUpdated {
+        todos: app.todos.clone(),
+    });
+
+    // Freshly done within a large TTL: visible.
+    app.sidebar_finished_ttl = 3600;
+    assert!(app.todo_visible(&app.todos[1]));
+
+    // TTL 0: done todos hidden immediately, in-progress still visible.
+    app.sidebar_finished_ttl = 0;
+    assert!(!app.todo_visible(&app.todos[1]));
+    assert!(app.todo_visible(&app.todos[0]));
+
+    // The pruned timestamp must not resurrect the hidden todo: re-running
+    // the event (as the agent would on any change) keeps it hidden.
+    app.prune_sidebar_state();
+    app.handle_agent_event(AgentEvent::TodosUpdated {
+        todos: app.todos.clone(),
+    });
+    assert!(!app.todo_visible(&app.todos[1]));
+}
+
+#[test]
 fn test_ask_user_event_stores_state_and_sets_mode() {
     use mew_agent::{AgentEvent, AskUserQuestion, QuestionOption};
     let mut app = App::new();

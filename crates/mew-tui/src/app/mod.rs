@@ -203,6 +203,12 @@ pub struct App {
     pub git_branch_resolved: bool,
     pub short_cwd: String,
     pub subagents: Vec<SubagentState>,
+    /// When finished subagents and done todos stay visible in the sidebar
+    /// (seconds). 0 hides them immediately. Set from `tui.sidebar_finished_ttl_secs`.
+    pub sidebar_finished_ttl: u64,
+    /// When each currently-done todo became Done, so the sidebar can hide
+    /// long-finished todos without touching the agent-owned list.
+    pub todo_done_at: std::collections::HashMap<usize, Instant>,
     pub background_jobs: Vec<BackgroundJobState>,
     pub undo_stack: Vec<(String, usize)>,
     pub redo_stack: Vec<(String, usize)>,
@@ -277,6 +283,9 @@ pub struct SubagentState {
     pub status: SubagentStatus,
     pub last_progress: Option<String>,
     pub display_name: Option<String>,
+    /// When the run reached a terminal state. `None` while running; drives
+    /// the sidebar's finished-entry retention.
+    pub finished_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -724,6 +733,8 @@ impl App {
             git_branch_resolved: false,
             short_cwd: short_cwd(),
             subagents: Vec::new(),
+            sidebar_finished_ttl: 180,
+            todo_done_at: std::collections::HashMap::new(),
             background_jobs: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -1806,6 +1817,44 @@ impl App {
         }
     }
 
+    /// How long a finished sidebar entry stays visible.
+    pub fn finished_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.sidebar_finished_ttl)
+    }
+
+    /// Whether a todo should still show in the sidebar: not Done, or Done
+    /// recently enough (within `sidebar_finished_ttl`). View-only — the
+    /// agent's list keeps done todos until the model or user deletes them.
+    pub fn todo_visible(&self, t: &mew_agent::Todo) -> bool {
+        if t.status != mew_agent::TodoStatus::Done {
+            return true;
+        }
+        match self.todo_done_at.get(&t.id) {
+            Some(at) => at.elapsed() <= self.finished_ttl(),
+            // No done_at recorded (pre-feature state): treat as fresh.
+            None => true,
+        }
+    }
+
+    /// Drop finished subagent entries older than the retention window so the
+    /// sidebar reads as a recent-activity feed instead of an ever-growing
+    /// log. Running entries are never pruned. Runs on every draw.
+    pub fn prune_sidebar_state(&mut self) {
+        let ttl = self.finished_ttl();
+        self.subagents.retain(|s| match s.finished_at {
+            Some(at) => at.elapsed() <= ttl,
+            None => true, // still running
+        });
+        // Drop done-timestamps for todos that are no longer Done or gone;
+        // expiry itself is a view concern (todo_visible) so a re-render
+        // never resurrects an expired entry via a fresh timestamp.
+        self.todo_done_at.retain(|id, _at| {
+            self.todos
+                .iter()
+                .any(|t| t.id == *id && t.status == mew_agent::TodoStatus::Done)
+        });
+    }
+
     /// Process an agent event and update state.
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
@@ -2013,6 +2062,19 @@ impl App {
                 });
             }
             AgentEvent::TodosUpdated { todos } => {
+                // Track when each todo became Done so the sidebar can hide
+                // long-finished todos (view-only; the agent's list is
+                // untouched). Ids that are no longer Done drop out, and a
+                // re-done todo restarts its clock.
+                let now = Instant::now();
+                let mut next = std::collections::HashMap::new();
+                for t in &todos {
+                    if t.status == mew_agent::TodoStatus::Done {
+                        let at = self.todo_done_at.get(&t.id).copied().unwrap_or(now);
+                        next.insert(t.id, at);
+                    }
+                }
+                self.todo_done_at = next;
                 self.todos = todos;
             }
             AgentEvent::PersonaSwitchRequested { name } => {
@@ -2127,6 +2189,7 @@ impl App {
                     status: SubagentStatus::Running,
                     last_progress: None,
                     display_name: display_name.clone(),
+                    finished_at: None,
                 });
             }
             AgentEvent::SubagentProgress { .. } => {}
@@ -2160,6 +2223,7 @@ impl App {
                             SubagentStatus::Failed { reason }
                         }
                     };
+                    sa.finished_at = Some(Instant::now());
                 }
             }
             AgentEvent::SubagentPermissionRequest { call, tx, .. } => {
