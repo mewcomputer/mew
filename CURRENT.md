@@ -1,3 +1,12 @@
+# 2026-08-09 — review findings fixed
+
+Committed f6debc8: atomic registry writes (temp+rename + write mutex),
+concurrent batch waits (join_all), turn-cap/corrective-turn alignment,
+SchemaCheck tri-state (broken schemas skip correction), warning applied before
+the Finished event, orphan-injection clear-after-append, Agent::new depth
+default aligned to 1, reminder wording no longer promises an abandon action.
+New regression tests for each. Branch: wip/orchestration-improvements.
+
 # 2026-08-09 — code-review pass on orchestration branch (2 subagents)
 
 Two code-reviewer subagents (deepseek-v4-flash) reviewed the diff, fed as
