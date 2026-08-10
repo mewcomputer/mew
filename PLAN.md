@@ -1,116 +1,138 @@
-# Plan: daemon-only TUI, immediate two-press cancel, and guided queued messages
+# Orchestration improvements: fan-in, guardrails, todo/execution join, durability, typed handoffs
 
-## Context
+Implements paths A–E from `docs/development/dev-orchestration.md`, staged so each
+phase lands independently with tests. F (full scheduler) is deliberately out of
+scope.
 
-The local-mode TUI (`run_tui`) embeds the `Agent` directly and has no server-side
-serialization, so a cancelled turn can still be winding down while a new submit
-starts a second concurrent turn — the reported race. The daemon already
-serializes turns (`turn_lock` + `current_turn_cancel` in `mew-daemon/src/lib.rs`),
-so making the daemon the only runtime path removes the race at the source.
+## New configuration
 
-Two UX problems compound it:
-- Esc only *arms* a 2-second hint on the first press; the user doesn't realize the
-  turn is still running and submits again, which **queues** messages that all fire
-  in a burst when the turn finally ends ("multiple requests at the same time").
-- Queued messages have no way to steer the *running* turn; they only become a new
-  turn after the current one finishes.
+All phases read from one new config section in `mew-config::Config`
+(`crates/mew-config/src/lib.rs`), with `#[serde(default)]` so existing configs
+are untouched. `MEW_ORCHESTRATION__*` env overrides come free from the existing
+`MEW_` layering.
 
-Decisions (confirmed):
-1. **Sunset local mode** — the `mew` TUI always talks to a daemon (spawn one if
-   none is running). The deterministic harness (`mew-tui/src/harness.rs`) and
-   `tui-capture` harness mode stay — they are test tooling, not the user runtime.
-2. **Guide command** — a queued message can be injected into the running turn's
-   *next* provider request (even a tool-call continuation) to steer the LLM now.
-3. **Two-press Esc cancels immediately** — the second press cancels and the TUI
-   keeps the turn "active" until the turn actually ends, so later submits are
-   queued rather than sent into the daemon's "turn in progress" window.
+```toml
+[orchestration]
+max_concurrent_subagents = 4     # 0 = unlimited (opt out of the cap)
+max_subagent_depth = 1           # children also need `can_spawn: true` to nest
+default_max_duration_secs = 300  # overrides the built-in per-run wall-clock default
+leak_reminder = true             # remind the model about uncollected tasks at turn end
+leak_reminder_max = 2            # max reminder loop-backs per user turn
+```
 
-## Phase 1 — Agent runtime: guidance injection
+Plumbing: `build_session_agent` passes an `OrchestrationConfig` clone into new
+`Agent` fields (same pattern as `subagent_runner`/`subagent_defs`). The runner
+receives the pieces it needs via `SimpleRunner::with_*` setters.
 
-Goal: let the daemon inject a short user message into the running turn's next
-provider request (mid-tool-loop), without starting a new turn.
+## Phase 1 — fan-in and leak reporting (doc item A)
 
-- `crates/mew-agent/src/agent.rs`: add a shared pending-guidance queue on `Agent`
-  (e.g. `pending_guidance: Arc<tokio::sync::Mutex<VecDeque<String>>>`, or a
-  `tokio::sync::mpsc` channel). Because `run_with_parts` clones the agent but
-  shares `Arc` fields, the running turn sees the guidance.
-- `crates/mew-agent/src/turn.rs`: at the top of each `turn_loop` iteration (before
-  `prepare_and_compact_messages` builds the request), drain pending guidance and
-  append each as a user `Message` to `self.messages` so it is included in the next
-  request. If the turn already ended, the guidance stays queued and is picked up
-  by the next turn (matches the "else it gets picked up on the next turn" fallback).
-- Add a public method `Agent::enqueue_guidance(text)` (or `inject_guidance`).
-- Emit an `AgentEvent` (e.g. a `Message`/`ProviderEvent`-style marker) so the TUI
-  can show the injected guidance in the transcript.
+1. **`subagent_wait` batch mode** (`crates/mew-tools/src/tools/subagent_wait.rs`,
+   `crates/mew-agent/src/tools.rs::execute_subagent_wait`):
+   - Schema gains `task_ids: string[]` and `all: boolean` alongside the existing
+     `task_id`. Exactly one of the three must be present.
+   - Agent-side: wait each task, collect into a single result keyed by task_id:
+     `{"<id>": {"status": "complete|cancelled|error", "text": ...}}`. One failed
+     task does not fail the batch; per-task status carries it. `all: true` waits
+     every outstanding task.
+   - Update the `subagent_start` description to mention batch collection.
+2. **Turn-end leak reminder** (`crates/mew-agent/src/turn.rs`):
+   - After `dispatcher.on_turn_end`, where goal continuation already injects a
+     synthetic user message and loops back, add the same move for uncollected
+     subagent tasks: if `list_subagents()` is non-empty and `leak_reminder` is
+     on, inject a synthetic message listing task_ids, def names, and elapsed
+     time, instructing the model to collect or explicitly abandon them.
+   - Guard with a per-user-turn counter (`leak_reminder_max`, default 2) so a
+     model that keeps spawning instead of collecting cannot loop forever.
+     Counter resets on each real user turn.
+3. Tests (`mew-agent/src/tests.rs` style): batch wait returns per-task statuses
+   including a failed task; `all: true` drains everything; reminder fires once
+   with running tasks, does not fire when none, stops after `leak_reminder_max`.
 
-## Phase 2 — Daemon + protocol: Guide message
+## Phase 2 — guardrails: concurrency cap and explicit depth policy (doc item B)
 
-- `crates/mew-protocol`: add `ClientMessage::Guide { text }` (wire roundtrip
-  coverage). Keep it separate from `Prompt` (session-management vs streaming).
-- `crates/mew-daemon/src/lib.rs`: handle `ClientMessage::Guide`, resolve the
-  attached session, and call `agent.enqueue_guidance(text)`. Also broadcast a
-  user-message event so attached clients see it. Update the client/TS client if
-  the wire enum is shared there.
-- `crates/mew-daemon/src/client.rs`: add `DaemonClient::guide(text)`.
+1. **Concurrency cap** (`crates/mew-agent/src/agent.rs::start_subagent`):
+   - Before spawning, count entries in `subagent_tasks`. At or above
+     `max_concurrent_subagents` (when > 0), return a structured error:
+     "concurrency cap reached (N running); call subagent_wait to collect
+     results first". The tool surfaces this as a normal tool error so the model
+     can react.
+2. **Explicit depth policy** (`mew-subagents`, `mew-agent::runner`,
+   `crates/mew/src/setup/agent.rs`):
+   - Subagent frontmatter gains `can_spawn: bool` (default false), parsed into
+     `SubagentDef`.
+   - `SubagentRunOptions` gains `depth: u32` (parents are depth 0). The runner
+     includes `subagent_start`/`subagent_wait` in the child's tool map only when
+     `def.can_spawn` and `depth + 1 < max_subagent_depth`, and gives the child a
+     nested runner + defs when so.
+   - Setup ordering fix: register `subagent_start`/`subagent_wait` into
+     `agent.tools` *before* constructing `SimpleRunner`, and let the runner
+     filter per-def instead of relying on construction order. This replaces the
+     current accidental depth-1 enforcement with an explicit, tested policy.
+3. Tests: cap rejects the N+1th spawn and succeeds after a wait frees a slot;
+   cap 0 = unlimited; a `can_spawn` def at depth 0 gets the tools, a non-
+   `can_spawn` def does not, and nothing gets them past `max_subagent_depth`.
 
-## Phase 3 — TUI: guided queued messages + reminder
+## Phase 3 — join todos to execution (doc item C)
 
-- `crates/mew-tui/src/events.rs`: add `Action::GuideQueued(String)` (or reuse the
-  queued-send path with a mode). Wire a keybinding (Ctrl+Up / Shift+Up, or the
-  existing Up-Up) that, when a queued message exists, pops it and sends it as
-  guidance instead of cancelling-and-resubmitting.
-- `crates/mew-tui/src/app/mod.rs`: track queued messages with a "guide vs send"
-  intent; add a visible reminder (status pill + the existing input preview strip)
-  explaining the guide key and that queued messages will fire on the next turn.
-- `crates/mew/src/runtime/dispatch.rs`: add the dispatch arm for `Action::GuideQueued`
-  → `target.guide(text)`. Add a `CommandTarget::guide` method to both `LocalTarget`
-  (dropped in Phase 5) and `DaemonTarget`.
-- Update the help overlay (`ui/overlays.rs`) to document the guide key.
+1. `subagent_start` schema gains optional `todo_id: integer`; the agent records
+   `(todo_id, task_id)` in the task registry entry.
+2. `todo_list` output annotates linked todos (`#3 — in progress — Curie,
+   running 42s`) and the completion message for a collected task suggests
+   marking the linked todo done (suggestion, not auto-transition: the model
+   still owns state changes).
+3. Linked state shows up in the leak reminder from Phase 1.
+4. Sidebar (TUI) shows the todo id next to the subagent entry if the link
+   exists — small `mew-tui` change reading data already on the wire.
+5. Tests: link recorded and visible in todo_list; suggestion text appears on
+   collection; unknown todo_id is rejected with a clear error.
 
-## Phase 4 — TUI: two-press Esc that stops immediately + turn-alive guard
+## Phase 4 — durable orchestration state (doc item D)
 
-- Keep the two-press Esc arm/cancel in `handle_normal_key` (`events.rs`).
-- On the second press (`Action::Cancel`), do **not** set `streaming=false`
-  immediately. Instead set a `cancelling` flag and keep streaming truthy until the
-  turn-ending `MessageEnd`/`Error` event actually arrives. This way submits during
-  the cancel-window are queued, not sent into the daemon's "turn in progress"
-  window.
-- `crates/mew/src/runtime/dispatch.rs`: `Action::Cancel` sends daemon cancel and
-  marks `cancelling`; does not clear `streaming`. `app/mod.rs` clears `cancelling`
-  + `streaming` on `MessageEnd`/`Error`.
-- If the daemon still replies with "turn in progress" (edge race), queue the
-  message instead of dropping it.
+1. Persist the task registry to `<session>/subagent_tasks.json` (sibling of
+   `todos.json`): task_id, def name, linked todo_id, status, child session id,
+   started_at. Written on spawn/collect/cancel.
+2. On session resume: reload the file; tasks marked running are reclassified as
+   `orphaned` (their process died with the session) and surfaced to the model
+   in the first turn's context; completed-but-uncollected results are
+   recoverable from the child session transcript where possible, else marked
+   `lost`.
+3. Tests: round-trip persistence; resume surfaces orphaned tasks; collected
+   tasks are removed from the file.
 
-## Phase 5 — Sunset local mode (daemon-only)
+## Phase 5 — typed handoffs (doc item E)
 
-- `crates/mew/src/commands/tui.rs`: make `chat_cmd` connect to a daemon, spawning
-  one if none is healthy (reuse the supervisor pattern from
-  `mew-desktop-supervisor`, or a CLI-side spawn of `mew daemon --socket ...`).
-  Remove the `run_tui` local path from the default UX.
-- Keep `mew-tui/src/harness.rs` and `tui-capture` harness mode (deterministic tests).
-- Keep `LocalTarget` only if the harness/tests still need it; otherwise remove it.
-- Update `mew-tui/src/harness.rs` `Backend`/`LocalBackend` if the guide/cancel
-  actions change the harness's action expectations.
+1. Subagent frontmatter gains optional `output_schema` (JSON Schema, inline or
+   `@path` relative to the def file).
+2. Runner validates the child's final message as JSON against the schema; on
+   failure the child gets exactly one corrective turn containing the validation
+   error. Second failure returns the raw text with a `schema_invalid` warning
+   prepended (never silently drops output).
+3. `jsonschema` crate for validation (new dependency, one small crate).
+4. Tests: valid output passes through untouched; invalid output triggers one
+   corrective turn; still-invalid output returns with warning.
 
-## Phase 6 — Plan-presentation race
+## Settings summary (what the user can tune)
 
-- Investigate the plan-approval modal path (`PlanApprovalRequest`,
-  `plan_approval_confirm`). The turn pauses at plan approval while `streaming` is
-  still true; confirm the new turn-alive guard + daemon-only serialization covers
-  the case where the user submits during plan review. Add a queued/guard behavior
-  if needed.
+| Setting | Default | Phase |
+|---|---|---|
+| `orchestration.max_concurrent_subagents` | 4 | 2 |
+| `orchestration.max_subagent_depth` | 1 | 2 |
+| `orchestration.default_max_duration_secs` | 300 | 2 |
+| `orchestration.leak_reminder` | true | 1 |
+| `orchestration.leak_reminder_max` | 2 | 1 |
 
-## Phase 7 — Verification
+Plus two subagent-def frontmatter fields: `can_spawn` (phase 2),
+`output_schema` (phase 5).
 
-- Tests: protocol roundtrip for `Guide`; agent guidance injection (guidance is
-  included in the next request even when `Finish::ToolUse`); TUI queued-message
-  guide key; two-press Esc cancel keeps `streaming` until the turn ends.
-- Run `cargo test --all`, `cargo clippy --all -- -D warnings`, `cargo fmt`,
-  `just arch-check`, `just theme-codegen-check`, and the JS checks if the wire
-  protocol changed.
-- Update `CURRENT.md` with an append-only dated entry.
+## Verification
 
-## Out of scope (for now)
+Per phase: `cargo test -p mew-agent -p mew-tools -p mew-subagents -p mew-config`,
+then `cargo clippy --all -- -D warnings`, `just arch-check`, and `cargo fmt`
+before committing. Each phase is its own commit on a WIP branch.
 
-- Full removal of the harness / `tui-capture` local mode (kept as test tooling).
-- Remote/iroh daemon changes beyond what the shared `Guide` wire message needs.
+## Explicitly out of scope
+
+- Path F (runtime scheduler executing the todo dependency graph). Revisit after
+  A–E bake.
+- Web UI surfacing of todo/subagent links (TUI only in phase 3).
+- Cost/token budgeting across fan-outs.

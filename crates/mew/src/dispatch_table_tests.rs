@@ -233,7 +233,9 @@ async fn test_action_variant_table() {
             Action::SlashCommand(_) => Action::SlashCommand("/cost".into()),
             Action::SwitchModel(_) => Action::SwitchModel("test/model".into()),
             Action::InsertAtMention(_) => Action::InsertAtMention("@file".into()),
-            Action::InsertSubagentMention(_) => Action::InsertSubagentMention("researcher".into()),
+            Action::InsertNamespaceMention(_, _) => {
+                Action::InsertNamespaceMention("skill".into(), "clarify".into())
+            }
             Action::CopySelection(_) => unreachable!(),
             Action::CancelMostRecentSubagent(_) => {
                 Action::CancelMostRecentSubagent("task_123".into())

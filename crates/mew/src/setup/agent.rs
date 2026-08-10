@@ -450,14 +450,10 @@ pub(crate) fn wire_subagents(
             router_provider_id: find_router_provider(cfg).map(|(id, _)| id),
             raw,
         });
-        let runner = mew_agent::runner::SimpleRunner::new(
-            agent.provider.clone(),
-            agent.tools.values().cloned().collect(),
-            dispatcher,
-        )
-        .with_model_resolver(resolver);
-        agent.subagent_runner = Some(Arc::new(runner));
-        agent.subagent_defs = subagent_defs.to_vec();
+        // Register the spawn tools before building the runner so the
+        // runner's tool map contains them. The runner decides per-child
+        // (via `can_spawn` and the depth cap) whether a subagent actually
+        // receives them.
         agent.tools.insert(
             "subagent_start".into(),
             Arc::new(mew_tools::tools::subagent_start::SubagentStart::new(
@@ -468,6 +464,20 @@ pub(crate) fn wire_subagents(
             "subagent_wait".into(),
             Arc::new(mew_tools::tools::subagent_wait::SubagentWait::new()),
         );
+        let runner = mew_agent::runner::SimpleRunner::new(
+            agent.provider.clone(),
+            agent.tools.values().cloned().collect(),
+            dispatcher,
+        )
+        .with_model_resolver(resolver)
+        .with_spawn_policy(
+            subagent_defs.to_vec(),
+            cfg.orchestration.max_subagent_depth,
+            cfg.orchestration.max_concurrent_subagents,
+            cfg.orchestration.default_max_duration_secs,
+        );
+        agent.subagent_runner = Some(Arc::new(runner));
+        agent.subagent_defs = subagent_defs.to_vec();
     }
 }
 
@@ -544,13 +554,21 @@ pub(crate) fn build_session_agent(
 
     let permission_engine = build_permission_engine(cfg, mode);
 
+    let subagent_registry_path = writer
+        .as_ref()
+        .and_then(|w| w.path().parent().map(|p| p.join("subagent_tasks.json")));
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
+    agent.subagent_registry_path = subagent_registry_path;
     agent.set_browser_enabled(browser_enabled);
     agent.set_model_info(model_id, provider_id);
     agent.template_ctx = template_ctx;
     agent.flagged_files = flagged_files;
     agent.secrets = build_secret_set(cfg);
     agent.todos_path = todos_path;
+    agent.leak_reminder = cfg.orchestration.leak_reminder;
+    agent.leak_reminder_max = cfg.orchestration.leak_reminder_max;
+    agent.max_concurrent_subagents = cfg.orchestration.max_concurrent_subagents;
+    agent.max_subagent_depth = cfg.orchestration.max_subagent_depth;
     agent.set_permission_engine(permission_engine);
     maybe_set_classifier_provider(&mut agent, cfg, cat, raw, provider_id, model_id);
     agent.set_plan_path(&cfg.plan_path);

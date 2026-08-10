@@ -154,3 +154,81 @@ fn display_name_is_from_the_known_pool() {
         );
     }
 }
+
+#[test]
+fn loader_parses_can_spawn_frontmatter() {
+    let tmp = TempDir::new().unwrap();
+    write_subagent(
+        tmp.path(),
+        "orchestrator.md",
+        "---\nname: orchestrator\ndescription: nests\ncan_spawn: true\n---\nbody\n",
+    );
+    write_subagent(
+        tmp.path(),
+        "plain.md",
+        "---\nname: plain\ndescription: no nest\n---\nbody\n",
+    );
+
+    let defs = Loader::new(tmp.path()).load().expect("load");
+    let by_name: std::collections::HashMap<_, _> =
+        defs.iter().map(|d| (d.name.as_str(), d)).collect();
+
+    assert!(by_name.get("orchestrator").expect("orchestrator").can_spawn);
+    assert!(!by_name.get("plain").expect("plain").can_spawn);
+}
+
+#[test]
+fn loader_resolves_output_schema_yaml_map_and_at_path() {
+    let tmp = TempDir::new().unwrap();
+    write_subagent(
+        tmp.path(),
+        "typed.md",
+        "---\nname: typed\ndescription: typed output\noutput_schema:\n  type: object\n  required: [answer]\n---\nbody\n",
+    );
+    let schema_dir = tmp.path().join(".mew").join("agents").join("schemas");
+    fs::create_dir_all(&schema_dir).unwrap();
+    fs::write(
+        schema_dir.join("report.json"),
+        r#"{"type":"object","properties":{"title":{"type":"string"}}}"#,
+    )
+    .unwrap();
+    write_subagent(
+        tmp.path(),
+        "referenced.md",
+        "---\nname: referenced\ndescription: file schema\noutput_schema: \"@schemas/report.json\"\n---\nbody\n",
+    );
+
+    let defs = Loader::new(tmp.path()).load().expect("load");
+    let by_name: std::collections::HashMap<_, _> =
+        defs.iter().map(|d| (d.name.as_str(), d)).collect();
+
+    let typed = by_name.get("typed").expect("typed");
+    let schema = typed.output_schema.as_ref().expect("schema");
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["required"][0], "answer");
+
+    let referenced = by_name.get("referenced").expect("referenced");
+    let schema = referenced.output_schema.as_ref().expect("schema");
+    assert_eq!(schema["properties"]["title"]["type"], "string");
+
+    // Defs without output_schema stay None.
+    assert!(by_name
+        .get("researcher")
+        .expect("researcher")
+        .output_schema
+        .is_none());
+}
+
+#[test]
+fn loader_skips_def_with_missing_output_schema_file() {
+    // Loader policy: a def that fails to load (bad YAML, missing @path
+    // schema) is skipped with a debug log rather than failing the whole load.
+    let tmp = TempDir::new().unwrap();
+    write_subagent(
+        tmp.path(),
+        "broken.md",
+        "---\nname: broken\ndescription: bad ref\noutput_schema: \"@schemas/nope.json\"\n---\nbody\n",
+    );
+    let defs = Loader::new(tmp.path()).load().expect("load");
+    assert!(!defs.iter().any(|d| d.name == "broken"));
+}

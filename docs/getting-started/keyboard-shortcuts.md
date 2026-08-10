@@ -45,7 +45,7 @@ Press `?` in the TUI to toggle the shortcuts overlay at any time.
 | `Ctrl+Shift+C` | Copy selected text to clipboard |
 | `Ctrl+T` | Toggle reasoning/thinking block expansion |
 | `Ctrl+O` | Toggle bash output expansion |
-| `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | Toggle sidebar sections (context / tools / MCP) |
+| `Ctrl+1` | Toggle the sidebar Environment section (context files / MCP) |
 | `x` | Cancel most recently started subagent (when input empty) |
 | `@` | Open file picker for @-mentions |
 

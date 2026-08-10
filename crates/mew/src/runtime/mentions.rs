@@ -2,7 +2,9 @@
 //!
 //! [`process_mentions`] resolves @mentions in user input. Text files are
 //! inlined into the model-facing text; image files become `Part::File`
-//! attachments.
+//! attachments. Namespace references (`@skill:name`, `@model:provider/model`,
+//! `@subagent:name`) are also resolved here: skills inline their body, models
+//! inline a reference marker, and subagents inline their description.
 
 use mew_message::Part;
 
@@ -31,10 +33,79 @@ pub async fn process_mentions(
     text: &str,
     cwd: &std::path::Path,
     context_files: &mut Vec<String>,
+    skills: &[mew_skills::Skill],
+    subagents: &[mew_subagents::SubagentDef],
 ) -> (String, String, Vec<Part>) {
-    let mentions = mew_tui::app::parse_file_mentions(text);
+    // --- Phase 1: Resolve namespace references ---
+    // Namespace refs (@skill:, @model:, @subagent:) are resolved and stripped
+    // FIRST so that the file-mention pass below never sees them.
+    //
+    // To prevent inlined content (skill bodies, descriptions) from being
+    // corrupted by subsequent token replacements, we strip ALL tokens from
+    // the text first, then append the inlined content afterward.
+    let refs = mew_tui::app::parse_namespace_refs(text);
     let mut enriched = text.to_string();
     let mut display = text.to_string();
+    let mut enriched_tail = String::new();
+    let mut display_tail = String::new();
+
+    for nr in &refs {
+        match nr.kind.as_str() {
+            "skill" => {
+                let skill = skills.iter().find(|s| s.name == nr.value);
+                match skill {
+                    Some(skill) => {
+                        enriched = enriched.replace(&nr.raw, "");
+                        display = display.replace(&nr.raw, "");
+                        enriched_tail.push_str(&format!(
+                            "\n\n--- skill: {} ---\n{}",
+                            skill.name, skill.body
+                        ));
+                        display_tail
+                            .push_str(&format!("\n<skill '{}' added to context>", skill.name));
+                    }
+                    None => {
+                        let err = format!("[error: skill '{}' not found]", nr.value);
+                        enriched = enriched.replace(&nr.raw, &err);
+                        display = display.replace(&nr.raw, &err);
+                    }
+                }
+            }
+            "model" => {
+                enriched = enriched.replace(&nr.raw, "");
+                display = display.replace(&nr.raw, "");
+                enriched_tail.push_str(&format!("\n\n[model reference: {}]", nr.value));
+                display_tail.push_str(&format!("\n<model '{}' referenced>", nr.value));
+            }
+            "subagent" => {
+                let subagent = subagents.iter().find(|s| s.name == nr.value);
+                match subagent {
+                    Some(sa) => {
+                        enriched = enriched.replace(&nr.raw, "");
+                        display = display.replace(&nr.raw, "");
+                        enriched_tail.push_str(&format!(
+                            "\n\n--- subagent: {} ---\n{}",
+                            sa.name, sa.description
+                        ));
+                        display_tail
+                            .push_str(&format!("\n<subagent '{}' added to context>", sa.name));
+                    }
+                    None => {
+                        let err = format!("[error: subagent '{}' not found]", nr.value);
+                        enriched = enriched.replace(&nr.raw, &err);
+                        display = display.replace(&nr.raw, &err);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    enriched.push_str(&enriched_tail);
+    display.push_str(&display_tail);
+
+    // --- Phase 2: Resolve file @mentions (existing logic) ---
+    let mentions = mew_tui::app::parse_file_mentions(&enriched);
     let mut attachments: Vec<Part> = Vec::new();
 
     for path_str in &mentions {
@@ -127,5 +198,139 @@ mod tests {
         assert_eq!(image_mime("foo.pdf"), None);
         assert_eq!(image_mime("foo"), None);
         assert_eq!(image_mime(""), None);
+    }
+
+    // --- Skill reference resolution tests ---
+
+    fn test_skill(name: &str, body: &str) -> mew_skills::Skill {
+        mew_skills::Skill {
+            name: name.to_string(),
+            description: format!("Description for {name}"),
+            body: body.to_string(),
+            path: std::path::PathBuf::from("(test)"),
+            template: false,
+        }
+    }
+
+    fn test_subagent(name: &str, description: &str) -> mew_subagents::SubagentDef {
+        mew_subagents::SubagentDef {
+            name: name.to_string(),
+            description: description.to_string(),
+            model: None,
+            tools: None,
+            max_turns: None,
+            max_duration_secs: None,
+            body: String::new(),
+            path: std::path::PathBuf::from("(test)"),
+            template: false,
+            can_spawn: false,
+            output_schema: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_resolves_skill() {
+        let skills = vec![test_skill("clarify", "Be clear and concise.")];
+        let mut ctx = Vec::new();
+        let cwd = std::path::Path::new(".");
+        let (enriched, display, _atts) =
+            process_mentions("@skill:clarify fix this", cwd, &mut ctx, &skills, &[]).await;
+        assert!(enriched.contains("Be clear and concise."));
+        assert!(display.contains("<skill 'clarify' added to context>"));
+        // The raw token should be stripped from enriched text.
+        assert!(!enriched.contains("@skill:clarify"));
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_resolves_model() {
+        let mut ctx = Vec::new();
+        let cwd = std::path::Path::new(".");
+        let (enriched, display, _atts) =
+            process_mentions("@model:openai/gpt-4o review this", cwd, &mut ctx, &[], &[]).await;
+        assert!(enriched.contains("[model reference: openai/gpt-4o]"));
+        assert!(display.contains("<model 'openai/gpt-4o' referenced>"));
+        assert!(!enriched.contains("@model:openai/gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_resolves_subagent() {
+        let subagents = vec![test_subagent(
+            "researcher",
+            "Investigate research questions.",
+        )];
+        let mut ctx = Vec::new();
+        let cwd = std::path::Path::new(".");
+        let (enriched, display, _atts) = process_mentions(
+            "@subagent:researcher look into this",
+            cwd,
+            &mut ctx,
+            &[],
+            &subagents,
+        )
+        .await;
+        assert!(enriched.contains("--- subagent: researcher ---"));
+        assert!(enriched.contains("Investigate research questions."));
+        assert!(display.contains("<subagent 'researcher' added to context>"));
+        assert!(!enriched.contains("@subagent:researcher"));
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_subagent_not_found() {
+        let mut ctx = Vec::new();
+        let cwd = std::path::Path::new(".");
+        let (enriched, display, _atts) =
+            process_mentions("@subagent:nonexistent", cwd, &mut ctx, &[], &[]).await;
+        assert!(enriched.contains("[error: subagent 'nonexistent' not found]"));
+        assert!(display.contains("[error: subagent 'nonexistent' not found]"));
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_skill_not_found() {
+        let skills: Vec<mew_skills::Skill> = vec![];
+        let mut ctx = Vec::new();
+        let cwd = std::path::Path::new(".");
+        let (enriched, display, _atts) =
+            process_mentions("@skill:nonexistent fix this", cwd, &mut ctx, &skills, &[]).await;
+        assert!(enriched.contains("[error: skill 'nonexistent' not found]"));
+        assert!(display.contains("[error: skill 'nonexistent' not found]"));
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_mixed_skill_and_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        std::fs::write(cwd.join("main.rs"), "fn main() {}").unwrap();
+
+        let skills = vec![test_skill("clarify", "Be clear.")];
+        let mut ctx = Vec::new();
+        let (enriched, display, _atts) = process_mentions(
+            "@skill:clarify review @main.rs",
+            cwd,
+            &mut ctx,
+            &skills,
+            &[],
+        )
+        .await;
+        // Skill body inlined.
+        assert!(enriched.contains("Be clear."));
+        assert!(display.contains("<skill 'clarify' added to context>"));
+        // File content inlined.
+        assert!(enriched.contains("fn main() {}"));
+        assert!(display.contains("<main.rs added to context>"));
+    }
+
+    #[tokio::test]
+    async fn test_process_mentions_skill_body_inlined() {
+        let skills = vec![test_skill(
+            "audit",
+            "# Audit Instructions\nCheck accessibility and performance.",
+        )];
+        let mut ctx = Vec::new();
+        let cwd = std::path::Path::new(".");
+        let (enriched, _display, _atts) =
+            process_mentions("@skill:audit", cwd, &mut ctx, &skills, &[]).await;
+        assert!(enriched.contains("--- skill: audit ---"));
+        assert!(enriched.contains("# Audit Instructions"));
+        assert!(enriched.contains("Check accessibility and performance."));
     }
 }

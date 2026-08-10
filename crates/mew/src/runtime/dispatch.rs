@@ -86,8 +86,8 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             cx.app.insert_mention(&mention);
             Flow::Continue
         }
-        Action::InsertSubagentMention(name) => {
-            cx.app.insert_mention(&format!("@{} ", name));
+        Action::InsertNamespaceMention(kind, value) => {
+            cx.app.insert_namespace_mention(&kind, &value);
             Flow::Continue
         }
         Action::CopySelection(text) => {
@@ -96,16 +96,8 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             cx.app.clear_selection();
             Flow::Continue
         }
-        Action::ToggleSidebarContext => {
-            cx.app.toggle_sidebar_section("context");
-            Flow::Continue
-        }
-        Action::ToggleSidebarTools => {
-            cx.app.toggle_sidebar_section("tools");
-            Flow::Continue
-        }
-        Action::ToggleSidebarMcp => {
-            cx.app.toggle_sidebar_section("mcp");
+        Action::ToggleSidebarEnvironment => {
+            cx.app.toggle_sidebar_section("environment");
             Flow::Continue
         }
         Action::OpenSettings => {
@@ -251,8 +243,14 @@ async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String) {
     }
     let text = cx.target.intercept_user_input(text).await;
     let cwd = std::env::current_dir().unwrap_or_default();
-    let (enriched, display, attachments) =
-        process_mentions(&text, &cwd, &mut cx.app.context_files).await;
+    let (enriched, display, attachments) = process_mentions(
+        &text,
+        &cwd,
+        &mut cx.app.context_files,
+        &cx.app.skill_catalog,
+        &cx.app.subagent_catalog,
+    )
+    .await;
     cx.app.push_user(display, attachments.clone());
     cx.app.streaming = true;
     let rx = cx.target.prompt(enriched, attachments);
@@ -309,8 +307,14 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
                 return Flow::Continue;
             }
             let cwd = std::env::current_dir().unwrap_or_default();
-            let (enriched, display, attachments) =
-                process_mentions(&text, &cwd, &mut cx.app.context_files).await;
+            let (enriched, display, attachments) = process_mentions(
+                &text,
+                &cwd,
+                &mut cx.app.context_files,
+                &cx.app.skill_catalog,
+                &cx.app.subagent_catalog,
+            )
+            .await;
             cx.app.push_user(display, attachments.clone());
             cx.app.streaming = true;
             let rx = cx.target.prompt(enriched, attachments);

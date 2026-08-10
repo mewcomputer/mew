@@ -185,6 +185,12 @@ impl TodoList {
     /// Render the list as a readable, scannable string. Used for tool output
     /// and the `/todo` command.
     pub fn render(&self) -> String {
+        self.render_annotated(&std::collections::HashMap::new())
+    }
+
+    /// Render with per-todo notes (e.g. a linked subagent task) appended to
+    /// the matching entries.
+    pub fn render_annotated(&self, notes: &std::collections::HashMap<usize, String>) -> String {
         if self.items.is_empty() {
             return "(no todos)".to_string();
         }
@@ -206,6 +212,9 @@ impl TodoList {
                         .collect::<Vec<_>>()
                         .join(", "),
                 ));
+            }
+            if let Some(note) = notes.get(&t.id) {
+                out.push_str(&format!(" -- {}", note));
             }
             out.push('\n');
         }
@@ -390,5 +399,23 @@ mod tests {
         let list = TodoList::load(&path).await.unwrap();
         assert!(list.items.is_empty());
         assert_eq!(list.next_id, 1);
+    }
+}
+
+#[cfg(test)]
+mod annotation_tests {
+    use super::*;
+
+    #[test]
+    fn test_render_annotated_appends_notes_to_linked_todos() {
+        let mut list = TodoList::new();
+        list.create(vec![("linked".into(), vec![])]);
+        list.create(vec![("unlinked".into(), vec![])]);
+        let notes = std::collections::HashMap::from([(1usize, "subagent stub (12s)".to_string())]);
+        let rendered = list.render_annotated(&notes);
+        assert!(rendered.contains("#1 linked -- subagent stub (12s)"));
+        assert!(rendered.contains("[ ] #2 unlinked\n"));
+        // Plain render is unaffected.
+        assert!(!list.render().contains("subagent stub"));
     }
 }

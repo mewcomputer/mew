@@ -42,6 +42,74 @@ pub struct SubagentTask {
     /// Session id of the subagent's own session file, set when the runner
     /// reports its `Started` event. Used for the session pop-in feature.
     pub child_session_id: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Todo this task is executing, when the spawn was linked to one.
+    /// Surfaced in todo_list output, the leak reminder, and the collection
+    /// result.
+    pub todo_id: Option<usize>,
+}
+
+/// Format a collected subagent result for tool output: the text (with any
+/// incompleteness warnings prepended and a linked-todo note appended),
+/// whether the run succeeded, and the child's turn manifests. Shared by
+/// `subagent_start` (sync path) and `subagent_wait`.
+pub(crate) fn format_subagent_result(
+    collected: Result<(mew_subagents::SubagentResult, Option<usize>), String>,
+) -> (String, bool, Vec<mew_message::TurnManifest>) {
+    let (result, todo_id) = match collected {
+        Ok((result, todo_id)) => (Ok(result), todo_id),
+        Err(e) => (Err(e), None),
+    };
+    let (mut out, success, manifests) = match result {
+        Ok(mew_subagents::SubagentResult::Complete {
+            text,
+            turns_used,
+            hit_turn_limit,
+            hit_time_limit,
+            session_unavailable,
+            manifests,
+        }) => {
+            let mut out = text.trim_end_matches('\n').to_string();
+            if hit_turn_limit {
+                out.insert_str(
+                    0,
+                    &format!(
+                        "warning: subagent hit max_turns limit ({} turns); result may be incomplete\n\n",
+                        turns_used
+                    ),
+                );
+            }
+            if hit_time_limit {
+                out.insert_str(
+                    0,
+                    "warning: subagent hit max_duration limit; result may be incomplete\n\n",
+                );
+            }
+            if session_unavailable {
+                out.insert_str(
+                    0,
+                    "warning: subagent transcript could not be written; result is unrecorded\n\n",
+                );
+            }
+            (out, true, manifests)
+        }
+        Ok(mew_subagents::SubagentResult::Cancelled) => (
+            "subagent was cancelled before completion".to_string(),
+            false,
+            vec![],
+        ),
+        Ok(mew_subagents::SubagentResult::Error { reason }) => {
+            (format!("subagent failed: {}", reason), false, vec![])
+        }
+        Err(e) => (format!("error: {}", e), false, vec![]),
+    };
+    if let Some(id) = todo_id {
+        out.push_str(&format!(
+            "\n\nnote: this task was linked to todo #{} — if the work is finished, \
+             mark it done with todo_complete.",
+            id
+        ));
+    }
+    (out, success, manifests)
 }
 
 /// Lifecycle state of a background shell job.
@@ -128,10 +196,28 @@ pub struct Agent {
     /// are depth 0; a subagent of a depth-N session would be depth N+1. The
     /// spawn is rejected if N+1 exceeds this cap.
     pub max_subagent_depth: u32,
+    /// Maximum subagent runs active at once. `start_subagent` past the cap
+    /// fails with a structured error telling the model to collect results
+    /// first. 0 disables the cap.
+    pub max_concurrent_subagents: u32,
+    /// When true, the turn loop reminds the model at turn end about subagent
+    /// tasks that were started but never collected with `subagent_wait`.
+    pub leak_reminder: bool,
+    /// Maximum leak-reminder loop-backs per user turn.
+    pub leak_reminder_max: u32,
+    /// Leak reminders issued this user turn. Lives on the per-turn clone, so
+    /// it resets to the long-lived agent's value (0) each user turn.
+    pub leak_reminder_count: u32,
     pub subagent_defs: Vec<SubagentDef>,
     pub subagent_runner: Option<Arc<dyn SubagentRunner>>,
     /// Background subagent tasks: task_id → task.
     pub subagent_tasks: Arc<tokio::sync::Mutex<HashMap<String, SubagentTask>>>,
+    /// Where outstanding subagent tasks are persisted (`subagent_tasks.json`
+    /// in the session dir). `None` when there's no session writer.
+    pub subagent_registry_path: Option<std::path::PathBuf>,
+    /// Set once a resumed session's orphaned-task records have been surfaced
+    /// to the model. Shared so only the first turn injects them.
+    pub subagent_registry_handled: Arc<tokio::sync::Mutex<bool>>,
     /// Background shell jobs: job_id → job. Populated by `shell_background`,
     /// drained by `job_block` / `job_cancel`.
     pub shell_jobs: Arc<tokio::sync::Mutex<HashMap<String, ShellJob>>>,
@@ -336,7 +422,11 @@ impl Agent {
                     .and_then(|v| v.parse::<u32>().ok())
                     .unwrap_or(100),
             ),
-            max_subagent_depth: 3,
+            max_subagent_depth: 1,
+            max_concurrent_subagents: 4,
+            leak_reminder: true,
+            leak_reminder_max: 2,
+            leak_reminder_count: 0,
             subagent_defs: Vec::new(),
             // Defaults to enabled with the 5k-token threshold recommended
             // in the publish that motivated this feature. Use
@@ -346,6 +436,8 @@ impl Agent {
             default_max_output_tokens: 0,
             subagent_runner: None,
             subagent_tasks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            subagent_registry_path: None,
+            subagent_registry_handled: Arc::new(tokio::sync::Mutex::new(false)),
             shell_jobs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             workspace_roots: Vec::new(),
             workspace_allowances: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
@@ -1236,12 +1328,42 @@ impl Agent {
         }
     }
 
+    /// Persist the outstanding-task registry to `<session>/subagent_tasks.json`.
+    /// Best-effort: failures are logged, not surfaced. Static so the event
+    /// pump (which owns clones, not `&self`) can call it when the child
+    /// session id lands.
+    pub(crate) async fn persist_subagent_registry(
+        tasks: &Arc<tokio::sync::Mutex<HashMap<String, SubagentTask>>>,
+        path: &Option<std::path::PathBuf>,
+    ) {
+        let Some(path) = path else { return };
+        let mut records = Vec::new();
+        {
+            let tasks = tasks.lock().await;
+            for (id, t) in tasks.iter() {
+                records.push(crate::subagent_registry::SubagentTaskRecord {
+                    task_id: id.clone(),
+                    name: t.name.clone(),
+                    todo_id: t.todo_id,
+                    child_session_id: t.child_session_id.lock().await.clone(),
+                    started_at: t.started_at,
+                });
+            }
+        }
+        if let Err(e) = crate::subagent_registry::save(path, &records).await {
+            tracing::warn!(error = %e, "failed to persist subagent task registry");
+        }
+    }
+
     /// Spawn a subagent in the background. Returns a task ID immediately.
+    /// `todo_id` links the task to a todo: the link shows up in todo_list
+    /// output, the leak reminder, and the collection result.
     pub async fn start_subagent(
         &self,
         name: &str,
         prompt: &str,
         model: Option<&str>,
+        todo_id: Option<usize>,
         ev_tx: &mpsc::Sender<AgentEvent>,
     ) -> Result<String, String> {
         let def = self
@@ -1251,18 +1373,33 @@ impl Agent {
             .ok_or_else(|| format!("unknown subagent: {}", name))?
             .clone();
 
+        if let Some(id) = todo_id {
+            if self.todos.lock().await.get(id).is_none() {
+                return Err(format!("cannot link subagent: no todo with id {}", id));
+            }
+        }
+
         // Depth cap: parent's depth + 1 must not exceed max_subagent_depth.
         // Top-level sessions are depth 0; their direct subagents are depth 1.
-        let parent_depth = if let Some(session) = &self.session {
-            session.lock().await.meta().depth
-        } else {
-            0
-        };
+        let parent_depth = self.session_depth().await;
         if parent_depth + 1 > self.max_subagent_depth {
             return Err(format!(
                 "subagent nesting depth exceeded (parent depth {}, max {})",
                 parent_depth, self.max_subagent_depth
             ));
+        }
+
+        // Concurrency cap: uncollected tasks (running or finished) count
+        // against it, so the model must collect results before spawning more.
+        if self.max_concurrent_subagents > 0 {
+            let active = self.subagent_tasks.lock().await.len() as u32;
+            if active >= self.max_concurrent_subagents {
+                return Err(format!(
+                    "subagent concurrency cap reached ({} of {} running or uncollected); \
+                     call subagent_wait (task_ids or all) to collect results first",
+                    active, self.max_concurrent_subagents
+                ));
+            }
         }
 
         let runner = self
@@ -1285,6 +1422,8 @@ impl Agent {
         let parent_session_id = self.session_id;
         let child_session_id_slot = Arc::new(tokio::sync::Mutex::new(None::<String>));
         let child_id_for_pump = child_session_id_slot.clone();
+        let tasks_for_pump = self.subagent_tasks.clone();
+        let registry_path_for_pump = self.subagent_registry_path.clone();
 
         tokio::spawn(async move {
             let (event_tx, mut event_rx) = mpsc::channel(256);
@@ -1302,6 +1441,12 @@ impl Agent {
                             display_name,
                         } => {
                             *pump_child_id.lock().await = Some(child_session_id.clone());
+                            // Re-persist now that the child session id is known.
+                            Self::persist_subagent_registry(
+                                &tasks_for_pump,
+                                &registry_path_for_pump,
+                            )
+                            .await;
                             AgentEvent::SubagentStart {
                                 parent_call_id: pump_cid.clone(),
                                 name: name_clone.clone(),
@@ -1340,6 +1485,7 @@ impl Agent {
                     event_tx,
                     cancel,
                     model,
+                    parent_depth,
                 })
                 .await;
 
@@ -1356,8 +1502,11 @@ impl Agent {
                 result_rx: Some(result_rx),
                 cancel: task_cancel,
                 child_session_id: child_session_id_slot,
+                todo_id,
             },
         );
+        drop(tasks);
+        Self::persist_subagent_registry(&self.subagent_tasks, &self.subagent_registry_path).await;
 
         Ok(task_id)
     }
@@ -1375,11 +1524,12 @@ impl Agent {
         }
     }
 
-    /// Wait for a background subagent to complete. Returns the structured result.
+    /// Wait for a background subagent to complete. Returns the structured
+    /// result plus the task's linked todo, if any.
     pub async fn wait_subagent(
         &self,
         task_id: &str,
-    ) -> Result<mew_subagents::SubagentResult, String> {
+    ) -> Result<(mew_subagents::SubagentResult, Option<usize>), String> {
         let mut tasks = self.subagent_tasks.lock().await;
         let mut task = tasks
             .remove(task_id)
@@ -1391,22 +1541,68 @@ impl Agent {
             .ok_or_else(|| format!("task {} already awaited", task_id))?;
 
         drop(tasks);
+        Self::persist_subagent_registry(&self.subagent_tasks, &self.subagent_registry_path).await;
 
         let result = result_rx
             .await
             .map_err(|_| "subagent task cancelled".to_string())?;
 
-        result.map_err(|e| format!("subagent error: {}", e))
+        result
+            .map(|r| (r, task.todo_id))
+            .map_err(|e| format!("subagent error: {}", e))
     }
 
-    /// List running subagent tasks (name, task_id, elapsed_ms).
-    pub async fn list_subagents(&self) -> Vec<(String, String, i64)> {
+    /// List running subagent tasks (name, task_id, elapsed_ms, linked todo).
+    pub async fn list_subagents(&self) -> Vec<(String, String, i64, Option<usize>)> {
         let tasks = self.subagent_tasks.lock().await;
         let now = chrono::Utc::now().timestamp_millis();
         tasks
             .iter()
-            .map(|(id, t)| (t.name.clone(), id.clone(), now - t.started_at))
+            .map(|(id, t)| (t.name.clone(), id.clone(), now - t.started_at, t.todo_id))
             .collect()
+    }
+
+    /// Nesting depth of this session (top-level sessions are 0).
+    pub(crate) async fn session_depth(&self) -> u32 {
+        if let Some(session) = &self.session {
+            session.lock().await.meta().depth
+        } else {
+            0
+        }
+    }
+
+    /// Task IDs of all outstanding subagent tasks (running or finished but
+    /// not yet collected via `wait_subagent`).
+    pub async fn subagent_task_ids(&self) -> Vec<String> {
+        let tasks = self.subagent_tasks.lock().await;
+        tasks.keys().cloned().collect()
+    }
+
+    /// Wait for several subagent tasks and return their results as a JSON
+    /// object keyed by task_id: `{"<id>": {"status", "text"}}`. A failed
+    /// task does not fail the batch; its per-task status carries it. Tasks
+    /// are awaited concurrently so the batch's total latency tracks the
+    /// slowest task, not the sum.
+    pub(crate) async fn wait_subagents_batch(&self, ids: Vec<String>) -> String {
+        let results = futures::future::join_all(ids.into_iter().map(|id| {
+            let agent = self.clone();
+            async move {
+                let (text, ok, _) = format_subagent_result(agent.wait_subagent(&id).await);
+                (
+                    id,
+                    serde_json::json!({
+                        "status": if ok { "complete" } else { "failed" },
+                        "text": text,
+                    }),
+                )
+            }
+        }))
+        .await;
+        let mut map = serde_json::Map::new();
+        for (id, value) in results {
+            map.insert(id, value);
+        }
+        serde_json::Value::Object(map).to_string()
     }
 
     // -----------------------------------------------------------------

@@ -74,9 +74,9 @@ named `context7` becomes `mcp__context7__search`.
 
 ## MCP status in the sidebar
 
-The sidebar shows MCP server connection status and tool count. Press
-`Ctrl+3` to toggle the MCP section. Each server shows its name, whether
-it connected successfully, and how many tools it exposes.
+The sidebar's Environment section shows MCP server connection status and
+tool count. Press `Ctrl+1` to expand it. Each server shows its name,
+whether it connected successfully, and how many tools it exposes.
 
 ## Permissions
 
@@ -109,8 +109,8 @@ Check each server's docs for required environment variables.
 
 ## Troubleshooting
 
-**Server not connecting**: check the sidebar MCP section (Ctrl+3) for
-error messages. Common causes: wrong command path, missing `npx`, server
+**Server not connecting**: check the sidebar Environment section (Ctrl+1)
+for error messages. Common causes: wrong command path, missing `npx`, server
 crashing on startup.
 
 **Tools not appearing**: the server may not expose any tools, or the

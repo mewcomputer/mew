@@ -44,6 +44,10 @@ pub struct Config {
     /// TUI configuration (theme, etc.).
     #[serde(default)]
     pub tui: TuiConfig,
+    /// Subagent orchestration guardrails (fan-in reminders, concurrency cap,
+    /// nesting depth).
+    #[serde(default)]
+    pub orchestration: OrchestrationConfig,
 }
 
 /// TUI configuration.
@@ -53,6 +57,61 @@ pub struct TuiConfig {
     /// file in `~/.config/mew/themes/` or `.mew/themes/`.
     #[serde(default)]
     pub theme: String,
+}
+
+/// Subagent orchestration guardrails.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestrationConfig {
+    /// Maximum subagent runs active at once per session. `subagent_start`
+    /// past the cap returns a structured error telling the model to collect
+    /// results first. 0 disables the cap.
+    #[serde(default = "default_max_concurrent_subagents")]
+    pub max_concurrent_subagents: u32,
+    /// How deep subagent spawning may nest. 1 (default) means children never
+    /// receive the subagent tools. Deeper nesting additionally requires the
+    /// subagent def to set `can_spawn: true`.
+    #[serde(default = "default_max_subagent_depth")]
+    pub max_subagent_depth: u32,
+    /// Default wall-clock cap (seconds) for subagent runs whose def does not
+    /// set `max_duration_secs`.
+    #[serde(default = "default_max_duration_secs")]
+    pub default_max_duration_secs: u64,
+    /// When true, the agent reminds the model at turn end about subagent
+    /// tasks that were started but never collected with `subagent_wait`.
+    #[serde(default = "default_true")]
+    pub leak_reminder: bool,
+    /// Maximum leak-reminder loop-backs per user turn, so a model that keeps
+    /// spawning instead of collecting cannot loop forever.
+    #[serde(default = "default_leak_reminder_max")]
+    pub leak_reminder_max: u32,
+}
+
+impl Default for OrchestrationConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_subagents: default_max_concurrent_subagents(),
+            max_subagent_depth: default_max_subagent_depth(),
+            default_max_duration_secs: default_max_duration_secs(),
+            leak_reminder: true,
+            leak_reminder_max: default_leak_reminder_max(),
+        }
+    }
+}
+
+fn default_max_concurrent_subagents() -> u32 {
+    4
+}
+
+fn default_max_subagent_depth() -> u32 {
+    1
+}
+
+fn default_max_duration_secs() -> u64 {
+    300
+}
+
+fn default_leak_reminder_max() -> u32 {
+    2
 }
 
 fn default_persona() -> String {
@@ -179,6 +238,7 @@ impl Default for Config {
             default_persona: default_persona(),
             plan_path: default_plan_path(),
             tui: TuiConfig::default(),
+            orchestration: OrchestrationConfig::default(),
         }
     }
 }
@@ -853,6 +913,31 @@ responses_lite = true
         assert_eq!(cfg.models[1].id, "custom-llama");
         assert!(cfg.models[1].shape.is_empty());
         assert!(cfg.models[1].responses_lite);
+    }
+
+    #[test]
+    fn test_orchestration_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.orchestration.max_concurrent_subagents, 4);
+        assert_eq!(cfg.orchestration.max_subagent_depth, 1);
+        assert_eq!(cfg.orchestration.default_max_duration_secs, 300);
+        assert!(cfg.orchestration.leak_reminder);
+        assert_eq!(cfg.orchestration.leak_reminder_max, 2);
+    }
+
+    #[test]
+    fn test_orchestration_partial_overrides() {
+        let toml = r#"
+[orchestration]
+max_concurrent_subagents = 0
+leak_reminder = false
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.orchestration.max_concurrent_subagents, 0);
+        assert!(!cfg.orchestration.leak_reminder);
+        // Untouched fields keep defaults.
+        assert_eq!(cfg.orchestration.max_subagent_depth, 1);
+        assert_eq!(cfg.orchestration.leak_reminder_max, 2);
     }
 
     #[test]

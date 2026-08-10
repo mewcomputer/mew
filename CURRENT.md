@@ -1,3 +1,114 @@
+# 2026-08-09 — review findings fixed
+
+Committed f6debc8: atomic registry writes (temp+rename + write mutex),
+concurrent batch waits (join_all), turn-cap/corrective-turn alignment,
+SchemaCheck tri-state (broken schemas skip correction), warning applied before
+the Finished event, orphan-injection clear-after-append, Agent::new depth
+default aligned to 1, reminder wording no longer promises an abandon action.
+New regression tests for each. Branch: wip/orchestration-improvements.
+
+# 2026-08-09 — code-review pass on orchestration branch (2 subagents)
+
+Two code-reviewer subagents (deepseek-v4-flash) reviewed the diff, fed as
+verbatim unified diffs (their sandbox had no repo access). Verified every
+claim against the live code afterward. Real findings: P1 registry write
+atomicity (plain fs::write, concurrent persist paths), P1 sequential batch
+waits, P1 hit_turn_cap/default-cap mismatch, P2 no model-facing abandon tool,
+P2 Finished-event vs result text mismatch on schema_invalid, P2 handled-flag
+set before load + clear-before-append, P2 broken schemas not load-validated.
+False positives ruled out: schema_invalid bypass (exit_answer falls through),
+parent_depth propagation (child session meta carries depth), legacy subagent
+tool (never registered). See docs/development/dev-orchestration.md.
+
+# 2026-08-09 — orchestration phase 5: typed handoffs (plan complete)
+
+Subagent frontmatter gains `output_schema` (YAML map or `@path`); the runner
+validates the child's final output as JSON, grants one corrective turn on
+failure, and returns raw text with a `schema_invalid` warning on a second
+failure. Committed as 88b72c2. Also fixed a commit-hygiene miss: phase 4's
+registry module was left untracked; autosquashed into f067183. All five phases
+of `docs/development/dev-orchestration.md` are now on
+`wip/orchestration-improvements`. Deferred: TUI/web sidebar surfacing of
+todo↔task links (needs a wire field); subagent turn-counting question remains
+open.
+
+# 2026-08-09 — orchestration phase 4: durable task registry
+
+Outstanding subagent tasks persist to `<session>/subagent_tasks.json`; on
+resume, orphans are surfaced once in a synthetic message with each child's
+final text recovered from its transcript where possible. Committed as d6d756a.
+Side finding: `test_paste_clipboard_image_no_tool_error` fails on unmodified
+main in this environment (pre-existing, unrelated).
+
+# 2026-08-09 — orchestration phase 3: todo ↔ subagent links
+
+`subagent_start` accepts `todo_id` (validated); todo_list annotates linked
+todos, the leak reminder lists todo ids, and collecting a linked task suggests
+`todo_complete` (model still owns transitions). Committed as d269c9b. Deferred:
+TUI/web sidebar surfacing (todo_id is not on the wire yet — needs an
+AgentEvent/ServerMessage field).
+
+# 2026-08-09 — orchestration phase 2: concurrency cap + depth policy
+
+`max_concurrent_subagents` (default 4) enforced in `start_subagent` with a
+structured "collect first" error. Subagent defs gain `can_spawn` frontmatter;
+children get the spawn tools only when opted in and within
+`max_subagent_depth` (default 1), replacing enforcement-by-construction-order.
+`default_max_duration_secs` config now feeds the runner. Committed as 9084baf.
+Open note: user suspects subagent turn counting may be off (turn cap vs
+wall-clock cap interaction) — investigate before phase 5.
+
+# 2026-08-09 — orchestration phase 1: fan-in + leak reminder
+
+`subagent_wait` now takes `task_ids[]` or `all: true` and returns per-task
+results keyed by task ID (a failed task no longer fails the batch). The turn
+loop reminds the model at turn end about uncollected subagent tasks, capped
+per user turn. New `[orchestration]` config section with `MEW_ORCHESTRATION__*`
+env overrides. Committed as d15e4aa on `wip/orchestration-improvements`.
+
+# 2026-08-09 — orchestration assessment doc
+
+Reviewed the task/orchestration stack (todos, subagents, goals, personas,
+hooks, background jobs) and wrote `docs/development/dev-orchestration.md`:
+an assessment of gaps (model-driven sequencing, no fan-in, unbounded fan-out,
+in-memory task registry, todo/execution disconnect, free-text handoffs,
+depth-1 nesting) plus six ordered improvement paths. No code changes.
+
+# 2026-08-08 — namespace references: `@skill:`, `@model:`, `@subagent:` input syntax
+
+Added inline namespace references for skills, models, and subagents in TUI chat
+input. All three use the `@namespace:value` syntax and resolve client-side at
+submit time, inlining content into the model-facing prompt.
+
+## Changes
+
+- `crates/mew-tui/Cargo.toml`: Added `mew-skills` and `mew-subagents` deps.
+- `crates/mew-tui/src/app/mod.rs`:
+  - Added `NamespaceRef` struct and `parse_namespace_refs()` for `@skill:`,
+    `@model:`, `@subagent:` parsing. Replaced the prior skill-only parser.
+  - Added `skill_catalog` and `subagent_catalog` fields to `App`.
+  - Added `insert_skill_mention()` and `insert_namespace_mention()`.
+  - Updated `parse_file_mentions()` to skip all namespace prefixes.
+- `crates/mew/src/runtime/mentions.rs`: `process_mentions()` now takes
+  `skills` and `subagents` slices. Resolves skill (body), model (marker),
+  and subagent (description) references before file mentions.
+- `crates/mew/src/runtime/dispatch.rs`: Updated both call sites; added
+  `InsertSkillMention` and `InsertNamespaceMention` dispatch arms.
+- `crates/mew-tui/src/app/pickers.rs`: Generalized `open_skill_picker` into
+  `open_namespace_picker(kind, filter)` handling all three namespaces.
+- `crates/mew-tui/src/events.rs`: Generalized picker trigger to detect
+  `skill:`, `model:`, `subagent:` prefixes. Added `InsertNamespaceMention`
+  action variant.
+- `crates/mew/src/commands/tui.rs`: Loads skills and subagents at startup.
+- `AGENTS.md`: Documented namespace references.
+
+## Tests
+
+Parser tests (6), file-mention guard test (1), picker tests (3), insert test
+(1) in `mew-tui/src/app/tests.rs`. Resolution tests (7) in
+`mew/src/runtime/mentions.rs`. All pass. `cargo clippy`, `cargo fmt`, and
+`just arch-check` clean.
+
 # 2026-08-04 — openai provider: tolerate usage chunks with no `choices` field
 
 Some OpenAI-compatible providers (vLLM, proxies) emit a final streaming data
@@ -5501,3 +5612,86 @@ on session attach.
 
 Verified: `cargo test -p mew-agent -p mew-daemon -p mew-tui` green, clippy clean
 (`-D warnings`), `just arch-check` passes.
+
+# 2026-08-05 — TUI sidebar restructure: activity-first, static info demoted
+
+Reworked the TUI sidebar around live state instead of static configuration.
+The Sessions list, Tools list, and Personas list are gone (session switching
+lives in the `/sessions` picker; tools and personas are discoverable
+elsewhere). Empty sections no longer render placeholder lines.
+
+## Changes
+
+- `crates/mew-tui/src/ui/sidebar.rs`: rewritten. New top-to-bottom order:
+  session header (title from `session_titles` → daemon summary → first
+  message, then id and message count), Todos, Companion, Subagents,
+  Background Jobs, Changes, Environment. Activity sections render only when
+  non-empty. Context files and MCP servers are merged into a single
+  Environment section, collapsed by default. Also fixes a latent off-by-one:
+  clickable header rows were recorded one row above where they render
+  (`visual_row` started at `area.y` while content renders at `area.y + 1`).
+- `crates/mew-tui/src/events.rs`: `ToggleSidebarContext/Tools/Mcp` actions
+  replaced by a single `ToggleSidebarEnvironment`; Ctrl+2 and Ctrl+3 bindings
+  removed, Ctrl+1 toggles Environment.
+- `crates/mew-tui/src/app/mod.rs`: `toggle_sidebar_section` now seeds the
+  collapse map from `App::sidebar_default_collapsed` so the first toggle of a
+  collapsed-by-default section actually expands it (previously the first
+  press was a no-op for such sections).
+- `crates/mew/src/runtime/dispatch.rs`: dispatch arm updated to match.
+- `crates/mew-tui/src/ui/overlays.rs`: help text updated (Ctrl+1 only).
+- Docs updated: `docs/getting-started/keyboard-shortcuts.md`,
+  `docs/getting-started/quick-start.md` (diagram also corrected: the sidebar
+  is on the right), `docs/using-mew/mcp-servers.md`.
+
+Session attention badges (`[1!]`/`[?]`) are no longer listed per session in
+the sidebar; the status bar still aggregates pending permissions/questions
+for non-active sessions.
+
+## Tests
+
+- `ui/sidebar.rs`: render tests for empty-sidebar hiding, session title and
+  fallbacks, todos visibility, Environment collapsed-by-default + toggle, and
+  Tools/Personas never rendering.
+- `app/tests.rs`: Ctrl+1 maps to `ToggleSidebarEnvironment`; first toggle of
+  Environment expands it.
+
+Verified: `cargo test -p mew-tui` (189 + 5 golden) and `cargo test --all`
+green, `cargo clippy --all -- -D warnings` clean, `just arch-check` passes,
+`cargo fmt --check` clean.
+
+Known pre-existing failure (reproduces on a clean tree, unrelated to this
+change): `mew::dispatch_table_tests::test_paste_clipboard_image_no_tool_error`
+fails when run via `cargo test -p mew` on this machine; it passes under
+`cargo test --all`. Looks environment-sensitive (clipboard tool availability)
+and needs its own investigation.
+
+# 2026-08-05 — fix sidebar click-to-toggle drift
+
+Clicking a sidebar header needed several rows above the visible title to
+register. Two causes, both now fixed in `crates/mew-tui/src/ui/sidebar.rs`:
+
+1. Header sections incremented `visual_row` twice for the header line (once
+   at record time, once after pushing), drifting every later recorded row
+   down by one.
+2. Several rows were truncated with budgets that overflowed the inner width
+   (todo rows, job rows, change rows, progress rows, unbounded MCP/context
+   paths), so `Paragraph::wrap` split them into extra visual lines that the
+   row tracking never counted. Each wrapped line above a header shifted its
+   click target further away.
+
+Fix: a `truncate_to_fit` helper caps every row at its exact display-width
+budget (unicode-width aware, ellipsis inside the budget), and the header
+record/push/increment sequence is now single-count. With no line able to
+wrap, the recorded header rows match rendered rows exactly.
+
+## Tests
+
+- `test_sidebar_header_rows_align_with_rendered_headers`: fills todos,
+  companion, changes, and environment with overlong content and asserts each
+  recorded `(row, section)` points at the rendered header line. This failed
+  before the fix and guards the click-target invariant going forward.
+- `test_truncate_to_fit`: boundary, ellipsis, zero-budget, and wide-glyph
+  cases.
+
+Verified: `cargo test -p mew-tui` (191 + 5 golden) green, clippy and fmt
+clean.

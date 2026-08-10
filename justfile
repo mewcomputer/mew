@@ -260,7 +260,7 @@ arch-check:
         | grep -v '^\s*//' \
         | grep -v '=> Action::' \
         | grep -v '=> unreachable!' \
-        | grep -v 'InsertSubagentMention' \
+        | grep -v 'InsertNamespaceMention' \
         | grep -v 'CancelMostRecentSubagent' \
         | grep -v 'SetPermissionMode(_)' ; then
         echo "ERROR: Action/SlashResult match arms outside runtime/dispatch.rs" ; exit 1

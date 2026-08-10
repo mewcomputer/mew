@@ -31,6 +31,8 @@ unicode-width = "0.2"
 rand.workspace = true
 strum = { version = "0.26", features = ["derive"] }
 mew-config = { workspace = true }
+mew-skills = { workspace = true }
+mew-subagents = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
 tempfile = "3"

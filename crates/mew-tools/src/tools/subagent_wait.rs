@@ -20,9 +20,18 @@ impl SubagentWait {
                 "task_id": {
                     "type": "string",
                     "description": "The task ID returned by subagent_start."
+                },
+                "task_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Wait for several tasks at once. Returns a JSON object keyed by task ID, each with a per-task status, so one failed task does not fail the batch."
+                },
+                "all": {
+                    "type": "boolean",
+                    "description": "Wait for every outstanding subagent task. Returns the same keyed JSON object as task_ids.",
+                    "default": false
                 }
-            },
-            "required": ["task_id"]
+            }
         });
         Self { schema }
     }
@@ -35,8 +44,9 @@ impl Tool for SubagentWait {
     }
 
     fn description(&self) -> &str {
-        "Wait for a background subagent to complete and get its result. \
-         Use the task ID returned by subagent_start when you passed `async: true`. \
+        "Wait for background subagents and get their results. Pass exactly one of: \
+         task_id (a single task ID from subagent_start), task_ids (collect several \
+         at once, results keyed by task ID), or all (collect every outstanding task). \
          Most of the time you should just use subagent_start without `async` and \
          it will return the result directly without needing this tool."
     }

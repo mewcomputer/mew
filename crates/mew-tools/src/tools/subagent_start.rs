@@ -20,7 +20,8 @@ impl SubagentStart {
              \n\
              Pass `async: true` to start the subagent in the background and return a task ID \
              immediately. Use subagent_wait with the task ID to collect the result later, which \
-             is useful for running multiple subagents in parallel before combining their results.",
+             is useful for running multiple subagents in parallel before combining their results. \
+             subagent_wait also accepts `task_ids` or `all: true` to collect a whole batch at once.",
         );
         if !defs.is_empty() {
             desc.push_str("\n\nAvailable subagents:");
@@ -51,6 +52,10 @@ impl SubagentStart {
                 "model": {
                     "type": "string",
                     "description": "Optional model override. Use \"micro\" or \"deci\" to select the router's configured tier, or pass a fully-qualified \"provider/model\"."
+                },
+                "todo_id": {
+                    "type": "integer",
+                    "description": "Optional todo ID this subagent is executing. Links the task to the todo: todo_list shows it, and collecting the result reminds you to mark the todo done."
                 }
             },
             "required": ["name", "prompt"]

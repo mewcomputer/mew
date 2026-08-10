@@ -66,7 +66,100 @@ impl Agent {
         };
 
         self.append_message(user_msg).await;
+        self.inject_orphaned_subagent_tasks().await;
         self.turn_loop(ev_tx).await
+    }
+
+    /// On the first turn of a resumed session, surface any subagent tasks the
+    /// previous run left uncollected: one synthetic message listing them, with
+    /// each result recovered from the child transcript where possible. The
+    /// registry file is cleared after the message is appended so it surfaces
+    /// exactly once.
+    async fn inject_orphaned_subagent_tasks(&mut self) {
+        let Some(path) = self.subagent_registry_path.clone() else {
+            return;
+        };
+        {
+            let mut handled = self.subagent_registry_handled.lock().await;
+            if *handled {
+                return;
+            }
+            // Mark handled *before* the async work so a re-entrant turn can't
+            // double-inject. If load fails below, the records are lost for
+            // this process lifetime — acceptable tradeoff for surface-once.
+            *handled = true;
+        }
+        let records = match crate::subagent_registry::load(&path).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load subagent task registry");
+                return;
+            }
+        };
+        if records.is_empty() {
+            return;
+        }
+
+        let session_dir = path.parent().map(|p| p.to_path_buf());
+        let mut lines = String::new();
+        for r in &records {
+            let todo_note = match r.todo_id {
+                Some(id) => format!(", todo #{}", id),
+                None => String::new(),
+            };
+            let recovered = match (&session_dir, &r.child_session_id) {
+                (Some(dir), Some(child_id)) => {
+                    crate::subagent_registry::recover_child_text(dir, child_id).await
+                }
+                _ => None,
+            };
+            let outcome = match recovered {
+                Some(text) => {
+                    let trimmed: String = text.chars().take(2000).collect();
+                    format!("recovered result:\n{}", trimmed)
+                }
+                None => "result lost (transcript unavailable)".to_string(),
+            };
+            lines.push_str(&format!(
+                "- {} ({}{}): {}\n",
+                r.task_id, r.name, todo_note, outcome
+            ));
+        }
+        let msg = Message {
+            id: Ulid::new(),
+            session_id: self.session_id,
+            role: Role::User,
+            parts: vec![Part::Text(TextPart {
+                base: PartBase {
+                    id: Ulid::new(),
+                    message_id: Ulid::new(),
+                    session_id: self.session_id,
+                },
+                text: format!(
+                    "<orphaned_subagent_tasks>\n\
+                     The previous run of this session ended with {} subagent task(s) that \
+                     were never collected:\n\
+                     {lines}\
+                     Use these results or disregard them as you see fit.\n\
+                     </orphaned_subagent_tasks>",
+                    records.len()
+                ),
+                synthetic: true,
+            })],
+            time: Time {
+                created: Utc::now().timestamp_millis(),
+                completed: None,
+            },
+            assistant: None,
+        };
+        self.append_message(msg).await;
+
+        // Surface once: clear the registry only after the message is safely
+        // appended, so a crash between here and the clear at worst re-surfaces
+        // the orphans on the next resume instead of losing them.
+        if let Err(e) = crate::subagent_registry::save(&path, &[]).await {
+            tracing::warn!(error = %e, "failed to clear subagent task registry");
+        }
     }
 
     pub(crate) async fn turn_loop(
@@ -516,6 +609,62 @@ impl Agent {
                     // count is tracked separately on GoalState.
                     turn_count = 0;
                     continue;
+                }
+
+                // Leak reminder: the model is about to end its turn with
+                // subagent tasks it never collected. Nudge it to collect or
+                // explicitly abandon them, capped per user turn so a model
+                // that keeps spawning instead of collecting can't loop.
+                if self.leak_reminder && self.leak_reminder_count < self.leak_reminder_max {
+                    let outstanding = self.list_subagents().await;
+                    if !outstanding.is_empty() {
+                        self.leak_reminder_count += 1;
+                        let mut lines = String::new();
+                        for (name, task_id, elapsed_ms, todo_id) in &outstanding {
+                            let todo_note = match todo_id {
+                                Some(id) => format!(", todo #{}", id),
+                                None => String::new(),
+                            };
+                            lines.push_str(&format!(
+                                "- {} ({}, {}s elapsed{})\n",
+                                task_id,
+                                name,
+                                elapsed_ms / 1000,
+                                todo_note
+                            ));
+                        }
+                        let reminder_msg = Message {
+                            id: Ulid::new(),
+                            session_id: self.session_id,
+                            role: Role::User,
+                            parts: vec![Part::Text(TextPart {
+                                base: PartBase {
+                                    id: Ulid::new(),
+                                    message_id: Ulid::new(),
+                                    session_id: self.session_id,
+                                },
+                                text: format!(
+                                    "<subagent_task_reminder>\n\
+                                     You started subagent tasks that have not been collected:\n\
+                                     {lines}\n\
+                                     Collect their results with subagent_wait (pass task_ids, \
+                                     or all: true). Note: uncollected tasks keep occupying a \
+                                     concurrency slot, and the agent cannot discard them on its \
+                                     own.\n\
+                                     </subagent_task_reminder>"
+                                ),
+                                synthetic: true,
+                            })],
+                            time: Time {
+                                created: Utc::now().timestamp_millis(),
+                                completed: None,
+                            },
+                            assistant: None,
+                        };
+                        self.append_message(reminder_msg).await;
+                        turn_count = 0;
+                        continue;
+                    }
                 }
                 return Ok(());
             }

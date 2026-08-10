@@ -31,6 +31,15 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
 
     let mut app = mew_tui::App::new();
     app.daemon_mode = true;
+    // Load skills for autocomplete and inline skill-reference resolution.
+    // Uses the same standard locations as the daemon's skill loader.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let skill_loader = mew_skills::Loader::new(cwd.clone());
+    app.skill_catalog = skill_loader.load().unwrap_or_default();
+    // Load subagent definitions for autocomplete and inline reference
+    // resolution.
+    let subagent_loader = mew_subagents::Loader::new(cwd);
+    app.subagent_catalog = subagent_loader.load().unwrap_or_default();
     // Set the session ID from the daemon client.
     if let Some(sid) = client.session_id().await {
         app.status.session_id = sid;

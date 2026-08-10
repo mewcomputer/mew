@@ -825,15 +825,9 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             }
             return None;
         }
-        // Ctrl+1/2/3: toggle sidebar sections
+        // Ctrl+1: toggle the sidebar environment section.
         KeyCode::Char('1') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            return Some(Action::ToggleSidebarContext);
-        }
-        KeyCode::Char('2') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            return Some(Action::ToggleSidebarTools);
-        }
-        KeyCode::Char('3') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            return Some(Action::ToggleSidebarMcp);
+            return Some(Action::ToggleSidebarEnvironment);
         }
         // Ctrl+Shift+C: copy selected text to clipboard.
         KeyCode::Char('C') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1270,12 +1264,12 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         KeyCode::Enter => {
             let picker_data = app.picker.as_ref().and_then(|p| {
                 p.selected_item()
-                    .map(|item| (item.id.clone(), p.kind.clone(), item.label.clone()))
+                    .map(|item| (item.id.clone(), p.kind.clone()))
             });
             // The thinking picker's budget row commits its draft as
             // `budget:<n>` instead of the raw row id.
             let budget_variant = app.picker.as_ref().and_then(selected_thinking_variant);
-            if let Some((id, kind, label)) = picker_data {
+            if let Some((id, kind)) = picker_data {
                 app.close_picker();
                 if kind == "command" {
                     if id.starts_with('/') {
@@ -1306,11 +1300,9 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 } else if kind == "permission_mode" {
                     mew_hooks::PermissionMode::from_id(&id).map(Action::SetPermissionMode)
                 } else if kind == "file" {
-                    if label.contains("[subagent]") {
-                        Some(Action::InsertSubagentMention(id))
-                    } else {
-                        Some(Action::InsertAtMention(format!("@{}", id)))
-                    }
+                    Some(Action::InsertAtMention(format!("@{}", id)))
+                } else if let Some(ns_kind) = kind.strip_prefix("ns_") {
+                    Some(Action::InsertNamespaceMention(ns_kind.to_string(), id))
                 } else if kind == "session" {
                     Some(Action::AttachSession(id))
                 } else if kind == "project" {
@@ -1350,6 +1342,24 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 }
             }
             app.picker_insert(c);
+            // If the user typed a namespace prefix (skill:, model:, subagent:)
+            // after `@` in the file picker, switch to the appropriate picker.
+            let picker_kind = app
+                .picker
+                .as_ref()
+                .filter(|p| p.kind == "file")
+                .and_then(|p| {
+                    let f = p.filter.as_str();
+                    crate::app::NAMESPACE_PREFIXES
+                        .iter()
+                        .find_map(|(kind, prefix)| {
+                            f.strip_prefix(prefix).map(|filter| (*kind, filter))
+                        })
+                });
+            if let Some((kind, filter)) = picker_kind {
+                let filter = filter.to_string();
+                app.open_namespace_picker(kind, &filter);
+            }
             None
         }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::META) => {
@@ -1442,14 +1452,12 @@ pub enum Action {
     SwitchModel(String),
     /// Insert an @mention path into the input.
     InsertAtMention(String),
-    /// Insert an @mention subagent reference.
-    InsertSubagentMention(String),
+    /// Insert a namespace reference (skill, model, or subagent) into the input.
+    InsertNamespaceMention(String, String),
     /// Copy selected text to clipboard.
     CopySelection(String),
-    /// Toggle sidebar section collapsed state.
-    ToggleSidebarContext,
-    ToggleSidebarTools,
-    ToggleSidebarMcp,
+    /// Toggle the sidebar's Environment section collapsed state.
+    ToggleSidebarEnvironment,
     /// Open the settings page (populate plugins).
     OpenSettings,
     /// Cancel the most recently started running subagent. Carries the

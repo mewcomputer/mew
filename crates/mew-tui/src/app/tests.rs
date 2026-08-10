@@ -28,6 +28,65 @@ fn test_parse_file_mentions_none() {
     assert!(mentions.is_empty());
 }
 
+// --- Skill reference parser tests ---
+
+#[test]
+fn test_parse_namespace_refs_skill() {
+    let refs = parse_namespace_refs("use @skill:clarify for this");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].kind, "skill");
+    assert_eq!(refs[0].value, "clarify");
+    assert_eq!(refs[0].raw, "@skill:clarify");
+}
+
+#[test]
+fn test_parse_namespace_refs_model() {
+    let refs = parse_namespace_refs("use @model:openai/gpt-4o");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].kind, "model");
+    assert_eq!(refs[0].value, "openai/gpt-4o");
+    assert_eq!(refs[0].raw, "@model:openai/gpt-4o");
+}
+
+#[test]
+fn test_parse_namespace_refs_subagent() {
+    let refs = parse_namespace_refs("spawn @subagent:researcher");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].kind, "subagent");
+    assert_eq!(refs[0].value, "researcher");
+    assert_eq!(refs[0].raw, "@subagent:researcher");
+}
+
+#[test]
+fn test_parse_namespace_refs_multiple() {
+    let refs = parse_namespace_refs("@skill:clarify and @model:openai/gpt-4o and @subagent:coder");
+    assert_eq!(refs.len(), 3);
+    assert_eq!(refs[0].kind, "skill");
+    assert_eq!(refs[1].kind, "model");
+    assert_eq!(refs[2].kind, "subagent");
+}
+
+#[test]
+fn test_parse_namespace_refs_none() {
+    assert!(parse_namespace_refs("no refs here").is_empty());
+    assert!(parse_namespace_refs("@src/main.rs is a file mention").is_empty());
+}
+
+#[test]
+fn test_parse_namespace_refs_trailing_punct() {
+    let refs = parse_namespace_refs("use @skill:clarify.");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].value, "clarify");
+}
+
+#[test]
+fn test_file_mentions_skip_namespaces() {
+    let mentions = parse_file_mentions(
+        "@skill:clarify @model:openai/gpt-4o @subagent:researcher @src/main.rs",
+    );
+    assert_eq!(mentions, vec!["src/main.rs"]);
+}
+
 #[test]
 fn test_builtin_slash_commands_has_core_commands() {
     let cmds = App::builtin_slash_commands();
@@ -828,6 +887,109 @@ fn test_insert_mention_replaces_trigger_at() {
     app.cursor = app.input.len();
     app.insert_mention("@lib.rs ");
     assert_eq!(app.input, "see @lib.rs ");
+}
+
+#[test]
+fn test_namespace_picker_skill() {
+    let mut app = App::new();
+    app.skill_catalog = vec![
+        mew_skills::Skill {
+            name: "clarify".into(),
+            description: "Improve UX copy".into(),
+            body: "body".into(),
+            path: std::path::PathBuf::from("(test)"),
+            template: false,
+        },
+        mew_skills::Skill {
+            name: "polish".into(),
+            description: "Final polish".into(),
+            body: "body".into(),
+            path: std::path::PathBuf::from("(test)"),
+            template: false,
+        },
+    ];
+
+    app.open_namespace_picker("skill", "");
+    let picker = app.picker.as_ref().expect("picker should be open");
+    assert_eq!(picker.kind, "ns_skill");
+    assert_eq!(picker.items.len(), 2);
+    assert!(picker.items.iter().any(|i| i.label == "@skill:clarify"));
+}
+
+#[test]
+fn test_namespace_picker_model() {
+    let mut app = App::new();
+    app.models = vec![
+        ("openai/gpt-4o".into(), "GPT-4o".into()),
+        (
+            "anthropic/claude-3-5-sonnet".into(),
+            "Claude 3.5 Sonnet".into(),
+        ),
+    ];
+
+    app.open_namespace_picker("model", "");
+    let picker = app.picker.as_ref().expect("picker should be open");
+    assert_eq!(picker.kind, "ns_model");
+    assert_eq!(picker.items.len(), 2);
+    assert!(picker
+        .items
+        .iter()
+        .any(|i| i.label == "@model:openai/gpt-4o"));
+}
+
+#[test]
+fn test_namespace_picker_subagent() {
+    let mut app = App::new();
+    app.subagent_catalog = vec![mew_subagents::SubagentDef {
+        name: "researcher".into(),
+        description: "Investigate research questions".into(),
+        model: None,
+        tools: None,
+        max_turns: None,
+        max_duration_secs: None,
+        body: "body".into(),
+        path: std::path::PathBuf::from("(test)"),
+        template: false,
+        can_spawn: false,
+        output_schema: None,
+    }];
+
+    app.open_namespace_picker("subagent", "");
+    let picker = app.picker.as_ref().expect("picker should be open");
+    assert_eq!(picker.kind, "ns_subagent");
+    assert_eq!(picker.items.len(), 1);
+    assert!(picker
+        .items
+        .iter()
+        .any(|i| i.label == "@subagent:researcher"));
+}
+
+#[test]
+fn test_insert_namespace_mention() {
+    let mut app = App::new();
+    // Input ends with `@` (the trigger that opened the picker).
+    app.input = "@".to_string();
+    app.cursor = 1;
+    app.insert_namespace_mention("model", "openai/gpt-4o");
+    assert_eq!(app.input, "@model:openai/gpt-4o ");
+
+    app.input = "@".to_string();
+    app.cursor = 1;
+    app.insert_namespace_mention("subagent", "researcher");
+    assert_eq!(app.input, "@subagent:researcher ");
+}
+
+#[test]
+fn test_skill_catalog_loaded_via_loader() {
+    // Verify the mew_skills::Loader populates skill_catalog correctly,
+    // matching how tui.rs loads skills at startup.
+    let loader = mew_skills::Loader::new(std::env::current_dir().unwrap_or_default());
+    let skills = loader.load().unwrap_or_default();
+    // Built-in skills (at minimum mew-docs) should be present.
+    assert!(
+        skills.iter().any(|s| s.name == "mew-docs"),
+        "skill_catalog should contain built-in skills"
+    );
 }
 
 #[test]
@@ -2415,4 +2577,28 @@ fn test_model_list_populates_thinking_budget() {
         (budget.min, budget.max, budget.step, budget.default),
         (0, 262_144, 1024, 131_072)
     );
+}
+
+#[test]
+fn test_ctrl_1_maps_to_environment_toggle() {
+    use crate::events::Action;
+    let mut app = App::new();
+    let key = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('1'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    let action = crate::events::handle_key_event(&mut app, key);
+    assert!(matches!(action, Some(Action::ToggleSidebarEnvironment)));
+}
+
+#[test]
+fn test_environment_toggle_first_press_expands() {
+    // Environment defaults to collapsed, so the first toggle must expand
+    // it (regression guard: the toggle must know the section's default).
+    let mut app = App::new();
+    assert!(App::sidebar_default_collapsed("environment"));
+    app.toggle_sidebar_section("environment");
+    assert_eq!(app.sidebar_collapsed.get("environment"), Some(&false));
+    app.toggle_sidebar_section("environment");
+    assert_eq!(app.sidebar_collapsed.get("environment"), Some(&true));
 }
