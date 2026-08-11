@@ -1,3 +1,45 @@
+# 2026-08-10 — wire builders demote images for non-vision models
+
+`Request` now carries `supports_vision: bool` (defaults to true); the agent
+sets it from `agent.supports_vision` at every request. All three wire
+builders (OpenAI, Anthropic, Responses) inspect this flag and demote any
+image data — both user-attached `File` parts and tool-result images — to
+plain text annotations when the model doesn't support vision. This is the
+case when a user has read an image with a vision model, then switched to a
+non-vision model: the base64 data is still in `ToolStateCompleted`, but the
+new model can't see it. Without the demote, non-vision providers either
+reject the request or leak the base64 bytes into the response. New
+regression test `test_build_wire_message_tool_result_image_demoted_when_no_vision`.
+
+# 2026-08-10 — reasoning truncator no longer breaks tool-pairing
+
+The reasoning truncator's "I've been thinking too long" ack is now appended
+as a Text Part on the SAME assistant message as the truncated reasoning,
+instead of being forged as a separate assistant message. The previous
+design broke the assistant→user alternation that the wire builders rely on:
+the forged ack cleared the `last_assistant_call_ids` tracking set, so the
+following user message's `ToolResultPart`s were dropped from the wire and
+the original `tool_calls` ended up with no matching `role:tool` response.
+OpenAI-compatible providers reject this with 400 "An assistant message with
+'toolcalls' must be followed by tool messages responding to each 'toolcall
+id'". The ack is now a part on the original assistant message, which keeps
+the conversation alternation intact. Regression test added.
+
+# 2026-08-10 — skip Running tool calls in wire builders
+
+All three wire builders (OpenAI, Anthropic, Responses) now skip both
+`Pending` and `Running` tool calls when emitting assistant messages.
+Previously only `Pending` was skipped, so an assistant message with a
+`Running` call would emit `tool_calls` / `tool_use` / `function_call` for
+that call while the following user message (where the matching
+`ToolResultPart` would land) hadn't been appended yet. OpenAI-compatible
+providers reject this with 400 "An assistant message with 'toolcalls' must
+be followed by tool messages responding to each 'toolcall id'" (Console
+Go, etc.); Anthropic returns a similar error for tool_use without
+tool_result. Tracking sets used to pair tool results now mirror the wire
+filter: only `Completed`/`Error` call_ids are included. New regression
+test `test_build_wire_message_skips_running_tool_calls`.
+
 # 2026-08-10 — read tool returns images for vision-capable models
 
 The `read` tool now detects image files (PNG, JPEG, GIF, WebP, BMP) by

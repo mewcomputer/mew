@@ -191,14 +191,22 @@ impl Adapter {
 
         for m in &req.messages {
             if let Some(msg) = self
-                .build_wire_message(&req.messages, m, &last_assistant_call_ids)
+                .build_wire_message(
+                    &req.messages,
+                    m,
+                    &last_assistant_call_ids,
+                    req.supports_vision,
+                )
                 .await
             {
                 if m.role == Role::Assistant {
                     last_assistant_call_ids.clear();
                     for p in &m.parts {
                         if let Part::ToolCall(tc) = p {
-                            if !matches!(tc.state, ToolState::Pending(_)) {
+                            // Mirror the wire builder: only Completed/Error
+                            // calls are emitted as tool_use, so only those
+                            // belong in the set used to pair tool_results.
+                            if matches!(tc.state, ToolState::Completed(_) | ToolState::Error(_)) {
                                 last_assistant_call_ids.insert(tc.call_id.clone());
                             }
                         }
@@ -325,6 +333,7 @@ impl Adapter {
         all: &[Message],
         m: &Message,
         last_assistant_call_ids: &std::collections::HashSet<String>,
+        supports_vision: bool,
     ) -> Option<serde_json::Value> {
         let mut content: Vec<serde_json::Value> = Vec::new();
 
@@ -342,11 +351,29 @@ impl Adapter {
                             // message. The API rejects tool_results without
                             // a preceding tool_use.
                             let (text, images) = Self::find_tool_output(all, &pt.call_id);
-                            if images.is_empty() {
+                            if images.is_empty() || !supports_vision {
+                                // Demote images to text annotations when the
+                                // active model doesn't support vision.
+                                let content_text = if images.is_empty() {
+                                    text
+                                } else {
+                                    let mut combined = text;
+                                    if !combined.is_empty() && !combined.ends_with('\n') {
+                                        combined.push('\n');
+                                    }
+                                    for img in &images {
+                                        combined.push_str(&format!(
+                                            "[Image omitted: {} ({} bytes); current model does not support vision]\n",
+                                            img.mime,
+                                            img.data.len() * 3 / 4
+                                        ));
+                                    }
+                                    combined
+                                };
                                 content.push(json!({
                                     "type": "tool_result",
                                     "tool_use_id": pt.call_id,
-                                    "content": text,
+                                    "content": content_text,
                                 }));
                             } else {
                                 // Vision tool result: emit multi-block content
@@ -374,15 +401,26 @@ impl Adapter {
                         }
                         Part::File(pt) => {
                             if pt.mime.starts_with("image/") {
-                                let b64 = self.read_image_data(&pt.url).await;
-                                content.push(json!({
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": pt.mime,
-                                        "data": b64,
-                                    }
-                                }));
+                                if supports_vision {
+                                    let b64 = self.read_image_data(&pt.url).await;
+                                    content.push(json!({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": pt.mime,
+                                            "data": b64,
+                                        }
+                                    }));
+                                } else {
+                                    let filename = pt.filename.as_deref().unwrap_or("image");
+                                    content.push(json!({
+                                        "type": "text",
+                                        "text": format!(
+                                            "[Image attached: {} ({}); omitted — current model does not support vision]",
+                                            filename, pt.mime
+                                        ),
+                                    }));
+                                }
                             } else {
                                 let filename = pt.filename.as_deref().unwrap_or("unnamed");
                                 content.push(json!({
@@ -425,11 +463,15 @@ impl Adapter {
                             }
                         }
                         Part::ToolCall(pt) => {
-                            // Skip tool calls that are still Pending — they
-                            // have no result yet. Emitting a tool_use without
-                            // a matching tool_result block causes API errors
-                            // on replay after interrupted sessions.
-                            if matches!(pt.state, ToolState::Pending(_)) {
+                            // Skip tool calls without a final result yet.
+                            // Pending = never started; Running = started but
+                            // not complete. Both lack a matching tool_result
+                            // block in the next user message, so emitting
+                            // them creates a tool_use without a corresponding
+                            // tool_result and the API rejects the request
+                            // ("messages: tool_use ids were found without
+                            // tool_result blocks immediately after them").
+                            if matches!(pt.state, ToolState::Pending(_) | ToolState::Running(_)) {
                                 continue;
                             }
                             // The API rejects non-object input (sessions
@@ -999,7 +1041,7 @@ mod tests {
             assistant: None,
         };
         let wire = adapter
-            .build_wire_message(&[], &msg, &empty_call_ids())
+            .build_wire_message(&[], &msg, &empty_call_ids(), true)
             .await;
         assert!(wire.is_some());
         let wire = wire.unwrap();
@@ -1078,7 +1120,7 @@ mod tests {
             }),
         };
         let wire = adapter
-            .build_wire_message(&[], &msg, &empty_call_ids())
+            .build_wire_message(&[], &msg, &empty_call_ids(), true)
             .await;
         assert!(wire.is_some());
         let wire = wire.unwrap();
@@ -1137,7 +1179,7 @@ mod tests {
             assistant: None,
         };
         let wire = adapter
-            .build_wire_message(&[], &msg, &empty_call_ids())
+            .build_wire_message(&[], &msg, &empty_call_ids(), true)
             .await;
         assert!(wire.is_some());
         let wire = wire.unwrap();
@@ -1203,7 +1245,7 @@ mod tests {
             }),
         };
         let wire = adapter
-            .build_wire_message(&[], &msg, &empty_call_ids())
+            .build_wire_message(&[], &msg, &empty_call_ids(), true)
             .await
             .unwrap();
         let content = wire["content"].as_array().unwrap();
@@ -1286,7 +1328,9 @@ mod tests {
         // the tracking set for the tool_result to be emitted.
         let mut call_ids = std::collections::HashSet::new();
         call_ids.insert("call_789".to_string());
-        let wire = adapter.build_wire_message(&all, &user_msg, &call_ids).await;
+        let wire = adapter
+            .build_wire_message(&all, &user_msg, &call_ids, true)
+            .await;
         assert!(wire.is_some());
         let wire = wire.unwrap();
         let content = wire["content"].as_array().unwrap();
@@ -1343,7 +1387,7 @@ mod tests {
             assistant: None,
         };
         let wire = adapter
-            .build_wire_message(&[], &msg, &empty_call_ids())
+            .build_wire_message(&[], &msg, &empty_call_ids(), true)
             .await;
         assert!(wire.is_some());
         let wire = wire.unwrap();
@@ -1391,6 +1435,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: Default::default(),
+            ..Default::default()
         };
 
         let mut stream = adapter.stream(req).await.expect("stream");
@@ -1446,6 +1491,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: Default::default(),
+            ..Default::default()
         };
 
         let mut stream = adapter.stream(req).await.expect("stream");
@@ -1509,6 +1555,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: Default::default(),
+            ..Default::default()
         };
 
         let mut stream = adapter.stream(req).await.expect("stream");
@@ -1572,6 +1619,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: Default::default(),
+            ..Default::default()
         };
 
         let mut stream = adapter.stream(req).await.expect("stream");
@@ -1639,6 +1687,7 @@ mod tests {
                 tool_choice: None,
             }),
             headers: reqwest::header::HeaderMap::new(),
+            ..Default::default()
         }
     }
 
@@ -1825,6 +1874,7 @@ mod tests {
                 tool_choice: Some(tool_choice),
             }),
             headers: reqwest::header::HeaderMap::new(),
+            ..Default::default()
         }
     }
 

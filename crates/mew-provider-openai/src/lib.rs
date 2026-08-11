@@ -221,14 +221,23 @@ impl Adapter {
 
         for m in &req.messages {
             let msgs = self
-                .build_wire_message(&req.messages, m, &last_assistant_call_ids)
+                .build_wire_message(
+                    &req.messages,
+                    m,
+                    &last_assistant_call_ids,
+                    req.supports_vision,
+                )
                 .await;
             // Update the tracking set if this message emitted tool_calls.
             if m.role == Role::Assistant {
                 last_assistant_call_ids.clear();
                 for p in &m.parts {
                     if let Part::ToolCall(tc) = p {
-                        if !matches!(tc.state, ToolState::Pending(_)) {
+                        // Mirror the wire builder: only include calls with a
+                        // final state (Completed or Error). Pending/Running
+                        // calls aren't emitted as tool_calls, so they shouldn't
+                        // be in the set used to pair ToolResultParts.
+                        if matches!(tc.state, ToolState::Completed(_) | ToolState::Error(_)) {
                             last_assistant_call_ids.insert(tc.call_id.clone());
                         }
                     }
@@ -322,6 +331,7 @@ impl Adapter {
         all: &[Message],
         m: &Message,
         last_assistant_call_ids: &std::collections::HashSet<String>,
+        supports_vision: bool,
     ) -> Vec<serde_json::Value> {
         let mut out: Vec<serde_json::Value> = Vec::new();
 
@@ -351,15 +361,26 @@ impl Adapter {
                         }
                         Part::File(pt) => {
                             if pt.mime.starts_with("image/") {
-                                if let Ok((mime, b64)) =
-                                    mew_provider::imageutil::resolve(&pt.url).await
-                                {
-                                    image_blocks.push(json!({
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": format!("data:{};base64,{}", mime, b64),
-                                        }
-                                    }));
+                                if supports_vision {
+                                    if let Ok((mime, b64)) =
+                                        mew_provider::imageutil::resolve(&pt.url).await
+                                    {
+                                        image_blocks.push(json!({
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": format!("data:{};base64,{}", mime, b64),
+                                            }
+                                        }));
+                                    }
+                                } else {
+                                    // Vision disabled — don't emit base64 the
+                                    // model can't see. Annotate so the model
+                                    // knows an image was attached but skipped.
+                                    let filename = pt.filename.as_deref().unwrap_or("image");
+                                    text_content.push_str(&format!(
+                                        "\n[Image attached: {} ({}); omitted — current model does not support vision]",
+                                        filename, pt.mime
+                                    ));
                                 }
                             } else {
                                 let filename = pt.filename.as_deref().unwrap_or("unnamed");
@@ -372,10 +393,34 @@ impl Adapter {
                             // message. Providers reject role:tool messages
                             // that don't follow a preceding tool_calls message.
                             let (text, images) = Self::find_tool_output(all, &pt.call_id);
-                            if images.is_empty() {
+                            if images.is_empty() || !supports_vision {
+                                // Demote images to text annotations when the
+                                // active model doesn't support vision. This
+                                // covers the case where the tool was run on
+                                // a vision model and the user has since
+                                // switched to a non-vision model — the base64
+                                // data is still in ToolStateCompleted, but the
+                                // new model can't see it. Include the byte
+                                // count so the model at least knows the size.
+                                let content = if images.is_empty() {
+                                    text
+                                } else {
+                                    let mut combined = text;
+                                    if !combined.is_empty() && !combined.ends_with('\n') {
+                                        combined.push('\n');
+                                    }
+                                    for img in &images {
+                                        combined.push_str(&format!(
+                                            "[Image omitted: {} ({} bytes); current model does not support vision]\n",
+                                            img.mime,
+                                            img.data.len() * 3 / 4
+                                        ));
+                                    }
+                                    combined
+                                };
                                 tool_results.push(json!({
                                     "role": "tool",
-                                    "content": text,
+                                    "content": content,
                                     "tool_call_id": pt.call_id,
                                 }));
                             } else {
@@ -433,12 +478,15 @@ impl Adapter {
                             reasoning.push_str(&pt.text);
                         }
                         Part::ToolCall(pt) => {
-                            // Skip tool calls that are still Pending — they have
-                            // no result yet, and emitting them creates an
-                            // assistant message with tool_calls but no matching
-                            // role:tool response, which providers reject with
-                            // "insufficient tool messages following toolcalls".
-                            if matches!(pt.state, ToolState::Pending(_)) {
+                            // Skip tool calls without a final result yet.
+                            // Pending = never started; Running = started but
+                            // not complete. Both lack a matching ToolResultPart
+                            // in the next user message, so emitting them would
+                            // create an assistant message with tool_calls but
+                            // no matching role:tool response — providers reject
+                            // this with "insufficient tool messages following
+                            // toolcalls message".
+                            if matches!(pt.state, ToolState::Pending(_) | ToolState::Running(_)) {
                                 continue;
                             }
                             // Backends reject non-object arguments (sessions
@@ -937,7 +985,7 @@ mod tests {
             assistant: None,
         };
         let wire = adapter
-            .build_wire_message(&[], &msg, &empty_call_ids())
+            .build_wire_message(&[], &msg, &empty_call_ids(), true)
             .await;
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0]["role"], "user");
@@ -1003,7 +1051,7 @@ mod tests {
             }),
         };
         let wire = adapter
-            .build_wire_message(&[], &msg, &empty_call_ids())
+            .build_wire_message(&[], &msg, &empty_call_ids(), true)
             .await;
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0]["role"], "assistant");
@@ -1063,7 +1111,7 @@ mod tests {
             }),
         };
         let wire = adapter
-            .build_wire_message(&[], &msg, &empty_call_ids())
+            .build_wire_message(&[], &msg, &empty_call_ids(), true)
             .await;
         assert_eq!(wire.len(), 1);
         assert_eq!(
@@ -1131,7 +1179,7 @@ mod tests {
             }),
         };
         let wire = adapter
-            .build_wire_message(&[], &msg, &empty_call_ids())
+            .build_wire_message(&[], &msg, &empty_call_ids(), true)
             .await;
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0]["role"], "assistant");
@@ -1141,6 +1189,69 @@ mod tests {
         assert!(
             wire[0].get("tool_calls").is_none(),
             "Pending tool calls must not appear in wire messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_skips_running_tool_calls() {
+        // A Running tool call (started but not yet complete) has no
+        // ToolResultPart in the next user message. Emitting it would
+        // create an assistant message with tool_calls but no matching
+        // role:tool response, which providers reject with
+        // "insufficient tool messages following toolcalls message".
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                tool_name: "read".to_string(),
+                call_id: "call_running".to_string(),
+                state: ToolState::Running(mew_message::ToolStateRunning {
+                    input: serde_json::json!({"path": "foo.rs"}),
+                    output: String::new(),
+                    time: ToolTime {
+                        start: 0,
+                        end: None,
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: Some(AssistantMeta {
+                provider_id: String::new(),
+                model_id: String::new(),
+                cost: 0.0,
+                tokens: Tokens::default(),
+                finish: None,
+                error: None,
+                manifest: None,
+            }),
+        };
+        let wire = adapter
+            .build_wire_message(&[], &msg, &empty_call_ids(), true)
+            .await;
+        // The Running tool call is skipped, but a wire message is still
+        // emitted (with no content and no tool_calls). This is important:
+        // dropping the message entirely would break message alternation.
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0]["role"], "assistant");
+        assert!(
+            wire[0].get("tool_calls").is_none(),
+            "Running tool calls must not appear in wire messages"
         );
     }
 
@@ -1191,7 +1302,7 @@ mod tests {
             assistant: None,
         };
         let wire = adapter
-            .build_wire_message(&[], &msg, &empty_call_ids())
+            .build_wire_message(&[], &msg, &empty_call_ids(), true)
             .await;
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0]["role"], "user");
@@ -1236,7 +1347,7 @@ mod tests {
         };
         // Pass empty call_ids — no preceding assistant message had this call.
         let wire = adapter
-            .build_wire_message(&[], &msg, &empty_call_ids())
+            .build_wire_message(&[], &msg, &empty_call_ids(), true)
             .await;
         // The tool result is dropped; the user message has no text/image,
         // so nothing is emitted at all.
@@ -1276,7 +1387,7 @@ mod tests {
         };
         let mut call_ids = std::collections::HashSet::new();
         call_ids.insert("call_valid".to_string());
-        let wire = adapter.build_wire_message(&[], &msg, &call_ids).await;
+        let wire = adapter.build_wire_message(&[], &msg, &call_ids, true).await;
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0]["role"], "tool");
         assert_eq!(wire[0]["tool_call_id"], "call_valid");
@@ -1867,6 +1978,101 @@ mod tests {
         let url = content[1]["image_url"]["url"].as_str().unwrap();
         assert!(url.starts_with("data:image/png;base64,"));
         assert!(url.contains("iVBORw0KGgo="));
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_tool_result_image_demoted_when_no_vision() {
+        // Regression: when the user has switched from a vision-capable model
+        // to a non-vision model, stored tool images from prior turns must be
+        // demoted to text annotations instead of base64 data URLs. Otherwise
+        // non-vision providers would either reject the request or leak the
+        // base64 bytes into the model output.
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let assistant_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                tool_name: "read".to_string(),
+                call_id: "read:1".to_string(),
+                state: ToolState::Completed(ToolStateCompleted {
+                    input: serde_json::json!({"path": "photo.png"}),
+                    output: "[Image: photo.png (10 bytes, image/png)]".to_string(),
+                    metadata: None,
+                    diff: None,
+                    images: vec![mew_message::ToolImage {
+                        mime: "image/png".to_string(),
+                        // 24 base64 chars ≈ 17 bytes decoded
+                        data: "iVBORw0KGgoAAAANSUhEUgAAAA".to_string(),
+                    }],
+                    time: ToolTime {
+                        start: 0,
+                        end: Some(1),
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let user_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![Part::ToolResult(ToolResultPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                call_id: "read:1".to_string(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let all = vec![assistant_msg, user_msg];
+        let req = Request {
+            model: "test-model".to_string(),
+            messages: all,
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: reqwest::header::HeaderMap::new(),
+            supports_vision: false,
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let messages = body_json["messages"].as_array().unwrap();
+
+        // The tool message should contain a plain text annotation, not an
+        // image_url block.
+        let tool_msg = &messages[1];
+        assert_eq!(tool_msg["role"], "tool");
+        let content_str = tool_msg["content"].as_str().unwrap();
+        assert!(content_str.contains("[Image omitted: image/png"));
+        assert!(content_str.contains("does not support vision"));
+        // The base64 data must NOT be in the wire.
+        assert!(!content_str.contains("iVBORw0KGgo"));
+        // content must be a string, not an array.
+        assert!(tool_msg["content"].is_string());
     }
 
     fn tool_choice_request(

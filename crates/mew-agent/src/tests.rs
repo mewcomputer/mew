@@ -2789,6 +2789,30 @@ async fn test_long_reasoning_truncates_and_forges_ack() {
         has_ack,
         "forged acknowledgement assistant message must be in history"
     );
+
+    // Regression: the ack must be appended as a Part on the same assistant
+    // message (not as a new assistant message), so the wire builder keeps
+    // pairing the original tool_calls with the next user message's
+    // ToolResultParts. Forging a separate assistant message used to break
+    // the alternation and cause providers to reject the request
+    // ("insufficient tool messages following toolcalls").
+    drop(msgs);
+    let msgs = agent.messages.lock().await;
+    let assistant_with_tool_call = msgs
+        .iter()
+        .find(|m| {
+            m.role == Role::Assistant
+                && m.parts.iter().any(|p| matches!(p, Part::ToolCall(_)))
+                && m.parts.iter().any(|p| matches!(p, Part::Reasoning(_)))
+        })
+        .expect("assistant message should contain both tool_call and reasoning parts");
+    assert!(
+        assistant_with_tool_call
+            .parts
+            .iter()
+            .any(|p| matches!(p, Part::Text(tp) if tp.text.contains("Acknowledging overthinking"))),
+        "ack Text part must live on the SAME assistant message as the tool_call"
+    );
 }
 
 #[tokio::test]

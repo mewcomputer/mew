@@ -2479,6 +2479,7 @@ async fn generate_session_title(agent: &Agent, prompt_text: &str) -> String {
             ..Default::default()
         }),
         headers: Default::default(),
+        supports_vision: agent.supports_vision,
     };
 
     match agent.provider.stream(req).await {
@@ -2774,6 +2775,7 @@ async fn generate_session_summary(agent: &Agent) -> Option<String> {
             ..Default::default()
         }),
         headers: Default::default(),
+        supports_vision: agent.supports_vision,
     };
     match agent.provider.stream(req).await {
         Ok(mut stream) => {

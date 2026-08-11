@@ -681,6 +681,7 @@ impl Agent {
                 ..Default::default()
             }),
             headers: http::HeaderMap::new(),
+            supports_vision: self.supports_vision,
         };
 
         let stream = match provider.stream(request).await {

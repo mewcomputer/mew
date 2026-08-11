@@ -146,6 +146,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: Default::default(),
+            ..Default::default()
         }
     }
 

@@ -306,13 +306,22 @@ impl Adapter {
             std::collections::HashSet::new();
 
         for m in &req.messages {
-            self.build_wire_message(m, &tool_outputs, &mut input, &last_assistant_call_ids)
-                .await;
+            self.build_wire_message(
+                m,
+                &tool_outputs,
+                &mut input,
+                &last_assistant_call_ids,
+                req.supports_vision,
+            )
+            .await;
             if m.role == Role::Assistant {
                 last_assistant_call_ids.clear();
                 for p in &m.parts {
                     if let Part::ToolCall(tc) = p {
-                        if !matches!(tc.state, ToolState::Pending(_)) {
+                        // Mirror the wire builder: only Completed/Error
+                        // calls are emitted as function_call, so only those
+                        // belong in the set used to pair function_call_output.
+                        if matches!(tc.state, ToolState::Completed(_) | ToolState::Error(_)) {
                             last_assistant_call_ids.insert(tc.call_id.clone());
                         }
                     }
@@ -453,6 +462,7 @@ impl Adapter {
         tool_outputs: &std::collections::HashMap<&str, (String, Vec<mew_message::ToolImage>)>,
         input: &mut Vec<serde_json::Value>,
         last_assistant_call_ids: &std::collections::HashSet<String>,
+        supports_vision: bool,
     ) {
         match m.role {
             Role::System => {
@@ -487,10 +497,27 @@ impl Adapter {
                             }
                         }
                         Part::File(fp) => {
-                            text_content.push(json!({
-                                "type": "input_image",
-                                "image_url": fp.url,
-                            }));
+                            if fp.mime.starts_with("image/") && supports_vision {
+                                text_content.push(json!({
+                                    "type": "input_image",
+                                    "image_url": fp.url,
+                                }));
+                            } else if fp.mime.starts_with("image/") {
+                                let filename = fp.filename.as_deref().unwrap_or("image");
+                                text_content.push(json!({
+                                    "type": "input_text",
+                                    "text": format!(
+                                        "[Image attached: {} ({}); omitted — current model does not support vision]",
+                                        filename, fp.mime
+                                    ),
+                                }));
+                            } else {
+                                let filename = fp.filename.as_deref().unwrap_or("file");
+                                text_content.push(json!({
+                                    "type": "input_text",
+                                    "text": format!("[File: {}]", filename),
+                                }));
+                            }
                         }
                         Part::ToolResult(tr)
                             if last_assistant_call_ids.contains(tr.call_id.as_str()) =>
@@ -504,12 +531,16 @@ impl Adapter {
                                 .cloned()
                                 .unwrap_or_default();
                             // The Responses API function_call_output only
-                            // accepts a string. When images are present,
-                            // encode them as data URLs appended to the text
-                            // so vision-capable models can process them.
+                            // accepts a string. When images are present and
+                            // the model supports vision, encode them as data
+                            // URLs appended to the text. When the model
+                            // doesn't support vision, demote to a text
+                            // annotation so the model gets a coherent, non-
+                            // broken payload (and the base64 bytes don't
+                            // leak into the response).
                             let output = if images.is_empty() {
                                 text
-                            } else {
+                            } else if supports_vision {
                                 let mut combined = text;
                                 for img in &images {
                                     if !combined.is_empty() {
@@ -518,6 +549,19 @@ impl Adapter {
                                     combined.push_str(&format!(
                                         "data:{};base64,{}",
                                         img.mime, img.data
+                                    ));
+                                }
+                                combined
+                            } else {
+                                let mut combined = text;
+                                if !combined.is_empty() && !combined.ends_with('\n') {
+                                    combined.push('\n');
+                                }
+                                for img in &images {
+                                    combined.push_str(&format!(
+                                        "[Image omitted: {} ({} bytes); current model does not support vision]\n",
+                                        img.mime,
+                                        img.data.len() * 3 / 4
                                     ));
                                 }
                                 combined
@@ -568,11 +612,14 @@ impl Adapter {
                             }
                         }
                         Part::ToolCall(tc) => {
-                            // Skip tool calls that are still Pending — they
-                            // have no result yet. Emitting a function_call
-                            // without a matching function_call_output causes
-                            // API errors on replay after interrupted sessions.
-                            if matches!(tc.state, ToolState::Pending(_)) {
+                            // Skip tool calls without a final result yet.
+                            // Pending = never started; Running = started but
+                            // not complete. Both lack a matching
+                            // function_call_output in the next user message,
+                            // so emitting them creates a function_call without
+                            // a corresponding function_call_output and the API
+                            // rejects the request.
+                            if matches!(tc.state, ToolState::Pending(_) | ToolState::Running(_)) {
                                 continue;
                             }
                             // Backends reject non-object arguments (sessions
@@ -1387,6 +1434,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let body = adapter.build_request_body(&req).await.unwrap();
@@ -1447,6 +1495,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let body = adapter.build_request_body(&req).await.unwrap();
@@ -1506,6 +1555,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let body = adapter.build_request_body(&req).await.unwrap();
@@ -1586,6 +1636,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let body = adapter.build_request_body(&req).await.unwrap();
@@ -1614,6 +1665,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let body = adapter.build_request_body(&req).await.unwrap();
@@ -1644,6 +1696,8 @@ mod tests {
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+
+            ..Default::default()
         };
 
         let body = adapter.build_request_body(&req).await.unwrap();
@@ -1678,6 +1732,8 @@ mod tests {
             }),
             params: None,
             headers: http::HeaderMap::new(),
+
+            ..Default::default()
         };
 
         let body = adapter.build_request_body(&req).await.unwrap();
@@ -1700,6 +1756,8 @@ mod tests {
             }),
             params: None,
             headers: http::HeaderMap::new(),
+
+            ..Default::default()
         };
 
         let body2 = adapter.build_request_body(&req2).await.unwrap();
@@ -1723,6 +1781,8 @@ mod tests {
                 tool_choice: None,
             }),
             headers: http::HeaderMap::new(),
+
+            ..Default::default()
         };
 
         let body = adapter.build_request_body(&req).await.unwrap();
@@ -1759,6 +1819,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
         let body = adapter.build_request_body(&req).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1777,6 +1838,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
         let body = adapter.build_request_body(&req).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1810,6 +1872,8 @@ mod tests {
             }),
             params: None,
             headers: http::HeaderMap::new(),
+
+            ..Default::default()
         };
 
         let body = adapter.build_request_body(&req).await.unwrap();
@@ -1863,6 +1927,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
         let body = adapter.build_request_body(&req).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1898,6 +1963,8 @@ mod tests {
             }),
             params: None,
             headers: http::HeaderMap::new(),
+
+            ..Default::default()
         };
         let body = adapter.build_request_body(&req).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1924,6 +1991,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
         let body = adapter.build_request_body(&req).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1988,6 +2056,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let stream = adapter.stream(req).await.unwrap();
@@ -2081,6 +2150,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let stream = adapter.stream(req).await.unwrap();
@@ -2140,6 +2210,8 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"status\
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+
+            ..Default::default()
         };
 
         let stream = adapter.stream(req).await.unwrap();
@@ -2205,6 +2277,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_3\",\"status\
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let stream = adapter.stream(req).await.unwrap();
@@ -2287,6 +2360,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_4\",\"status\
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let stream = adapter.stream(req).await.unwrap();
@@ -2388,6 +2462,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_4\",\"status\
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let body = adapter.build_request_body(&req).await.unwrap();
@@ -2464,6 +2539,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_4\",\"status\
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let body = adapter.build_request_body(&req).await.unwrap();
@@ -2513,6 +2589,7 @@ data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_err\",\"error\":
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let stream = adapter.stream(req).await.unwrap();
@@ -2566,6 +2643,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_u\",\"status\
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let stream = adapter.stream(req).await.unwrap();
@@ -2609,6 +2687,7 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_u\",\"status\
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         };
 
         let result = adapter.stream(req).await;

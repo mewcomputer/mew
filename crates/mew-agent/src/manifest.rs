@@ -609,6 +609,7 @@ mod tests {
             reasoning: None,
             params: None,
             headers: http::HeaderMap::new(),
+            ..Default::default()
         }
     }
 

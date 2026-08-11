@@ -53,7 +53,7 @@ pub enum ToolChoice {
     None_,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Request {
     pub model: String,
     pub messages: Vec<Message>,
@@ -69,6 +69,27 @@ pub struct Request {
     /// HTTP headers to add to the request. Set by the `on_chat_headers`
     /// hook in the host. Providers that don't use them can ignore.
     pub headers: http::HeaderMap,
+    /// Whether the active model supports image input. When false, wire
+    /// builders demote any image data in tool results / file attachments to
+    /// plain-text annotations so the model sees a coherent, non-broken
+    /// request. Defaults to true so callers that don't opt in keep current
+    /// behavior.
+    pub supports_vision: bool,
+}
+
+impl Default for Request {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: http::HeaderMap::new(),
+            supports_vision: true,
+        }
+    }
 }
 
 /// Per-provider reasoning/thinking configuration.

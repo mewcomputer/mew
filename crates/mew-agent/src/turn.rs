@@ -284,6 +284,7 @@ impl Agent {
                     }),
                 }),
                 headers,
+                supports_vision: self.supports_vision,
             };
 
             let req_for_fallback = req.clone();
@@ -458,36 +459,42 @@ impl Agent {
 
             // Reasoning-truncation hook: if any reasoning trace in this
             // turn exceeded the configured threshold, truncate the part
-            // in place, forge a short acknowledgement assistant message
-            // into history, and flag the next request to force a tool
-            // call. Provider-agnostic — no stream mutation needed.
+            // in place, append a short acknowledgement Text part to the
+            // SAME assistant message, and flag the next request to force
+            // a tool call. The ack is appended as a part (not a new
+            // message) so the wire builder keeps pairing the assistant's
+            // tool_calls with the user message's ToolResultParts that
+            // follow — a forged assistant message between them would
+            // break the alternation and cause providers to reject the
+            // request ("insufficient tool messages following toolcalls").
             if self.reasoning_truncation_enabled {
                 if let Some(msg) = assistant_msg.as_mut() {
                     if self.maybe_truncate_reasoning_in_place(msg) {
-                        let ack_msg = Message {
-                            id: Ulid::new(),
-                            session_id: self.session_id,
-                            role: Role::Assistant,
-                            parts: vec![Part::Text(TextPart {
-                                base: PartBase {
-                                    id: Ulid::new(),
-                                    message_id: Ulid::new(),
-                                    session_id: self.session_id,
-                                },
-                                text: crate::reasoning_truncator::TRUNCATION_ACK_TEXT.to_string(),
-                                synthetic: true,
-                            })],
-                            time: Time {
-                                created: Utc::now().timestamp_millis(),
-                                completed: Some(Utc::now().timestamp_millis()),
+                        let ack_text_part = Part::Text(TextPart {
+                            base: PartBase {
+                                id: Ulid::new(),
+                                message_id: msg.id,
+                                session_id: self.session_id,
                             },
-                            assistant: None,
-                        };
+                            text: crate::reasoning_truncator::TRUNCATION_ACK_TEXT.to_string(),
+                            synthetic: true,
+                        });
+                        msg.parts.push(ack_text_part);
                         tracing::info!(
                             threshold = self.reasoning_truncator.threshold,
-                            "reasoning truncated; forging acknowledgement + forcing tool_choice"
+                            "reasoning truncated; appended acknowledgement part + forcing tool_choice"
                         );
-                        self.append_message(ack_msg).await;
+                        // Sync the modified assistant message back into
+                        // the store so the next request sees the new part.
+                        let updated_msg = msg.clone();
+                        let mut messages = self.messages.lock().await;
+                        for m in messages.iter_mut() {
+                            if m.id == updated_msg.id {
+                                *m = updated_msg;
+                                break;
+                            }
+                        }
+                        drop(messages);
                         self.reasoning_truncator.mark_truncated();
                     }
                 }
@@ -1065,7 +1072,8 @@ pub(crate) fn repair_orphaned_tool_calls(
     }
 
     // Find orphaned Pending tool calls and collect their call_ids + assistant
-    // message indices so we can patch them in place.
+    // message indices so we can patch them in place. Running tool calls are
+    // already skipped by the wire builders, so they don't need repair here.
     let now = chrono::Utc::now().timestamp();
     let mut to_repair: Vec<(usize, String)> = Vec::new();
     for (i, msg) in messages.iter().enumerate() {
