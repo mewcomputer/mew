@@ -38,6 +38,10 @@ pub struct ToolCtxShared {
     pub snapshot_store: std::sync::Arc<dyn mew_hashline::SnapshotStore>,
     /// Whether this turn is attached to the native desktop browser.
     pub browser_enabled: bool,
+    /// Whether the active model supports image input. Tools can use this to
+    /// gate vision-specific behavior (e.g. returning image data vs. a text
+    /// fallback message).
+    pub supports_vision: bool,
 }
 
 impl Default for ToolCtxShared {
@@ -50,6 +54,7 @@ impl Default for ToolCtxShared {
             shell_session: None,
             snapshot_store: std::sync::Arc::new(mew_hashline::InMemorySnapshotStore::new()),
             browser_enabled: false,
+            supports_vision: false,
         }
     }
 }
@@ -97,6 +102,21 @@ impl ToolCtx {
         Self::new(
             Arc::new(ToolCtxShared {
                 cwd,
+                ..Default::default()
+            }),
+            "test".into(),
+            CancellationToken::new(),
+            mpsc::channel(1).0,
+        )
+    }
+
+    /// Test helper: build a ToolCtx with vision support enabled.
+    #[cfg(test)]
+    pub fn test_with_vision(cwd: PathBuf) -> Self {
+        Self::new(
+            Arc::new(ToolCtxShared {
+                cwd,
+                supports_vision: true,
                 ..Default::default()
             }),
             "test".into(),

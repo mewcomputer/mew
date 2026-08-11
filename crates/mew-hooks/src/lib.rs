@@ -184,7 +184,16 @@ pub struct ToolOutput {
     /// per-session change stats.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_delta: Option<FileDelta>,
+    /// Images returned by a tool for vision-capable models. Each entry is
+    /// base64-encoded raw image data with a MIME type. Wire builders convert
+    /// these into provider-specific image content blocks inside tool results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ToolImage>,
 }
+
+/// An image produced by a tool, intended for vision-capable models.
+/// The `data` field holds base64-encoded raw image bytes.
+pub type ToolImage = mew_message::ToolImage;
 
 /// Line-level diff stats for a single file operation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

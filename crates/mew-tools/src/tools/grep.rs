@@ -296,6 +296,7 @@ impl Tool for Grep {
                 diff: None,
                 metadata: None,
                 file_delta: None,
+                images: vec![],
             })
         })
         .await;

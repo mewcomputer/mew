@@ -59,6 +59,7 @@ impl Tool for ExitTool {
             diff: None,
             metadata: None,
             file_delta: None,
+            images: vec![],
         })
     }
 }

@@ -765,6 +765,7 @@ impl mew_tools::Tool for McpTool {
                 diff: None,
                 metadata: None,
                 file_delta: None,
+                images: vec![],
             }),
         }
     }

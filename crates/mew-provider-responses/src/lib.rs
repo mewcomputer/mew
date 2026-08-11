@@ -272,7 +272,9 @@ impl Provider for Adapter {
 impl Adapter {
     /// Build a lookup map of call_id → tool output string, scanning all
     /// messages once. O(N×P) instead of O(N²×P) when called per tool result.
-    fn build_tool_output_map(messages: &[Message]) -> std::collections::HashMap<&str, String> {
+    fn build_tool_output_map(
+        messages: &[Message],
+    ) -> std::collections::HashMap<&str, (String, Vec<mew_message::ToolImage>)> {
         let mut map = std::collections::HashMap::new();
         for m in messages {
             for p in &m.parts {
@@ -280,8 +282,9 @@ impl Adapter {
                     // For Error state, return the error message so the
                     // provider sees a non-empty tool result.
                     let output = match &tc.state {
-                        ToolState::Error(e) => e.error.clone(),
-                        _ => tc.state.output().unwrap_or("").to_string(),
+                        ToolState::Error(e) => (e.error.clone(), vec![]),
+                        ToolState::Completed(c) => (c.output.clone(), c.images.clone()),
+                        _ => (tc.state.output().unwrap_or("").to_string(), vec![]),
                     };
                     map.insert(tc.call_id.as_str(), output);
                 }
@@ -447,7 +450,7 @@ impl Adapter {
     async fn build_wire_message(
         &self,
         m: &Message,
-        tool_outputs: &std::collections::HashMap<&str, String>,
+        tool_outputs: &std::collections::HashMap<&str, (String, Vec<mew_message::ToolImage>)>,
         input: &mut Vec<serde_json::Value>,
         last_assistant_call_ids: &std::collections::HashSet<String>,
     ) {
@@ -496,10 +499,29 @@ impl Adapter {
                             // to a function_call in the immediately preceding
                             // assistant message. The API rejects outputs that
                             // don't follow a preceding function_call.
-                            let output = tool_outputs
+                            let (text, images) = tool_outputs
                                 .get(tr.call_id.as_str())
                                 .cloned()
                                 .unwrap_or_default();
+                            // The Responses API function_call_output only
+                            // accepts a string. When images are present,
+                            // encode them as data URLs appended to the text
+                            // so vision-capable models can process them.
+                            let output = if images.is_empty() {
+                                text
+                            } else {
+                                let mut combined = text;
+                                for img in &images {
+                                    if !combined.is_empty() {
+                                        combined.push('\n');
+                                    }
+                                    combined.push_str(&format!(
+                                        "data:{};base64,{}",
+                                        img.mime, img.data
+                                    ));
+                                }
+                                combined
+                            };
                             tool_results.push(json!({
                                 "type": "function_call_output",
                                 "call_id": tr.call_id,
@@ -1402,6 +1424,7 @@ mod tests {
                     output: String::new(),
                     metadata: None,
                     diff: None,
+                    images: vec![],
                     time: ToolTime {
                         start: 0,
                         end: None,
@@ -1460,6 +1483,7 @@ mod tests {
                     output: String::new(),
                     metadata: None,
                     diff: None,
+                    images: vec![],
                     time: ToolTime {
                         start: 0,
                         end: None,
@@ -1514,6 +1538,7 @@ mod tests {
                 output: "hi\n".to_string(),
                 metadata: None,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: 0,
                     end: Some(1),

@@ -99,6 +99,7 @@ async fn test_plugin_redacts_secrets() {
         diff: None,
         metadata: None,
         file_delta: None,
+        images: vec![],
     };
 
     let result = dispatcher.on_tool_execute_after(&call, output).await;

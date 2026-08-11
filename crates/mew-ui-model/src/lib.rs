@@ -701,6 +701,7 @@ mod tests {
                         output: "/tmp/mew".into(),
                         metadata: None,
                         diff: None,
+                        images: vec![],
                         time: ToolTime {
                             start: 0,
                             end: Some(1),
@@ -833,6 +834,7 @@ mod tests {
                     output: "edited".into(),
                     metadata: None,
                     diff: Some("@@ -1 +1 @@\n-old\n+new".into()),
+                    images: vec![],
                     time: ToolTime {
                         start: 0,
                         end: Some(1),

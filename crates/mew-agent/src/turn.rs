@@ -1234,6 +1234,7 @@ mod tests {
                 output: "ok".to_string(),
                 metadata: None,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: 0,
                     end: Some(0),

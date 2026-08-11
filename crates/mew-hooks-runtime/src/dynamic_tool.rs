@@ -48,6 +48,7 @@ impl mew_tools::Tool for DynamicTool {
             diff: None,
             metadata: None,
             file_delta: None,
+            images: vec![],
         })
     }
 }

@@ -128,6 +128,7 @@ impl Tool for EchoTool {
             output: input.to_string(),
             error: String::new(),
             diff: None,
+            images: vec![],
             metadata: None,
             file_delta: None,
         })
@@ -194,6 +195,7 @@ impl Tool for BlockingTool {
             output: input.to_string(),
             error: String::new(),
             diff: None,
+            images: vec![],
             metadata: None,
             file_delta: None,
         })
@@ -502,6 +504,7 @@ async fn test_compaction_keeps_tool_call_with_result() {
                 output: "hello".into(),
                 metadata: None,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: 0,
                     end: Some(0),
@@ -774,6 +777,7 @@ fn test_pending_tool_calls() {
             output: "done".into(),
             metadata: None,
             diff: None,
+            images: vec![],
             time: ToolTime {
                 start: now,
                 end: Some(now),

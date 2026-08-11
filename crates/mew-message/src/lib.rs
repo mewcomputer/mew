@@ -334,7 +334,17 @@ pub struct ToolStateCompleted {
     pub metadata: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ToolImage>,
     pub time: ToolTime,
+}
+
+/// An image produced by a tool, intended for vision-capable models.
+/// The `data` field holds base64-encoded raw image bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolImage {
+    pub mime: String,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -578,6 +588,7 @@ mod tests {
                 output: "foo.rs:12: foo()\n".into(),
                 metadata: Some(json!({"matches": 1})),
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: 1700000001000,
                     end: Some(1700000002000),
@@ -688,6 +699,7 @@ mod tests {
                         output: "file contents".into(),
                         metadata: None,
                         diff: None,
+                        images: vec![],
                         time: ToolTime {
                             start: 1700000001000,
                             end: Some(1700000002000),

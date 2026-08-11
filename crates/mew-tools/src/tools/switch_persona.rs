@@ -104,6 +104,7 @@ impl Tool for SwitchPersona {
                 diff: None,
                 metadata: None,
                 file_delta: None,
+                images: vec![],
             });
         }
 
@@ -152,6 +153,7 @@ impl Tool for SwitchPersona {
                             diff: None,
                             metadata: None,
                             file_delta: None,
+                            images: vec![],
                         });
                     }
                 }

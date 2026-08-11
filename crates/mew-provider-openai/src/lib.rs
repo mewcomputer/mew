@@ -187,7 +187,10 @@ fn thinking_mode_active(reasoning: Option<&mew_provider::ReasoningConfig>) -> bo
 }
 
 impl Adapter {
-    fn find_tool_output(messages: &[Message], call_id: &str) -> String {
+    fn find_tool_output(
+        messages: &[Message],
+        call_id: &str,
+    ) -> (String, Vec<mew_message::ToolImage>) {
         for m in messages {
             for p in &m.parts {
                 if let Part::ToolCall(tc) = p {
@@ -196,14 +199,15 @@ impl Adapter {
                         // For Error state, return the error message so the
                         // provider sees a non-empty tool result.
                         return match &tc.state {
-                            ToolState::Error(e) => e.error.clone(),
-                            _ => tc.state.output().unwrap_or("").to_string(),
+                            ToolState::Error(e) => (e.error.clone(), vec![]),
+                            ToolState::Completed(c) => (c.output.clone(), c.images.clone()),
+                            _ => (tc.state.output().unwrap_or("").to_string(), vec![]),
                         };
                     }
                 }
             }
         }
-        String::new()
+        (String::new(), vec![])
     }
 
     async fn build_request_body(&self, req: &Request) -> Result<Vec<u8>, ProviderError> {
@@ -367,12 +371,34 @@ impl Adapter {
                             // tool_call in the immediately preceding assistant
                             // message. Providers reject role:tool messages
                             // that don't follow a preceding tool_calls message.
-                            let output = Self::find_tool_output(all, &pt.call_id);
-                            tool_results.push(json!({
-                                "role": "tool",
-                                "content": output,
-                                "tool_call_id": pt.call_id,
-                            }));
+                            let (text, images) = Self::find_tool_output(all, &pt.call_id);
+                            if images.is_empty() {
+                                tool_results.push(json!({
+                                    "role": "tool",
+                                    "content": text,
+                                    "tool_call_id": pt.call_id,
+                                }));
+                            } else {
+                                // Vision tool result: emit multi-part content
+                                // with text + image_url blocks.
+                                let mut content: Vec<serde_json::Value> = Vec::new();
+                                if !text.is_empty() {
+                                    content.push(json!({"type": "text", "text": text}));
+                                }
+                                for img in &images {
+                                    content.push(json!({
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": format!("data:{};base64,{}", img.mime, img.data),
+                                        }
+                                    }));
+                                }
+                                tool_results.push(json!({
+                                    "role": "tool",
+                                    "content": content,
+                                    "tool_call_id": pt.call_id,
+                                }));
+                            }
                         }
                         _ => {}
                     }
@@ -953,6 +979,7 @@ mod tests {
                         output: String::new(),
                         metadata: None,
                         diff: None,
+                        images: vec![],
                         time: ToolTime {
                             start: 0,
                             end: None,
@@ -1013,6 +1040,7 @@ mod tests {
                     output: String::new(),
                     metadata: None,
                     diff: None,
+                    images: vec![],
                     time: ToolTime {
                         start: 0,
                         end: None,
@@ -1607,6 +1635,7 @@ mod tests {
                     output: "hi\n".to_string(),
                     metadata: None,
                     diff: None,
+                    images: vec![],
                     time: ToolTime {
                         start: 0,
                         end: Some(1),
@@ -1687,6 +1716,7 @@ mod tests {
                     output: "hi\n".to_string(),
                     metadata: None,
                     diff: None,
+                    images: vec![],
                     time: ToolTime {
                         start: 0,
                         end: Some(1),
@@ -1748,6 +1778,95 @@ mod tests {
         assert_eq!(messages[1]["tool_call_id"], "bash:14");
         assert_eq!(messages[2]["role"], "user");
         assert_eq!(messages[2]["content"], "Here is the result");
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_tool_result_with_image() {
+        // A completed tool call that returned an image should produce a
+        // multi-part content array with text + image_url blocks.
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://example.com".to_string(),
+            "model".to_string(),
+            "key".to_string(),
+        );
+        let assistant_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                tool_name: "read".to_string(),
+                call_id: "read:1".to_string(),
+                state: ToolState::Completed(ToolStateCompleted {
+                    input: serde_json::json!({"path": "photo.png"}),
+                    output: "[Image: photo.png (10 bytes, image/png)]".to_string(),
+                    metadata: None,
+                    diff: None,
+                    images: vec![mew_message::ToolImage {
+                        mime: "image/png".to_string(),
+                        data: "iVBORw0KGgo=".to_string(),
+                    }],
+                    time: ToolTime {
+                        start: 0,
+                        end: Some(1),
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let user_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::User,
+            parts: vec![Part::ToolResult(ToolResultPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                call_id: "read:1".to_string(),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let all = vec![assistant_msg, user_msg];
+        let req = Request {
+            model: "test-model".to_string(),
+            messages: all,
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            ..Default::default()
+        };
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let messages = body_json["messages"].as_array().unwrap();
+
+        // The tool message should have array content with text + image_url.
+        let tool_msg = &messages[1];
+        assert_eq!(tool_msg["role"], "tool");
+        assert_eq!(tool_msg["tool_call_id"], "read:1");
+        let content = tool_msg["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert!(content[0]["text"].as_str().unwrap().contains("photo.png"));
+        assert_eq!(content[1]["type"], "image_url");
+        let url = content[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+        assert!(url.contains("iVBORw0KGgo="));
     }
 
     fn tool_choice_request(

@@ -569,6 +569,7 @@ impl Agent {
                     shell_session: self.shell_session.clone(),
                     snapshot_store: self.snapshot_store.clone(),
                     browser_enabled: self.browser_enabled,
+                    supports_vision: self.supports_vision,
                 }),
                 tc.call_id.clone(),
                 self.cancel_token.child_token(),
@@ -636,6 +637,7 @@ impl Agent {
                         output: String::new(),
                         error: e.to_string(),
                         diff: None,
+                        images: vec![],
                         metadata: None,
                         file_delta: None,
                     }
@@ -675,6 +677,7 @@ impl Agent {
                         output: output.output.clone(),
                         metadata: output.metadata.clone(),
                         diff: output.diff.clone(),
+                        images: output.images.clone(),
                         time: ToolTime {
                             start: Utc::now().timestamp_millis(),
                             end: Some(Utc::now().timestamp_millis()),
@@ -1079,6 +1082,7 @@ impl Agent {
                 output: result,
                 metadata,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),
                     end: Some(Utc::now().timestamp_millis()),
@@ -1183,6 +1187,7 @@ impl Agent {
                 output,
                 metadata,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),
                     end: Some(Utc::now().timestamp_millis()),
@@ -1328,6 +1333,7 @@ impl Agent {
                 output,
                 metadata: None,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),
                     end: Some(Utc::now().timestamp_millis()),
@@ -1482,6 +1488,7 @@ impl Agent {
                 output,
                 metadata: None,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),
                     end: Some(Utc::now().timestamp_millis()),
@@ -1603,6 +1610,7 @@ impl Agent {
                 output,
                 metadata: None,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),
                     end: Some(Utc::now().timestamp_millis()),
@@ -1694,6 +1702,7 @@ impl Agent {
                 output,
                 metadata: None,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),
                     end: Some(Utc::now().timestamp_millis()),
@@ -1785,6 +1794,7 @@ impl Agent {
                 output,
                 metadata: None,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),
                     end: Some(Utc::now().timestamp_millis()),
@@ -2039,6 +2049,7 @@ impl Agent {
                 output: output.clone(),
                 metadata: None,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),
                     end: Some(Utc::now().timestamp_millis()),
@@ -2170,6 +2181,7 @@ impl Agent {
                 output,
                 metadata: None,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),
                     end: Some(Utc::now().timestamp_millis()),
@@ -2275,6 +2287,7 @@ impl Agent {
                 output,
                 metadata,
                 diff: None,
+                images: vec![],
                 time: ToolTime {
                     start: Utc::now().timestamp_millis(),
                     end: Some(Utc::now().timestamp_millis()),

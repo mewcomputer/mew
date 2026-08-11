@@ -163,6 +163,7 @@ impl Tool for EchoTool {
             output: input.to_string(),
             error: String::new(),
             diff: None,
+            images: vec![],
             metadata: None,
             file_delta: None,
         })

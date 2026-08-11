@@ -158,7 +158,10 @@ impl Provider for Adapter {
 }
 
 impl Adapter {
-    fn find_tool_output(messages: &[Message], call_id: &str) -> String {
+    fn find_tool_output(
+        messages: &[Message],
+        call_id: &str,
+    ) -> (String, Vec<mew_message::ToolImage>) {
         for m in messages {
             for p in &m.parts {
                 if let Part::ToolCall(tc) = p {
@@ -167,14 +170,15 @@ impl Adapter {
                         // For Error state, return the error message so the
                         // provider sees a non-empty tool result.
                         return match &tc.state {
-                            ToolState::Error(e) => e.error.clone(),
-                            _ => tc.state.output().unwrap_or("").to_string(),
+                            ToolState::Error(e) => (e.error.clone(), vec![]),
+                            ToolState::Completed(c) => (c.output.clone(), c.images.clone()),
+                            _ => (tc.state.output().unwrap_or("").to_string(), vec![]),
                         };
                     }
                 }
             }
         }
-        String::new()
+        (String::new(), vec![])
     }
 
     async fn build_request_body(&self, req: &Request) -> Result<Vec<u8>, ProviderError> {
@@ -337,12 +341,36 @@ impl Adapter {
                             // tool_use in the immediately preceding assistant
                             // message. The API rejects tool_results without
                             // a preceding tool_use.
-                            let output = Self::find_tool_output(all, &pt.call_id);
-                            content.push(json!({
-                                "type": "tool_result",
-                                "tool_use_id": pt.call_id,
-                                "content": output,
-                            }));
+                            let (text, images) = Self::find_tool_output(all, &pt.call_id);
+                            if images.is_empty() {
+                                content.push(json!({
+                                    "type": "tool_result",
+                                    "tool_use_id": pt.call_id,
+                                    "content": text,
+                                }));
+                            } else {
+                                // Vision tool result: emit multi-block content
+                                // with text + image blocks.
+                                let mut blocks: Vec<serde_json::Value> = Vec::new();
+                                if !text.is_empty() {
+                                    blocks.push(json!({"type": "text", "text": text}));
+                                }
+                                for img in &images {
+                                    blocks.push(json!({
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": img.mime,
+                                            "data": img.data,
+                                        }
+                                    }));
+                                }
+                                content.push(json!({
+                                    "type": "tool_result",
+                                    "tool_use_id": pt.call_id,
+                                    "content": blocks,
+                                }));
+                            }
                         }
                         Part::File(pt) => {
                             if pt.mime.starts_with("image/") {
@@ -1026,6 +1054,7 @@ mod tests {
                         output: String::new(),
                         metadata: None,
                         diff: None,
+                        images: vec![],
                         time: ToolTime {
                             start: 0,
                             end: None,
@@ -1151,6 +1180,7 @@ mod tests {
                     output: String::new(),
                     metadata: None,
                     diff: None,
+                    images: vec![],
                     time: ToolTime {
                         start: 0,
                         end: None,
@@ -1211,6 +1241,7 @@ mod tests {
                     output: "echo: hello".to_string(),
                     metadata: None,
                     diff: None,
+                    images: vec![],
                     time: ToolTime {
                         start: 0,
                         end: Some(1),

@@ -96,6 +96,7 @@ impl Tool for Glob {
             diff: None,
             metadata: None,
             file_delta: None,
+            images: vec![],
         })
     }
 }

@@ -1917,6 +1917,7 @@ impl mew_tools::Tool for PluginTool {
             diff: None,
             metadata: None,
             file_delta: None,
+            images: vec![],
         })
     }
 }

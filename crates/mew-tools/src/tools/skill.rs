@@ -109,6 +109,7 @@ impl Tool for Skill {
             diff: None,
             metadata: None,
             file_delta: None,
+            images: vec![],
         })
     }
 }

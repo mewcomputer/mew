@@ -284,6 +284,7 @@ impl LocalBackend {
                 output: output.to_string(),
                 metadata: None,
                 diff: diff.map(|s| s.to_string()),
+                images: vec![],
                 time: ToolTime {
                     start: 0,
                     end: Some(0),

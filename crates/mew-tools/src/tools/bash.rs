@@ -262,6 +262,7 @@ async fn execute_in_session(
         diff: None,
         metadata: None,
         file_delta: None,
+        images: vec![],
     })
 }
 
@@ -321,6 +322,7 @@ fn finalize_output(
         diff: None,
         metadata: None,
         file_delta: None,
+        images: vec![],
     }
 }
 

@@ -1,10 +1,29 @@
 use crate::{Sensitivity, Tool, ToolCtx, ToolError, ToolOutput};
 use async_trait::async_trait;
+use base64::Engine;
 use serde_json::Value;
 
 pub struct Read;
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
+
+/// Returns the image MIME type for a path if its extension is a recognized
+/// image format.
+fn image_mime(path: &std::path::Path) -> Option<&'static str> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
+}
 
 #[async_trait]
 impl Tool for Read {
@@ -14,7 +33,9 @@ impl Tool for Read {
 
     fn description(&self) -> &str {
         "Read the contents of a file. Output includes a [path#hash] header and \
-         line-numbered content so follow-up hashline edits can target exact lines."
+         line-numbered content so follow-up hashline edits can target exact \
+         lines. Image files (PNG, JPEG, GIF, WebP, BMP) are returned as image \
+         content when the model supports vision."
     }
 
     fn schema(&self) -> &Value {
@@ -67,6 +88,50 @@ impl Tool for Read {
                 metadata.len(),
                 MAX_FILE_SIZE
             )));
+        }
+
+        // If the file has a recognized image extension, return it as image
+        // content for vision-capable models.
+        if let Some(mime) = image_mime(&abs_path) {
+            if ctx.supports_vision {
+                let bytes = tokio::fs::read(&abs_path)
+                    .await
+                    .map_err(|e| ToolError::Execution(format!("{}: {}", abs_path.display(), e)))?;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                return Ok(ToolOutput {
+                    output: format!(
+                        "[Image: {} ({} bytes, {})]",
+                        display_path,
+                        bytes.len(),
+                        mime
+                    ),
+                    error: String::new(),
+                    diff: None,
+                    metadata: None,
+                    file_delta: None,
+                    images: vec![mew_hooks::ToolImage {
+                        mime: mime.to_string(),
+                        data: b64,
+                    }],
+                });
+            } else {
+                // No vision support — return a helpful text message so the
+                // model knows the file exists but can't be viewed.
+                return Ok(ToolOutput {
+                    output: format!(
+                        "[Binary image file: {} ({} bytes, {}). \
+                         This model does not support image input.]",
+                        display_path,
+                        metadata.len(),
+                        mime
+                    ),
+                    error: String::new(),
+                    diff: None,
+                    metadata: None,
+                    file_delta: None,
+                    images: vec![],
+                });
+            }
         }
 
         let content = tokio::fs::read_to_string(&abs_path)
@@ -125,6 +190,7 @@ impl Tool for Read {
             diff: None,
             metadata: None,
             file_delta: None,
+            images: vec![],
         })
     }
 }
@@ -260,5 +326,90 @@ mod tests {
             "expected the binary path in error: {err}"
         );
         assert!(err.contains("binary"), "expected 'binary' in error: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_read_image_with_vision() {
+        let dir = tempfile::tempdir().unwrap();
+        // Minimal valid PNG: 1x1 red pixel.
+        let png_bytes: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+            0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00,
+            0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x01, 0x5E, 0x99, 0xF5, 0x4A, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+            0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let path = dir.path().join("photo.png");
+        tokio::fs::write(&path, png_bytes).await.unwrap();
+
+        let tool = Read;
+        let ctx = ToolCtx::test_with_vision(dir.path().to_path_buf());
+        let input = serde_json::json!({"path": "photo.png"});
+        let result = tool.execute(ctx, input).await.unwrap();
+
+        // The text output mentions the image.
+        assert!(result.output.contains("[Image:"));
+        assert!(result.output.contains("photo.png"));
+        assert!(result.output.contains("image/png"));
+
+        // One image is returned.
+        assert_eq!(result.images.len(), 1);
+        assert_eq!(result.images[0].mime, "image/png");
+        // The base64 data should decode back to the original bytes.
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&result.images[0].data)
+            .unwrap();
+        assert_eq!(decoded, png_bytes);
+    }
+
+    #[tokio::test]
+    async fn test_read_image_without_vision() {
+        let dir = tempfile::tempdir().unwrap();
+        let png_bytes: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        let path = dir.path().join("photo.jpg");
+        tokio::fs::write(&path, png_bytes).await.unwrap();
+
+        let tool = Read;
+        let ctx = dummy_ctx(dir.path().to_path_buf());
+        let input = serde_json::json!({"path": "photo.jpg"});
+        let result = tool.execute(ctx, input).await.unwrap();
+
+        // No image data — model can't see it.
+        assert!(result.images.is_empty());
+
+        // But the text output tells the model what happened.
+        assert!(result.output.contains("Binary image file"));
+        assert!(result.output.contains("photo.jpg"));
+        assert!(result.output.contains("does not support image input"));
+    }
+
+    #[tokio::test]
+    async fn test_read_image_jpeg_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img.jpeg");
+        tokio::fs::write(&path, b"fake jpeg").await.unwrap();
+
+        let tool = Read;
+        let ctx = ToolCtx::test_with_vision(dir.path().to_path_buf());
+        let input = serde_json::json!({"path": "img.jpeg"});
+        let result = tool.execute(ctx, input).await.unwrap();
+        assert_eq!(result.images.len(), 1);
+        assert_eq!(result.images[0].mime, "image/jpeg");
+    }
+
+    #[tokio::test]
+    async fn test_read_non_image_unchanged() {
+        // Ensure text files still go through the normal path with vision on.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("code.rs");
+        tokio::fs::write(&path, "fn main() {}").await.unwrap();
+
+        let tool = Read;
+        let ctx = ToolCtx::test_with_vision(dir.path().to_path_buf());
+        let input = serde_json::json!({"path": "code.rs"});
+        let result = tool.execute(ctx, input).await.unwrap();
+        assert!(result.images.is_empty());
+        assert!(result.output.contains("fn main()"));
     }
 }

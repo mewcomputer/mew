@@ -1,3 +1,15 @@
+# 2026-08-10 — read tool returns images for vision-capable models
+
+The `read` tool now detects image files (PNG, JPEG, GIF, WebP, BMP) by
+extension and returns them as base64-encoded image content in `ToolOutput`
+when the active model supports vision. When vision is not supported, it
+returns a helpful text message instead of the old "cannot read binary file"
+error. The images flow through `ToolStateCompleted` into all three wire
+builders (OpenAI, Anthropic, Responses) which emit provider-specific image
+content blocks inside tool results. New tests cover the read tool (vision on,
+vision off, JPEG extension, text files unaffected) and the OpenAI wire
+builder (multi-part tool result with text + image_url).
+
 # 2026-08-09 — sidebar retention for finished subagents and done todos
 
 New `tui.sidebar_finished_ttl_secs` config (default 180, 0 = hide
