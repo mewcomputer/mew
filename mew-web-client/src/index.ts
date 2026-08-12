@@ -149,7 +149,14 @@ export type Part =
       filename?: string;
       url: string;
     }
-  | { type: "compaction"; base: PartBase; auto: boolean; overflow: boolean };
+  | {
+      type: "compaction";
+      base: PartBase;
+      auto: boolean;
+      overflow: boolean;
+      summary?: string;
+      removed_count?: number;
+    };
 
 export interface PartBase {
   id: string;

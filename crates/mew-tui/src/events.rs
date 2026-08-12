@@ -421,6 +421,23 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
                     return None;
                 }
 
+                // Same handling for the compaction block — it shares the
+                // tool_batch_expanded set so a single key binding toggles
+                // both.
+                if let Some(&(id, _)) = app
+                    .compaction_header_rows
+                    .iter()
+                    .find(|(_, header_row)| *header_row == visual_row)
+                {
+                    if app.tool_batch_expanded.contains(&id) {
+                        app.tool_batch_expanded.remove(&id);
+                    } else {
+                        app.tool_batch_expanded.insert(id);
+                    }
+                    app.mark_chat_dirty();
+                    return None;
+                }
+
                 let rel_col = col.saturating_sub(app.chat_area.x) as usize;
                 app.sel_anchor_row = Some(visual_row);
                 app.sel_anchor_col = Some(rel_col);
@@ -1089,11 +1106,12 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 app.slash_selected = 0;
                 app.slash_scroll = 0;
             }
-            // Auto-open file picker when @ is typed at start or after a space.
+            // Auto-open the reference picker when @ is typed at start or
+            // after a space.
             if c == '@' {
                 let before = &app.input[..app.cursor.saturating_sub(1)];
                 if before.is_empty() || before.ends_with(' ') {
-                    app.open_file_picker("");
+                    app.open_at_picker();
                 }
             }
             None
@@ -1269,7 +1287,156 @@ fn selected_thinking_variant(picker: &crate::app::PickerState) -> Option<String>
     }
 }
 
+/// Resolve a selected `@`-picker item (whose label is `@path`, `@model:...`,
+/// `@skill:...`, or `@subagent:...`) to the insertion action it represents.
+fn at_mention_action(label: &str) -> Option<Action> {
+    let rest = label.strip_prefix('@')?;
+    for (kind, prefix) in crate::app::NAMESPACE_PREFIXES {
+        if let Some(value) = rest.strip_prefix(prefix) {
+            return Some(Action::InsertNamespaceMention(
+                kind.to_string(),
+                value.to_string(),
+            ));
+        }
+    }
+    Some(Action::InsertAtMention(format!("{label} ")))
+}
+
 fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    // Inline `@` picker: editing keys mutate the chat input (not a separate
+    // picker filter field), then re-derive the picker filter from the token
+    // after the last `@`. Navigation/selection/close fall through to the
+    // shared picker handling below.
+    if app.picker.as_ref().is_some_and(|p| p.is_at_picker()) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let meta = key.modifiers.contains(KeyModifiers::META);
+        match key.code {
+            KeyCode::Char(c) if !ctrl && !alt && !meta => {
+                app.insert_char(c);
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Backspace if meta => {
+                app.push_undo();
+                app.input.clear();
+                app.cursor = 0;
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Backspace if alt => {
+                app.push_undo();
+                app.delete_word_left();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Backspace => {
+                app.backspace();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Delete => {
+                app.delete_char();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Left if alt => {
+                app.cursor_word_left();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Left => {
+                app.cursor_left();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Right if alt => {
+                app.cursor_word_right();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Right => {
+                app.cursor_right();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Home => {
+                app.cursor_home();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::End => {
+                app.cursor_end();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Char('a') if ctrl => {
+                app.cursor_home();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Char('e') if ctrl => {
+                app.cursor_end();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Char('f') if ctrl => {
+                app.cursor_right();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Char('b') if ctrl => {
+                app.cursor_left();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Char('w') if ctrl => {
+                app.push_undo();
+                let before = &app.input[..app.cursor];
+                let new_cursor = before
+                    .trim_end_matches(|c: char| c.is_whitespace())
+                    .rfind(|c: char| c.is_whitespace())
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                app.input.replace_range(new_cursor..app.cursor, "");
+                app.cursor = new_cursor;
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Char('k') if ctrl => {
+                if app.cursor < app.input.len() {
+                    app.push_undo();
+                    app.input.truncate(app.cursor);
+                }
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Char('u') if ctrl => {
+                app.push_undo();
+                app.input.clear();
+                app.cursor = 0;
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Char('z') if ctrl => {
+                app.undo();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Char('Z') if ctrl => {
+                app.redo();
+                app.sync_at_picker();
+                return None;
+            }
+            KeyCode::Char('y') if ctrl => {
+                app.redo();
+                app.sync_at_picker();
+                return None;
+            }
+            _ => {}
+        }
+    }
+
     // Ctrl+P in the thinking variant picker cycles to the next variant.
     if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
         if let Some(ref mut picker) = app.picker {
@@ -1311,12 +1478,12 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         KeyCode::Enter => {
             let picker_data = app.picker.as_ref().and_then(|p| {
                 p.selected_item()
-                    .map(|item| (item.id.clone(), p.kind.clone()))
+                    .map(|item| (item.id.clone(), p.kind.clone(), item.label.clone()))
             });
             // The thinking picker's budget row commits its draft as
             // `budget:<n>` instead of the raw row id.
             let budget_variant = app.picker.as_ref().and_then(selected_thinking_variant);
-            if let Some((id, kind)) = picker_data {
+            if let Some((id, kind, label)) = picker_data {
                 app.close_picker();
                 if kind == "command" {
                     if id.starts_with('/') {
@@ -1346,10 +1513,8 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     budget_variant.map(Action::SetThinkingVariant)
                 } else if kind == "permission_mode" {
                     mew_hooks::PermissionMode::from_id(&id).map(Action::SetPermissionMode)
-                } else if kind == "file" {
-                    Some(Action::InsertAtMention(format!("@{}", id)))
-                } else if let Some(ns_kind) = kind.strip_prefix("ns_") {
-                    Some(Action::InsertNamespaceMention(ns_kind.to_string(), id))
+                } else if kind == "at" {
+                    at_mention_action(&label)
                 } else if kind == "session" {
                     Some(Action::AttachSession(id))
                 } else if kind == "project" {
@@ -1389,24 +1554,6 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 }
             }
             app.picker_insert(c);
-            // If the user typed a namespace prefix (skill:, model:, subagent:)
-            // after `@` in the file picker, switch to the appropriate picker.
-            let picker_kind = app
-                .picker
-                .as_ref()
-                .filter(|p| p.kind == "file")
-                .and_then(|p| {
-                    let f = p.filter.as_str();
-                    crate::app::NAMESPACE_PREFIXES
-                        .iter()
-                        .find_map(|(kind, prefix)| {
-                            f.strip_prefix(prefix).map(|filter| (*kind, filter))
-                        })
-                });
-            if let Some((kind, filter)) = picker_kind {
-                let filter = filter.to_string();
-                app.open_namespace_picker(kind, &filter);
-            }
             None
         }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::META) => {
@@ -1545,4 +1692,38 @@ pub enum Action {
     ToggleSessionArchived(String),
     /// Toggle the pinned flag on a daemon session (session picker ^P).
     ToggleSessionPinned(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_at_mention_action_file() {
+        let action = at_mention_action("@src/main.rs");
+        assert!(matches!(
+            action,
+            Some(Action::InsertAtMention(ref s)) if s == "@src/main.rs "
+        ));
+    }
+
+    #[test]
+    fn test_at_mention_action_namespace() {
+        let action = at_mention_action("@skill:clarify");
+        assert!(matches!(
+            action,
+            Some(Action::InsertNamespaceMention(ref kind, ref value))
+                if kind == "skill" && value == "clarify"
+        ));
+    }
+
+    #[test]
+    fn test_at_mention_action_model() {
+        let action = at_mention_action("@model:openai/gpt-4o");
+        assert!(matches!(
+            action,
+            Some(Action::InsertNamespaceMention(ref kind, ref value))
+                if kind == "model" && value == "openai/gpt-4o"
+        ));
+    }
 }

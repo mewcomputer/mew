@@ -65,9 +65,11 @@ pub async fn process_mentions(
                             .push_str(&format!("\n<skill '{}' added to context>", skill.name));
                     }
                     None => {
-                        let err = format!("[error: skill '{}' not found]", nr.value);
-                        enriched = enriched.replace(&nr.raw, &err);
-                        display = display.replace(&nr.raw, &err);
+                        // Unknown skill: strip the token silently. The user
+                        // asked us to keep references in their input and skip
+                        // missing ones rather than surfacing an error.
+                        enriched = enriched.replace(&nr.raw, "");
+                        display = display.replace(&nr.raw, "");
                     }
                 }
             }
@@ -91,9 +93,11 @@ pub async fn process_mentions(
                             .push_str(&format!("\n<subagent '{}' added to context>", sa.name));
                     }
                     None => {
-                        let err = format!("[error: subagent '{}' not found]", nr.value);
-                        enriched = enriched.replace(&nr.raw, &err);
-                        display = display.replace(&nr.raw, &err);
+                        // Unknown subagent: strip the token silently. The user
+                        // asked us to keep references in their input and skip
+                        // missing ones rather than surfacing an error.
+                        enriched = enriched.replace(&nr.raw, "");
+                        display = display.replace(&nr.raw, "");
                     }
                 }
             }
@@ -280,8 +284,11 @@ mod tests {
         let cwd = std::path::Path::new(".");
         let (enriched, display, _atts) =
             process_mentions("@subagent:nonexistent", cwd, &mut ctx, &[], &[]).await;
-        assert!(enriched.contains("[error: subagent 'nonexistent' not found]"));
-        assert!(display.contains("[error: subagent 'nonexistent' not found]"));
+        // Unknown subagent refs are stripped silently — no error surfaces.
+        assert!(!enriched.contains("@subagent:nonexistent"));
+        assert!(!enriched.contains("error"));
+        assert!(!display.contains("@subagent:nonexistent"));
+        assert!(!display.contains("error"));
     }
 
     #[tokio::test]
@@ -291,8 +298,12 @@ mod tests {
         let cwd = std::path::Path::new(".");
         let (enriched, display, _atts) =
             process_mentions("@skill:nonexistent fix this", cwd, &mut ctx, &skills, &[]).await;
-        assert!(enriched.contains("[error: skill 'nonexistent' not found]"));
-        assert!(display.contains("[error: skill 'nonexistent' not found]"));
+        // Unknown skill refs are stripped silently — no error surfaces.
+        assert!(enriched.contains("fix this"));
+        assert!(!enriched.contains("@skill:nonexistent"));
+        assert!(!enriched.contains("error"));
+        assert!(!display.contains("@skill:nonexistent"));
+        assert!(!display.contains("error"));
     }
 
     #[tokio::test]

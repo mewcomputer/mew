@@ -286,7 +286,7 @@ where
     match read_image() {
         Ok(path) => {
             let path_str = path.to_string_lossy().to_string();
-            cx.app.insert_mention(&format!("@{}", path_str));
+            cx.app.insert_mention(&format!("@{} ", path_str));
             cx.app.set_alert("image pasted from clipboard");
         }
         Err(e) => {

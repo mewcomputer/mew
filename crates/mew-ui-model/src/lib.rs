@@ -56,6 +56,8 @@ pub enum TranscriptPart {
     },
     Compaction {
         auto: bool,
+        summary: Option<String>,
+        removed_count: Option<u32>,
     },
 }
 
@@ -502,7 +504,11 @@ impl TranscriptItem {
                 Part::ToolResult(_) => (None, None),
                 Part::Compaction(part) => (
                     Some("context compacted".into()),
-                    Some(TranscriptPart::Compaction { auto: part.auto }),
+                    Some(TranscriptPart::Compaction {
+                        auto: part.auto,
+                        summary: part.summary.clone(),
+                        removed_count: part.removed_count,
+                    }),
                 ),
             };
             if let Some(projected) = projected {

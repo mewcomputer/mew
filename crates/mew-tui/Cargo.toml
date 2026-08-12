@@ -36,6 +36,7 @@ mew-subagents = { workspace = true }
 toml = { workspace = true }
 anyhow = { workspace = true }
 tempfile = "3"
+fff-search = "0.9"
 
 [[bin]]
 name = "theme_codegen"

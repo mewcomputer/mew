@@ -840,6 +840,40 @@ mod tests {
     }
 
     #[test]
+    fn landing_input_box_stays_put_when_autocomplete_opens() {
+        // The landing (start) screen must anchor the input box so the inline
+        // slash / `@` autocomplete overlays the logo above it instead of
+        // shifting the box down or clipping it shorter.
+        let mut h = Harness::new(80, 24);
+        h.render();
+        let empty_y = h.app.input_area.y;
+        let empty_h = h.app.input_area.height;
+
+        h.type_str("/");
+        h.render();
+        assert_eq!(
+            h.app.input_area.y, empty_y,
+            "slash autocomplete should not move the input box"
+        );
+        assert_eq!(
+            h.app.input_area.height, empty_h,
+            "slash autocomplete should not resize the input box"
+        );
+
+        // The autocomplete itself is rendered in the rows directly above the
+        // box (absolute positioning), not pushed below the fold. The box's
+        // visible "> /" marker sits one row below its top edge (the box has a
+        // 1-row inset above the text).
+        let frame = h.render();
+        let content_row = h.app.input_area.y as usize + 1;
+        let lines: Vec<&str> = frame.lines().collect();
+        assert!(
+            lines[content_row].contains('>'),
+            "input box marker missing at row {content_row}: {frame}"
+        );
+    }
+
+    #[test]
     fn submit_echoes_user_message_and_streams() {
         let mut h = Harness::new(80, 24);
         h.type_str("do the thing");

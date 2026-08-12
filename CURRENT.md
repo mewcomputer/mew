@@ -1,3 +1,17 @@
+# 2026-08-10 — compaction renders as a collapsible tool-call-style block
+
+Compaction markers are now a synthetic `Role::System` message carrying a
+`CompactionPart` with new optional fields (`summary: Option<String>`,
+`removed_count: Option<u32>`). The wire still filters them out via
+`is_compaction_message` (which checks the part, not the role), and the TUI
+now renders them as a tool-call-style block: a header line ("context
+compacted · N messages") with an expand chevron, expandable (Ctrl-G or
+click) to show the summary body. Older sessions without `summary` render
+the header with a "(no summary captured)" placeholder. The new fields are
+serde-defaulted so session jsonl stays backward-compatible. New tests
+`test_compaction_block_renders_with_header_and_none_placeholder` and
+`test_compaction_block_renders_summary_body_when_expanded`.
+
 # 2026-08-10 — wire builders demote images for non-vision models
 
 `Request` now carries `supports_vision: bool` (defaults to true); the agent
@@ -5854,3 +5868,147 @@ old math (reproduces the bug) and passes with the fix.
 
 Verified: `cargo test -p mew-tui` green (216 unit + 5 golden + doc),
 `cargo clippy -p mew-tui --all-targets -- -D warnings` clean, fmt clean.
+
+# 2026-08-11 — `@` picker docks at the bottom; unknown namespace refs are silent
+
+The `@`-mention picker (`file` and `ns_*` kinds) now renders at the bottom
+of the screen like an autocomplete, just above the chat input, instead of
+as a centered popup. The width fills the input row; centered popups (the
+command palette, model picker, theme picker, etc.) keep the existing
+centered-narrow look. The position math is computed in `draw_picker`
+(ui/overlays.rs) — `@` pickers anchor at `area.height - height` and pad the
+width to the full input; other pickers stay centered.
+
+`process_mentions` (crates/mew/src/runtime/mentions.rs) no longer surfaces
+an `[error: skill/subagent '...' not found]` string when a referenced
+skill or subagent is missing. The raw `@skill:foo` / `@subagent:bar` token
+is stripped from the enriched and display text silently, on the principle
+that an unknown reference is just irrelevant. Existing references still
+attach as usual when the catalog has a match. `@model:...` is unchanged
+(it always attaches a reference marker regardless of validity).
+
+Tests (app/tests.rs): new `test_at_picker_renders_at_bottom` (first item
+row is below the vertical midpoint of an 80x24 harness) and
+`test_command_palette_stays_centered` (palette stays centered, so the
+behavior change is scoped to `@` pickers). The two not-found tests in
+runtime/mentions.rs were updated to assert the token is stripped and no
+error string appears.
+
+Verified: `cargo test -p mew-tui` green (220 unit), `cargo test -p mew`
+green (137 + 3 integration), `cargo clippy -p mew-tui -p mew --all-targets
+-- -D warnings` clean, `cargo fmt --all -- --check` clean.
+
+# 2026-08-12 — inline @-mention picker uses the chat input
+
+The `@`-mention picker (file paths and `@skill:`/`@model:`/`@subagent:`
+refs) no longer renders or owns its own filter input. Typing while the
+picker is open now edits the chat input, and the picker re-derives its
+filter from the token after the last `@` before the cursor. The overlay
+docks as a chrome-less list (no `> ` filter row, no divider), and the chat
+input keeps its own cursor.
+
+Key changes:
+- `PickerState::is_at_picker()` identifies file/namespace pickers.
+- `App::sync_at_picker()` derives the active token and switches between
+  file and namespace kinds (or closes the picker when the `@` is gone).
+- `App::insert_mention()` replaces the whole `@...` partial token, not
+  just a trailing `@`, so completed mentions substitute the typed text.
+- `handle_picker_key` routes editing keys (chars, backspace, delete,
+  arrows, home/end, common readline chords, undo/redo) to the chat input
+  and re-syncs; selection/close/navigation still share the picker path.
+- `open_file_picker`/`open_namespace_picker` build full item lists and
+  leave live filtering to `PickerState::filtered`, so shrinking the filter
+  still shows the full catalog.
+
+New tests cover partial-token replacement, namespace switching both
+directions, and picker close on token deletion. Verified:
+`cargo test -p mew-tui` (224 passed), `cargo check -p mew`,
+`cargo clippy -p mew-tui --all-targets` clean.
+
+## 2026-08-12 — unified @ reference picker, drop "no results"
+
+The inline `@` picker now shows one flat list of everything referenceable:
+files, models, skills, and subagents. Typing after `@` narrows the same
+catalog; namespace prefixes (`model:`, `skill:`, `subagent:`) restrict to that
+namespace and match the value after the prefix. Replaced `open_file_picker`
+and `open_namespace_picker` with `open_at_picker`, removed the kind-switching
+from `sync_at_picker`, and added a `PickerItem.namespace` tag so `filtered`
+can match prefix-aware.
+
+Removed the `no results` row from the picker list; an empty result set now
+renders as an empty list. Updated the help text and docs (keyboard shortcuts,
+tips-and-tricks) to say "reference picker". File mentions (picker and clipboard
+image paste) now insert with a trailing space, matching namespace mentions.
+
+Verified: `cargo test -p mew-tui` (228 passed + 5 golden frames),
+`cargo clippy -p mew-tui --all-targets -- -D warnings` clean, `just arch-check`
+clean, `cargo test -p mew dispatch_table_tests` (20 passed).
+
+## 2026-08-12 (afternoon)
+
+Rendered the inline `@`-mention picker with the same component used for
+slash-command autocomplete. Extracted the shared single-line autocomplete
+renderer in `ui/overlays.rs` (`draw_autocomplete`); `draw_slash_autocomplete`
+and the new `draw_reference_autocomplete` both delegate to it. The `@` list now
+sits directly above the input (reserving layout space like the slash list)
+instead of docking as a bottom popup, with name + description on one row and a
+slim scrollbar. An empty result set renders no panel at all, matching the
+earlier "no results" cleanup. Centered pickers still use `draw_picker`.
+
+Verified: `cargo test -p mew-tui` (228 passed + 5 golden frames),
+`cargo clippy -p mew-tui --all-targets -- -D warnings` clean,
+`just arch-check` clean.
+
+Documented the `@`-picker file discovery in `file_mention_items`: it is a
+fresh, bounded `ignore::WalkBuilder` walk (gitignore-aware, depth 4, skips
+files > 1 MiB, capped at 50 shortest paths), not an indexed or fuzzy finder.
+
+## 2026-08-12 (late afternoon)
+
+Wired the `@`-picker file path to fff-search, with the bounded `ignore` walk as
+the empty-query fallback. Empty query now lists the walk's files by
+modification time (newest first, shortest path breaks ties) before models,
+skills, and subagents. Non-empty plain queries are debounced (60ms) and run
+through a background fff index (`fff_search::FilePicker` built once on first
+open via `spawn_blocking`); results are merged with substring-matched
+references. Namespace queries (`@model:`, `@skill:`, `@subagent:`) still filter
+references only and never touch fff. `PickerState::filtered` now passes through
+pre-computed candidates for the at-picker instead of re-filtering.
+
+Verified: `cargo test -p mew-tui` (232 passed + 5 golden frames + 1 doc),
+`cargo clippy -p mew-tui --all-targets -- -D warnings` clean, `just arch-check`
+clean, `cargo build -p mew` clean.
+
+## 2026-08-12 (evening)
+
+Stabilized the landing-screen input box against the inline autocomplete. The
+hero+input block was including `autocomplete_height` in its vertical centering,
+so opening or filtering the `/` or `@` menu shifted the input down and could
+clip it shorter. `draw_landing` now anchors the input box's top edge (centering
+uses a nominal single-line height) and no longer takes an `autocomplete_height`
+parameter; `ui::draw` clips the autocomplete rect to the rows actually
+available above the box and overlays it there, so the list covers the logo when
+needed without moving or resizing the box. Added a harness regression test
+asserting the box's y/height are unchanged when the slash menu opens.
+
+Verified: `cargo test -p mew-tui` (233 passed + 5 golden frames + 1 doc),
+`cargo clippy -p mew-tui --all-targets` clean, `cargo fmt --all -- --check`
+clean.
+
+# 2026-08-12 — landing autocomplete gets a visible surface
+
+The inline slash/`@` autocomplete panel now paints `muted` (the same
+`#28282c` surface as the input text field) instead of `status_bar.background`,
+which resolved to the same `#1e1e21` as the page background. The list
+previously rendered as floating text with no visible surface; now it reads as
+an extension of the text field, both in the chat layout and when it overlays
+the logo on the landing screen. Unselected row backgrounds were updated to
+match.
+
+## 2026-08-12 — Landing autocomplete surface
+
+- The landing-screen autocomplete now `Clear`s its rect before painting its
+  `muted` surface. A bare `Block` only sets the background color, so the logo
+  glyphs underneath were bleeding through; `Clear` resets the foreground first.
+- Added a one-row `background`-colored bottom hairline to the autocomplete so
+  the list is visually separated from the input field below it.

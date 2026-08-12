@@ -193,6 +193,16 @@ pub struct CompactionPart {
     pub overflow: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail_start_id: Option<MessageId>,
+    /// The summary text produced by the assistant when the compaction ran.
+    /// Renders as the body of the collapsible "context compacted" block in
+    /// the TUI / web UI; older session jsonl written before this field will
+    /// deserialize with `None` and render as a header-only block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// Number of messages compacted. Drives the "X messages compacted"
+    /// header line — also gracefully `None` for older sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_count: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------

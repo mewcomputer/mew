@@ -47,7 +47,7 @@ Press `?` in the TUI to toggle the shortcuts overlay at any time.
 | `Ctrl+O` | Toggle bash output expansion |
 | `Ctrl+1` | Toggle the sidebar Environment section (context files / MCP) |
 | `x` | Cancel most recently started subagent (when input empty) |
-| `@` | Open file picker for @-mentions |
+| `@` | Open the reference picker for @-mentions (files, models, skills, subagents) |
 
 ## Mouse
 

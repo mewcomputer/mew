@@ -61,12 +61,26 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let slash_cmds = app.filtered_slash_commands();
     let show_slash = app.mode == Mode::SlashCommand && !slash_cmds.is_empty();
+    // The inline `@`-mention picker uses the same autocomplete slot as slash
+    // commands. It only takes space when it has at least one match, so an
+    // empty result set simply leaves the input at its normal position.
+    let ref_count = app
+        .picker
+        .as_ref()
+        .filter(|p| p.is_at_picker())
+        .map(|p| p.filtered().len())
+        .unwrap_or(0);
+    let show_ref = app.mode == Mode::CommandPalette
+        && app.picker.as_ref().is_some_and(|p| p.is_at_picker())
+        && ref_count > 0;
     // Cap the visible list at min(12, half the terminal height) so a long
     // command set doesn't eat the whole screen, and tall terminals get more
     // items. If fewer commands exist than the cap, show them all.
     let max_visible_items: u16 = (area.height / 2).min(12);
-    let slash_height = if show_slash {
+    let autocomplete_height = if show_slash {
         (slash_cmds.len() as u16).min(max_visible_items) + 2
+    } else if show_ref {
+        (ref_count as u16).min(max_visible_items) + 2
     } else {
         0
     };
@@ -104,7 +118,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             f.render_widget(landing_bg, hero_area);
         }
 
-        let input_rect = welcome::draw_landing(f, app, hero_area, slash_height);
+        let input_rect = welcome::draw_landing(f, app, hero_area);
         if app.mode == Mode::UserQuestion {
             if let Some(ref uq) = app.user_question {
                 overlays::draw_user_question(f, uq, input_rect, &app.theme);
@@ -113,15 +127,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             input::draw_input(f, app, input_rect);
         }
 
-        // Slash autocomplete sits directly above the centered input.
+        // The inline autocomplete (slash commands or `@` references) is
+        // absolutely positioned directly above the centered input, like the
+        // web dropdown: it overlays the logo if needed and never moves or
+        // resizes the input box. Clip it to the rows actually available above
+        // the box so it can cover the hero but not the input itself.
+        let available_above = input_rect.y.saturating_sub(hero_area.y);
+        let autocomplete_height = autocomplete_height.min(available_above);
+        let autocomplete_rect = Rect::new(
+            input_rect.x,
+            input_rect.y.saturating_sub(autocomplete_height),
+            input_rect.width,
+            autocomplete_height,
+        );
         if show_slash {
-            let slash_rect = Rect::new(
-                input_rect.x,
-                input_rect.y.saturating_sub(slash_height),
-                input_rect.width,
-                slash_height,
-            );
-            overlays::draw_slash_autocomplete(f, app, &slash_cmds, slash_rect);
+            overlays::draw_slash_autocomplete(f, app, &slash_cmds, autocomplete_rect);
+        } else if show_ref {
+            overlays::draw_reference_autocomplete(f, app, autocomplete_rect);
         }
 
         status::draw_status(f, app, status_rect);
@@ -169,7 +191,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
-            Constraint::Length(slash_height), // slash autocomplete
+            Constraint::Length(autocomplete_height), // inline autocomplete
             Constraint::Length(question_height),
             Constraint::Length(1), // status
         ])
@@ -194,6 +216,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if show_slash {
         overlays::draw_slash_autocomplete(f, app, &slash_cmds, vert[1]);
+    } else if show_ref {
+        overlays::draw_reference_autocomplete(f, app, vert[1]);
     }
     if app.mode == Mode::UserQuestion {
         if let Some(ref uq) = app.user_question {
@@ -252,7 +276,11 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.mode == Mode::CommandPalette {
         if let Some(ref mut picker) = app.picker {
-            overlays::draw_picker(f, picker, area, &app.theme);
+            // The inline `@`-mention picker is drawn above the input by the
+            // layout; only centered pickers render as a modal overlay.
+            if !picker.is_at_picker() {
+                overlays::draw_picker(f, picker, area, &app.theme);
+            }
         }
     }
 

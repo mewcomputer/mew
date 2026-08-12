@@ -52,11 +52,12 @@ session, that approval survives `/clear`.
 
 ## @-mentions
 
-- Type `@` in the input to open the file picker. Selecting a file inserts
-  an `@path` mention that gets resolved and added to the agent's context
-  before the prompt is sent.
-- `@` followed by a subagent name (shown with `[subagent]` tag) inserts
-  a subagent reference instead of a file path.
+- Type `@` in the input to open the reference picker. It lists files,
+  models, skills, and subagents in one list; typing after the `@` narrows
+  the same list. Selecting a file inserts an `@path` mention that gets
+  resolved and added to the agent's context before the prompt is sent.
+  Selecting a model, skill, or subagent inserts the matching
+  `@model:`, `@skill:`, or `@subagent:` reference.
 
 ## Terminal title
 

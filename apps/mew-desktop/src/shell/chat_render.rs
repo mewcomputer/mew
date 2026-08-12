@@ -503,7 +503,11 @@ impl DesktopShell {
                 "attachment",
                 label,
             ),
-            TranscriptPart::Compaction { auto } => self.render_meta_part(
+            TranscriptPart::Compaction {
+                auto,
+                summary: _,
+                removed_count: _,
+            } => self.render_meta_part(
                 row.message_index,
                 row.part_index,
                 TablerIcon::Dots,

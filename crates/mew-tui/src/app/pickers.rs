@@ -5,6 +5,12 @@
 
 use super::*;
 
+use fff_search::file_picker::{FFFMode, FilePicker, FilePickerOptions, FuzzySearchOptions};
+use fff_search::{PaginationArgs, QueryParser};
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
 impl App {
     pub fn open_model_picker(&mut self) {
         let mut items: Vec<PickerItem> = Vec::new();
@@ -252,6 +258,10 @@ impl App {
     pub fn close_picker(&mut self) {
         self.picker = None;
         self.mode = Mode::Normal;
+        // Cancel any queued/debounced file search for a closed @ picker so we
+        // don't do background work for a query the user already dismissed.
+        self.pending_file_query = None;
+        self.file_query_deadline = None;
     }
 
     pub fn open_thinking_variant_picker(&mut self) {
@@ -509,124 +519,243 @@ impl App {
         }
     }
 
-    pub fn open_file_picker(&mut self, prefix: &str) {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let mut items: Vec<PickerItem> = Vec::new();
+    /// Open the inline `@` mention picker with every referenceable item in one
+    /// flat list: files (most recently modified first), models, skills, and
+    /// subagents. Candidates are recomputed on each keystroke by
+    /// [`App::sync_at_picker`]; files are fuzzy-searched with fff once the
+    /// background index is ready.
+    pub fn open_at_picker(&mut self) {
+        self.at_file_items = file_mention_items();
+        self.at_reference_items = self.build_reference_items();
+        self.fff_file_results = None;
+        self.pending_file_query = None;
+        self.file_query_deadline = None;
 
-        let prefix_lower = prefix.to_lowercase();
-
-        let walker = ignore::WalkBuilder::new(&cwd)
-            .max_depth(Some(4))
-            .hidden(false)
-            .git_ignore(true)
-            .build();
-
-        for entry in walker.flatten() {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            if let Ok(meta) = entry.metadata() {
-                if meta.len() > 1_048_576 {
-                    continue;
-                }
-            }
-            let rel = path
-                .strip_prefix(&cwd)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .to_string();
-            if !rel.to_lowercase().contains(&prefix_lower) {
-                continue;
-            }
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            items.push(PickerItem {
-                id: rel.clone(),
-                label: format!("@{}", rel),
-                description: if size > 1024 {
-                    format!("{} KB", size / 1024)
-                } else {
-                    format!("{} B", size)
-                },
-                ..Default::default()
-            });
-        }
-
-        items.sort_by_key(|i| i.label.len());
-        items.truncate(50);
-
+        let items = self.empty_at_candidates();
         self.mode = Mode::CommandPalette;
         self.picker = Some(PickerState {
-            kind: "file".into(),
+            kind: "at".into(),
             items,
-            filter: prefix.to_string(),
+            filter: String::new(),
             selected: 0,
-            cursor: prefix.len(),
+            cursor: 0,
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
             budget: None,
+        });
+
+        self.schedule_file_index_build();
+    }
+
+    fn build_reference_items(&self) -> Vec<PickerItem> {
+        let mut items = Vec::new();
+        items.extend(self.models.iter().map(|(id, desc)| PickerItem {
+            id: id.clone(),
+            label: format!("@model:{id}"),
+            description: desc.clone(),
+            namespace: Some("model"),
+            ..Default::default()
+        }));
+        items.extend(self.skill_catalog.iter().map(|s| PickerItem {
+            id: s.name.clone(),
+            label: format!("@skill:{}", s.name),
+            description: s.description.clone(),
+            namespace: Some("skill"),
+            ..Default::default()
+        }));
+        items.extend(self.subagent_catalog.iter().map(|s| PickerItem {
+            id: s.name.clone(),
+            label: format!("@subagent:{}", s.name),
+            description: s.description.clone(),
+            namespace: Some("subagent"),
+            ..Default::default()
+        }));
+        items.sort_by_key(|i| i.label.to_lowercase());
+        items
+    }
+
+    fn empty_at_candidates(&self) -> Vec<PickerItem> {
+        let mut items = self.at_file_items.clone();
+        items.extend(self.at_reference_items.iter().cloned());
+        items
+    }
+
+    /// Re-derive the inline `@` picker candidates from the chat input. The
+    /// active token runs from the last `@` at or before the cursor to the
+    /// cursor; its text after the `@` is the query (either a namespace
+    /// reference like `skill:clarify` or a plain file prefix). When the token
+    /// is gone (the `@` was deleted), the picker closes.
+    pub fn sync_at_picker(&mut self) {
+        let Some(picker) = self.picker.as_ref() else {
+            return;
+        };
+        if !picker.is_at_picker() {
+            return;
+        }
+
+        let before = &self.input[..self.cursor];
+        let Some(at) = before.rfind('@') else {
+            self.close_picker();
+            return;
+        };
+        let query = before[at + 1..].to_string();
+
+        let candidates = self.compute_at_candidates(&query);
+        if self.needs_file_search(&query) {
+            self.pending_file_query = Some(query.clone());
+            self.file_query_deadline = Some(Instant::now() + FILE_SEARCH_DEBOUNCE);
+        } else if !is_plain_file_query(&query) {
+            self.pending_file_query = None;
+            self.file_query_deadline = None;
+        }
+
+        if let Some(p) = self.picker.as_mut() {
+            p.items = candidates;
+            p.cursor = query.len();
+            p.filter = query;
+            p.selected = 0;
+        }
+    }
+
+    fn compute_at_candidates(&self, query: &str) -> Vec<PickerItem> {
+        if query.is_empty() {
+            return self.empty_at_candidates();
+        }
+
+        if let Some((kind, rest)) = namespace_query(query) {
+            let rest = rest.to_lowercase();
+            return self
+                .at_reference_items
+                .iter()
+                .filter(|i| {
+                    i.namespace == Some(kind)
+                        && (rest.is_empty()
+                            || i.label.to_lowercase().contains(&rest)
+                            || i.description.to_lowercase().contains(&rest))
+                })
+                .cloned()
+                .collect();
+        }
+
+        // Plain query: substring-matched references + file candidates (fff
+        // results when available, otherwise a substring pass over the walk).
+        let q = query.to_lowercase();
+        let mut items: Vec<PickerItem> = self
+            .at_reference_items
+            .iter()
+            .filter(|i| {
+                i.label.to_lowercase().contains(&q) || i.description.to_lowercase().contains(&q)
+            })
+            .cloned()
+            .collect();
+
+        let files = match &self.fff_file_results {
+            Some((cached_q, files)) if cached_q == query => files.clone(),
+            _ => self.substring_file_candidates(&q),
+        };
+        items.extend(files);
+        items
+    }
+
+    fn substring_file_candidates(&self, q: &str) -> Vec<PickerItem> {
+        self.at_file_items
+            .iter()
+            .filter(|i| i.label.to_lowercase().contains(q))
+            .cloned()
+            .collect()
+    }
+
+    fn needs_file_search(&self, query: &str) -> bool {
+        if !is_plain_file_query(query) {
+            return false;
+        }
+        !self
+            .fff_file_results
+            .as_ref()
+            .map(|(q, _)| q == query)
+            .unwrap_or(false)
+    }
+
+    fn schedule_file_index_build(&mut self) {
+        if self.file_index.is_some() || self.file_index_building {
+            return;
+        }
+        // Headless tests/harness have no tokio runtime; keep the walk fallback.
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        self.file_index_building = true;
+        let tx = self.file_search_tx.clone();
+        let cwd = std::env::current_dir().unwrap_or_default();
+        tokio::task::spawn_blocking(move || {
+            let result = build_file_index(&cwd);
+            let _ = tx.blocking_send(FileSearchEvent::IndexReady(result));
         });
     }
 
-    /// Open a namespace picker for `@skill:`, `@model:`, or `@subagent:` references.
-    /// `kind` is `"skill"`, `"model"`, or `"subagent"`. `filter` is the text
-    /// typed after the namespace prefix, used to pre-filter results.
-    pub fn open_namespace_picker(&mut self, kind: &str, filter: &str) {
-        let filter_lower = filter.to_lowercase();
-        let mut items: Vec<PickerItem> = match kind {
-            "skill" => self
-                .skill_catalog
-                .iter()
-                .filter(|s| s.name.to_lowercase().contains(&filter_lower))
-                .map(|s| PickerItem {
-                    id: s.name.clone(),
-                    label: format!("@skill:{}", s.name),
-                    description: s.description.clone(),
-                    ..Default::default()
-                })
-                .collect(),
-            "model" => self
-                .models
-                .iter()
-                .filter(|(id, label)| {
-                    id.to_lowercase().contains(&filter_lower)
-                        || label.to_lowercase().contains(&filter_lower)
-                })
-                .map(|(id, label)| PickerItem {
-                    id: id.clone(),
-                    label: format!("@model:{id}"),
-                    description: label.clone(),
-                    ..Default::default()
-                })
-                .collect(),
-            "subagent" => self
-                .subagent_catalog
-                .iter()
-                .filter(|s| s.name.to_lowercase().contains(&filter_lower))
-                .map(|s| PickerItem {
-                    id: s.name.clone(),
-                    label: format!("@subagent:{}", s.name),
-                    description: s.description.clone(),
-                    ..Default::default()
-                })
-                .collect(),
-            _ => Vec::new(),
+    fn schedule_file_search(&mut self, query: String) {
+        let Some(index) = self.file_index.clone() else {
+            return;
         };
-        items.sort_by_key(|i| i.label.len());
-
-        self.mode = Mode::CommandPalette;
-        self.picker = Some(PickerState {
-            kind: format!("ns_{kind}"),
-            items,
-            filter: filter.to_string(),
-            selected: 0,
-            cursor: filter.len(),
-            scroll: 0,
-            visible_items: PICKER_VISIBLE_ITEMS,
-            hint: None,
-            budget: None,
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        self.file_search_gen = self.file_search_gen.wrapping_add(1);
+        let generation = self.file_search_gen;
+        let tx = self.file_search_tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let files = fff_file_search(&index, &query, 50);
+            let _ = tx.blocking_send(FileSearchEvent::Results {
+                generation,
+                query,
+                files,
+            });
         });
+    }
+
+    /// Drain background file-search events and fire debounced searches. Called
+    /// from [`App::tick`] so it runs on the main-loop cadence.
+    pub fn poll_file_search(&mut self) {
+        while let Ok(event) = self.file_search_rx.try_recv() {
+            match event {
+                FileSearchEvent::IndexReady(Ok(index)) => {
+                    self.file_index = Some(index);
+                    self.file_index_building = false;
+                    if let Some(q) = self.pending_file_query.clone() {
+                        self.pending_file_query = None;
+                        self.file_query_deadline = None;
+                        self.schedule_file_search(q);
+                    }
+                }
+                FileSearchEvent::IndexReady(Err(_)) => {
+                    self.file_index_building = false;
+                }
+                FileSearchEvent::Results {
+                    generation,
+                    query,
+                    files,
+                } => {
+                    if generation != self.file_search_gen {
+                        continue;
+                    }
+                    self.fff_file_results = Some((query.clone(), files));
+                    self.sync_at_picker();
+                }
+            }
+        }
+
+        if let Some(q) = self.pending_file_query.clone() {
+            let due = self
+                .file_query_deadline
+                .map(|d| Instant::now() >= d)
+                .unwrap_or(true);
+            if due && self.file_index.is_some() {
+                self.pending_file_query = None;
+                self.file_query_deadline = None;
+                self.schedule_file_search(q);
+            }
+        }
     }
 
     /// Open the command palette with a list of commands.
@@ -694,5 +823,181 @@ impl App {
             hint: None,
             budget: None,
         });
+    }
+}
+
+/// Build the file portion of the `@` mention catalog.
+///
+/// This is a fresh, bounded directory walk on every open, not an indexed or
+/// fuzzy finder. It uses `ignore::WalkBuilder` (the same walker ripgrep and
+/// `fd` use), so it is `.gitignore`-aware and skips hidden entries for free.
+/// Depth is capped at 4 and files over 1 MiB are skipped, then the result is
+/// truncated to 50 entries sorted by modification time (newest first), with
+/// shortest path breaking ties. The fff index, when ready, supersedes this
+/// walk for non-empty plain queries.
+fn file_mention_items() -> Vec<PickerItem> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut entries: Vec<(PickerItem, std::time::SystemTime)> = Vec::new();
+
+    let walker = ignore::WalkBuilder::new(&cwd)
+        .max_depth(Some(4))
+        .hidden(false)
+        .git_ignore(true)
+        .build();
+
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.len() > 1_048_576 {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(&cwd)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        entries.push((
+            PickerItem {
+                id: rel.clone(),
+                label: format!("@{rel}"),
+                description: format_file_size(meta.len()),
+                ..Default::default()
+            },
+            modified,
+        ));
+    }
+
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.id.len().cmp(&b.0.id.len())));
+    entries.truncate(50);
+    entries.into_iter().map(|(item, _)| item).collect()
+}
+
+fn format_file_size(size: u64) -> String {
+    if size > 1024 {
+        format!("{} KB", size / 1024)
+    } else {
+        format!("{} B", size)
+    }
+}
+
+const FILE_SEARCH_DEBOUNCE: Duration = Duration::from_millis(60);
+
+/// True when a query is a plain file query (not a namespace reference like
+/// `model:` or `skill:`), so it should drive an fff fuzzy file search.
+fn is_plain_file_query(query: &str) -> bool {
+    !query.is_empty()
+        && !NAMESPACE_PREFIXES
+            .iter()
+            .any(|(_, prefix)| query.starts_with(prefix))
+}
+
+/// Split a namespace reference query into `(kind, rest)`, e.g.
+/// `"skill:clarify"` -> `("skill", "clarify")`.
+fn namespace_query(query: &str) -> Option<(&'static str, &str)> {
+    NAMESPACE_PREFIXES
+        .iter()
+        .find_map(|(kind, prefix)| query.strip_prefix(*prefix).map(|rest| (*kind, rest)))
+}
+
+/// Build a fff file index for `cwd` (synchronous; run on a blocking thread).
+fn build_file_index(cwd: &Path) -> Result<Arc<Mutex<FilePicker>>, String> {
+    let mut picker = FilePicker::new(FilePickerOptions {
+        base_path: cwd.to_string_lossy().to_string(),
+        enable_mmap_cache: false,
+        mode: FFFMode::Ai,
+        watch: false,
+        ..Default::default()
+    })
+    .map_err(|e| e.to_string())?;
+    picker.collect_files().map_err(|e| e.to_string())?;
+    Ok(Arc::new(Mutex::new(picker)))
+}
+
+/// Run a fuzzy filename search against a cached fff index and convert the
+/// ranked results into `@`-picker items.
+fn fff_file_search(index: &Arc<Mutex<FilePicker>>, query: &str, limit: usize) -> Vec<PickerItem> {
+    let picker = index.lock().unwrap();
+    let parser = QueryParser::default();
+    let query = parser.parse(query);
+    let options = FuzzySearchOptions {
+        pagination: PaginationArgs { offset: 0, limit },
+        ..Default::default()
+    };
+    let result = picker.fuzzy_search(&query, None, options);
+    result
+        .items
+        .iter()
+        .take(limit)
+        .map(|item| {
+            let rel = item.relative_path(&*picker);
+            PickerItem {
+                id: rel.clone(),
+                label: format!("@{rel}"),
+                description: format_file_size(item.size),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_file_size() {
+        assert_eq!(format_file_size(0), "0 B");
+        assert_eq!(format_file_size(1024), "1024 B");
+        assert_eq!(format_file_size(2048), "2 KB");
+    }
+
+    #[test]
+    fn test_namespace_query() {
+        assert_eq!(namespace_query("skill:clarify"), Some(("skill", "clarify")));
+        assert_eq!(
+            namespace_query("model:openai/gpt-4o"),
+            Some(("model", "openai/gpt-4o"))
+        );
+        assert_eq!(
+            namespace_query("subagent:researcher"),
+            Some(("subagent", "researcher"))
+        );
+        assert_eq!(namespace_query("src/main.rs"), None);
+        assert_eq!(namespace_query("skill"), None);
+    }
+
+    #[test]
+    fn test_is_plain_file_query() {
+        assert!(!is_plain_file_query(""));
+        assert!(is_plain_file_query("src/main.rs"));
+        assert!(!is_plain_file_query("skill:clarify"));
+        assert!(!is_plain_file_query("model:gpt"));
+    }
+
+    #[test]
+    fn test_fff_file_search_returns_ranked_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn lib() {}").unwrap();
+        std::fs::write(dir.path().join("README.md"), "# readme").unwrap();
+
+        let index = build_file_index(dir.path()).expect("build index");
+        let results = fff_file_search(&index, "main", 10);
+
+        assert!(
+            results.iter().any(|i| i.label == "@src/main.rs"),
+            "expected src/main.rs in results: {results:?}"
+        );
+        assert!(
+            !results.iter().any(|i| i.label == "@README.md"),
+            "README should not rank for `main`: {results:?}"
+        );
     }
 }

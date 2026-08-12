@@ -281,6 +281,24 @@ pub(crate) fn build_chat_lines(
     let tool_width = chat_width;
     app.reasoning_header_rows.clear();
     app.tool_batch_header_rows.clear();
+    app.compaction_header_rows.clear();
+    // Snapshot compaction parts so we can render them after the main loop
+    // releases the immutable `app.messages` borrow. The renderer needs
+    // `&mut app` to record header-row indices and look up theme colors,
+    // which can't be done while the iteration is active.
+    let compactions_to_render: Vec<mew_message::CompactionPart> = app
+        .messages
+        .iter()
+        .filter_map(|msg| {
+            if msg.role != Role::System {
+                return None;
+            }
+            msg.parts.iter().find_map(|p| match p {
+                Part::Compaction(c) => Some(c.clone()),
+                _ => None,
+            })
+        })
+        .collect();
     let mut sel_ctx = ChatLineCtx {
         lines: &mut lines,
         chat_rows: &mut chat_rows,
@@ -298,6 +316,8 @@ pub(crate) fn build_chat_lines(
 
     for (msg_idx, msg) in app.messages.iter().enumerate() {
         if msg.role == Role::System {
+            // Skip; the compaction block is rendered below in its own pass
+            // after the main loop's immutable borrow is released.
             continue;
         }
         let is_last = msg_idx + 1 == msg_count;
@@ -719,6 +739,17 @@ pub(crate) fn build_chat_lines(
             sel_ctx.push_line(Line::from(""));
         }
     }
+    // Render compaction blocks now that the main loop's immutable borrow
+    // of `app.messages` is released. The renderer needs `&mut app` to
+    // record header rows and look up theme colors, so we can't run it
+    // inside the main loop. We re-use `sel_ctx` so the visual_row
+    // counter continues to be accurate across the full chat.
+    for compaction in compactions_to_render {
+        let tool_width = chat_width.saturating_sub(2);
+        let tool_bg_style = Style::default().bg(tool_bg);
+        render_compaction_block(&mut sel_ctx, app, &compaction, tool_width, tool_bg_style);
+        sel_ctx.push_line(Line::from(""));
+    }
     #[allow(clippy::drop_non_drop)]
     drop(sel_ctx);
     crate::app::BuiltChat { lines, chat_rows }
@@ -889,6 +920,102 @@ fn render_single_tool_call(
                     sel_ctx.push_line(wrapped);
                 }
             }
+        }
+    }
+
+    if let Some(line) = push_tool_edge(tool_width, false, tool_bg) {
+        sel_ctx.push_line(line);
+    }
+}
+
+/// Render a `CompactionPart` as a tool-call-style collapsible block. Visually
+/// matches a tool call so the user can scan it the same way: a header line
+/// ("context compacted · 12 messages") with an expand chevron, and the
+/// summary text body when expanded. Collapsed by default since the summary
+/// is usually long and not interesting at a glance.
+fn render_compaction_block(
+    sel_ctx: &mut ChatLineCtx<'_>,
+    app: &mut App,
+    compaction: &mew_message::CompactionPart,
+    tool_width: u16,
+    tool_bg_style: Style,
+) {
+    let tool_bg = app.theme.resolve("tool.background");
+    let is_expanded = app.tool_batch_expanded.contains(&compaction.base.id);
+    let chevron = if is_expanded { "▼" } else { "▶" };
+
+    // Header: "context compacted · N messages" (auto/forced distinguishes
+    // automatic vs invoked by the user).
+    let removed = compaction.removed_count.unwrap_or(0);
+    let label = if compaction.auto {
+        "context compacted"
+    } else {
+        "context compacted (forced)"
+    };
+    let count_text = if removed == 1 {
+        "1 message".to_string()
+    } else {
+        format!("{removed} messages")
+    };
+
+    if let Some(line) = push_tool_edge(tool_width, true, tool_bg) {
+        sel_ctx.push_line(line);
+    }
+    sel_ctx.push_line(push_tool_line(
+        tool_width,
+        vec![
+            Span::styled("  ", tool_bg_style),
+            Span::styled(
+                chevron,
+                Style::default()
+                    .fg(app.theme.resolve("text.muted"))
+                    .bg(tool_bg),
+            ),
+            Span::styled(" ", tool_bg_style),
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(app.theme.resolve("text.accent"))
+                    .bg(tool_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · {count_text}"),
+                Style::default()
+                    .fg(app.theme.resolve("text.muted"))
+                    .bg(tool_bg),
+            ),
+        ],
+        tool_bg_style,
+    ));
+    app.compaction_header_rows
+        .push((compaction.base.id, sel_ctx.visual_row));
+
+    if is_expanded {
+        if let Some(summary) = compaction.summary.as_ref() {
+            if !summary.is_empty() {
+                for line in summary.lines() {
+                    let wrapped =
+                        wrap_tool_line(tool_width, Line::from(line.to_string()), "      ", tool_bg);
+                    for w in wrapped {
+                        sel_ctx.push_line(w);
+                    }
+                }
+            }
+        } else {
+            // Older sessions or runs that didn't capture a summary — show
+            // a placeholder so the user knows the body is intentionally
+            // empty, not missing.
+            sel_ctx.push_line(push_tool_line(
+                tool_width,
+                vec![Span::styled(
+                    "      (no summary captured)",
+                    Style::default()
+                        .fg(app.theme.resolve("text.muted"))
+                        .bg(tool_bg),
+                )],
+                tool_bg_style,
+            ));
         }
     }
 
@@ -1291,6 +1418,156 @@ mod tests {
                 "line {i} width {line_width} exceeds chat_width {chat_width}: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_compaction_block_renders_with_header_and_none_placeholder() {
+        // A `CompactionPart` with a `None` summary should still render a
+        // hit-testable header line ("context compacted · N messages") and
+        // a "(no summary captured)" placeholder when expanded. The header
+        // row must be recorded in `app.compaction_header_rows` so click
+        // hit-testing can find it.
+        use crate::app::App;
+        use mew_message::{CompactionPart, Message, Part, PartBase, Role};
+
+        let mut app = App::new();
+        let msg_id = ulid::Ulid::new();
+        let part_id = ulid::Ulid::new();
+        app.push_message(Message {
+            id: msg_id,
+            session_id: ulid::Ulid::new(),
+            role: Role::System,
+            parts: vec![Part::Compaction(CompactionPart {
+                base: PartBase {
+                    id: part_id,
+                    message_id: msg_id,
+                    session_id: ulid::Ulid::new(),
+                },
+                auto: true,
+                overflow: false,
+                tail_start_id: None,
+                summary: None,
+                removed_count: Some(7),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        });
+
+        let chat_width = 60u16;
+        let built = build_chat_lines(&mut app, chat_width - 2, chat_width);
+
+        // Header row should be recorded so click hit-testing works.
+        assert!(
+            app.compaction_header_rows
+                .iter()
+                .any(|&(id, _)| id == part_id),
+            "compaction header row should be recorded for hit-testing"
+        );
+
+        // The header text "context compacted" should appear in the rendered
+        // output.
+        let combined: String = built
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("context compacted"),
+            "header label missing from rendered chat: {combined:?}"
+        );
+        assert!(
+            combined.contains("7 messages"),
+            "removed count missing from rendered chat: {combined:?}"
+        );
+
+        // Expansion is off by default; the placeholder should NOT be visible.
+        assert!(
+            !combined.contains("(no summary captured)"),
+            "placeholder should be hidden when collapsed: {combined:?}"
+        );
+
+        // Toggle expansion and re-render. The placeholder should now appear.
+        app.tool_batch_expanded.insert(part_id);
+        let built = build_chat_lines(&mut app, chat_width - 2, chat_width);
+        let combined: String = built
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains("(no summary captured)"),
+            "placeholder should be visible when expanded: {combined:?}"
+        );
+    }
+
+    #[test]
+    fn test_compaction_block_renders_summary_body_when_expanded() {
+        // When the compaction has a summary, the body should appear inside
+        // the rendered block once it's expanded.
+        use crate::app::App;
+        use mew_message::{CompactionPart, Message, Part, PartBase, Role};
+
+        let mut app = App::new();
+        let msg_id = ulid::Ulid::new();
+        let part_id = ulid::Ulid::new();
+        let summary = "Refactored read tool to return images. Fixed wire-builder pairing bug.";
+        app.push_message(Message {
+            id: msg_id,
+            session_id: ulid::Ulid::new(),
+            role: Role::System,
+            parts: vec![Part::Compaction(CompactionPart {
+                base: PartBase {
+                    id: part_id,
+                    message_id: msg_id,
+                    session_id: ulid::Ulid::new(),
+                },
+                auto: true,
+                overflow: false,
+                tail_start_id: None,
+                summary: Some(summary.to_string()),
+                removed_count: Some(3),
+            })],
+            time: mew_message::Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        });
+
+        let chat_width = 80u16;
+        app.tool_batch_expanded.insert(part_id);
+        let built = build_chat_lines(&mut app, chat_width - 2, chat_width);
+
+        let combined: String = built
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            combined.contains(summary),
+            "summary body should appear when expanded: {combined:?}"
+        );
     }
 
     #[test]

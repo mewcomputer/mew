@@ -15,10 +15,49 @@ use crate::app::{
     PICKER_VISIBLE_ITEMS,
 };
 
-pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCommand], area: Rect) {
-    let tokens = &app.theme;
-    let bg = Block::default().style(Style::default().bg(tokens.resolve("status_bar.background")));
+/// A single selectable row in an inline autocomplete list (slash commands or
+/// `@`-mentions). Name and description share one line, matching the compact
+/// look used by both the slash and reference pickers.
+struct AutocompleteEntry<'a> {
+    name: &'a str,
+    description: &'a str,
+}
+
+/// Render an inline, borderless autocomplete list. This is the shared
+/// component behind both the slash-command list and the `@`-mention list:
+/// a raised surface panel with single-line entries and a slim scrollbar.
+fn draw_autocomplete(
+    f: &mut Frame,
+    tokens: &crate::theme::Theme,
+    entries: &[AutocompleteEntry<'_>],
+    selected: usize,
+    scroll: usize,
+    area: Rect,
+) {
+    // Match the input field's surface so the list reads as an extension of
+    // the text field it docks above.
+    let surface = tokens.resolve("muted");
+    // Clear any content behind the list (e.g. the landing logo) before
+    // painting the surface. A `Block` only sets the background color; the
+    // foreground glyphs underneath would otherwise stay visible.
+    f.render_widget(Clear, area);
+    let bg = Block::default().style(Style::default().bg(surface));
     f.render_widget(bg, area);
+
+    // A one-row hairline of the page background along the bottom edge
+    // separates the list from the input field below (both use `muted`).
+    if area.height > 0 {
+        let bottom = Rect::new(
+            area.x,
+            area.y.saturating_add(area.height.saturating_sub(1)),
+            area.width,
+            1,
+        );
+        f.render_widget(
+            Block::default().style(Style::default().bg(tokens.resolve("background"))),
+            bottom,
+        );
+    }
 
     let inner = Rect::new(
         area.x + 1,
@@ -29,18 +68,15 @@ pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCom
     let visible = inner.height as usize;
 
     let mut text = Text::default();
-    let start = app.slash_scroll;
-    for (i, cmd) in cmds.iter().enumerate().skip(start).take(visible) {
-        let is_selected = i == app.slash_selected;
+    for (i, entry) in entries.iter().enumerate().skip(scroll).take(visible) {
+        let is_selected = i == selected;
         let name_style = if is_selected {
             Style::default()
                 .fg(tokens.resolve("selection.foreground"))
                 .bg(tokens.resolve("selection.background"))
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default()
-                .fg(tokens.resolve("text.body"))
-                .bg(tokens.resolve("status_bar.background"))
+            Style::default().fg(tokens.resolve("text.body")).bg(surface)
         };
         let desc_style = if is_selected {
             Style::default()
@@ -49,26 +85,26 @@ pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCom
         } else {
             Style::default()
                 .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(surface)
         };
         text.push_line(Line::from(vec![
             Span::raw("  "),
-            Span::styled(&cmd.name, name_style),
+            Span::styled(entry.name, name_style),
             Span::raw("  "),
-            Span::styled(&cmd.description, desc_style),
+            Span::styled(entry.description, desc_style),
         ]));
     }
 
     f.render_widget(Paragraph::new(text), inner);
 
-    if cmds.len() > visible {
+    if entries.len() > visible {
         let scrollbar_area = Rect::new(area.x + area.width - 1, area.y, 1, area.height);
         // content_length is the scroll range (max_scroll + 1), not the item
         // count: ratatui only reaches the track end when position ==
         // content_length - 1, and our scroll tops out at len - visible.
-        let mut scrollbar_state = ScrollbarState::new(cmds.len().saturating_sub(visible) + 1)
+        let mut scrollbar_state = ScrollbarState::new(entries.len().saturating_sub(visible) + 1)
             .viewport_content_length(visible)
-            .position(app.slash_scroll);
+            .position(scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
@@ -76,6 +112,68 @@ pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCom
             .thumb_symbol("█");
         f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
     }
+}
+
+pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCommand], area: Rect) {
+    let entries: Vec<AutocompleteEntry<'_>> = cmds
+        .iter()
+        .map(|cmd| AutocompleteEntry {
+            name: &cmd.name,
+            description: &cmd.description,
+        })
+        .collect();
+    draw_autocomplete(
+        f,
+        &app.theme,
+        &entries,
+        app.slash_selected,
+        app.slash_scroll,
+        area,
+    );
+}
+
+/// Render the inline `@`-mention autocomplete list above the chat input.
+/// Reuses the slash-command component with the unified file/model/skill/
+/// subagent catalog, and keeps the selected entry in view while scrolling.
+pub(super) fn draw_reference_autocomplete(f: &mut Frame, app: &mut App, area: Rect) {
+    let Some(picker) = app.picker.as_mut() else {
+        return;
+    };
+    if !picker.is_at_picker() {
+        return;
+    }
+
+    let filtered_len = picker.filtered().len();
+    if filtered_len == 0 {
+        return;
+    }
+
+    let visible = (area.height.saturating_sub(2) as usize).max(1);
+    picker.selected = picker.selected.min(filtered_len - 1);
+    if picker.selected < picker.scroll {
+        picker.scroll = picker.selected;
+    } else if picker.selected >= picker.scroll + visible {
+        picker.scroll = picker.selected.saturating_sub(visible - 1);
+    }
+    picker.scroll = picker.scroll.min(filtered_len.saturating_sub(visible));
+
+    let entries: Vec<AutocompleteEntry<'_>> = picker
+        .filtered()
+        .into_iter()
+        .map(|item| AutocompleteEntry {
+            name: &item.label,
+            description: &item.description,
+        })
+        .collect();
+
+    draw_autocomplete(
+        f,
+        &app.theme,
+        &entries,
+        picker.selected,
+        picker.scroll,
+        area,
+    );
 }
 
 pub(super) fn draw_alert(f: &mut Frame, app: &App, area: Rect) {
@@ -663,6 +761,9 @@ pub(super) fn draw_picker(
     area: Rect,
     tokens: &crate::theme::Theme,
 ) {
+    // Centered pickers (command palette, model, theme, etc.) keep a narrow
+    // centered popup; the inline `@`-mention list is rendered by
+    // `draw_reference_autocomplete` above the input instead.
     let width = 60u16.min(area.width.saturating_sub(4));
 
     // `filtered` is cloned to owned items so the budget-track bookkeeping
@@ -752,8 +853,10 @@ pub(super) fn draw_picker(
     // Cap the popup at a bounded row budget so long lists don't fill the
     // screen; longer content is reached by scrolling.
     let content_height = total_rows.clamp(1, PICKER_VISIBLE_ITEMS * 2) as u16;
-    let height = (4 + content_height).min(area.height.saturating_sub(4));
-    let list_area_height = height.saturating_sub(4);
+    // Filter row + divider add four rows of chrome around the list.
+    let chrome = 4;
+    let height = (chrome + content_height).min(area.height.saturating_sub(4));
+    let list_area_height = height.saturating_sub(chrome);
     let visible_rows = list_area_height.max(1) as usize;
     picker.visible_items = visible_rows;
 
@@ -775,7 +878,7 @@ pub(super) fn draw_picker(
 
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
-    let popup = Rect::new(x, y, width, height);
+    let popup = Rect::new(area.x + x, area.y + y, width, height);
 
     f.render_widget(Clear, popup);
 
@@ -844,6 +947,19 @@ pub(super) fn draw_picker(
         inner.height.saturating_sub(2),
     );
 
+    render_picker_list(f, picker, &filtered, &flat_items, flat_rows, list_area);
+}
+
+/// Render the picker's item list (and scrollbar) into `list_area`.
+fn render_picker_list(
+    f: &mut Frame,
+    picker: &mut PickerState,
+    filtered: &[PickerItem],
+    flat_items: &[usize],
+    flat_rows: Vec<Line<'static>>,
+    list_area: Rect,
+) {
+    let total_rows: usize = flat_rows.len();
     let mut list_text = Text::default();
     let window_start = picker.scroll;
     for (row_y, (item_idx, line)) in (list_area.y..).zip(
@@ -851,7 +967,7 @@ pub(super) fn draw_picker(
             .iter()
             .zip(flat_rows)
             .skip(window_start)
-            .take(visible_rows),
+            .take(picker.visible_items),
     ) {
         // The budget row records its track rect for mouse hit-testing.
         if filtered.get(*item_idx).map(|it| it.id == "budget") == Some(true) {
@@ -862,21 +978,12 @@ pub(super) fn draw_picker(
         list_text.push_line(line);
     }
 
-    if filtered.is_empty() {
-        list_text.push_line(Line::from(Span::styled(
-            "no results",
-            Style::default()
-                .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("status_bar.background")),
-        )));
-    }
-
     // Lines are pre-wrapped to the list width, so no ratatui `Wrap`: every
     // emitted row matches the row math above exactly.
     let list_para = Paragraph::new(list_text);
     f.render_widget(list_para, list_area);
 
-    if total_rows > visible_rows {
+    if total_rows > picker.visible_items {
         let scrollbar_area = list_area.inner(Margin {
             horizontal: 0,
             vertical: 0,
@@ -884,9 +991,10 @@ pub(super) fn draw_picker(
         // content_length is the scroll range (max_scroll + 1) so the thumb
         // travels the full track; the app's scroll tops out at
         // total_rows - visible_rows.
-        let mut scrollbar_state = ScrollbarState::new(total_rows.saturating_sub(visible_rows) + 1)
-            .viewport_content_length(visible_rows)
-            .position(picker.scroll);
+        let mut scrollbar_state =
+            ScrollbarState::new(total_rows.saturating_sub(picker.visible_items) + 1)
+                .viewport_content_length(picker.visible_items)
+                .position(picker.scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
@@ -1465,7 +1573,7 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect, tokens: &crate::theme::Theme
         ]),
         Line::from(vec![
             Span::styled("  @          ", key_style),
-            Span::styled("file picker (@-mention)", desc_style),
+            Span::styled("reference picker (@-mention)", desc_style),
         ]),
         Line::from(""),
         Line::from(Span::styled("Tools & Sidebar", header_style)),

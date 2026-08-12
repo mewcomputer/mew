@@ -28,13 +28,14 @@ fn logo_lines() -> Vec<String> {
 /// Render the landing (start) screen and return the rect the caller should
 /// render the input into.
 ///
-/// Draws the cat + block "mew" wordmark centered as a hero, with room reserved
-/// below it for a centered input field (and the slash-autocomplete list above
-/// that field, when active). The hero and the input are centered together as a
-/// single block so the cat reads as sitting directly above the field. The
-/// caller renders the input itself via `draw_input` and draws the slash list
-/// into the `slash_height` rows directly above the returned rect.
-pub(super) fn draw_landing(f: &mut Frame, app: &App, area: Rect, slash_height: u16) -> Rect {
+/// Draws the cat + block "mew" wordmark centered as a hero, with a centered
+/// input field directly below it. The input box's top edge is anchored so it
+/// stays put while the user types (the box grows downward) and while the
+/// autocomplete list appears (the caller overlays that list above the box, on
+/// top of the logo if needed). The caller renders the input itself via
+/// `draw_input` and draws the autocomplete into rows directly above the
+/// returned rect.
+pub(super) fn draw_landing(f: &mut Frame, app: &App, area: Rect) -> Rect {
     let cat_lines: Vec<&str> = CAT.lines().collect();
     let logo_lines = logo_lines();
 
@@ -113,16 +114,19 @@ pub(super) fn draw_landing(f: &mut Frame, app: &App, area: Rect, slash_height: u
     let content_w = input_w.saturating_sub(2).saturating_sub(2);
     let input_h = (app.input_visual_line_count(content_w).clamp(1, 12) + 2) as u16;
 
-    // Vertical layout: hero, a 1-row gap, the slash list, then the input — all
-    // centered as one block so the cat hovers just above the field.
+    // Vertical layout: hero, a 1-row gap, then the input. The block is
+    // centered using a nominal single-line input so the input box's top edge
+    // is anchored: as the user types the box grows downward instead of
+    // recentering, and the autocomplete list (drawn by the caller above the
+    // box) never moves or resizes it.
     let gap_rows: u16 = 1;
-    let block_h = hero_h
+    let nominal_input_h: u16 = 3;
+    let stack_h = hero_h
         .saturating_add(gap_rows)
-        .saturating_add(slash_height)
-        .saturating_add(input_h);
+        .saturating_add(nominal_input_h);
 
-    let top_pad = if area.height > block_h {
-        (area.height - block_h) / 2
+    let top_pad = if area.height > stack_h {
+        (area.height - stack_h) / 2
     } else {
         0
     };
@@ -137,11 +141,9 @@ pub(super) fn draw_landing(f: &mut Frame, app: &App, area: Rect, slash_height: u
     let hero_rect = Rect::new(hero_x, block_y, hero_w, hero_h);
     f.render_widget(Paragraph::new(hero_rows), hero_rect);
 
-    // Input: horizontally centered, sitting below the hero + slash list.
-    let input_y = block_y
-        .saturating_add(hero_h)
-        .saturating_add(gap_rows)
-        .saturating_add(slash_height);
+    // Input: horizontally centered, top edge anchored directly below the
+    // hero + gap. The box grows downward from here as text wraps.
+    let input_y = block_y.saturating_add(hero_h).saturating_add(gap_rows);
     let input_x = center_x
         .saturating_sub(input_w / 2)
         .clamp(area.x, area.right().saturating_sub(input_w));

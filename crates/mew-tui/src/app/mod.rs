@@ -149,6 +149,21 @@ pub struct App {
     /// submits the oldest queued message.
     pub pending_queued_send: bool,
     pub picker: Option<PickerState>,
+    /// Cached fff file index for fuzzy `@` file search. Built lazily on a
+    /// background thread on first picker open; `None` until it is ready.
+    pub file_index: Option<std::sync::Arc<std::sync::Mutex<fff_search::file_picker::FilePicker>>>,
+    pub file_index_building: bool,
+    pub file_search_tx: tokio::sync::mpsc::Sender<FileSearchEvent>,
+    pub file_search_rx: tokio::sync::mpsc::Receiver<FileSearchEvent>,
+    pub file_search_gen: u64,
+    /// Debounced plain-file query awaiting an fff search.
+    pub pending_file_query: Option<String>,
+    pub file_query_deadline: Option<std::time::Instant>,
+    /// Latest applied fff results for the active plain query: `(query, files)`.
+    pub fff_file_results: Option<(String, Vec<PickerItem>)>,
+    /// Base `@`-picker candidate sets, rebuilt each time the picker opens.
+    pub at_file_items: Vec<PickerItem>,
+    pub at_reference_items: Vec<PickerItem>,
     pub settings: Option<crate::settings::SettingsState>,
     pub slash_selected: usize,
     pub slash_scroll: usize,
@@ -165,6 +180,10 @@ pub struct App {
     /// Visual rows of tool-batch header lines, mapping a click back to the
     /// batch's first `ToolCall` part id. Rebuilt every `draw_chat`.
     pub tool_batch_header_rows: Vec<(PartId, usize)>,
+    /// Visual-row index of each rendered `Compaction` header, paired with
+    /// the compaction part's id. Rebuilt every `draw_chat` so click hit-
+    /// testing for expand/collapse stays accurate.
+    pub compaction_header_rows: Vec<(PartId, usize)>,
     pub pending_md_rerender: Option<mew_message::MessageId>,
     pub md_state: mdstream::DocumentState,
     pub md_stream: Option<mdstream::MdStream>,
@@ -339,6 +358,11 @@ pub struct PickerItem {
     /// (e.g. "Recent" in the model picker). It is skipped by selection
     /// and filtered out when the user types a filter.
     pub header: bool,
+    /// For unified `@`-picker items, the reference namespace (`"model"`,
+    /// `"skill"`, or `"subagent"`); `None` for files and other pickers.
+    /// Lets a filter like `model:gpt` match the value after the prefix
+    /// instead of requiring the prefix itself to appear in the label.
+    pub namespace: Option<&'static str>,
 }
 
 /// State for the cmdk-style command palette.
@@ -436,6 +460,12 @@ impl PickerBudget {
 
 impl PickerState {
     pub fn filtered(&self) -> Vec<&PickerItem> {
+        // The inline `@` picker pre-computes its candidates in
+        // `sync_at_picker` (files via fff/walk, references via namespace or
+        // substring matching), so no second filtering pass happens here.
+        if self.is_at_picker() {
+            return self.items.iter().filter(|i| !i.header).collect();
+        }
         let f = self.filter.to_lowercase();
         self.items
             .iter()
@@ -452,6 +482,14 @@ impl PickerState {
     pub fn selected_item(&self) -> Option<&PickerItem> {
         let filtered = self.filtered();
         filtered.get(self.selected).copied()
+    }
+
+    /// True for the inline `@`-mention picker (files, models, skills, and
+    /// subagents in one list). This picker has no dedicated filter input: it
+    /// derives its filter from the chat input and renders as a bare
+    /// autocomplete list.
+    pub fn is_at_picker(&self) -> bool {
+        self.kind == "at"
     }
 
     /// Move selection by `delta` (positive = down, negative = up),
@@ -486,6 +524,22 @@ impl PickerState {
         }
         self.selected = new as usize;
     }
+}
+
+/// Events produced by background `@`-picker file work (index builds and
+/// debounced fuzzy searches) and consumed by [`App::poll_file_search`].
+pub enum FileSearchEvent {
+    /// A lazy fff index finished building (or failed).
+    IndexReady(
+        Result<std::sync::Arc<std::sync::Mutex<fff_search::file_picker::FilePicker>>, String>,
+    ),
+    /// A fuzzy file search finished. `generation` discards stale results when
+    /// the user has typed again before an older search returned.
+    Results {
+        generation: u64,
+        query: String,
+        files: Vec<PickerItem>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -646,6 +700,7 @@ pub enum ToolDisplayState {
 
 impl App {
     pub fn new() -> Self {
+        let (file_search_tx, file_search_rx) = tokio::sync::mpsc::channel(16);
         Self {
             theme: crate::theme::Theme::dark(),
             messages: Vec::new(),
@@ -691,6 +746,16 @@ impl App {
             up_press: None,
             pending_queued_send: false,
             picker: None,
+            file_index: None,
+            file_index_building: false,
+            file_search_tx,
+            file_search_rx,
+            file_search_gen: 0,
+            pending_file_query: None,
+            file_query_deadline: None,
+            fff_file_results: None,
+            at_file_items: Vec::new(),
+            at_reference_items: Vec::new(),
             settings: None,
             slash_selected: 0,
             slash_scroll: 0,
@@ -702,6 +767,7 @@ impl App {
             reasoning_elapsed: HashMap::new(),
             reasoning_header_rows: Vec::new(),
             tool_batch_header_rows: Vec::new(),
+            compaction_header_rows: Vec::new(),
             pending_md_rerender: None,
             md_state: mdstream::DocumentState::new(),
             md_stream: None,
@@ -1643,10 +1709,19 @@ impl App {
         }
     }
 
-    /// Toggle expansion of the most recently drawn tool-call batch. No-op
-    /// when no collapsed/expanded batch header is on screen.
+    /// Toggle expansion of the most recently drawn tool-call batch.
+    /// Covers both regular tool batches and compaction blocks (which share
+    /// the same `tool_batch_expanded` set). No-op when no collapsed/expanded
+    /// header is on screen.
     pub fn toggle_tool_batch_expanded(&mut self) {
-        if let Some(&(id, _)) = self.tool_batch_header_rows.last() {
+        // Prefer the most recent tool batch; fall back to the most recent
+        // compaction if no batch is on screen.
+        let id_opt = self
+            .tool_batch_header_rows
+            .last()
+            .or_else(|| self.compaction_header_rows.last())
+            .map(|&(id, _)| id);
+        if let Some(id) = id_opt {
             if self.tool_batch_expanded.contains(&id) {
                 self.tool_batch_expanded.remove(&id);
             } else {
@@ -1671,23 +1746,24 @@ impl App {
         }
     }
 
-    /// Insert an @-mention into the input, replacing the trigger `@` that
-    /// opened the picker. Without this, the trigger `@` (already in the
-    /// input) plus the mention's leading `@` produces `@@path`.
+    /// Insert an @-mention into the input, replacing the partial `@...` token
+    /// that opened the picker. The token runs from the last `@` at or before
+    /// the cursor to the cursor, so the picked mention substitutes the text the
+    /// user had typed so far instead of producing `@@path`.
     pub fn insert_mention(&mut self, mention: &str) {
-        if self.input.ends_with('@') {
-            self.input.pop();
-            self.cursor = self.cursor.saturating_sub(1);
+        if let Some(at) = self.input[..self.cursor].rfind('@') {
+            self.input.replace_range(at..self.cursor, mention);
+            self.cursor = at + mention.len();
+        } else {
+            self.input.push_str(mention);
+            self.cursor += mention.len();
         }
-        self.input.push_str(mention);
-        self.cursor += mention.len();
     }
 
     /// Insert a skill reference into the input, replacing the `@` trigger
-    /// that opened the picker. The `skill:` portion lived in the picker
-    /// filter, not the input, so the input ends with just `@`.
+    /// that opened the picker.
     /// Insert a model or subagent namespace reference into the input,
-    /// replacing the `@` trigger that opened the picker.
+    /// replacing the partial `@namespace:` token the user typed.
     pub fn insert_namespace_mention(&mut self, kind: &str, value: &str) {
         self.insert_mention(&format!("@{kind}:{value} "));
     }
@@ -1704,6 +1780,7 @@ impl App {
 
     /// Expire the pending-cancel hint and pending-quit hint.
     pub fn tick(&mut self) {
+        self.poll_file_search();
         if let Some(since) = self.esc_cancel_pending {
             if since.elapsed() > Duration::from_secs(2) {
                 self.esc_cancel_pending = None;

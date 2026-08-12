@@ -835,39 +835,35 @@ impl Agent {
         compacted.retain(|message| !is_compaction_message(message));
         let tail_start_id = compacted.first().map(|message| message.id);
         let compact_id = Ulid::new();
+        // Compaction is a synthetic system marker, not a user message —
+        // mirrors the way other hidden agent state (e.g. capability notices)
+        // is delivered. The assistant message in the wire never sees this
+        // because context_from_history filters out anything tagged with a
+        // CompactionPart, and the TUI renders it as a tool-call-style
+        // collapsible block instead of a chat row.
+        let removed_count = messages.len();
         let compact_msg = Message {
             id: compact_id,
             session_id: self.session_id,
-            role: Role::User,
-            parts: vec![
-                Part::Text(TextPart {
-                    base: PartBase {
-                        id: Ulid::new(),
-                        message_id: compact_id,
-                        session_id: self.session_id,
-                    },
-                    text: "Summarize the important beats of the current thread in a way where if you weren't there you'd know exactly what happened."
-                        .into(),
-                    synthetic: true,
-                }),
-                Part::Compaction(CompactionPart {
-                    base: PartBase {
-                        id: Ulid::new(),
-                        message_id: compact_id,
-                        session_id: self.session_id,
-                    },
-                    auto: !force,
-                    overflow: false,
-                    tail_start_id,
-                }),
-            ],
+            role: Role::System,
+            parts: vec![Part::Compaction(CompactionPart {
+                base: PartBase {
+                    id: Ulid::new(),
+                    message_id: compact_id,
+                    session_id: self.session_id,
+                },
+                auto: !force,
+                overflow: false,
+                tail_start_id,
+                summary: None,
+                removed_count: Some(removed_count as u32),
+            })],
             time: Time {
                 created: Utc::now().timestamp_millis(),
                 completed: None,
             },
             assistant: None,
         };
-        let removed_count = messages.len();
         messages = compacted;
         messages.insert(0, compact_msg.clone());
 
@@ -1332,21 +1328,25 @@ mod tests {
     fn rebuilds_context_from_persisted_compaction_marker() {
         let old = make_msg(Role::User, vec![text_part("old")]);
         let kept = make_msg(Role::User, vec![text_part("kept")]);
+        // Newer sessions tag the compaction marker as a synthetic
+        // System message (the wire still filters it out regardless of
+        // role because the filter checks for the Compaction part, not
+        // the role). Older sessions may serialize it as User — the
+        // filter handles both, but the old role is no longer produced.
         let marker = make_msg(
-            Role::User,
-            vec![
-                text_part("summary"),
-                Part::Compaction(CompactionPart {
-                    base: PartBase {
-                        id: ulid::Ulid::new(),
-                        message_id: ulid::Ulid::new(),
-                        session_id: ulid::Ulid::new(),
-                    },
-                    auto: true,
-                    overflow: false,
-                    tail_start_id: Some(kept.id),
-                }),
-            ],
+            Role::System,
+            vec![Part::Compaction(CompactionPart {
+                base: PartBase {
+                    id: ulid::Ulid::new(),
+                    message_id: ulid::Ulid::new(),
+                    session_id: ulid::Ulid::new(),
+                },
+                auto: true,
+                overflow: false,
+                tail_start_id: Some(kept.id),
+                summary: None,
+                removed_count: Some(1),
+            })],
         );
         let marker_id = marker.id;
         let old_id = old.id;

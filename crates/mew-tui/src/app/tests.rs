@@ -1,5 +1,22 @@
 use super::*;
 
+/// Open a picker with an explicit item list, so rendering and scroll
+/// mechanics tests don't depend on the real filesystem or catalog contents.
+fn open_test_picker(app: &mut App, kind: &str, items: Vec<PickerItem>) {
+    app.mode = Mode::CommandPalette;
+    app.picker = Some(PickerState {
+        kind: kind.into(),
+        items,
+        filter: String::new(),
+        selected: 0,
+        cursor: 0,
+        scroll: 0,
+        visible_items: PICKER_VISIBLE_ITEMS,
+        hint: None,
+        budget: None,
+    });
+}
+
 #[test]
 fn test_parse_file_mentions_basic() {
     let text = "fix the bug in @src/main.rs";
@@ -1013,7 +1030,7 @@ fn test_insert_mention_replaces_trigger_at() {
 }
 
 #[test]
-fn test_namespace_picker_skill() {
+fn test_at_picker_includes_skills() {
     let mut app = App::new();
     app.skill_catalog = vec![
         mew_skills::Skill {
@@ -1032,56 +1049,44 @@ fn test_namespace_picker_skill() {
         },
     ];
 
-    app.open_namespace_picker("skill", "");
+    app.open_at_picker();
     let picker = app.picker.as_ref().expect("picker should be open");
-    assert_eq!(picker.kind, "ns_skill");
-    assert_eq!(picker.items.len(), 2);
+    assert_eq!(picker.kind, "at");
     assert!(picker.items.iter().any(|i| i.label == "@skill:clarify"));
+    assert!(picker.items.iter().any(|i| i.label == "@skill:polish"));
 }
 
 #[test]
-fn test_namespace_picker_wraps_long_descriptions() {
-    // Descriptions longer than the picker list width wrap onto multiple
-    // display rows instead of being truncated; the row model accounts for
-    // every wrapped row so scrolling and the popup height stay exact.
+fn test_at_picker_renders_single_line_entries() {
+    // The inline `@`-mention list reuses the slash autocomplete component, so
+    // each entry stays on one line. A long description is clipped by the
+    // terminal width rather than wrapped onto extra rows.
     let mut h = crate::harness::Harness::new(80, 24);
-    h.app.skill_catalog = vec![mew_skills::Skill {
-        name: "clarify".into(),
-        description:
-            "Improve unclear UX copy, error messages, microcopy, labels, and instructions to make interfaces easier to understand"
-                .into(),
-        body: "body".into(),
-        path: std::path::PathBuf::from("(test)"),
-        template: false,
-    }];
-    h.app.open_namespace_picker("skill", "");
+    open_test_picker(
+        &mut h.app,
+        "at",
+        vec![PickerItem {
+            id: "clarify".into(),
+            label: "@skill:clarify".into(),
+            description:
+                "Improve unclear UX copy, error messages, microcopy, labels, and instructions to make interfaces easier to understand"
+                    .into(),
+            ..Default::default()
+        }],
+    );
     let rendered = h.render();
-    assert!(
-        rendered.contains("@skill:clarify"),
-        "item label should render:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("understand"),
-        "full description must render (wrapped across rows):\n{rendered}"
-    );
-    let desc_row_count = rendered
+    let label_rows = rendered
         .lines()
-        .filter(|l| l.contains("UX copy") || l.contains("understand"))
+        .filter(|l| l.contains("@skill:clarify"))
         .count();
-    assert!(
-        desc_row_count >= 2,
-        "description should wrap across ≥2 rows, got {desc_row_count}:\n{rendered}"
-    );
-    let picker = h.app.picker.as_ref().unwrap();
-    assert!(
-        picker.visible_items >= 2,
-        "visible window covers the wrapped rows, got {}",
-        picker.visible_items
+    assert_eq!(
+        label_rows, 1,
+        "entry should render on a single row:\n{rendered}"
     );
 }
 
 #[test]
-fn test_namespace_picker_model() {
+fn test_at_picker_includes_models() {
     let mut app = App::new();
     app.models = vec![
         ("openai/gpt-4o".into(), "GPT-4o".into()),
@@ -1091,10 +1096,9 @@ fn test_namespace_picker_model() {
         ),
     ];
 
-    app.open_namespace_picker("model", "");
+    app.open_at_picker();
     let picker = app.picker.as_ref().expect("picker should be open");
-    assert_eq!(picker.kind, "ns_model");
-    assert_eq!(picker.items.len(), 2);
+    assert_eq!(picker.kind, "at");
     assert!(picker
         .items
         .iter()
@@ -1102,7 +1106,7 @@ fn test_namespace_picker_model() {
 }
 
 #[test]
-fn test_namespace_picker_subagent() {
+fn test_at_picker_includes_subagents() {
     let mut app = App::new();
     app.subagent_catalog = vec![mew_subagents::SubagentDef {
         name: "researcher".into(),
@@ -1118,14 +1122,48 @@ fn test_namespace_picker_subagent() {
         output_schema: None,
     }];
 
-    app.open_namespace_picker("subagent", "");
+    app.open_at_picker();
     let picker = app.picker.as_ref().expect("picker should be open");
-    assert_eq!(picker.kind, "ns_subagent");
-    assert_eq!(picker.items.len(), 1);
+    assert_eq!(picker.kind, "at");
     assert!(picker
         .items
         .iter()
         .any(|i| i.label == "@subagent:researcher"));
+}
+
+#[test]
+fn test_at_picker_filter_matches_namespace_value() {
+    // A namespace prefix in the query narrows to that namespace and matches
+    // the text after the prefix, rather than requiring the literal prefix to
+    // appear in the item label.
+    let mut app = App::new();
+    app.models = vec![("openai/gpt-4o".into(), "GPT-4o".into())];
+    app.skill_catalog = vec![mew_skills::Skill {
+        name: "gpt-writer".into(),
+        description: "Writes with GPT".into(),
+        body: "body".into(),
+        path: std::path::PathBuf::from("(test)"),
+        template: false,
+    }];
+
+    app.open_at_picker();
+    app.input = "@model:gpt".to_string();
+    app.cursor = app.input.len();
+    app.sync_at_picker();
+
+    let labels: Vec<&str> = app
+        .picker
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .map(|i| i.label.as_str())
+        .collect();
+    assert!(labels.contains(&"@model:openai/gpt-4o"));
+    assert!(
+        !labels.contains(&"@skill:gpt-writer"),
+        "skill items must not match a model: prefix"
+    );
 }
 
 #[test]
@@ -1141,6 +1179,138 @@ fn test_insert_namespace_mention() {
     app.cursor = 1;
     app.insert_namespace_mention("subagent", "researcher");
     assert_eq!(app.input, "@subagent:researcher ");
+}
+
+#[test]
+fn test_insert_mention_replaces_partial_token() {
+    // With the inline picker the user keeps typing in the chat input, so the
+    // selected mention replaces the whole `@...` token, not just the `@`.
+    let mut app = App::new();
+    app.input = "@skill:cla".to_string();
+    app.cursor = app.input.len();
+    app.insert_namespace_mention("skill", "clarify");
+    assert_eq!(app.input, "@skill:clarify ");
+    assert_eq!(app.cursor, app.input.len());
+
+    app.input = "see @sr".to_string();
+    app.cursor = app.input.len();
+    app.insert_mention("@src/main.rs");
+    assert_eq!(app.input, "see @src/main.rs");
+    assert_eq!(app.cursor, app.input.len());
+}
+
+#[test]
+fn test_sync_at_picker_filters_skill_reference() {
+    let mut app = App::new();
+    app.skill_catalog = vec![mew_skills::Skill {
+        name: "clarify".into(),
+        description: "Improve UX copy".into(),
+        body: "body".into(),
+        path: std::path::PathBuf::from("(test)"),
+        template: false,
+    }];
+
+    // The user typed `@skill:cla` in the chat input; the unified picker
+    // filters the same catalog by the full token after the `@`.
+    app.input = "@skill:cla".to_string();
+    app.cursor = app.input.len();
+    app.open_at_picker();
+    app.sync_at_picker();
+
+    let picker = app.picker.as_ref().expect("picker should be open");
+    assert_eq!(picker.kind, "at");
+    assert_eq!(picker.filter, "skill:cla");
+    assert!(picker
+        .filtered()
+        .iter()
+        .any(|i| i.label == "@skill:clarify"));
+}
+
+#[test]
+fn test_sync_at_picker_plain_at_filters_path() {
+    let mut app = App::new();
+    app.skill_catalog = vec![mew_skills::Skill {
+        name: "clarify".into(),
+        description: "Improve UX copy".into(),
+        body: "body".into(),
+        path: std::path::PathBuf::from("(test)"),
+        template: false,
+    }];
+
+    // `@skill` (no colon) is a plain path prefix, not the `skill:` namespace;
+    // the picker stays a single unified list and just filters on `skill`.
+    app.input = "@skill".to_string();
+    app.cursor = app.input.len();
+    app.open_at_picker();
+    app.sync_at_picker();
+
+    let picker = app.picker.as_ref().expect("picker should be open");
+    assert_eq!(picker.kind, "at");
+    assert_eq!(picker.filter, "skill");
+}
+
+#[test]
+fn test_sync_at_picker_closes_when_at_removed() {
+    let mut app = App::new();
+    app.input = "hello".to_string();
+    app.cursor = app.input.len();
+    app.open_at_picker();
+    app.sync_at_picker();
+
+    assert!(
+        app.picker.is_none(),
+        "picker should close without a `@` token"
+    );
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+#[test]
+fn test_at_picker_uses_slash_style_component() {
+    // The `@`-mention list reuses the slash-command autocomplete component:
+    // each entry renders name and description on a single row, inline, rather
+    // than as a two-line popup entry.
+    let mut h = crate::harness::Harness::new(80, 24);
+    open_test_picker(
+        &mut h.app,
+        "at",
+        vec![PickerItem {
+            id: "clarify".into(),
+            label: "@skill:clarify".into(),
+            description: "Improve UX copy".into(),
+            ..Default::default()
+        }],
+    );
+    let rendered = h.render();
+
+    let row = rendered
+        .lines()
+        .find(|r| r.contains("@skill:clarify"))
+        .expect("item label must render");
+    assert!(
+        row.contains("Improve UX copy"),
+        "label and description should share a row: {row}"
+    );
+}
+
+#[test]
+fn test_command_palette_stays_centered() {
+    // The command palette (Ctrl+K) should remain a centered popup, not an
+    // inline autocomplete. Only the `@`-mention picker renders inline.
+    let mut h = crate::harness::Harness::new(80, 24);
+    h.app.open_command_palette();
+    let rendered = h.render();
+
+    let rows: Vec<&str> = rendered.lines().collect();
+    let item_row = rows
+        .iter()
+        .position(|r| r.contains("Switch Model") || r.contains("Settings"))
+        .expect("command palette items must render");
+    // The palette should NOT be in the bottom half: it should sit closer
+    // to the middle of the screen.
+    assert!(
+        item_row < rows.len() / 2,
+        "command palette should stay centered, got row {item_row}"
+    );
 }
 
 #[test]
@@ -2750,18 +2920,17 @@ fn test_picker_row_scroll_keeps_selection_visible() {
     // item advances the scroll so the selected item's full row span is in
     // view.
     let mut h = crate::harness::Harness::new(80, 24);
-    h.app.skill_catalog = (0..12)
-        .map(|n| mew_skills::Skill {
-            name: format!("skill{n}"),
+    let items = (0..12)
+        .map(|n| PickerItem {
+            id: format!("skill{n}"),
+            label: format!("@skill:skill{n}"),
             description:
                 "a fairly long description that wraps across several rows inside the picker list"
                     .into(),
-            body: "body".into(),
-            path: std::path::PathBuf::from("(test)"),
-            template: false,
+            ..Default::default()
         })
         .collect();
-    h.app.open_namespace_picker("skill", "");
+    open_test_picker(&mut h.app, "command", items);
     // Move to the last item (11 steps from index 0).
     for _ in 0..11 {
         h.app.picker_down();
@@ -2817,18 +2986,17 @@ fn test_picker_scrollbar_travels_full_track() {
     // position == content_length - 1, so the old `content_length = total`
     // call left the thumb short of the bottom at max scroll.
     let mut h = crate::harness::Harness::new(80, 24);
-    h.app.skill_catalog = (0..12)
-        .map(|n| mew_skills::Skill {
-            name: format!("skill{n}"),
+    let items = (0..12)
+        .map(|n| PickerItem {
+            id: format!("skill{n}"),
+            label: format!("@skill:skill{n}"),
             description:
                 "a fairly long description that wraps across several rows inside the picker list"
                     .into(),
-            body: "body".into(),
-            path: std::path::PathBuf::from("(test)"),
-            template: false,
+            ..Default::default()
         })
         .collect();
-    h.app.open_namespace_picker("skill", "");
+    open_test_picker(&mut h.app, "command", items);
 
     // At the top the thumb starts on the scrollbar column's topmost row.
     let (thumb, top, _bottom) = scrollbar_span(&h.render()).expect("picker scrollbar must render");
