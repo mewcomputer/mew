@@ -1,6 +1,6 @@
 # silent-drop audit: the drain-bug class, repo-wide
 
-Follow-up scan after notes/runtime-rework-plan.md: searched every crate + frontend for the
+Follow-up scan after the runtime dispatch refactor: searched every crate + frontend for the
 same defect classes — silent-drop catch-alls on dispatch enums, stub arms with comments
 claiming behavior that doesn't exist, duplicated dispatch that drifted, and capability
 claims that contradict the code. Severity labels per .mew/agents/code-reviewer.md.

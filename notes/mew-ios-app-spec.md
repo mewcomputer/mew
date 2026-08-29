@@ -1,15 +1,14 @@
 # mew ios app — spec
 
 An iOS client for mew: connect to daemons on multiple machines over iroh,
-watch sessions, respond to permissions, send prompts. Companion to
-`notes/mew-mobile-iroh-plan.md` (POC ladder rungs 3–4) and forward-compatible
+watch sessions, respond to permissions, send prompts. The daemon's iroh
+pairing path and mobile core now exist; this spec remains forward-compatible
 with `notes/mew-accounts-roaming-plan.md` (the phone's iroh key becomes its
 device key when the hub exists).
 
-Status: spec. Nothing mobile-side exists yet. Daemon-side iroh stage 1
-(listener + allowlist + `mew pair`) is implemented in the working tree but
-not merged — treat it as a prerequisite that lands first, and expect its
-details (pairing output format, allowlist path) to still shift.
+Status: reference spec. The mobile client and daemon-side iroh stage 1
+(listener + allowlist + `mew pair`) are implemented, while the remaining
+sections describe desired behavior and follow-on hardening.
 
 ---
 

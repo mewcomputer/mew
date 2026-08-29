@@ -1,8 +1,7 @@
 # testing plan: seams, fakes, and golden frames
 
-> update 2026-07-06: steps 1-2 are subsumed by notes/runtime-rework-plan.md (the
-> dispatch seam grew into a full runtime rework with compile-time guards). Steps 3-8
-> still land as written; step-1 regression tests become that plan's stage 0.
+> update 2026-07-06: steps 1-2 landed in the shared runtime dispatch path with
+> compile-time guards. Steps 3-8 still land as written.
 
 Prompted by "we don't mock as much as we could be." Position after surveying the repo:
 more mocking is the wrong lever — the project rules ("mocks hide problems", "never test
@@ -27,7 +26,7 @@ adds seams and real-integration coverage, not mock objects.
 
 1. **main.rs is untestable, not under-mocked.** Command dispatch exists in three
    divergent inline copies (main loop, drain loop, daemon loop). All of the P0s from
-   notes/tui-ux-fixes-plan.md live here. No test can reach this code today.
+   The former TUI UX P0s lived here. No test can reach this code today.
 2. **the harness simulates dispatch instead of exercising it.** `Harness::apply_action`
    (mew-tui/src/harness.rs:74) handles `Submit`/`Quit`/`Clear` and drops everything else —
    a fourth divergent copy of dispatch. Harness tests verify App + rendering, but the
@@ -45,7 +44,7 @@ adds seams and real-integration coverage, not mock objects.
 
 ## plan
 
-### 1. dispatch seam (pairs with tui-ux-fixes-plan step 4 — do together)
+### 1. dispatch seam (landed)
 
 Extract command handling from main.rs into one testable unit:
 
@@ -140,6 +139,6 @@ assertion-free tests.
 
 ## sequencing
 
-Steps 1-2 ride along with the tui-ux-fixes work (same refactor). 3 and 4 next — they
-protect the streaming fixes as they land. 5-7 are independent and small; 6 last since
-it depends on nothing here. 8 after 1-2 to measure what's left.
+Steps 1-2 are complete in the shared runtime path. 3 and 4 next — they protect the
+streaming fixes as they land. 5-7 are independent and small; 6 last since it depends
+on nothing here. 8 after 1-2 to measure what's left.

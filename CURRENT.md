@@ -1,3 +1,34 @@
+# 2026-08-28 — remove completed feature plans
+
+Removed five completed or superseded plans: `notes/mew-tui-self-capture-plan.md`,
+`notes/mew-ios-improvement-plan.md`, `notes/mew-mobile-iroh-plan.md`,
+`notes/runtime-rework-plan.md`, and `notes/tui-ux-fixes-plan.md`. Updated the
+remaining testing and silent-drop audit notes to describe the landed runtime
+dispatch work without linking to deleted plans. Kept the active web UI fixes,
+testing, release, workbench, product, GPUI, and multi-workspace notes.
+
+# 2026-08-28 — remove obsolete frontend parity plans
+
+Removed the superseded July parity planning bundle:
+`notes/finish-up-parity.md`, `notes/tui-parity-plan.md`,
+`notes/web-parity-plan.md`, and `notes/ios-parity-plan.md`. Their work is
+largely landed, and their remaining references were stale. Kept the active
+root `PLAN.md` handoff plus the multi-workspace, GPUI, release, product, and
+in-progress feature notes for future scoping.
+
+# 2026-08-28 — verification baseline and release checks
+
+The repository baseline was rechecked from clean `main` with `just ci`, plus
+the standalone web UI tests, native desktop packaging, and the iOS simulator
+test. Rust, TypeScript, web UI, bridge e2e, and desktop packaging passed. The
+compaction round-trip fixture now supplies the new optional `summary` and
+`removed_count` fields. The clipboard error test injects the unavailable-tool
+case so it no longer depends on the host clipboard contents. iOS fixtures now
+match the current persona and turn-manifest APIs, but the build still stops in
+`AppStore.handleEvent`: the Swift UI does not yet handle `subagentEnd`,
+`planApprovalRequested`, or `goalProposed` events. That is a follow-up parity
+item, not a reason to add scope to the current verification pass.
+
 # 2026-08-10 — compaction renders as a collapsible tool-call-style block
 
 Compaction markers are now a synthetic `Role::System` message carrying a

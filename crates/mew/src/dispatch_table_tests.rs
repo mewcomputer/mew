@@ -472,7 +472,10 @@ async fn test_paste_clipboard_image_no_tool_error() {
         loaded_personas: &[],
         plugin_info: &plugin_info,
     };
-    let _ = runtime::handle_action(&mut cx, Action::PasteClipboardImage).await;
+    runtime::dispatch::handle_paste_clipboard_image_with(&mut cx, || {
+        Err("clipboard image tool unavailable".into())
+    })
+    .await;
 
     // Without pngpaste (or equivalent), we should get an error alert,
     // not a silent no-op.

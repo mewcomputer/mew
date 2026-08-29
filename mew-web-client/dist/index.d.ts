@@ -227,6 +227,8 @@ export type Part = {
     base: PartBase;
     auto: boolean;
     overflow: boolean;
+    summary?: string;
+    removed_count?: number;
 };
 export interface PartBase {
     id: string;

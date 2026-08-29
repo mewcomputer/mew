@@ -44,7 +44,8 @@ final class AppStoreEventHandlingTests: XCTestCase {
             pendingPermissions: [], pendingAskUser: [],
             models: [], daemonVersion: nil,
             permissionMode: "standard",
-            currentModel: nil, currentProvider: nil, thinkingVariant: nil
+            currentModel: nil, currentProvider: nil, thinkingVariant: nil,
+            currentPersona: nil, availablePersonas: []
         )
         mock.snapshotResult = snap
         store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
@@ -93,7 +94,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store.handleEvent(.turnEnded(
             daemon: "daemon-1", sessionId: "sess-1",
             inputTokens: 500, outputTokens: 200,
-            cost: 0.0123, failed: false
+            cost: 0.0123, failed: false, manifest: nil
         ))
         let usage = store.sessionUsage["sess-1"]
         XCTAssertNotNil(usage)
@@ -107,7 +108,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store.handleEvent(.turnEnded(
             daemon: "daemon-1", sessionId: "sess-1",
             inputTokens: 0, outputTokens: 0,
-            cost: 0.0, failed: true
+            cost: 0.0, failed: true, manifest: nil
         ))
         XCTAssertEqual(store.lastTurnFailed["sess-1"], true)
     }
@@ -158,7 +159,8 @@ final class AppStoreEventHandlingTests: XCTestCase {
             models: [], daemonVersion: "1.0",
             permissionMode: "standard",
             currentModel: "gpt-4", currentProvider: "openai",
-            thinkingVariant: "high"
+            thinkingVariant: "high", currentPersona: nil,
+            availablePersonas: []
         )
         mock.snapshotResult = snap
         store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))

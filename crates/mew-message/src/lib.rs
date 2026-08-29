@@ -650,6 +650,8 @@ mod tests {
             auto: true,
             overflow: false,
             tail_start_id: Some(Ulid::new()),
+            summary: None,
+            removed_count: None,
         });
         roundtrip("compaction", &p);
     }
