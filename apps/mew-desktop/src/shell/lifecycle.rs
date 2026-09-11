@@ -67,6 +67,7 @@ impl DesktopShell {
             .iter()
             .cloned()
             .collect();
+        let expanded_workspaces = BTreeSet::new();
         let sidebar_width = persisted_state
             .desktop_sidebar_width
             .unwrap_or(SIDEBAR_EXPANDED_WIDTH)
@@ -250,6 +251,7 @@ impl DesktopShell {
             sidebar_list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(40.)),
             sidebar_width,
             collapsed_groups,
+            expanded_workspaces,
             sidebar_search: String::new(),
             sidebar_search_focus_handle,
             sidebar_focus_handle,
@@ -616,6 +618,7 @@ impl DesktopShell {
         for message in [
             ClientMessage::Ping,
             ClientMessage::ListSessions,
+            ClientMessage::ListProjects,
             ClientMessage::ListModels,
         ] {
             let result = tokio::select! {

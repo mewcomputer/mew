@@ -2,15 +2,24 @@ use super::*;
 
 impl DesktopShell {
     pub(super) fn new_conversation(&mut self, cx: &mut Context<Self>) {
-        self.begin_new_conversation(None, cx);
+        self.begin_new_conversation(None, None, cx);
     }
 
     pub(super) fn new_conversation_in_group(&mut self, group_id: String, cx: &mut Context<Self>) {
-        self.begin_new_conversation(Some(group_id), cx);
+        self.begin_new_conversation(None, Some(group_id), cx);
+    }
+
+    pub(super) fn new_conversation_in_workspace(
+        &mut self,
+        workspace_path: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_new_conversation(Some(workspace_path), None, cx);
     }
 
     pub(super) fn begin_new_conversation(
         &mut self,
+        cwd: Option<String>,
         group_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -24,8 +33,8 @@ impl DesktopShell {
         self.pending_session_request = true;
         self.pending_session_target = None;
         let command = match group_id {
-            Some(group_id) => self.model.ui.new_conversation_in_group(None, group_id),
-            None => self.model.ui.new_conversation(None),
+            Some(group_id) => self.model.ui.new_conversation_in_group(cwd, group_id),
+            None => self.model.ui.new_conversation(cwd),
         };
         self.composer_selection = 0..0;
         self.composer_selection_reversed = false;
@@ -669,6 +678,7 @@ impl DesktopShell {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub(super) fn create_group(&mut self, cx: &mut Context<Self>) {
         let next_number = self.model.ui.groups.len() + 1;
         self.send_command(ClientMessage::CreateGroup {
@@ -808,26 +818,27 @@ impl DesktopShell {
     }
 
     pub(super) fn rebuild_sidebar_rows(&mut self) {
-        self.sidebar_rows = if self.sidebar_search.trim().is_empty() {
-            build_sidebar_rows(
-                &self.model.ui.conversations,
-                &self.model.ui.groups,
-                &self.collapsed_groups,
-            )
-        } else {
-            build_sidebar_rows_with_query(
-                &self.model.ui.conversations,
-                &self.model.ui.groups,
-                &self.collapsed_groups,
-                &self.sidebar_search,
-            )
-        };
+        self.sidebar_rows = build_workspace_sidebar_rows(
+            &self.model.ui.conversations,
+            &self.model.ui.projects,
+            &self.collapsed_groups,
+            &self.expanded_workspaces,
+            &self.sidebar_search,
+            self.model.ui.selected_session.as_deref(),
+        );
     }
 
     pub(super) fn toggle_group(&mut self, group_id: String, cx: &mut Context<Self>) {
         if !self.collapsed_groups.insert(group_id.clone()) {
             self.collapsed_groups.remove(&group_id);
         }
+        self.rebuild_sidebar_rows();
+        self.persist_layout();
+        cx.notify();
+    }
+
+    pub(super) fn show_more_workspace(&mut self, workspace_path: String, cx: &mut Context<Self>) {
+        self.expanded_workspaces.insert(workspace_path);
         self.rebuild_sidebar_rows();
         self.persist_layout();
         cx.notify();
@@ -1625,6 +1636,7 @@ mod tests {
             session_id: "session-1".into(),
             title: "A real session".into(),
             cwd: None,
+            workspace_path: None,
             last_message_at: None,
             state: mew_protocol::SessionState::Idle,
             last_turn_failed: false,

@@ -169,35 +169,170 @@ impl DesktopShell {
                         .px(px(4.))
                         .text_xs()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child("SESSIONS")
-                        .child(
-                            div().flex().items_center().gap(px(2.)).children([div()
-                                .id("new-group")
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .gap(px(4.))
-                                .h(px(24.))
-                                .px(px(5.))
-                                .rounded(px(6.))
-                                .cursor_pointer()
-                                .role(Role::Button)
-                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                .aria_label("New session group")
-                                .text_color(theme_rgb(&self.theme, "text.body"))
-                                .border_1()
-                                .border_color(theme_rgb(&self.theme, "divider"))
-                                .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.create_group(cx);
-                                }))
-                                .child(tabler_icon(
-                                    TablerIcon::Folder,
-                                    theme_rgb(&self.theme, "text.muted"),
-                                    px(14.),
-                                ))
-                                .child("group")]),
-                        )
+                        .child("WORKSPACES")
+                        .into_any_element(),
+                ),
+                SidebarRow::Workspace {
+                    path,
+                    name,
+                    pinned,
+                    count,
+                    collapsed,
+                } => {
+                    let workspace_id = if path.is_empty() {
+                        "other".to_owned()
+                    } else {
+                        path.clone()
+                    };
+                    let toggle_path = path.clone();
+                    let new_path = path.clone();
+                    Some(
+                        div()
+                            .id(format!("sidebar-workspace-{workspace_id}"))
+                            .flex()
+                            .items_center()
+                            .w_full()
+                            .h(px(30.))
+                            .px(px(6.))
+                            .gap(px(6.))
+                            .rounded(px(6.))
+                            .text_xs()
+                            .text_color(theme_rgb(&self.theme, "text.muted"))
+                            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                            .child(
+                                div()
+                                    .id(format!("toggle-workspace-{workspace_id}"))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .cursor_pointer()
+                                    .role(Role::Button)
+                                    .aria_expanded(!collapsed)
+                                    .aria_label(SharedString::from(format!(
+                                        "{} workspace, {} tasks, {}",
+                                        name,
+                                        count,
+                                        if collapsed { "collapsed" } else { "expanded" }
+                                    )))
+                                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        shell.toggle_group(toggle_path.clone(), cx);
+                                    }))
+                                    .child(tabler_icon(
+                                        if collapsed {
+                                            TablerIcon::ChevronRight
+                                        } else {
+                                            TablerIcon::ChevronDown
+                                        },
+                                        theme_rgb(&self.theme, "text.muted"),
+                                        px(13.),
+                                    ))
+                                    .child(tabler_icon(
+                                        TablerIcon::Folder,
+                                        theme_rgb(&self.theme, "text.muted"),
+                                        px(14.),
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .child(SharedString::from(name.clone())),
+                                    )
+                                    .when(pinned, |element| {
+                                        element.child(tabler_icon(
+                                            TablerIcon::Pin,
+                                            theme_rgb(&self.theme, "text.muted"),
+                                            px(11.),
+                                        ))
+                                    })
+                                    .child(div().flex_none().text_xs().child(count.to_string())),
+                            )
+                            .child(
+                                div()
+                                    .id(format!("new-task-in-workspace-{workspace_id}"))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(22.))
+                                    .rounded(px(5.))
+                                    .cursor_pointer()
+                                    .role(Role::Button)
+                                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                    .aria_label(SharedString::from(format!("New task in {name}")))
+                                    .hover(|element| element.bg(theme_rgb(&self.theme, "divider")))
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        if new_path.is_empty() {
+                                            shell.new_conversation(cx);
+                                        } else {
+                                            shell.new_conversation_in_workspace(
+                                                new_path.clone(),
+                                                cx,
+                                            );
+                                        }
+                                    }))
+                                    .child(tabler_icon(
+                                        TablerIcon::Plus,
+                                        theme_rgb(&self.theme, "text.muted"),
+                                        px(13.),
+                                    )),
+                            )
+                            .into_any_element(),
+                    )
+                }
+                SidebarRow::ShowMore {
+                    workspace_path,
+                    count,
+                } => {
+                    let path = workspace_path.clone();
+                    Some(
+                        div()
+                            .id(format!(
+                                "show-more-workspace-{}",
+                                if path.is_empty() { "other" } else { &path }
+                            ))
+                            .h(px(28.))
+                            .pl(px(34.))
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .role(Role::Button)
+                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                            .aria_label(SharedString::from(format!("Show {count} more tasks")))
+                            .text_xs()
+                            .text_color(theme_rgb(&self.theme, "text.muted"))
+                            .hover(|element| {
+                                element.text_color(theme_rgb(&self.theme, "text.body"))
+                            })
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                shell.show_more_workspace(path.clone(), cx);
+                            }))
+                            .child(SharedString::from(format!("Show more ({count})")))
+                            .into_any_element(),
+                    )
+                }
+                SidebarRow::Archived { count } => Some(
+                    div()
+                        .id("sidebar-archived")
+                        .h(px(30.))
+                        .px(px(10.))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .text_xs()
+                        .text_color(theme_rgb(&self.theme, "text.muted"))
+                        .child(tabler_icon(
+                            TablerIcon::Archive,
+                            theme_rgb(&self.theme, "text.muted"),
+                            px(13.),
+                        ))
+                        .child("Archived")
+                        .child(div().flex_none().child(count.to_string()))
                         .into_any_element(),
                 ),
                 SidebarRow::Group {

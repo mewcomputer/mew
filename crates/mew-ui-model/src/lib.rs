@@ -15,6 +15,7 @@ pub struct ConversationItem {
     pub session_id: String,
     pub title: String,
     pub cwd: Option<String>,
+    pub workspace_path: Option<String>,
     pub last_message_at: Option<i64>,
     pub state: SessionState,
     pub last_turn_failed: bool,
@@ -144,6 +145,7 @@ pub struct UiModel {
     pub connection: Option<ConnectionStatus>,
     pub conversations: Vec<ConversationItem>,
     pub groups: Vec<GroupInfo>,
+    pub projects: Vec<mew_protocol::ProjectInfo>,
     pub selected_session: Option<String>,
     pub transcript: Vec<TranscriptItem>,
     pub models: Vec<ModelInfo>,
@@ -173,6 +175,7 @@ impl Default for UiModel {
             connection: None,
             conversations: Vec::new(),
             groups: Vec::new(),
+            projects: Vec::new(),
             selected_session: None,
             transcript: Vec::new(),
             models: Vec::new(),
@@ -218,6 +221,7 @@ impl UiModel {
             .and_then(|session_id| state.session(session_id))
             .is_some_and(|session| session.running);
         self.models = state.models.clone();
+        self.projects = state.projects.clone();
         self.pending_actions = state
             .attached_session
             .as_deref()
@@ -443,6 +447,7 @@ impl From<&SessionInfo> for ConversationItem {
             session_id: session.session_id.clone(),
             title,
             cwd: session.cwd.clone(),
+            workspace_path: session.workspace_path.clone(),
             last_message_at: session.last_message_at,
             state: session.state,
             last_turn_failed: session.last_turn_failed,
@@ -582,6 +587,7 @@ mod tests {
             summary: None,
             client_count: 0,
             cwd: Some("/tmp/mew-project".into()),
+            workspace_path: Some("/tmp/mew-project".into()),
             last_turn_failed: false,
             archived: false,
             pinned: false,

@@ -49,12 +49,19 @@ pub mod groups;
 pub mod remote;
 pub mod session;
 pub mod terminal;
+mod workspace;
 
 #[cfg(feature = "iroh")]
 pub mod iroh_transport;
 
 pub use client::DaemonClient;
 pub use session::{AttachError, Session, SessionManager};
+
+pub(crate) fn workspace_roots() -> Vec<PathBuf> {
+    mew_config::load()
+        .map(|config| config.workspace.roots)
+        .unwrap_or_default()
+}
 
 /// Parameters passed to the agent-builder closure.
 pub struct AgentBuildParams {
@@ -2548,22 +2555,25 @@ async fn list_projects(
     // Workspace roots are useful projects even before a session has been
     // created for them. Loading config here also keeps this query aligned with
     // the same layered config the agent builder uses.
-    if let Ok(config) = mew_config::load() {
-        for root in config.workspace.roots {
-            let canonical = std::fs::canonicalize(&root).unwrap_or(root.clone());
-            let display_name = canonical
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| canonical.to_string_lossy().to_string());
-            projects
-                .entry(canonical.clone())
-                .or_insert_with(|| mew_protocol::ProjectInfo {
-                    path: root.to_string_lossy().to_string(),
-                    display_name,
-                    session_count: 0,
-                    last_used_at: None,
-                });
-        }
+    let workspace_roots = workspace_roots();
+    for root in &workspace_roots {
+        let canonical =
+            crate::workspace::resolve_workspace_path(Some(root.to_string_lossy().as_ref()), &[])
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root.clone());
+        let display_name = canonical
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| canonical.to_string_lossy().to_string());
+        projects
+            .entry(canonical.clone())
+            .or_insert_with(|| mew_protocol::ProjectInfo {
+                path: canonical.to_string_lossy().to_string(),
+                display_name,
+                session_count: 0,
+                last_used_at: None,
+                pinned: false,
+            });
     }
 
     // Walk session dirs and read meta.json for each.
@@ -2577,7 +2587,10 @@ async fn list_projects(
                 continue;
             };
             let path = PathBuf::from(cwd_str);
-            let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
+            let canonical =
+                crate::workspace::resolve_workspace_path(Some(cwd_str), &workspace_roots)
+                    .map(PathBuf::from)
+                    .unwrap_or(path.clone());
             let display_name = canonical
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -2590,6 +2603,7 @@ async fn list_projects(
                     display_name: display_name.clone(),
                     session_count: 0,
                     last_used_at: None,
+                    pinned: false,
                 });
             entry.session_count += 1;
             if let Some(ts) = last_used {

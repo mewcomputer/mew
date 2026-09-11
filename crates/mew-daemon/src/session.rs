@@ -382,6 +382,7 @@ impl SessionManager {
     /// List active and idle top-level sessions.
     pub async fn list(&self) -> Vec<SessionInfo> {
         let mut infos = Vec::new();
+        let workspace_roots = crate::workspace_roots();
         let active = self.active.lock().await;
 
         // Active sessions.
@@ -426,6 +427,10 @@ impl SessionManager {
                 summary,
                 client_count: session.client_count().await,
                 cwd: meta.as_ref().and_then(|m| m.cwd.clone()),
+                workspace_path: crate::workspace::resolve_workspace_path(
+                    meta.as_ref().and_then(|m| m.cwd.as_deref()),
+                    &workspace_roots,
+                ),
                 last_turn_failed: meta.as_ref().map(|m| m.last_turn_failed).unwrap_or(false),
                 archived: meta.as_ref().map(|m| m.archived).unwrap_or(false),
                 pinned: meta.as_ref().map(|m| m.pinned).unwrap_or(false),
@@ -478,6 +483,10 @@ impl SessionManager {
                             summary: meta.summary.clone(),
                             client_count: 0,
                             cwd: meta.cwd.clone(),
+                            workspace_path: crate::workspace::resolve_workspace_path(
+                                meta.cwd.as_deref(),
+                                &workspace_roots,
+                            ),
                             last_turn_failed: meta.last_turn_failed,
                             archived: meta.archived,
                             pinned: meta.pinned,

@@ -6255,3 +6255,26 @@ handler while GPUI held its internal mutable borrow. Scroll-state persistence is
 now deferred until after the callback returns. Added coverage for the
 follow-tail and scrolled-away boundaries. Verified the focused desktop test,
 desktop clippy, formatting, diff checks, and release desktop packaging.
+
+## 2026-09-11 — plan GPUI workspace-first sidebar cleanup
+
+Added `notes/gpui-workspace-sidebar-cleanup-plan.md`, an execution-ready plan
+for replacing the native desktop's session-group hierarchy with canonical
+daemon-owned workspace membership. The plan preserves existing group data,
+specifies workspace and task pinning, five-item progressive disclosure,
+relevance-first global search, stable anchored menus, local editor handoff,
+test-first implementation phases, visual QA states, and acceptance criteria.
+It builds on the project discovery and shared reducer work that already landed
+instead of duplicating it. Verified with `git diff --check`.
+
+## 2026-09-11 — implement workspace-first GPUI sidebar projection
+
+Added canonical daemon workspace identity resolution with longest-root matching,
+mirrored it into `SessionInfo` and `ConversationItem`, and exposed project
+metadata in `UiModel`. The native sidebar now renders workspace headers and
+groups tasks by workspace, keeps pinned/attention/running/selected tasks
+visible, caps normal recent tasks at five with `Show more`, expands search
+across archived matches, and supports workspace-scoped new-task actions. The
+relevant focused tests pass, `cargo check -p mew-desktop` passes, and
+`just desktop-dev` was used for a live screenshot plus collapse, show-more,
+search, and new-task interaction smoke pass.

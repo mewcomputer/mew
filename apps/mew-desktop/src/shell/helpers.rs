@@ -568,11 +568,198 @@ pub(super) fn selected_session_path(
         .map(display_session_path)
 }
 
+#[allow(dead_code)]
 pub(super) fn show_ungrouped_group(group_count: usize, session_count: usize) -> bool {
     group_count > 0 && session_count > 0
 }
 
+pub(super) const SIDEBAR_RECENT_TASK_LIMIT: usize = 5;
+
+/// Build the workspace-first sidebar projection. This is intentionally pure:
+/// rendering and interaction code should consume rows, not repeat grouping or
+/// ranking rules.
+pub(super) fn build_workspace_sidebar_rows(
+    conversations: &[ConversationItem],
+    projects: &[mew_protocol::ProjectInfo],
+    collapsed_workspaces: &BTreeSet<String>,
+    expanded_workspaces: &BTreeSet<String>,
+    query: &str,
+    selected_session: Option<&str>,
+) -> Vec<SidebarRow> {
+    let query = query.trim().to_lowercase();
+    let searching = !query.is_empty();
+    let mut project_by_path = projects
+        .iter()
+        .map(|project| (project.path.clone(), project.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for conversation in conversations {
+        let Some(path) = conversation.workspace_path.as_ref() else {
+            continue;
+        };
+        project_by_path
+            .entry(path.clone())
+            .or_insert_with(|| mew_protocol::ProjectInfo {
+                path: path.clone(),
+                display_name: Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(path)
+                    .to_owned(),
+                session_count: 0,
+                last_used_at: None,
+                pinned: false,
+            });
+    }
+
+    let mut workspace_projects = project_by_path.into_values().collect::<Vec<_>>();
+    workspace_projects.sort_by(|a, b| {
+        b.pinned
+            .cmp(&a.pinned)
+            .then_with(|| b.last_used_at.cmp(&a.last_used_at))
+            .then_with(|| {
+                a.display_name
+                    .to_lowercase()
+                    .cmp(&b.display_name.to_lowercase())
+            })
+            .then_with(|| a.path.cmp(&b.path))
+    });
+
+    let mut rows = vec![SidebarRow::Toolbar];
+    let mut other = Vec::new();
+    for project in workspace_projects {
+        let mut sessions = conversations
+            .iter()
+            .filter(|conversation| {
+                conversation.workspace_path.as_deref() == Some(project.path.as_str())
+            })
+            .filter(|conversation| {
+                searching && project_matches_query(&project, &query)
+                    || conversation_matches_query(conversation, &query)
+            })
+            .filter(|conversation| searching || !conversation.archived)
+            .cloned()
+            .collect::<Vec<_>>();
+        sessions.sort_by(task_order);
+        if sessions.is_empty() && searching {
+            continue;
+        }
+        let total_count = sessions.len();
+        let collapsed = !searching && collapsed_workspaces.contains(&project.path);
+        rows.push(SidebarRow::Workspace {
+            path: project.path.clone(),
+            name: project.display_name.clone(),
+            pinned: project.pinned,
+            count: total_count,
+            collapsed,
+        });
+        if collapsed {
+            continue;
+        }
+        let (visible, hidden) = visible_tasks(
+            &sessions,
+            selected_session,
+            searching,
+            expanded_workspaces.contains(&project.path),
+        );
+        rows.extend(visible.into_iter().map(SidebarRow::Session));
+        if hidden > 0 && !searching {
+            rows.push(SidebarRow::ShowMore {
+                workspace_path: project.path,
+                count: hidden,
+            });
+        }
+    }
+
+    for conversation in conversations.iter().filter(|conversation| {
+        conversation.workspace_path.is_none()
+            && (searching && conversation_matches_query(conversation, &query)
+                || !searching && !conversation.archived)
+    }) {
+        other.push(conversation.clone());
+    }
+    other.sort_by(task_order);
+    if !other.is_empty() {
+        rows.push(SidebarRow::Workspace {
+            path: String::new(),
+            name: "Other".into(),
+            pinned: false,
+            count: other.len(),
+            collapsed: false,
+        });
+        let (visible, hidden) = visible_tasks(
+            &other,
+            selected_session,
+            searching,
+            expanded_workspaces.contains(""),
+        );
+        rows.extend(visible.into_iter().map(SidebarRow::Session));
+        if hidden > 0 && !searching {
+            rows.push(SidebarRow::ShowMore {
+                workspace_path: String::new(),
+                count: hidden,
+            });
+        }
+    }
+
+    if !searching {
+        let archived_count = conversations
+            .iter()
+            .filter(|conversation| conversation.archived)
+            .count();
+        if archived_count > 0 {
+            rows.push(SidebarRow::Archived {
+                count: archived_count,
+            });
+        }
+    }
+    rows
+}
+
+fn task_order(a: &ConversationItem, b: &ConversationItem) -> std::cmp::Ordering {
+    b.pinned
+        .cmp(&a.pinned)
+        .then_with(|| b.last_message_at.cmp(&a.last_message_at))
+        .then_with(|| a.session_id.cmp(&b.session_id))
+}
+
+fn visible_tasks(
+    sessions: &[ConversationItem],
+    selected_session: Option<&str>,
+    searching: bool,
+    expanded: bool,
+) -> (Vec<ConversationItem>, usize) {
+    if searching || expanded {
+        return (sessions.to_vec(), 0);
+    }
+    let mut visible = Vec::new();
+    for conversation in sessions {
+        let forced = conversation.pinned
+            || Some(conversation.session_id.as_str()) == selected_session
+            || conversation.needs_attention
+            || conversation.state == mew_protocol::SessionState::Running
+            || conversation.last_turn_failed;
+        if forced
+            || conversation.pinned
+            || visible
+                .iter()
+                .filter(|item: &&ConversationItem| !item.pinned)
+                .count()
+                < SIDEBAR_RECENT_TASK_LIMIT
+        {
+            visible.push(conversation.clone());
+        }
+    }
+    let visible_count = visible.len();
+    (visible, sessions.len().saturating_sub(visible_count))
+}
+
+fn project_matches_query(project: &mew_protocol::ProjectInfo, query: &str) -> bool {
+    project.display_name.to_lowercase().contains(query)
+        || project.path.to_lowercase().contains(query)
+}
+
 /// Builds the sidebar row model without a search filter.
+#[allow(dead_code)]
 pub(super) fn build_sidebar_rows(
     conversations: &[ConversationItem],
     groups: &[mew_protocol::GroupInfo],
@@ -584,6 +771,7 @@ pub(super) fn build_sidebar_rows(
 /// Builds the sidebar row model: pinned sessions, groups with their visible
 /// (non-archived) sessions, ungrouped sessions, and a collapsed-by-default
 /// "Archived" section so archived conversations stay reachable.
+#[allow(dead_code)]
 pub(super) fn build_sidebar_rows_with_query(
     conversations: &[ConversationItem],
     groups: &[mew_protocol::GroupInfo],
@@ -722,6 +910,86 @@ fn conversation_matches_query(conversation: &ConversationItem, query: &str) -> b
             .cwd
             .as_deref()
             .is_some_and(|cwd| cwd.to_lowercase().contains(query))
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    use mew_protocol::{ProjectInfo, SessionState};
+
+    fn task(id: usize, workspace_path: Option<&str>, pinned: bool) -> ConversationItem {
+        ConversationItem {
+            session_id: format!("session-{id}"),
+            title: format!("Task {id}"),
+            cwd: workspace_path.map(str::to_owned),
+            workspace_path: workspace_path.map(str::to_owned),
+            last_message_at: Some(id as i64),
+            state: SessionState::Idle,
+            last_turn_failed: false,
+            needs_attention: false,
+            archived: false,
+            pinned,
+            group_id: None,
+        }
+    }
+
+    fn project(path: &str, pinned: bool) -> ProjectInfo {
+        ProjectInfo {
+            path: path.into(),
+            display_name: path.rsplit('/').next().unwrap_or(path).into(),
+            session_count: 0,
+            last_used_at: None,
+            pinned,
+        }
+    }
+
+    #[test]
+    fn workspace_rows_cap_recent_tasks_but_keep_pinned_tasks() {
+        let mut tasks = (0..7)
+            .map(|id| task(id, Some("/work/app"), false))
+            .collect::<Vec<_>>();
+        tasks.push(task(99, Some("/work/app"), true));
+        let rows = build_workspace_sidebar_rows(
+            &tasks,
+            &[project("/work/app", false)],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            "",
+            None,
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Session(_)))
+                .count(),
+            6
+        );
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::ShowMore { workspace_path, count }
+                if workspace_path == "/work/app" && *count == 2
+        )));
+    }
+
+    #[test]
+    fn search_expands_workspace_and_includes_archived_matches() {
+        let mut archived = task(1, Some("/work/app"), false);
+        archived.archived = true;
+        let tasks = vec![archived, task(2, Some("/work/app"), false)];
+        let rows = build_workspace_sidebar_rows(
+            &tasks,
+            &[project("/work/app", false)],
+            &BTreeSet::from([String::from("/work/app")]),
+            &BTreeSet::new(),
+            "task 1",
+            None,
+        );
+        assert!(rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::Session(item) if item.session_id == "session-1")));
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::ShowMore { .. })));
+    }
 }
 
 pub(super) fn display_path_from_home(path: &str, home: Option<&Path>) -> String {

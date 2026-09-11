@@ -49,6 +49,7 @@ pub(super) struct DesktopShell {
     pub(super) sidebar_list: gpui::ListState,
     pub(super) sidebar_width: f32,
     pub(super) collapsed_groups: BTreeSet<String>,
+    pub(super) expanded_workspaces: BTreeSet<String>,
     pub(super) sidebar_search: String,
     pub(super) sidebar_search_focus_handle: FocusHandle,
     pub(super) sidebar_focus_handle: FocusHandle,
@@ -371,9 +372,24 @@ pub(super) struct TranscriptTextEntry {
     pub(super) layout: gpui::TextLayout,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum SidebarRow {
     Toolbar,
+    Workspace {
+        path: String,
+        name: String,
+        pinned: bool,
+        count: usize,
+        collapsed: bool,
+    },
+    ShowMore {
+        workspace_path: String,
+        count: usize,
+    },
+    Archived {
+        count: usize,
+    },
     Group {
         id: String,
         name: String,

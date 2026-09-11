@@ -1390,6 +1390,7 @@ mod tests {
             summary: Some("A session".into()),
             client_count: 0,
             cwd: None,
+            workspace_path: None,
             last_turn_failed: false,
             archived: false,
             pinned: false,
@@ -1599,6 +1600,7 @@ mod tests {
             summary: None,
             client_count: 0,
             cwd: None,
+            workspace_path: None,
             last_turn_failed: false,
             archived: false,
             pinned: false,
@@ -1668,6 +1670,7 @@ mod tests {
             display_name: "project".into(),
             session_count: 1,
             last_used_at: Some(1),
+            pinned: false,
         }];
         let events = state.apply_server_message(ServerMessage::ProjectList { projects });
         assert!(matches!(

@@ -449,6 +449,9 @@ pub struct SessionInfo {
     /// Working directory for the session, if set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Canonical workspace identity used for client-side grouping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
     /// True if the last turn ended with an error.
     #[serde(default)]
     pub last_turn_failed: bool,
@@ -996,7 +999,7 @@ pub struct FlaggedFileWire {
 }
 
 /// A known project directory, returned by `ListProjects`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectInfo {
     /// Absolute path to the project directory.
     pub path: String,
@@ -1007,6 +1010,9 @@ pub struct ProjectInfo {
     /// Timestamp of the last activity in this project (epoch seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used_at: Option<i64>,
+    /// Whether this workspace is pinned in the daemon-owned sidebar order.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// Wire-format info about a persona, returned by `ListPersonas`.
