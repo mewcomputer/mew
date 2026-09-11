@@ -6,6 +6,7 @@ mod commands;
 mod config_editor;
 mod runtime;
 mod setup;
+mod version;
 
 use cli::*;
 
@@ -104,6 +105,23 @@ fn main() -> Result<()> {
             .clone()
             .unwrap_or_else(commands::daemon::default_pidfile);
         return commands::daemon::stop_daemon(&pidfile);
+    }
+
+    // Handle --status before anything else: print the daemon report and
+    // exit with its running state (0 running / 1 not). Kept off the tokio
+    // runtime; it only reads files and probes a pid.
+    if let Some(Commands::Daemon {
+        status: true,
+        pidfile,
+        ..
+    }) = &cli.command
+    {
+        let pidfile = pidfile
+            .clone()
+            .unwrap_or_else(commands::daemon::default_pidfile);
+        let (running, report) = commands::daemon::status_daemon(std::path::Path::new(&pidfile))?;
+        print!("{report}");
+        std::process::exit(if running { 0 } else { 1 });
     }
 
     // Handle --background: double-fork + setsid before the runtime starts.
@@ -277,8 +295,9 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
             port,
             background: _,
             log: _,
-            pidfile: _,
+            pidfile,
             stop: _,
+            status: _,
             fake_provider,
             provider,
             model,
@@ -327,8 +346,18 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
                 )
                 .await;
             }
-            commands::daemon::run_daemon(socket, port, fake_provider, &provider, model, raw, mode)
-                .await
+            let daemon_pidfile = pidfile.unwrap_or_else(commands::daemon::default_pidfile);
+            commands::daemon::run_daemon(
+                socket,
+                port,
+                fake_provider,
+                &provider,
+                model,
+                raw,
+                mode,
+                Some(daemon_pidfile),
+            )
+            .await
         }
         #[cfg(feature = "iroh")]
         Some(Commands::Pair) => commands::daemon::pair_cmd().await,

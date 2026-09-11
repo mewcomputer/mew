@@ -5,6 +5,7 @@
 //! pairing flow.
 
 use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
 
@@ -245,6 +246,7 @@ pub(crate) async fn build_daemon_server(
                     provider_id,
                     model_id,
                     raw2,
+                    Some(agent.session_id),
                 )
                 .context("build provider for model switch")?;
                 agent.provider = new_provider;
@@ -316,6 +318,7 @@ pub(crate) async fn build_daemon_server(
 /// If `fake_provider` is true, all real-provider setup is bypassed and
 /// every connection gets a `FakeProvider`-backed agent. Used for tests
 /// and offline demos.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_daemon(
     socket: Option<String>,
     port: Option<String>,
@@ -324,8 +327,12 @@ pub(crate) async fn run_daemon(
     model_flag: Option<String>,
     raw: bool,
     mode: mew_hooks::PermissionMode,
+    pidfile: Option<String>,
 ) -> Result<()> {
     let server = build_daemon_server(fake_provider, provider_flag, model_flag, raw, mode).await?;
+
+    let pidfile = pidfile.unwrap_or_else(default_pidfile);
+    write_local_status(Path::new(&pidfile), socket.as_deref(), port.as_deref())?;
 
     run_local_server(server, socket, port).await
 }
@@ -527,6 +534,157 @@ pub(crate) fn default_pidfile() -> String {
         .unwrap_or_else(|_| "/tmp/mew.pid".to_string())
 }
 
+/// Default status file path: next to the pidfile. The daemon writes
+/// `{version, pid, socket, port, started_at_unix}` here at startup;
+/// `mew daemon --status` reads it for build/endpoint metadata while the
+/// pidfile (or the status file's own pid) is the liveness source of truth.
+fn status_path_for(pidfile: &Path) -> PathBuf {
+    pidfile.with_file_name("mew.status.json")
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Write the daemon status file next to the pidfile at daemon startup.
+/// Written before the listeners bind; a stale file with a dead pid is
+/// reported as "not running" by `--status`, so a failed bind leaves no
+/// misleading state.
+pub(crate) fn write_local_status(
+    pidfile: &Path,
+    socket: Option<&str>,
+    port: Option<&str>,
+) -> Result<()> {
+    // Mirror run_local_server's socket decision: an explicit --socket wins,
+    // else the default Unix socket, unless --port alone made it TCP-only.
+    let socket_path = match (socket.is_some() || port.is_none(), socket) {
+        (true, Some(s)) => Some(s.to_string()),
+        (true, None) => Some(default_socket_path()),
+        (false, _) => None,
+    };
+    let status = serde_json::json!({
+        "version": crate::version::git_rev(),
+        "pid": std::process::id(),
+        "socket": socket_path,
+        "port": port,
+        "started_at_unix": unix_now(),
+    });
+    let path = status_path_for(pidfile);
+    std::fs::write(&path, serde_json::to_vec_pretty(&status)?)
+        .with_context(|| format!("write daemon status file {}", path.display()))
+}
+
+fn human_age(total_secs: u64) -> String {
+    if total_secs < 60 {
+        format!("{total_secs}s ago")
+    } else if total_secs < 3600 {
+        format!("{}m {}s ago", total_secs / 60, total_secs % 60)
+    } else {
+        format!("{}h {}m ago", total_secs / 3600, total_secs % 3600 / 60)
+    }
+}
+
+struct DaemonStatusMeta {
+    version: String,
+    pid: i32,
+    socket: Option<String>,
+    port: Option<String>,
+    started_at_unix: i64,
+}
+
+fn read_status(statusfile: &Path) -> Option<DaemonStatusMeta> {
+    let raw = std::fs::read_to_string(statusfile).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some(DaemonStatusMeta {
+        version: v.get("version")?.as_str()?.to_string(),
+        pid: v.get("pid")?.as_i64()? as i32,
+        socket: v.get("socket").and_then(|s| s.as_str()).map(str::to_string),
+        port: v.get("port").and_then(|s| s.as_str()).map(str::to_string),
+        started_at_unix: v.get("started_at_unix")?.as_i64()?,
+    })
+}
+
+fn read_pidfile(pidfile: &Path) -> Option<i32> {
+    std::fs::read_to_string(pidfile).ok()?.trim().parse().ok()
+}
+
+/// Report daemon liveness and identity as a printable report. Returns
+/// `(running, report)`, where `running` doubles as the process exit code
+/// state so `mew daemon --status` can exit 0/1 directly.
+///
+/// The pidfile is the primary liveness source (which is what `--stop`
+/// kills); the status file's pid is a fallback so a foreground daemon
+/// that never wrote a pidfile is still found.
+pub(crate) fn status_daemon(pidfile: &Path) -> Result<(bool, String)> {
+    let statusfile = status_path_for(pidfile);
+
+    let pid = read_pidfile(pidfile).or_else(|| read_status(&statusfile).map(|m| m.pid));
+    let Some(pid) = pid else {
+        return Ok((
+            false,
+            format!(
+                "daemon: not running\npidfile: {} (not found)\n",
+                pidfile.display()
+            ),
+        ));
+    };
+
+    let alive = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        None::<nix::sys::signal::Signal>,
+    )
+    .is_ok();
+    if !alive {
+        return Ok((
+            false,
+            format!(
+                "daemon: not running (pid {pid} from {} no longer alive)\n",
+                pidfile.display()
+            ),
+        ));
+    }
+
+    let mut out = format!("daemon: running\npid: {pid}\n");
+    match read_status(&statusfile) {
+        Some(meta) => {
+            out.push_str(&format!("build: {}\n", meta.version));
+            if let Some(socket) = meta.socket {
+                out.push_str(&format!("socket: {socket}\n"));
+            }
+            if let Some(port) = meta.port {
+                out.push_str(&format!("port: {port}\n"));
+            }
+            let age = unix_now().saturating_sub(meta.started_at_unix).max(0) as u64;
+            out.push_str(&format!("started: {}\n", human_age(age)));
+            let local = crate::version::git_rev();
+            out.push_str(&format!("local binary build: {local}\n"));
+            if local != meta.version {
+                out.push_str(&format!(
+                    "warning: daemon build ({}) differs from this binary ({local}); run `mew daemon --stop` to restart it\n",
+                    meta.version
+                ));
+            }
+        }
+        None => {
+            out.push_str(&format!(
+                "build: unknown (no status file at {})\n",
+                statusfile.display()
+            ));
+            out.push_str(&format!(
+                "local binary build: {}\n",
+                crate::version::git_rev()
+            ));
+            out.push_str(
+                "warning: daemon predates the current binary; run `mew daemon --stop` to restart it on this build\n",
+            );
+        }
+    }
+    Ok((true, out))
+}
+
 /// Detach from the controlling terminal via the standard double-fork +
 /// setsid pattern. After this returns, the process is a session leader
 /// with no controlling terminal, immune to SIGHUP from logout.
@@ -597,8 +755,9 @@ pub(crate) fn daemonize(log_file: Option<&str>, pidfile: &str) -> Result<()> {
 /// Read a PID from the pidfile and send SIGTERM. Returns an error if the
 /// file is missing or the process doesn't exist.
 pub(crate) fn stop_daemon(pidfile: &str) -> Result<()> {
+    let pid_path = Path::new(pidfile);
     let pid_str =
-        std::fs::read_to_string(pidfile).with_context(|| format!("read pidfile {pidfile}"))?;
+        std::fs::read_to_string(pid_path).with_context(|| format!("read pidfile {pidfile}"))?;
     let pid: i32 = pid_str
         .trim()
         .parse()
@@ -610,8 +769,9 @@ pub(crate) fn stop_daemon(pidfile: &str) -> Result<()> {
     )
     .context("send SIGTERM")?;
 
-    // Remove the pidfile.
-    let _ = std::fs::remove_file(pidfile);
+    // Remove the pidfile and the status file.
+    let _ = std::fs::remove_file(pid_path);
+    let _ = std::fs::remove_file(status_path_for(pid_path));
 
     println!("daemon (PID {pid}) stopped");
     Ok(())
@@ -627,5 +787,104 @@ mod tests {
             remote_invite_payload("node-1", "mew_invite"),
             "computer.mew.mew://node-1?token=mew_invite"
         );
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    /// Create an isolated pidfile/statusfile pair in a fresh temp dir.
+    /// Returns `(dir, pidfile, statusfile)`.
+    fn tmp_files(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("mew-status-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("mew.pid");
+        let statusfile = status_path_for(&pidfile);
+        (dir, pidfile, statusfile)
+    }
+
+    #[test]
+    fn status_file_sits_next_to_pidfile() {
+        assert_eq!(
+            status_path_for(Path::new("/tmp/foo/mew.pid")),
+            Path::new("/tmp/foo/mew.status.json")
+        );
+    }
+
+    #[test]
+    fn not_running_when_pidfile_missing() {
+        let (dir, pidfile, _) = tmp_files("missing");
+        let (running, report) = status_daemon(&pidfile).unwrap();
+        assert!(!running);
+        assert!(report.contains("daemon: not running"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn not_running_when_pid_dead() {
+        let (dir, pidfile, _) = tmp_files("dead");
+        // 999999999 is not a live process in practice.
+        std::fs::write(&pidfile, "999999999\n").unwrap();
+        let (running, report) = status_daemon(&pidfile).unwrap();
+        assert!(!running);
+        assert!(report.contains("no longer alive"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn running_reports_version_endpoints_and_local_build() {
+        let (dir, pidfile, statusfile) = tmp_files("running");
+        // Our own pid is alive, so the liveness probe says "running".
+        std::fs::write(&pidfile, format!("{}\n", std::process::id())).unwrap();
+        let status = serde_json::json!({
+            "version": "0000000",
+            "pid": std::process::id(),
+            "socket": "/tmp/mew.sock",
+            "port": "127.0.0.1:1234",
+            "started_at_unix": 0,
+        });
+        std::fs::write(&statusfile, serde_json::to_vec(&status).unwrap()).unwrap();
+
+        let (running, report) = status_daemon(&pidfile).unwrap();
+        assert!(running);
+        assert!(report.contains("daemon: running"));
+        assert!(report.contains("build: 0000000"));
+        assert!(report.contains("socket: /tmp/mew.sock"));
+        assert!(report.contains("port: 127.0.0.1:1234"));
+        assert!(report.contains("started:"));
+        let local = crate::version::git_rev();
+        assert!(report.contains(&format!("local binary build: {local}")));
+        if local != "0000000" {
+            assert!(report.contains("mew daemon --stop"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn running_without_status_file_reports_unknown_build_and_restart_hint() {
+        let (dir, pidfile, _) = tmp_files("nostatus");
+        std::fs::write(&pidfile, format!("{}\n", std::process::id())).unwrap();
+
+        let (running, report) = status_daemon(&pidfile).unwrap();
+        assert!(running);
+        assert!(report.contains("build: unknown"));
+        assert!(report.contains("mew daemon --stop"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn status_file_roundtrips_through_write_local_status() {
+        let (dir, _pidfile, _) = tmp_files("roundtrip");
+        let pidfile = dir.join("custom.pid");
+        write_local_status(&pidfile, Some("/tmp/custom.sock"), None).unwrap();
+        let meta = read_status(&status_path_for(&pidfile)).expect("status file readable");
+        assert_eq!(meta.version, crate::version::git_rev());
+        assert_eq!(meta.pid, std::process::id() as i32);
+        assert_eq!(meta.socket.as_deref(), Some("/tmp/custom.sock"));
+        assert!(meta.port.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

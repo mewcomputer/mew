@@ -147,6 +147,14 @@ pub enum Commands {
         #[arg(long)]
         stop: bool,
 
+        /// Print daemon status and exit: whether it is running, its PID,
+        /// the daemon's build revision (git hash), socket/port, and
+        /// uptime, plus the local binary's build revision so a stale
+        /// daemon is obvious. Reads the pidfile and the daemon's status
+        /// file. Exits 0 when a daemon is running, 1 otherwise.
+        #[arg(long)]
+        status: bool,
+
         /// Use the bundled `FakeProvider` instead of a real model.
         /// Responds to any prompt with a fixed streaming text. Intended
         /// for tests, demos, and offline experimentation — do not use
