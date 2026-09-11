@@ -1,3 +1,170 @@
+# 2026-09-10 — undo and visible cursors in every TUI text field
+
+Follow-up to the shared readline editor. Undo is no longer
+chat-input-only: `editor::UndoHistory` (state snapshots with the chat
+input's 500 ms coalescing and 100-entry cap) backs the question
+freeform, plan feedback, history search query, settings buffer, and
+picker filter; `handle_key_with_undo` routes edits through it and binds
+Ctrl+Z / Ctrl+Y on every field, and the chat input itself now uses the
+same `UndoHistory` type (its three ad-hoc stack fields were replaced
+with one `undo_history` field, behavior unchanged). Cursor rendering
+now follows the edit position on all surfaces: the question freeform and
+history-search cursors point into the text (was always the end), the
+picker filter cursor measures display width instead of byte offset
+(fixes drift on multibyte filters), the settings buffer's `│` marker
+sits at the cursor instead of after the text, and the plan feedback
+editor replaced its end-of-text `▏` glyph with a terminal cursor placed
+through the same word-wrap the renderer uses. All cursor placement uses
+`set_cursor_position`, so golden frames are unaffected. Coverage: 3 new
+editor unit tests (coalescing, undo/redo round trip, ^Z/^Y routing) and
+a freeform ^Z/^Y key-event test; the App undo tests were migrated to the
+shared type's accessors. `cargo test -p mew-tui` (253 + integration),
+clippy `-D warnings`, and fmt clean.
+
+# 2026-09-10 — one readline editor for every TUI text field
+
+The chat input had a complete readline-style editor (^A/^E/^F/^B/^D/
+^K/^U/^W, Alt word moves, Home/End, undo) embedded in `App`, but every
+other text field was push/pop-only: the question overlay's freeform
+answer, plan feedback, history search query, the settings buffer, and
+the picker filter (the last had arrow cursor moves only). All of those
+now share one editing core, `crates/mew-tui/src/app/editor.rs`, which
+owns the edit operations (insert/backspace/delete, char + word cursor
+moves, line-aware Home/End, kill-to-end, clear) and the key router
+`handle_key`. `app/input.rs` now delegates to it, so the chat input and
+thin fields are driven by identical code and bindings; Enter/Esc/Tab/
+arrows stay surface-specific. Each surface gained a cursor field
+(freeform/feedback/history-search/settings), the picker's budget-row and
+model-picker-Right special cases were hoisted ahead of the shared
+router, and mutation still resets the picker selection as before. Undo
+(^Z/^Y) remains chat-input-only, and the small overlays don't draw their
+cursor glyph yet; both are follow-ups. Coverage: 9 unit tests for the
+editor ops + router, plus key-event tests for readline keys in the
+question freeform (^B/^U) and plan feedback (^A/^K). `cargo test -p
+mew-tui` (249 + integration), clippy `-D warnings`, and fmt clean.
+
+# 2026-09-10 — modal text editors stop swallowing editing/navigation keys
+
+When the "Type your own answer" row of a user question (multi-choice
+prompt) was selected, `handle_user_question_key` unconditionally treated
+j/k/h/l as vim navigation and digits 1–9 as row-jump shortcuts, so those
+keys couldn't be typed into the freeform answer. The handler now detects
+when the freeform row is selected and routes printable keys (including
+n/y) and backspace into the text while Enter/Esc (submit/cancel) and
+Tab/arrows (navigation back onto option rows) keep working. The plan
+approval card had the same class of bug in its feedback editor: letters
+already typed (a/r/s are gated on `!editing`/Ctrl), but Tab/Left/Right
+still cycled the Approve/Request-changes/Submit selection mid-edit,
+which could approve the plan or submit changes while dropping the typed
+feedback. Those are now inert while the feedback editor is open. Other
+text surfaces (chat input, `@` picker) were already safe: their
+shortcuts are modifier-gated or gated on an empty input. Coverage: four
+key-event-level regression tests in `mew-tui` (j/k/h/l/digits/n/y type
+into the question freeform, backspace + Enter submit, j/digit still
+navigate on option rows, and the plan feedback editor keeps its
+selection under Tab/Left/Right and types every shortcut letter).
+`cargo test -p mew-tui` (243), clippy `-D warnings`, and fmt clean.
+
+# 2026-09-10 — `mew daemon --status` introspection command
+
+`mew daemon --status` reports whether the daemon is running, its PID,
+build revision, socket/TCP endpoints, and uptime (exit 0 running / 1
+not). Build identity is the git short hash (`<hash>-dirty` when the
+tree had uncommitted changes), embedded by a new `crates/mew/build.rs`
+as `MEW_GIT_HASH` and exposed via `crate::version::git_rev()`. The
+daemon writes a `mew.status.json` status file next to the pidfile at
+startup (version, pid, socket, port, start time); `--status` uses the
+pidfile (or the status file's pid) for liveness and the status file for
+metadata, then compares the daemon build to the local binary's, printing
+a restart hint when they differ or when the daemon predates the current
+binary. `--stop` now removes the status file too. Custom `--pidfile` is
+respected on both sides. Coverage: status-file placement/round-trip,
+not-running (missing pidfile and dead pid), running with status file
+(version/endpoints/stale hint), and running without status file (unknown
+build + restart hint); verified live against a background fake daemon.
+Builds are identified by git hash rather than crate version for now.
+`cargo test -p mew`, clippy `-D warnings`, and fmt clean.
+
+# 2026-09-10 — identify OpenCode traffic with a stable conversation session
+
+`opencode-zen`/`opencode-go` (and any provider pointed at an `opencode.ai`
+base URL) now send a `User-Agent: mew/<version>` and a stable
+`x-opencode-session: <session ulid>` on every chat-completions and /models
+request, so the gateway can route and reuse prompt caches per conversation.
+The conversation id is the mew session id, threaded into the provider build
+path (`build_session_agent`, daemon model switcher, Auto/Auto+ classifier,
+subagent `MainModelResolver`, and the fallback-model builder); the header is
+scoped inside the OpenAI-compatible adapter, keyed off the base URL, so
+non-OpenCode endpoints are untouched. Coverage: adapter header unit tests for
+OpenCode vs non-OpenCode base URLs and the no-session case, plus the
+existing provider/daemon suites; also dropped a pre-existing needless
+`..Default::default()` in an adapter test struct literal. `cargo test -p
+mew-provider-openai`, `cargo test -p mew`, clippy `-D warnings`, and fmt
+clean.
+
+# 2026-08-29 — shared subagent base prompt
+
+Every subagent now gets its system prompt composed by the runner as the new
+shared `mew://system_prompts/subagent` base (base prompt + the subagent
+contract: exit_tool result channel, narration, progress updates, context
+budget) followed by the def body. The base renders for all defs, so custom
+`.mew/agents` subagents inherit it without opting in, and a def with
+`template: false` keeps a verbatim body while the wrapper still renders.
+Previously each builtin inlined its own drifting copy (plan-reviewer had no
+base at all); builtin bodies are now role-only. Added request capture to the
+runner's test provider plus composition/verbatim/empty-body coverage, a
+role-only invariant over builtin bodies, and an inventory entry. Docs updated
+in `docs/using-mew/subagents.md`. `cargo test --all`, clippy, fmt clean.
+
+# 2026-08-29 — expose skill descriptions to prompt templates
+
+`TemplateContext` now carries `available_skills` as name + description pairs
+(mirroring `available_subagents`), so templated personas, skills, and subagent
+bodies can render the polytoken-style "Configured skills" listing with
+descriptions. The existing `skills` names variable and `has_skill()` derive
+from the same list, and `Agent::set_skills` refreshes the shared template
+context instead of leaving the persona-apply-time snapshot stale. The
+`<available_skills>` XML block appended to the system prompt is unchanged.
+Coverage: object rendering, names derivation, persona-template behavior, and
+`set_skills` refresh. `cargo test --all` and `cargo clippy --all -- -D
+warnings` clean; docs table in `docs/using-mew/personas.md` updated (also
+documents the previously missing `available_subagents` row).
+# 2026-08-29 — widen native GPUI chat scroll target
+
+Let the native transcript list span the full central chat pane while keeping
+message rows centered inside a bounded readable column. Moved transcript
+padding into the list so its scroll hitbox includes the pane gutters, and kept
+the composer fixed below it. Added width-boundary coverage. `cargo test --all`,
+desktop clippy, architecture and theme checks, formatting, diff checks,
+desktop packaging, and the live release app scroll/layout pass are clean.
+
+# 2026-08-29 — polish native GPUI session rail
+
+Bounded the move-to-group choices with an internal scroll region, added a
+persisted 232–360 point rail width with a visible resize splitter, and gave
+the session toolbar compact visible `new` and `group` actions. Added state and
+width-boundary coverage. `cargo test --all`, desktop clippy, architecture and
+theme checks, formatting, diff checks, desktop packaging, and the live release
+app accessibility/screenshot pass are clean.
+
+# 2026-08-28 — improve native GPUI session rail
+
+Added session search with `cmd-k` focus, a no-results state, running/failed/
+needs-input status labels, top-level pinned sessions, persistent collapsed
+groups, keyboard navigation, selected accessibility state, separate row
+controls, and inline group-delete confirmation. Added config and row-model
+tests. `cargo test --all`, desktop clippy, architecture and theme checks,
+desktop packaging, and a live release-app search/clear smoke check pass.
+
+# 2026-08-28 — keep native GPUI sidebar visibility app-wide
+
+The native desktop already persists `shell.sidebar` in the shared `state.toml`
+file and restores it on launch. Session restoration now preserves that global
+sidebar preference while continuing to restore workbench and terminal layout
+per session. Added a regression test for the boundary. `cargo test -p
+mew-desktop` passes with 91 tests, and formatting, clippy, and diff checks are
+clean.
+
 # 2026-08-28 — remove completed feature plans
 
 Removed five completed or superseded plans: `notes/mew-tui-self-capture-plan.md`,
@@ -6043,3 +6210,26 @@ match.
   glyphs underneath were bleeding through; `Clear` resets the foreground first.
 - Added a one-row `background`-colored bottom hairline to the autocomplete so
   the list is visually separated from the input field below it.
+
+## 2026-08-29 — deep UX pass for native GPUI chat and workbench
+
+Added keyboard focus rings and tab stops across native shell controls, tooltips
+for the icon-only auxiliary rail, clear primary/secondary/destructive action
+hierarchy, expandable tool output and long diffs, and removed the duplicate
+session-toolbar new-conversation control. Retry now preserves file attachments
+from transcript history, markdown links open safely in the in-app browser, and
+transcript follow mode exposes a jump-to-latest control while retaining a
+semantic scroll anchor per session. The workbench now auto-collapses when the
+window cannot keep both minimum panel widths and the desktop window has a
+native minimum size. Added model, config, markdown, retry, and responsive
+behavior coverage. `cargo test --all`, all-target desktop/config/model clippy,
+architecture and theme checks, formatting, diff checks, desktop packaging,
+and a release-app accessibility/screenshot smoke pass are clean.
+
+## 2026-08-29 — defer transcript scroll persistence outside GPUI list callbacks
+
+Fixed a native desktop panic caused by querying `ListState` from its own scroll
+handler while GPUI held its internal mutable borrow. Scroll-state persistence is
+now deferred until after the callback returns. Added coverage for the
+follow-tail and scrolled-away boundaries. Verified the focused desktop test,
+desktop clippy, formatting, diff checks, and release desktop packaging.
