@@ -47,7 +47,16 @@ pub(super) struct DesktopShell {
     pub(super) layout: ShellLayoutState,
     pub(super) sidebar_rows: Vec<SidebarRow>,
     pub(super) sidebar_list: gpui::ListState,
+    pub(super) sidebar_width: f32,
     pub(super) collapsed_groups: BTreeSet<String>,
+    pub(super) sidebar_search: String,
+    pub(super) sidebar_search_focus_handle: FocusHandle,
+    pub(super) sidebar_focus_handle: FocusHandle,
+    pub(super) sidebar_keyboard_session: Option<String>,
+    pub(super) sidebar_search_selection: Range<usize>,
+    pub(super) sidebar_search_selection_reversed: bool,
+    pub(super) sidebar_search_marked_range: Option<Range<usize>>,
+    pub(super) pending_group_deletion: Option<String>,
     pub(super) session_view_states: BTreeMap<String, SessionViewState>,
     pub(super) session_menu_session: Option<String>,
     pub(super) hovered_group: Option<String>,
@@ -63,9 +72,12 @@ pub(super) struct DesktopShell {
     pub(super) sidebar_animation_id: u64,
     pub(super) workbench_animation_id: u64,
     pub(super) terminal_animation_id: u64,
+    pub(super) window_width: f32,
     pub(super) workbench_width: f32,
     pub(super) auxiliary_view: AuxiliaryView,
     pub(super) transcript_list: gpui::ListState,
+    pub(super) transcript_scrolled_away: bool,
+    pub(super) pending_transcript_scroll_anchor: Option<mew_config::DesktopTranscriptScrollAnchor>,
     pub(super) transcript_rows: Vec<TranscriptRenderRow>,
     pub(super) transcript_rows_append_only: bool,
     pub(super) markdown_cache: Vec<Vec<CachedMarkdown>>,
@@ -75,6 +87,7 @@ pub(super) struct DesktopShell {
     pub(super) transcript_selection: Option<TranscriptSelection>,
     pub(super) transcript_selection_anchor: Option<TranscriptSelectionPoint>,
     pub(super) transcript_is_selecting: bool,
+    pub(super) transcript_link_candidate: Option<String>,
     pub(super) transcript_selected_text: Option<String>,
     pub(super) review_diffs: Vec<FileDiff>,
     pub(super) review_lines: Vec<DiffLine>,
@@ -164,6 +177,25 @@ pub(super) struct DesktopShell {
 /// its entity is only a narrow GPUI invalidation boundary.
 pub(super) struct BrowserPumpView {
     shell: WeakEntity<DesktopShell>,
+}
+
+pub(super) struct TooltipLabel {
+    pub(super) text: SharedString,
+    pub(super) background: gpui::Rgba,
+    pub(super) foreground: gpui::Rgba,
+}
+
+impl Render for TooltipLabel {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.))
+            .py(px(5.))
+            .rounded(px(6.))
+            .bg(self.background)
+            .text_xs()
+            .text_color(self.foreground)
+            .child(self.text.clone())
+    }
 }
 
 impl BrowserPumpView {
@@ -256,6 +288,7 @@ pub(super) struct SessionViewState {
     pub(super) browser_panel_open: bool,
     pub(super) browser_url: String,
     pub(super) browser_title: String,
+    pub(super) transcript_scroll_anchor: Option<mew_config::DesktopTranscriptScrollAnchor>,
 }
 
 impl SessionViewState {
@@ -282,6 +315,7 @@ impl SessionViewState {
             browser_panel_open: state.browser_panel_open,
             browser_url: state.browser_url.clone(),
             browser_title: state.browser_title.clone(),
+            transcript_scroll_anchor: state.transcript_scroll_anchor,
         }
     }
 
@@ -305,6 +339,7 @@ impl SessionViewState {
             browser_panel_open: self.browser_panel_open,
             browser_url: self.browser_url.clone(),
             browser_title: self.browser_title.clone(),
+            transcript_scroll_anchor: self.transcript_scroll_anchor,
         }
     }
 }
@@ -353,6 +388,8 @@ pub(super) enum SidebarRow {
 pub(super) const UNGROUPED_GROUP_ID: &str = "__ungrouped__";
 /// Pseudo-group id for the collapsed-by-default archived sessions section.
 pub(super) const ARCHIVED_GROUP_ID: &str = "__archived__";
+/// Pseudo-group id for pinned sessions kept at the top of the rail.
+pub(super) const PINNED_GROUP_ID: &str = "__pinned__";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AuxiliaryView {
@@ -366,7 +403,17 @@ pub(super) struct WorkbenchResizeDrag;
 
 pub(super) struct WorkbenchResizePreview;
 
+pub(super) struct SidebarResizeDrag;
+
+pub(super) struct SidebarResizePreview;
+
 impl Render for WorkbenchResizePreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.)).bg(gpui::transparent_black())
+    }
+}
+
+impl Render for SidebarResizePreview {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div().size(px(1.)).bg(gpui::transparent_black())
     }
@@ -637,12 +684,15 @@ pub(super) enum ShellCommand {
 }
 
 pub(super) const SIDEBAR_COLLAPSED_WIDTH: f32 = 0.;
+pub(super) const SIDEBAR_MIN_WIDTH: f32 = 232.;
+pub(super) const SIDEBAR_MAX_WIDTH: f32 = 360.;
 pub(super) const SIDEBAR_EXPANDED_WIDTH: f32 = 264.;
 pub(super) const WORKBENCH_COLLAPSED_WIDTH: f32 = 0.;
 pub(super) const WORKBENCH_EXPANDED_WIDTH: f32 = 360.;
 pub(super) const SHELL_GUTTER: f32 = 8.;
 pub(super) const SHELL_SURFACE_RADIUS: f32 = 14.;
 pub(super) const CHAT_CONTENT_MAX_WIDTH: f32 = 760.;
+pub(super) const CHAT_TRANSCRIPT_PADDING: f32 = 24.;
 pub(super) const CHAT_MIN_WIDTH: f32 = 420.;
 pub(super) const WORKBENCH_MIN_WIDTH: f32 = 280.;
 pub(super) const WORKBENCH_MAX_WIDTH: f32 = 960.;

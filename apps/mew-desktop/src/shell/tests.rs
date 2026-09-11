@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod shell_tests {
     use super::super::composer::composer_input_height;
+    use super::super::lifecycle::transcript_is_scrolled_away;
     use super::super::session_data::transcript_part_block_count;
     use super::super::*;
 
@@ -216,6 +217,17 @@ mod shell_tests {
     }
 
     #[test]
+    fn chat_content_column_stays_bounded_inside_a_wider_scroll_pane() {
+        assert_eq!(chat_content_column_width(0.), 0.);
+        assert_eq!(chat_content_column_width(420.), 420.);
+        assert_eq!(
+            chat_content_column_width(CHAT_CONTENT_MAX_WIDTH),
+            CHAT_CONTENT_MAX_WIDTH
+        );
+        assert_eq!(chat_content_column_width(1_200.), CHAT_CONTENT_MAX_WIDTH);
+    }
+
+    #[test]
     fn markdown_cache_reuses_equal_content_across_allocations() {
         let cached = CachedMarkdown {
             source: "same content".into(),
@@ -297,6 +309,27 @@ mod shell_tests {
             latest_user_prompt(&transcript).as_deref(),
             Some("second prompt")
         );
+    }
+
+    #[test]
+    fn latest_user_submission_retains_file_attachments() {
+        let transcript = vec![TranscriptItem {
+            role: TranscriptRole::User,
+            text: "review this".into(),
+            parts: vec![TranscriptPart::File {
+                label: "screenshot.png".into(),
+                attachment: Attachment {
+                    path: "/tmp/screenshot.png".into(),
+                    mime: Some("image/png".into()),
+                },
+            }],
+        }];
+
+        let submission = latest_user_submission(&transcript).expect("submission should exist");
+
+        assert_eq!(submission.text, "review this");
+        assert_eq!(submission.attachments[0].path, "/tmp/screenshot.png");
+        assert_eq!(submission.attachments[0].mime.as_deref(), Some("image/png"));
     }
 
     #[test]
@@ -401,6 +434,7 @@ mod shell_tests {
                     block: MarkdownBlock::Paragraph(InlineText {
                         text: "one".into(),
                         highlights: Vec::new(),
+                        links: Vec::new(),
                     }),
                     continuation: false,
                     syntax_highlights: Vec::new(),
@@ -506,27 +540,34 @@ mod shell_tests {
     #[test]
     fn sidebar_transition_reaches_both_panel_widths() {
         assert_eq!(SIDEBAR_COLLAPSED_WIDTH, 0.);
-        assert_eq!(sidebar_transition_width(true, 0.0), SIDEBAR_EXPANDED_WIDTH);
-        assert_eq!(sidebar_transition_width(true, 1.0), SIDEBAR_COLLAPSED_WIDTH);
+        assert_eq!(sidebar_transition_width(true, 0.0, 312.), 312.);
         assert_eq!(
-            sidebar_transition_width(false, 0.0),
+            sidebar_transition_width(true, 1.0, 312.),
             SIDEBAR_COLLAPSED_WIDTH
         );
-        assert_eq!(sidebar_transition_width(false, 1.0), SIDEBAR_EXPANDED_WIDTH);
+        assert_eq!(
+            sidebar_transition_width(false, 0.0, 312.),
+            SIDEBAR_COLLAPSED_WIDTH
+        );
+        assert_eq!(sidebar_transition_width(false, 1.0, 312.), 312.);
     }
 
     #[test]
     fn sidebar_transition_moves_the_surface_offscreen() {
-        assert_eq!(sidebar_transition_offset(true, 0.0), 0.);
+        assert_eq!(sidebar_transition_offset(true, 0.0, 312.), 0.);
+        assert_eq!(sidebar_transition_offset(true, 1.0, 312.), -312.);
+        assert_eq!(sidebar_transition_offset(false, 0.0, 312.), -312.);
+        assert_eq!(sidebar_transition_offset(false, 1.0, 312.), 0.);
+    }
+
+    #[test]
+    fn sidebar_width_stays_within_rail_bounds() {
+        assert_eq!(sidebar_width_from_pointer(SHELL_GUTTER), SIDEBAR_MIN_WIDTH);
         assert_eq!(
-            sidebar_transition_offset(true, 1.0),
-            -SIDEBAR_EXPANDED_WIDTH
+            sidebar_width_from_pointer(SHELL_GUTTER + SIDEBAR_MAX_WIDTH + 80.),
+            SIDEBAR_MAX_WIDTH
         );
-        assert_eq!(
-            sidebar_transition_offset(false, 0.0),
-            -SIDEBAR_EXPANDED_WIDTH
-        );
-        assert_eq!(sidebar_transition_offset(false, 1.0), 0.);
+        assert_eq!(sidebar_width_from_pointer(SHELL_GUTTER + 312.), 312.);
     }
 
     #[test]
@@ -589,6 +630,21 @@ mod shell_tests {
             workbench_width_from_pointer(720., 500., SIDEBAR_EXPANDED_WIDTH),
             36.
         );
+    }
+
+    #[test]
+    fn workbench_only_opens_when_the_chat_can_keep_its_minimum_width() {
+        assert!(!workbench_fits_window(720., SIDEBAR_EXPANDED_WIDTH));
+        assert!(workbench_fits_window(1_240., SIDEBAR_EXPANDED_WIDTH));
+        assert!(workbench_fits_window(720., SIDEBAR_COLLAPSED_WIDTH));
+    }
+
+    #[test]
+    fn transcript_scroll_state_only_marks_a_list_scrolled_away_when_needed() {
+        assert!(!transcript_is_scrolled_away(false, 0, 10, false));
+        assert!(!transcript_is_scrolled_away(true, 10, 10, false));
+        assert!(!transcript_is_scrolled_away(true, 4, 10, true));
+        assert!(transcript_is_scrolled_away(true, 4, 10, false));
     }
 
     #[test]
@@ -1094,6 +1150,77 @@ mod shell_tests {
             session_ids,
             vec!["newer", "older", "tie-a", "tie-b", "unknown"]
         );
+    }
+
+    #[test]
+    fn sidebar_rows_keep_pinned_sessions_in_a_top_section() {
+        let mut pinned = conversation_at("pinned", false, Some("grp"), Some(10));
+        pinned.pinned = true;
+        let conversations = vec![
+            pinned,
+            conversation_at("regular", false, Some("grp"), Some(20)),
+        ];
+        let groups = vec![mew_protocol::GroupInfo {
+            id: "grp".into(),
+            name: "Project".into(),
+            color: None,
+            order: 0,
+        }];
+
+        let rows = build_sidebar_rows(&conversations, &groups, &BTreeSet::new());
+        let group_ids: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Group { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let session_ids: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Session(conversation) => Some(conversation.session_id.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(group_ids, vec![PINNED_GROUP_ID, "grp"]);
+        assert_eq!(session_ids, vec!["pinned", "regular"]);
+    }
+
+    #[test]
+    fn sidebar_search_filters_sessions_and_expands_matching_groups() {
+        let conversations = vec![
+            conversation("alpha", false, Some("grp")),
+            conversation("beta", false, Some("grp")),
+            conversation("gamma", false, None),
+        ];
+        let groups = vec![mew_protocol::GroupInfo {
+            id: "grp".into(),
+            name: "Project".into(),
+            color: None,
+            order: 0,
+        }];
+
+        let rows = build_sidebar_rows_with_query(
+            &conversations,
+            &groups,
+            &BTreeSet::from(["grp".to_owned()]),
+            "ALPHA",
+        );
+        let sessions: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Session(conversation) => Some(conversation.session_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let group = rows.iter().find_map(|row| match row {
+            SidebarRow::Group { id, collapsed, .. } if id == "grp" => Some(*collapsed),
+            _ => None,
+        });
+
+        assert_eq!(sessions, vec!["alpha"]);
+        assert_eq!(group, Some(false));
     }
 
     #[test]

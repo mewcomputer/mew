@@ -99,9 +99,13 @@ impl DesktopShell {
         self.tool_text_cache.borrow_mut().clear();
         self.transcript_rows.clear();
         self.transcript_list.reset(0);
+        self.transcript_list.set_follow_mode(gpui::FollowMode::Tail);
+        self.transcript_scrolled_away = false;
+        self.pending_transcript_scroll_anchor = None;
         self.expanded_chat_parts.clear();
         self.transcript_selection = None;
         self.transcript_selection_anchor = None;
+        self.transcript_link_candidate = None;
         self.transcript_selected_text = None;
         self.transcript_is_selecting = false;
         self.clear_review();
@@ -299,6 +303,13 @@ impl DesktopShell {
         self.tool_text_cache.borrow_mut().clear();
         self.transcript_rows.clear();
         self.transcript_list.reset(0);
+        self.transcript_list
+            .set_follow_mode(if self.pending_transcript_scroll_anchor.is_some() {
+                gpui::FollowMode::Normal
+            } else {
+                gpui::FollowMode::Tail
+            });
+        self.transcript_scrolled_away = self.pending_transcript_scroll_anchor.is_some();
         self.expanded_chat_parts.clear();
         self.clear_review();
     }
@@ -378,6 +389,8 @@ impl DesktopShell {
             return;
         };
         self.layout.write_state(&mut state);
+        state.desktop_collapsed_groups = self.collapsed_groups.iter().cloned().collect();
+        state.desktop_sidebar_width = Some(self.sidebar_width);
         state.desktop_session_views = self
             .session_view_states
             .iter()
@@ -409,17 +422,62 @@ impl DesktopShell {
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.layout.sidebar_collapsed = !self.layout.sidebar_collapsed;
         self.sidebar_animation_id = self.sidebar_animation_id.wrapping_add(1);
+        self.collapse_workbench_if_needed();
         self.capture_session_view_state();
         self.persist_layout();
         cx.notify();
     }
 
+    pub(super) fn resize_sidebar(&mut self, pointer_x: f32, cx: &mut Context<Self>) {
+        let width = sidebar_width_from_pointer(pointer_x);
+        if (self.sidebar_width - width).abs() > 0.5 {
+            self.sidebar_width = width;
+            self.collapse_workbench_if_needed();
+            self.persist_layout();
+            cx.notify();
+        }
+    }
+
     pub(super) fn toggle_workbench(&mut self, cx: &mut Context<Self>) {
+        if self.layout.workbench_collapsed
+            && !workbench_fits_window(
+                self.window_width,
+                if self.layout.sidebar_collapsed {
+                    SIDEBAR_COLLAPSED_WIDTH
+                } else {
+                    self.sidebar_width
+                },
+            )
+        {
+            return;
+        }
         self.layout.workbench_collapsed = !self.layout.workbench_collapsed;
         self.workbench_animation_id = self.workbench_animation_id.wrapping_add(1);
         self.capture_session_view_state();
         self.persist_layout();
         cx.notify();
+    }
+
+    pub(super) fn update_window_width(&mut self, width: f32) -> bool {
+        let width_changed = (self.window_width - width).abs() > 0.5;
+        self.window_width = width;
+        width_changed || self.collapse_workbench_if_needed()
+    }
+
+    fn collapse_workbench_if_needed(&mut self) -> bool {
+        let sidebar_width = if self.layout.sidebar_collapsed {
+            SIDEBAR_COLLAPSED_WIDTH
+        } else {
+            self.sidebar_width
+        };
+        if self.layout.workbench_collapsed
+            || workbench_fits_window(self.window_width, sidebar_width)
+        {
+            return false;
+        }
+        self.layout.workbench_collapsed = true;
+        self.workbench_animation_id = self.workbench_animation_id.wrapping_add(1);
+        true
     }
 
     pub(super) fn toggle_terminal(&mut self, cx: &mut Context<Self>) {
@@ -558,6 +616,21 @@ impl DesktopShell {
         self.dispatch_shell_command(ShellCommand::ToggleWorkbench, cx);
     }
 
+    pub(super) fn action_focus_sidebar_search(
+        &mut self,
+        _: &FocusSidebarSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.layout.sidebar_collapsed {
+            self.toggle_sidebar(cx);
+        }
+        let focus_handle = self.sidebar_search_focus_handle.clone();
+        window.defer(cx, move |window, cx| {
+            window.focus(&focus_handle, cx);
+        });
+    }
+
     pub(super) fn action_dismiss_popovers(
         &mut self,
         _: &DismissPopovers,
@@ -606,9 +679,31 @@ impl DesktopShell {
     }
 
     pub(super) fn delete_group(&mut self, group_id: String, cx: &mut Context<Self>) {
+        self.collapsed_groups.remove(&group_id);
+        self.persist_layout();
         self.send_command(ClientMessage::DeleteGroup { group_id });
         self.session_menu_session = None;
         cx.notify();
+    }
+
+    pub(super) fn request_group_deletion(&mut self, group_id: String, cx: &mut Context<Self>) {
+        self.pending_group_deletion = Some(group_id);
+        self.session_menu_session = None;
+        cx.notify();
+    }
+
+    pub(super) fn cancel_group_deletion(&mut self, group_id: &str, cx: &mut Context<Self>) {
+        if self.pending_group_deletion.as_deref() == Some(group_id) {
+            self.pending_group_deletion = None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn confirm_group_deletion(&mut self, group_id: String, cx: &mut Context<Self>) {
+        if self.pending_group_deletion.as_deref() == Some(group_id.as_str()) {
+            self.pending_group_deletion = None;
+            self.delete_group(group_id, cx);
+        }
     }
 
     pub(super) fn capture_session_view_state(&mut self) {
@@ -634,7 +729,24 @@ impl DesktopShell {
             browser_panel_open: self.browser_panel_open,
             browser_url: self.browser_url.clone(),
             browser_title: self.browser_title.clone(),
+            transcript_scroll_anchor: self.current_transcript_scroll_anchor(),
         }
+    }
+
+    fn current_transcript_scroll_anchor(
+        &self,
+    ) -> Option<mew_config::DesktopTranscriptScrollAnchor> {
+        if !self.transcript_scrolled_away {
+            return None;
+        }
+        let offset = self.transcript_list.logical_scroll_top();
+        let row = self.transcript_rows.get(offset.item_ix)?;
+        Some(mew_config::DesktopTranscriptScrollAnchor {
+            message_index: row.message_index,
+            part_index: row.part_index,
+            block_index: row.block_index,
+            offset: f32::from(offset.offset_in_item),
+        })
     }
 
     fn ensure_session_view_state(&mut self, session_id: &str) {
@@ -651,10 +763,18 @@ impl DesktopShell {
             session_id,
             current_view_state,
         );
-        self.layout = view_state.layout;
+        restore_session_layout(&mut self.layout, view_state.layout);
         self.auxiliary_view = view_state.auxiliary_view;
         self.workbench_width = view_state.workbench_width;
         self.expanded_chat_parts = view_state.expanded_chat_parts;
+        self.pending_transcript_scroll_anchor = view_state.transcript_scroll_anchor;
+        self.transcript_scrolled_away = self.pending_transcript_scroll_anchor.is_some();
+        self.transcript_list
+            .set_follow_mode(if self.transcript_scrolled_away {
+                gpui::FollowMode::Normal
+            } else {
+                gpui::FollowMode::Tail
+            });
         self.browser_panel_open = view_state.browser_panel_open;
         self.browser_url = view_state.browser_url;
         self.browser_title = view_state.browser_title;
@@ -688,11 +808,20 @@ impl DesktopShell {
     }
 
     pub(super) fn rebuild_sidebar_rows(&mut self) {
-        self.sidebar_rows = build_sidebar_rows(
-            &self.model.ui.conversations,
-            &self.model.ui.groups,
-            &self.collapsed_groups,
-        );
+        self.sidebar_rows = if self.sidebar_search.trim().is_empty() {
+            build_sidebar_rows(
+                &self.model.ui.conversations,
+                &self.model.ui.groups,
+                &self.collapsed_groups,
+            )
+        } else {
+            build_sidebar_rows_with_query(
+                &self.model.ui.conversations,
+                &self.model.ui.groups,
+                &self.collapsed_groups,
+                &self.sidebar_search,
+            )
+        };
     }
 
     pub(super) fn toggle_group(&mut self, group_id: String, cx: &mut Context<Self>) {
@@ -700,6 +829,7 @@ impl DesktopShell {
             self.collapsed_groups.remove(&group_id);
         }
         self.rebuild_sidebar_rows();
+        self.persist_layout();
         cx.notify();
     }
 
@@ -821,6 +951,196 @@ impl DesktopShell {
                 cx.stop_propagation();
             }
         }
+    }
+
+    pub(super) fn sidebar_search_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        if key == "escape" {
+            self.clear_sidebar_search(cx);
+            window.focus(&self.composer_focus_handle, cx);
+            cx.stop_propagation();
+        } else if key == "a" && event.keystroke.modifiers.platform {
+            self.sidebar_search_selection = 0..self.sidebar_search.len();
+            self.sidebar_search_selection_reversed = false;
+            cx.notify();
+            cx.stop_propagation();
+        } else if key == "backspace" {
+            self.sidebar_search_backspace(window, cx);
+            cx.stop_propagation();
+        } else if key == "delete" {
+            self.sidebar_search_delete(window, cx);
+            cx.stop_propagation();
+        } else if key == "left" {
+            self.sidebar_search_move_left(cx);
+            cx.stop_propagation();
+        } else if key == "right" {
+            self.sidebar_search_move_right(cx);
+            cx.stop_propagation();
+        } else if key == "enter" {
+            if let Some(session_id) = self.sidebar_rows.iter().find_map(|row| match row {
+                SidebarRow::Session(conversation) => Some(conversation.session_id.clone()),
+                _ => None,
+            }) {
+                self.attach_session(session_id, cx);
+            }
+            cx.stop_propagation();
+        } else if key == "v" && event.keystroke.modifiers.platform {
+            if let Some(item) = cx.read_from_clipboard() {
+                if let Some(text) = item.text() {
+                    self.replace_sidebar_search_text(None, &text, cx);
+                }
+            }
+            cx.stop_propagation();
+        } else if !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+            && !event.keystroke.modifiers.alt
+        {
+            if let Some(text) = event.keystroke.key_char.as_deref() {
+                self.replace_sidebar_search_text(None, text, cx);
+                cx.stop_propagation();
+            }
+        }
+    }
+
+    pub(super) fn sidebar_search_mouse_down(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.sidebar_search_focus_handle, cx);
+        self.sidebar_search_selection = 0..self.sidebar_search.len();
+        self.sidebar_search_selection_reversed = false;
+        cx.notify();
+    }
+
+    pub(super) fn clear_sidebar_search(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_search.clear();
+        self.sidebar_search_selection = 0..0;
+        self.sidebar_search_selection_reversed = false;
+        self.sidebar_search_marked_range = None;
+        self.rebuild_sidebar_rows();
+        cx.notify();
+    }
+
+    pub(super) fn sidebar_search_cursor_offset(&self) -> usize {
+        if self.sidebar_search_selection_reversed {
+            self.sidebar_search_selection.start
+        } else {
+            self.sidebar_search_selection.end
+        }
+    }
+
+    fn sidebar_search_backspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_search_selection.is_empty() {
+            let cursor = self.sidebar_search_cursor_offset();
+            let start = previous_utf8_boundary(&self.sidebar_search, cursor);
+            if start == cursor {
+                window.play_system_bell();
+                return;
+            }
+            self.sidebar_search_selection = start..cursor;
+        }
+        self.replace_sidebar_search_text(None, "", cx);
+    }
+
+    fn sidebar_search_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_search_selection.is_empty() {
+            let cursor = self.sidebar_search_cursor_offset();
+            let end = next_utf8_boundary(&self.sidebar_search, cursor);
+            if end == cursor {
+                window.play_system_bell();
+                return;
+            }
+            self.sidebar_search_selection = cursor..end;
+        }
+        self.replace_sidebar_search_text(None, "", cx);
+    }
+
+    fn sidebar_search_move_left(&mut self, cx: &mut Context<Self>) {
+        let offset = if self.sidebar_search_selection.is_empty() {
+            previous_utf8_boundary(&self.sidebar_search, self.sidebar_search_cursor_offset())
+        } else {
+            self.sidebar_search_selection.start
+        };
+        self.sidebar_search_selection = offset..offset;
+        self.sidebar_search_selection_reversed = false;
+        cx.notify();
+    }
+
+    fn sidebar_search_move_right(&mut self, cx: &mut Context<Self>) {
+        let offset = if self.sidebar_search_selection.is_empty() {
+            next_utf8_boundary(&self.sidebar_search, self.sidebar_search_cursor_offset())
+        } else {
+            self.sidebar_search_selection.end
+        };
+        self.sidebar_search_selection = offset..offset;
+        self.sidebar_search_selection_reversed = false;
+        cx.notify();
+    }
+
+    pub(super) fn replace_sidebar_search_text(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        replacement: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.sidebar_search.clone();
+        let range = range_utf16
+            .as_ref()
+            .map(|range| {
+                byte_offset_for_utf16(&current, range.start)
+                    ..byte_offset_for_utf16(&current, range.end)
+            })
+            .or_else(|| self.sidebar_search_marked_range.clone())
+            .unwrap_or_else(|| self.sidebar_search_selection.clone());
+        let mut updated = current;
+        updated.replace_range(range.clone(), replacement);
+        let cursor = range.start + replacement.len();
+        self.sidebar_search_selection = cursor..cursor;
+        self.sidebar_search_selection_reversed = false;
+        self.sidebar_search_marked_range = None;
+        self.sidebar_search = updated;
+        self.rebuild_sidebar_rows();
+        cx.notify();
+    }
+
+    pub(super) fn replace_sidebar_search_and_mark(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        replacement: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.sidebar_search.clone();
+        let range = range_utf16
+            .as_ref()
+            .map(|range| {
+                byte_offset_for_utf16(&current, range.start)
+                    ..byte_offset_for_utf16(&current, range.end)
+            })
+            .or_else(|| self.sidebar_search_marked_range.clone())
+            .unwrap_or_else(|| self.sidebar_search_selection.clone());
+        let mut updated = current;
+        updated.replace_range(range.clone(), replacement);
+        let replacement_end = range.start + replacement.len();
+        self.sidebar_search_marked_range =
+            (!replacement.is_empty()).then_some(range.start..replacement_end);
+        self.sidebar_search_selection = new_selected_range_utf16
+            .map(|new_range| {
+                let start = byte_offset_for_utf16(replacement, new_range.start);
+                let end = byte_offset_for_utf16(replacement, new_range.end);
+                range.start + start..range.start + end
+            })
+            .unwrap_or(replacement_end..replacement_end);
+        self.sidebar_search_selection_reversed = false;
+        self.sidebar_search = updated;
+        self.rebuild_sidebar_rows();
+        cx.notify();
     }
 
     pub(super) fn rename_mouse_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1265,6 +1585,12 @@ fn open_tab_for_session(
     }
 }
 
+fn restore_session_layout(current: &mut ShellLayoutState, saved: ShellLayoutState) {
+    let sidebar_collapsed = current.sidebar_collapsed;
+    *current = saved;
+    current.sidebar_collapsed = sidebar_collapsed;
+}
+
 fn session_view_state_or_current(
     states: &mut BTreeMap<String, SessionViewState>,
     session_id: &str,
@@ -1330,6 +1656,7 @@ mod tests {
             browser_panel_open: true,
             browser_url: "https://example.com".into(),
             browser_title: "Example".into(),
+            transcript_scroll_anchor: None,
         };
         let mut states = BTreeMap::new();
 
@@ -1337,6 +1664,24 @@ mod tests {
 
         assert_eq!(restored, current);
         assert_eq!(states.get("session-1"), Some(&current));
+    }
+
+    #[test]
+    fn restoring_session_view_state_keeps_global_sidebar_visibility() {
+        let mut current = ShellLayoutState {
+            sidebar_collapsed: true,
+            ..ShellLayoutState::default()
+        };
+        let saved = ShellLayoutState {
+            sidebar_collapsed: false,
+            workbench_collapsed: true,
+            ..ShellLayoutState::default()
+        };
+
+        restore_session_layout(&mut current, saved);
+
+        assert!(current.sidebar_collapsed);
+        assert!(current.workbench_collapsed);
     }
 
     #[test]

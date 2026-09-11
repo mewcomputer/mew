@@ -27,6 +27,7 @@ impl DesktopShell {
         // GPUI, so querying it from a mouse or accessibility event panics.
         let down_layout = text.layout().clone();
         let down_text = inline.text.clone();
+        let down_links = inline.links.clone();
         self.transcript_text_registry
             .borrow_mut()
             .push(TranscriptTextEntry {
@@ -43,6 +44,9 @@ impl DesktopShell {
             .min_w_0()
             .whitespace_normal()
             .cursor(gpui::CursorStyle::IBeam)
+            .when(!inline.links.is_empty(), |element| {
+                element.cursor(gpui::CursorStyle::PointingHand)
+            })
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |shell, event, window, cx| {
@@ -51,6 +55,7 @@ impl DesktopShell {
                         block_index,
                         &down_text,
                         &down_layout,
+                        &down_links,
                         event,
                         window,
                         cx,
@@ -132,6 +137,7 @@ impl DesktopShell {
         block_index: usize,
         text: &str,
         layout: &gpui::TextLayout,
+        links: &[InlineLink],
         event: &gpui::MouseDownEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -142,6 +148,10 @@ impl DesktopShell {
             block_index,
             offset,
         };
+        self.transcript_link_candidate = links
+            .iter()
+            .find(|link| link.range.contains(&offset))
+            .map(|link| link.url.clone());
         self.transcript_selection_anchor = Some(point);
         self.update_transcript_selection(point);
         self.transcript_is_selecting = true;
@@ -182,6 +192,7 @@ impl DesktopShell {
         };
         drop(registry);
         if point != anchor {
+            self.transcript_link_candidate = None;
             self.update_transcript_selection(point);
         }
         cx.notify();
@@ -191,9 +202,12 @@ impl DesktopShell {
         &mut self,
         _event: &gpui::MouseUpEvent,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         self.transcript_is_selecting = false;
+        if let Some(url) = self.transcript_link_candidate.take() {
+            self.open_transcript_link(url, cx);
+        }
     }
 
     fn transcript_selection_range(
@@ -645,14 +659,35 @@ impl DesktopShell {
         if self.model.ui.running || !self.model.session_is_ready() {
             return;
         }
-        let Some(text) = latest_user_prompt(&self.model.ui.transcript) else {
+        let Some(submission) = latest_user_submission(&self.model.ui.transcript) else {
             return;
         };
         self.send_command(ClientMessage::Prompt {
-            text,
-            attachments: Vec::new(),
+            text: submission.text,
+            attachments: submission.attachments,
         });
         cx.notify();
+    }
+
+    pub(super) fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
+        self.pending_transcript_scroll_anchor = None;
+        self.transcript_scrolled_away = false;
+        self.transcript_list.set_follow_mode(gpui::FollowMode::Tail);
+        self.transcript_list.scroll_to_end();
+        self.capture_session_view_state();
+        self.persist_layout();
+        cx.notify();
+    }
+
+    pub(super) fn open_transcript_link(&mut self, url: String, cx: &mut Context<Self>) {
+        let Some(url) = normalize_browser_url(&url) else {
+            self.browser_error = Some("only http(s) links can open in the in-app browser".into());
+            cx.notify();
+            return;
+        };
+        self.browser_url = url;
+        self.open_browser_panel(cx);
+        self.navigate_browser_to(cx);
     }
 
     pub(super) fn composer_key_down(

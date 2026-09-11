@@ -57,26 +57,56 @@ pub(super) fn formatted_tool_input(input: &str) -> String {
         .unwrap_or_else(|| input.to_owned())
 }
 
+const TOOL_DIFF_LINES_MAX: usize = 40;
+const TOOL_OUTPUT_LINES_FOR_DISCLOSURE: usize = 12;
+
+#[derive(Clone, Copy)]
+pub(super) enum ActionButtonTone {
+    Primary,
+    Secondary,
+    Destructive,
+}
+
 impl DesktopShell {
     pub(super) fn render_action_button(
         &self,
         id: String,
         label: impl Into<SharedString>,
         command: ClientMessage,
+        tone: ActionButtonTone,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let label = label.into();
+        let (background, foreground, hover) = match tone {
+            ActionButtonTone::Primary => (
+                theme_rgb(&self.theme, "text.body"),
+                theme_rgb(&self.theme, "background"),
+                theme_rgb(&self.theme, "text.body").opacity(0.82),
+            ),
+            ActionButtonTone::Secondary => (
+                theme_rgb(&self.theme, "card"),
+                theme_rgb(&self.theme, "text.body"),
+                theme_rgb(&self.theme, "muted"),
+            ),
+            ActionButtonTone::Destructive => (
+                theme_rgb(&self.theme, "red.fg").opacity(0.14),
+                theme_rgb(&self.theme, "red.fg"),
+                theme_rgb(&self.theme, "red.fg").opacity(0.24),
+            ),
+        };
         div()
             .id(id)
             .px(px(10.))
             .py(px(6.))
             .rounded(px(7.))
             .cursor_pointer()
-            .bg(theme_rgb(&self.theme, "card"))
+            .bg(background)
+            .text_color(foreground)
             .text_xs()
             .role(Role::Button)
             .aria_label(label.clone())
-            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+            .hover(move |element| element.bg(hover))
             .on_click(cx.listener(move |shell, _, _, cx| {
                 shell.send_command(command.clone());
                 cx.notify();
@@ -123,6 +153,7 @@ impl DesktopShell {
                                 request_id: request_id.clone(),
                                 decision: PermissionDecision::AllowOnce,
                             },
+                            ActionButtonTone::Primary,
                             cx,
                         ),
                         self.render_action_button(
@@ -132,6 +163,7 @@ impl DesktopShell {
                                 request_id: request_id.clone(),
                                 decision: PermissionDecision::AllowSession,
                             },
+                            ActionButtonTone::Secondary,
                             cx,
                         ),
                         self.render_action_button(
@@ -141,6 +173,7 @@ impl DesktopShell {
                                 request_id,
                                 decision: PermissionDecision::Deny,
                             },
+                            ActionButtonTone::Destructive,
                             cx,
                         ),
                     ]))
@@ -172,6 +205,7 @@ impl DesktopShell {
                             request_id: request_id.clone(),
                             decision: PermissionDecision::AllowOnce,
                         },
+                        ActionButtonTone::Primary,
                         cx,
                     ),
                     self.render_action_button(
@@ -181,6 +215,7 @@ impl DesktopShell {
                             request_id,
                             decision: PermissionDecision::Deny,
                         },
+                        ActionButtonTone::Destructive,
                         cx,
                     ),
                 ]))
@@ -216,6 +251,7 @@ impl DesktopShell {
                                         request_id: request_id.clone(),
                                         answers: vec![answer],
                                     },
+                                    ActionButtonTone::Secondary,
                                     cx,
                                 )
                             }),
@@ -292,6 +328,7 @@ impl DesktopShell {
                                 approved: true,
                                 feedback: None,
                             },
+                            ActionButtonTone::Primary,
                             cx,
                         ),
                         if feedback_active {
@@ -304,6 +341,7 @@ impl DesktopShell {
                                 .bg(theme_rgb(&self.theme, "card"))
                                 .text_xs()
                                 .role(Role::Button)
+                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                 .aria_label("Cancel plan feedback")
                                 .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
                                 .on_click(cx.listener(|shell, _, _, cx| {
@@ -323,6 +361,7 @@ impl DesktopShell {
                                 .bg(theme_rgb(&self.theme, "card"))
                                 .text_xs()
                                 .role(Role::Button)
+                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                 .aria_label("Request plan changes")
                                 .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
                                 .on_click(cx.listener(move |shell, _, window, cx| {
@@ -367,6 +406,7 @@ impl DesktopShell {
                             request_id: request_id.clone(),
                             accepted: true,
                         },
+                        ActionButtonTone::Primary,
                         cx,
                     ),
                     self.render_action_button(
@@ -376,6 +416,7 @@ impl DesktopShell {
                             request_id,
                             accepted: false,
                         },
+                        ActionButtonTone::Destructive,
                         cx,
                     ),
                 ]))
@@ -424,7 +465,7 @@ impl DesktopShell {
     pub(super) fn render_transcript_row(
         &mut self,
         index: usize,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let Some(row) = self.transcript_rows.get(index).copied() else {
@@ -496,7 +537,7 @@ impl DesktopShell {
                 diff.as_deref(),
                 cx,
             ),
-            TranscriptPart::File(label) => self.render_meta_part(
+            TranscriptPart::File { label, .. } => self.render_meta_part(
                 row.message_index,
                 row.part_index,
                 TablerIcon::FileCode,
@@ -527,39 +568,48 @@ impl DesktopShell {
                 .transcript_rows
                 .get(index + 1)
                 .is_some_and(|next| next.message_index == row.message_index);
+        let content_max_width = chat_content_column_width(
+            f32::from(window.bounds().size.width) - CHAT_TRANSCRIPT_PADDING * 2.,
+        );
 
         div()
             .id(format!("transcript-row-{index}"))
             .flex()
             .w_full()
+            .justify_center()
             .when(is_user && !continues_after, |element| element.mb(px(8.)))
-            .justify_end()
-            .when(!is_user, |element| element.justify_start())
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .min_w_0()
-                    .max_w(px(650.))
-                    .when(!is_user, |element| element.w_full())
-                    .when(is_user, |element| {
-                        element
-                            .flex_none()
-                            .p(px(12.))
-                            .when(continues_before, |element| element.pt(px(2.)))
-                            .when(continues_after, |element| element.pb(px(2.)))
-                            .rounded(px(14.))
-                            .bg(theme_rgb(&self.theme, "card"))
-                    })
+                    .w_full()
+                    .max_w(px(content_max_width))
+                    .when(is_user, |element| element.justify_end())
                     .child(
                         div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
                             .min_w_0()
+                            .max_w(px(650.))
                             .when(!is_user, |element| element.w_full())
-                            .text_sm()
-                            .line_height(px(20.))
-                            .text_color(theme_rgb(&self.theme, "text.body"))
-                            .child(content),
+                            .when(is_user, |element| {
+                                element
+                                    .flex_none()
+                                    .p(px(12.))
+                                    .when(continues_before, |element| element.pt(px(2.)))
+                                    .when(continues_after, |element| element.pb(px(2.)))
+                                    .rounded(px(14.))
+                                    .bg(theme_rgb(&self.theme, "card"))
+                            })
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .when(!is_user, |element| element.w_full())
+                                    .text_sm()
+                                    .line_height(px(20.))
+                                    .text_color(theme_rgb(&self.theme, "text.body"))
+                                    .child(content),
+                            ),
                     ),
             )
             .into_any_element()
@@ -571,6 +621,8 @@ impl DesktopShell {
         }
         self.rebuild_transcript_rows_from_cache();
         self.sync_transcript_list();
+        self.capture_session_view_state();
+        self.persist_layout();
         cx.notify();
     }
 
@@ -595,6 +647,7 @@ impl DesktopShell {
             .gap(px(7.))
             .cursor_pointer()
             .role(Role::Button)
+            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
             .aria_expanded(!collapsed)
             .aria_label(SharedString::from(format!(
                 "{}{}",
@@ -741,30 +794,56 @@ impl DesktopShell {
                 .child(self.render_tool_text(
                     format!("tool-input-{message_index}-{part_index}"),
                     &formatted_tool_input(input),
+                    false,
                 ));
             if let Some(output) = output.filter(|output| !output.is_empty()) {
+                let output_key = format!("tool-output-{message_index}-{part_index}");
+                let output_expanded = self.expanded_chat_parts.contains(&output_key);
                 body = body.child(
                     div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
                         .text_xs()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child("output"),
+                        .child("output")
+                        .when(
+                            output.lines().count() > TOOL_OUTPUT_LINES_FOR_DISCLOSURE,
+                            |element| {
+                                element.child(self.render_tool_toggle(
+                                    format!("{output_key}-toggle"),
+                                    output_key.clone(),
+                                    output_expanded,
+                                    "output",
+                                    cx,
+                                ))
+                            },
+                        ),
                 );
-                body =
-                    body.child(self.render_tool_text(
-                        format!("tool-output-{message_index}-{part_index}"),
-                        output,
-                    ));
+                body = body.child(self.render_tool_text(output_key, output, output_expanded));
             }
             if let Some(diff) = diff.filter(|diff| !diff.is_empty()) {
+                let diff_key = format!("tool-diff-{message_index}-{part_index}");
+                let diff_expanded = self.expanded_chat_parts.contains(&diff_key);
                 body = body.child(
                     div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
                         .text_xs()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child("diff"),
+                        .child("diff")
+                        .when(diff.lines().count() > TOOL_DIFF_LINES_MAX, |element| {
+                            element.child(self.render_tool_toggle(
+                                format!("{diff_key}-toggle"),
+                                diff_key.clone(),
+                                diff_expanded,
+                                "diff",
+                                cx,
+                            ))
+                        }),
                 );
-                body = body.child(
-                    self.render_tool_diff(format!("tool-diff-{message_index}-{part_index}"), diff),
-                );
+                body = body.child(self.render_tool_diff(diff_key, diff, diff_expanded));
             }
             if let Some(error) = error {
                 body = body.child(
@@ -792,7 +871,38 @@ impl DesktopShell {
             .into_any_element()
     }
 
-    fn render_tool_text(&self, id: String, text: &str) -> gpui::AnyElement {
+    fn render_tool_toggle(
+        &self,
+        id: String,
+        key: String,
+        expanded: bool,
+        noun: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let label = if expanded {
+            format!("collapse {noun}")
+        } else {
+            format!("expand {noun}")
+        };
+        div()
+            .id(id)
+            .px(px(5.))
+            .py(px(2.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .role(Role::Button)
+            .aria_label(SharedString::from(label.clone()))
+            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+            .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+            .on_click(cx.listener(move |shell, _, _, cx| {
+                cx.stop_propagation();
+                shell.toggle_chat_part(key.clone(), cx);
+            }))
+            .child(SharedString::from(label))
+            .into_any_element()
+    }
+
+    fn render_tool_text(&self, id: String, text: &str, expanded: bool) -> gpui::AnyElement {
         let source_identity = text.as_ptr() as usize;
         let source_len = text.len();
         let lines = {
@@ -823,7 +933,7 @@ impl DesktopShell {
         let text_color = theme_rgb(&self.theme, "text.body");
         div()
             .id(id.clone())
-            .max_h(px(180.))
+            .max_h(if expanded { px(520.) } else { px(180.) })
             .overflow_x_scroll()
             .overflow_y_scroll()
             .bg(theme_rgb(&self.theme, "background"))
@@ -844,13 +954,16 @@ impl DesktopShell {
             .into_any_element()
     }
 
-    fn render_tool_diff(&self, id: String, diff: &str) -> gpui::AnyElement {
-        const DIFF_LINES_MAX: usize = 40;
+    fn render_tool_diff(&self, id: String, diff: &str, expanded: bool) -> gpui::AnyElement {
         let line_count = diff.lines().count();
-        let truncated = line_count > DIFF_LINES_MAX;
+        let truncated = !expanded && line_count > TOOL_DIFF_LINES_MAX;
         let lines = diff
             .lines()
-            .take(DIFF_LINES_MAX)
+            .take(if expanded {
+                line_count
+            } else {
+                TOOL_DIFF_LINES_MAX
+            })
             .map(|line| {
                 let color = if line.starts_with('+') {
                     theme_rgb(&self.theme, "green.fg")
@@ -864,7 +977,7 @@ impl DesktopShell {
             .collect::<Vec<_>>();
         div()
             .id(id.clone())
-            .max_h(px(180.))
+            .max_h(if expanded { px(520.) } else { px(180.) })
             .overflow_x_scroll()
             .overflow_y_scroll()
             .bg(theme_rgb(&self.theme, "background"))
@@ -887,7 +1000,7 @@ impl DesktopShell {
                     div()
                         .text_xs()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child(format!("… {} more lines", line_count - DIFF_LINES_MAX)),
+                        .child(format!("… {} more lines", line_count - TOOL_DIFF_LINES_MAX)),
                 )
             })
             .into_any_element()
@@ -934,6 +1047,27 @@ impl DesktopShell {
                 self.transcript_list.scroll_to_end();
             }
         }
+        self.restore_pending_transcript_scroll_anchor();
+    }
+
+    fn restore_pending_transcript_scroll_anchor(&mut self) {
+        let Some(anchor) = self.pending_transcript_scroll_anchor else {
+            return;
+        };
+        let Some(item_ix) = self.transcript_rows.iter().position(|row| {
+            row.message_index == anchor.message_index
+                && row.part_index == anchor.part_index
+                && row.block_index == anchor.block_index
+        }) else {
+            return;
+        };
+        self.transcript_list
+            .set_follow_mode(gpui::FollowMode::Normal);
+        self.transcript_list.scroll_to(gpui::ListOffset {
+            item_ix,
+            offset_in_item: px(anchor.offset.max(0.)),
+        });
+        self.pending_transcript_scroll_anchor = None;
     }
 
     fn render_transcript_attention(
@@ -1008,6 +1142,7 @@ impl DesktopShell {
                     .text_color(body)
                     .cursor_pointer()
                     .role(Role::Button)
+                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                     .aria_label("Cancel current turn")
                     .on_click(cx.listener(|shell, _, _, cx| {
                         shell.cancel_turn(cx);
@@ -1029,6 +1164,7 @@ impl DesktopShell {
                     .text_color(body)
                     .cursor_pointer()
                     .role(Role::Button)
+                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                     .aria_label(if matches!(attention, TranscriptAttention::Failed) {
                         "Retry last turn"
                     } else {
@@ -1115,18 +1251,26 @@ impl DesktopShell {
                     )
                     .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
                     .flex_1()
-                    .min_h_0(),
+                    .min_h_0()
+                    .w_full()
+                    .p(px(CHAT_TRANSCRIPT_PADDING)),
                 )
                 .when_some(transcript_attention_state, |element, attention| {
-                    element.child(self.render_transcript_attention(
-                        attention,
-                        if matches!(attention, TranscriptAttention::Failed) {
-                            last_error.as_deref()
-                        } else {
-                            None
-                        },
-                        cx,
-                    ))
+                    element.child(
+                        div()
+                            .w_full()
+                            .max_w(px(CHAT_CONTENT_MAX_WIDTH))
+                            .self_center()
+                            .child(self.render_transcript_attention(
+                                attention,
+                                if matches!(attention, TranscriptAttention::Failed) {
+                                    last_error.as_deref()
+                                } else {
+                                    None
+                                },
+                                cx,
+                            )),
+                    )
                 })
                 .into_any_element()
         };
@@ -1187,10 +1331,7 @@ impl DesktopShell {
                     .min_w_0()
                     .min_h_0()
                     .w_full()
-                    .max_w(px(CHAT_CONTENT_MAX_WIDTH))
-                    .self_center()
                     .gap(px(20.))
-                    .p(px(24.))
                     .overflow_y_hidden()
                     .on_mouse_move(cx.listener(Self::transcript_mouse_move_at_position))
                     .on_mouse_up(
@@ -1201,7 +1342,51 @@ impl DesktopShell {
                         gpui::MouseButton::Left,
                         cx.listener(Self::transcript_mouse_up),
                     )
-                    .child(transcript),
+                    .child(transcript)
+                    .when(self.transcript_scrolled_away, |element| {
+                        element.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom(px(12.))
+                                .flex()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .id("jump-to-latest")
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.))
+                                        .px(px(9.))
+                                        .py(px(6.))
+                                        .rounded(px(7.))
+                                        .cursor_pointer()
+                                        .role(Role::Button)
+                                        .aria_label("Jump to latest message")
+                                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                        .bg(theme_rgb(&self.theme, "card"))
+                                        .border_1()
+                                        .border_color(theme_rgb(&self.theme, "divider"))
+                                        .shadow_sm()
+                                        .text_xs()
+                                        .text_color(theme_rgb(&self.theme, "text.body"))
+                                        .hover(|element| {
+                                            element.bg(theme_rgb(&self.theme, "muted"))
+                                        })
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            cx.stop_propagation();
+                                            shell.jump_to_latest(cx);
+                                        }))
+                                        .child(tabler_icon(
+                                            TablerIcon::ChevronDown,
+                                            theme_rgb(&self.theme, "text.muted"),
+                                            px(13.),
+                                        ))
+                                        .child("jump to latest"),
+                                ),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -1272,6 +1457,7 @@ impl DesktopShell {
                                         .text_color(theme_rgb(&self.theme, "text.body"))
                                         .cursor_pointer()
                                         .role(Role::Button)
+                                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                         .aria_label("Retry daemon connection")
                                         .on_click(cx.listener(|shell, _, _, cx| {
                                             shell.retry_connection(cx);
@@ -1289,6 +1475,7 @@ impl DesktopShell {
                                         .text_color(theme_rgb(&self.theme, "text.body"))
                                         .cursor_pointer()
                                         .role(Role::Button)
+                                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                         .aria_label("Dismiss error")
                                         .on_click(cx.listener(|shell, _, _, cx| {
                                             shell.dismiss_error(cx);
@@ -1450,6 +1637,7 @@ impl DesktopShell {
                                                     .rounded(px(6.))
                                                     .cursor_pointer()
                                                     .role(Role::Button)
+                                                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                                     .aria_label("Attach files")
                                                     .text_color(theme_rgb(
                                                         &self.theme,
@@ -1483,6 +1671,7 @@ impl DesktopShell {
                                                     .id("model-picker-trigger")
                                                     .relative()
                                                     .role(Role::Button)
+                                                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                                     .aria_label(SharedString::from(format!(
                                                         "Choose model: {model_display}"
                                                     )))
@@ -1549,6 +1738,7 @@ impl DesktopShell {
                                                         .id("thinking-picker-trigger")
                                                         .relative()
                                                         .role(Role::Button)
+                                                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                                         .aria_label(SharedString::from(format!(
                                                             "Choose thinking variant: {thinking_display}"
                                                         )))
@@ -1615,6 +1805,7 @@ impl DesktopShell {
                                                     .id("permission-picker-trigger")
                                                     .relative()
                                                     .role(Role::Button)
+                                                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                                     .aria_label(SharedString::from(format!(
                                                         "Choose permission mode: {permission_display}"
                                                     )))
@@ -1681,6 +1872,7 @@ impl DesktopShell {
                                             .id("persona-picker-trigger")
                                             .relative()
                                             .role(Role::Button)
+                                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                             .aria_label(SharedString::from(format!(
                                                 "Choose persona: {persona_display}"
                                             )))
@@ -1741,6 +1933,7 @@ impl DesktopShell {
                                             .justify_center()
                                             .cursor_pointer()
                                             .role(Role::Button)
+                                            .desktop_focus(theme_rgb(&self.theme, "red.fg"))
                                             .aria_label("Cancel current turn")
                                             .on_click(cx.listener(|shell, _, _, cx| {
                                                 shell.cancel_turn(cx);
@@ -1763,6 +1956,7 @@ impl DesktopShell {
                                             .justify_center()
                                             .cursor_pointer()
                                             .role(Role::Button)
+                                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                             .aria_label("Send message")
                                             .on_click(cx.listener(|shell, _, _, cx| {
                                                 shell.submit_prompt(cx);
@@ -1862,6 +2056,7 @@ impl DesktopShell {
                                             .rounded(px(6.))
                                             .cursor_pointer()
                                             .role(Role::Button)
+                                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                             .aria_label("Yield control to another client")
                                             .hover(|element| {
                                                 element.bg(theme_rgb(&self.theme, "muted"))

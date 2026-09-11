@@ -215,6 +215,7 @@ impl DesktopShell {
                 .rounded(px(7.))
                 .cursor_pointer()
                 .role(Role::MenuItem)
+                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                 .aria_label(label.clone())
                 .aria_selected(selected)
                 .when(selected, |element| {
@@ -314,6 +315,7 @@ impl DesktopShell {
                 .rounded(px(7.))
                 .cursor_pointer()
                 .role(Role::MenuItem)
+                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                 .aria_label(SharedString::from(name.clone()))
                 .aria_selected(selected)
                 .when(selected, |element| {
@@ -412,6 +414,7 @@ impl DesktopShell {
                     .rounded(px(7.))
                     .cursor_pointer()
                     .role(Role::MenuItem)
+                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                     .aria_label(SharedString::from(*label))
                     .aria_selected(selected)
                     .when(selected, |element| {
@@ -481,6 +484,7 @@ impl DesktopShell {
                 .rounded(px(7.))
                 .cursor_pointer()
                 .role(Role::MenuItem)
+                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                 .aria_label(SharedString::from(label.clone()))
                 .aria_selected(selected)
                 .when(selected, |element| {
@@ -561,6 +565,7 @@ impl DesktopShell {
                     .rounded(px(7.))
                     .cursor_pointer()
                     .role(Role::MenuItem)
+                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                     .aria_label(SharedString::from(name))
                     .aria_selected(index == selected)
                     .when(index == selected, |element| {
@@ -613,6 +618,7 @@ impl DesktopShell {
                     .rounded(px(7.))
                     .cursor_pointer()
                     .role(Role::MenuItem)
+                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                     .aria_label(SharedString::from(format!("Mention {path}")))
                     .aria_selected(index == selected)
                     .when(index == selected, |element| {

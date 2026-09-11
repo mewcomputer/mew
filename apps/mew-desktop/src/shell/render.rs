@@ -44,6 +44,7 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::action_toggle_sidebar))
             .on_action(cx.listener(Self::action_toggle_terminal))
             .on_action(cx.listener(Self::action_toggle_workbench))
+            .on_action(cx.listener(Self::action_focus_sidebar_search))
             .on_action(cx.listener(Self::action_dismiss_popovers))
             .child(self.render_topbar(cx))
             .child(if self.settings_open {

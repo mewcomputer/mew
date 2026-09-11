@@ -74,12 +74,19 @@ pub enum MarkdownBlock {
 pub struct InlineText {
     pub text: String,
     pub highlights: Vec<InlineHighlight>,
+    pub links: Vec<InlineLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineHighlight {
     pub range: Range<usize>,
     pub style: InlineStyle,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineLink {
+    pub range: Range<usize>,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,6 +259,18 @@ fn slice_inline(inline: &InlineText, range: std::ops::Range<usize>) -> InlineTex
                 })
             })
             .collect(),
+        links: inline
+            .links
+            .iter()
+            .filter_map(|link| {
+                let start = link.range.start.max(range.start);
+                let end = link.range.end.min(range.end);
+                (start < end).then(|| InlineLink {
+                    range: start - range.start..end - range.start,
+                    url: link.url.clone(),
+                })
+            })
+            .collect(),
     }
 }
 
@@ -262,6 +281,7 @@ fn split_lines(text: &str) -> Vec<String> {
     split_inline(&InlineText {
         text: text.to_owned(),
         highlights: Vec::new(),
+        links: Vec::new(),
     })
     .into_iter()
     .map(|chunk| chunk.text)
@@ -398,6 +418,7 @@ fn parse_inline(input: &str) -> InlineText {
     let mut output = InlineText {
         text: String::new(),
         highlights: Vec::new(),
+        links: Vec::new(),
     };
     let mut index = 0;
 
@@ -421,6 +442,12 @@ fn parse_inline(input: &str) -> InlineText {
                     output.highlights.push(InlineHighlight {
                         range: start..output.text.len(),
                         style: InlineStyle::Link,
+                    });
+                    let url_start = close_bracket + 2;
+                    let url_end = url_start + close_paren;
+                    output.links.push(InlineLink {
+                        range: start..output.text.len(),
+                        url: rest[url_start..url_end].to_owned(),
                     });
                     index += close_bracket + 2 + close_paren + 1;
                     continue;
@@ -504,6 +531,25 @@ mod tests {
                 InlineStyle::Link,
             ]
         );
+        assert_eq!(inline.links.len(), 1);
+        assert_eq!(inline.links[0].url, "https://example.com");
+    }
+
+    #[test]
+    fn link_targets_survive_virtualized_inline_slices() {
+        let document = parse_document("before [a very long link](https://example.com/path) after");
+        let MarkdownBlock::Paragraph(inline) = &document.blocks[0] else {
+            panic!("expected paragraph")
+        };
+
+        let chunks = split_inline(inline);
+
+        assert!(chunks.iter().any(|chunk| {
+            chunk
+                .links
+                .iter()
+                .any(|link| link.url == "https://example.com/path")
+        }));
     }
 
     #[test]

@@ -1,21 +1,34 @@
 use super::*;
 use unicode_segmentation::UnicodeSegmentation;
 
-pub(super) fn sidebar_transition_width(collapsed: bool, delta: f32) -> f32 {
+pub(super) trait DesktopFocusExt: gpui::InteractiveElement + Sized {
+    fn desktop_focus(self, color: gpui::Rgba) -> Self {
+        self.tab_index(0)
+            .focus_visible(move |style| style.border_1().border_color(color))
+    }
+}
+
+impl<T: gpui::InteractiveElement + Sized> DesktopFocusExt for T {}
+
+pub(super) fn sidebar_transition_width(collapsed: bool, delta: f32, expanded_width: f32) -> f32 {
     let (from, to) = if collapsed {
-        (SIDEBAR_EXPANDED_WIDTH, SIDEBAR_COLLAPSED_WIDTH)
+        (expanded_width, SIDEBAR_COLLAPSED_WIDTH)
     } else {
-        (SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_EXPANDED_WIDTH)
+        (SIDEBAR_COLLAPSED_WIDTH, expanded_width)
     };
     from + (to - from) * delta
 }
 
-pub(super) fn sidebar_transition_offset(collapsed: bool, delta: f32) -> f32 {
+pub(super) fn sidebar_transition_offset(collapsed: bool, delta: f32, expanded_width: f32) -> f32 {
     if collapsed {
-        -SIDEBAR_EXPANDED_WIDTH * delta
+        -expanded_width * delta
     } else {
-        -SIDEBAR_EXPANDED_WIDTH * (1. - delta)
+        -expanded_width * (1. - delta)
     }
+}
+
+pub(super) fn sidebar_width_from_pointer(pointer_x: f32) -> f32 {
+    (pointer_x - SHELL_GUTTER).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
 }
 
 pub(super) fn workbench_transition_width(collapsed: bool, delta: f32) -> f32 {
@@ -37,6 +50,10 @@ pub(super) fn workbench_transition_offset(collapsed: bool, delta: f32, expanded_
 
 pub(super) fn workbench_max_width(window_width: f32, sidebar_width: f32) -> f32 {
     (window_width - sidebar_width - CHAT_MIN_WIDTH).max(0.)
+}
+
+pub(super) fn workbench_fits_window(window_width: f32, sidebar_width: f32) -> bool {
+    window_width >= sidebar_width + CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH
 }
 
 pub(super) fn workbench_width_from_pointer(
@@ -222,6 +239,10 @@ pub(super) fn persona_picker_height(option_count: usize) -> Pixels {
 
 pub(super) fn should_animate_transcript_row(row_index: usize, row_count: usize) -> bool {
     row_count > 0 && row_index + 1 == row_count
+}
+
+pub(super) fn chat_content_column_width(available_width: f32) -> f32 {
+    available_width.clamp(0., CHAT_CONTENT_MAX_WIDTH)
 }
 
 /// Slash menu entries matching the current composer text. The menu is only
@@ -551,16 +572,28 @@ pub(super) fn show_ungrouped_group(group_count: usize, session_count: usize) -> 
     group_count > 0 && session_count > 0
 }
 
-/// Builds the sidebar row model: toolbar, groups with their visible
-/// (non-archived) sessions, ungrouped sessions, and a collapsed-by-default
-/// "Archived" section so archived conversations stay reachable.
+/// Builds the sidebar row model without a search filter.
 pub(super) fn build_sidebar_rows(
     conversations: &[ConversationItem],
     groups: &[mew_protocol::GroupInfo],
     collapsed_groups: &BTreeSet<String>,
 ) -> Vec<SidebarRow> {
+    build_sidebar_rows_with_query(conversations, groups, collapsed_groups, "")
+}
+
+/// Builds the sidebar row model: pinned sessions, groups with their visible
+/// (non-archived) sessions, ungrouped sessions, and a collapsed-by-default
+/// "Archived" section so archived conversations stay reachable.
+pub(super) fn build_sidebar_rows_with_query(
+    conversations: &[ConversationItem],
+    groups: &[mew_protocol::GroupInfo],
+    collapsed_groups: &BTreeSet<String>,
+    query: &str,
+) -> Vec<SidebarRow> {
     let mut rows = vec![SidebarRow::Toolbar];
     let mut grouped_session_ids = BTreeSet::new();
+    let query = query.trim().to_lowercase();
+    let searching = !query.is_empty();
     let mut conversations = conversations.to_vec();
     conversations.sort_by(|a, b| {
         b.last_message_at
@@ -568,12 +601,42 @@ pub(super) fn build_sidebar_rows(
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
 
+    let pinned: Vec<_> = conversations
+        .iter()
+        .filter(|conversation| {
+            !conversation.archived
+                && conversation.pinned
+                && (!searching
+                    || query == "pinned"
+                    || conversation_matches_query(conversation, &query))
+        })
+        .cloned()
+        .collect();
+    if !pinned.is_empty() {
+        let collapsed = !searching && collapsed_groups.contains(PINNED_GROUP_ID);
+        rows.push(SidebarRow::Group {
+            id: PINNED_GROUP_ID.into(),
+            name: "Pinned".into(),
+            color: None,
+            count: pinned.len(),
+            collapsed,
+        });
+        if !collapsed {
+            rows.extend(pinned.into_iter().map(SidebarRow::Session));
+        }
+    }
+
     for group in groups {
+        let group_matches = searching && group.name.to_lowercase().contains(&query);
         let sessions: Vec<_> = conversations
             .iter()
             .filter(|conversation| {
                 !conversation.archived
+                    && !conversation.pinned
                     && conversation.group_id.as_deref() == Some(group.id.as_str())
+                    && (!searching
+                        || group_matches
+                        || conversation_matches_query(conversation, &query))
             })
             .cloned()
             .collect();
@@ -582,7 +645,10 @@ pub(super) fn build_sidebar_rows(
                 .iter()
                 .map(|conversation| conversation.session_id.clone()),
         );
-        let collapsed = collapsed_groups.contains(&group.id);
+        if searching && sessions.is_empty() {
+            continue;
+        }
+        let collapsed = !searching && collapsed_groups.contains(&group.id);
         rows.push(SidebarRow::Group {
             id: group.id.clone(),
             name: group.name.clone(),
@@ -598,7 +664,12 @@ pub(super) fn build_sidebar_rows(
     let ungrouped: Vec<_> = conversations
         .iter()
         .filter(|conversation| {
-            !conversation.archived && !grouped_session_ids.contains(&conversation.session_id)
+            !conversation.archived
+                && !conversation.pinned
+                && !grouped_session_ids.contains(&conversation.session_id)
+                && (!searching
+                    || query == "ungrouped"
+                    || conversation_matches_query(conversation, &query))
         })
         .cloned()
         .collect();
@@ -620,11 +691,16 @@ pub(super) fn build_sidebar_rows(
 
     let archived: Vec<_> = conversations
         .iter()
-        .filter(|conversation| conversation.archived)
+        .filter(|conversation| {
+            conversation.archived
+                && (!searching
+                    || query == "archived"
+                    || conversation_matches_query(conversation, &query))
+        })
         .cloned()
         .collect();
     if !archived.is_empty() {
-        let collapsed = collapsed_groups.contains(ARCHIVED_GROUP_ID);
+        let collapsed = !searching && collapsed_groups.contains(ARCHIVED_GROUP_ID);
         rows.push(SidebarRow::Group {
             id: ARCHIVED_GROUP_ID.into(),
             name: "Archived".into(),
@@ -637,6 +713,15 @@ pub(super) fn build_sidebar_rows(
         }
     }
     rows
+}
+
+fn conversation_matches_query(conversation: &ConversationItem, query: &str) -> bool {
+    conversation.title.to_lowercase().contains(query)
+        || conversation.session_id.to_lowercase().contains(query)
+        || conversation
+            .cwd
+            .as_deref()
+            .is_some_and(|cwd| cwd.to_lowercase().contains(query))
 }
 
 pub(super) fn display_path_from_home(path: &str, home: Option<&Path>) -> String {
@@ -673,6 +758,7 @@ pub(super) fn compact_session_title(title: &str) -> String {
     }
 }
 
+#[cfg(test)]
 pub(super) fn latest_user_prompt(transcript: &[TranscriptItem]) -> Option<String> {
     transcript
         .iter()
@@ -680,6 +766,37 @@ pub(super) fn latest_user_prompt(transcript: &[TranscriptItem]) -> Option<String
         .find(|item| item.role == TranscriptRole::User)
         .map(|item| item.text.trim().to_owned())
         .filter(|text| !text.is_empty())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RetryablePrompt {
+    pub(super) text: String,
+    pub(super) attachments: Vec<Attachment>,
+}
+
+pub(super) fn latest_user_submission(transcript: &[TranscriptItem]) -> Option<RetryablePrompt> {
+    transcript
+        .iter()
+        .rev()
+        .find(|item| item.role == TranscriptRole::User)
+        .and_then(|item| {
+            let text = item.text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let attachments = item
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    TranscriptPart::File { attachment, .. } => Some(attachment.clone()),
+                    _ => None,
+                })
+                .collect();
+            Some(RetryablePrompt {
+                text: text.to_owned(),
+                attachments,
+            })
+        })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -43,8 +43,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     icons::{tabler_icon, IconAssets, TablerIcon},
     markdown::{
-        highlight_code_blocks, parse_document, virtualize_document, InlineStyle, InlineText,
-        MarkdownBlock, MarkdownRenderBlock, MarkdownSyntaxHighlight, StreamingMarkdown,
+        highlight_code_blocks, parse_document, virtualize_document, InlineLink, InlineStyle,
+        InlineText, MarkdownBlock, MarkdownRenderBlock, MarkdownSyntaxHighlight, StreamingMarkdown,
     },
     model::ShellModel,
     terminal::{TerminalEvent, TerminalView, DEFAULT_FONT_FAMILY},
@@ -81,6 +81,7 @@ actions!(
         ToggleSidebar,
         ToggleTerminal,
         ToggleWorkbench,
+        FocusSidebarSearch,
         DismissPopovers,
         ComposerBackspace,
         ComposerDelete,
