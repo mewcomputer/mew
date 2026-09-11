@@ -2613,6 +2613,101 @@ fn test_apply_persona_without_template_is_verbatim() {
     assert_eq!(prompt, "Hello {{ name }}");
 }
 
+#[test]
+fn test_apply_persona_template_sees_skill_descriptions() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let mut agent = agent;
+    agent.set_skills(vec![mew_skills::Skill {
+        name: "release-checklist".into(),
+        description: "ships safely".into(),
+        body: String::new(),
+        path: std::path::PathBuf::new(),
+        template: false,
+    }]);
+    let persona = mew_personas::Persona {
+        name: "templated".into(),
+        description: "lists skills".into(),
+        body: "{% for s in available_skills %}{{ s.name }}: {{ s.description }} {% endfor %}"
+            .into(),
+        path: std::path::PathBuf::new(),
+        config: mew_personas::PersonaConfig {
+            model: None,
+            tools: None,
+            tools_deny: None,
+            skills: None,
+            template: Some(true),
+            ..Default::default()
+        },
+    };
+    agent.apply_persona(&persona);
+    let prompt = agent.persona_prompt.expect("prompt should be set");
+    assert!(
+        prompt.contains("release-checklist: ships safely"),
+        "templated persona must see skill name and description, got: {prompt}"
+    );
+}
+
+#[test]
+fn test_set_skills_refreshes_template_ctx() {
+    let agent = Agent::new(
+        std::sync::Arc::new(FakeProvider::new(vec![])),
+        std::sync::Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let mut agent = agent;
+    agent.set_skills(vec![mew_skills::Skill {
+        name: "skill-a".into(),
+        description: "first".into(),
+        body: String::new(),
+        path: std::path::PathBuf::new(),
+        template: false,
+    }]);
+    let persona = mew_personas::Persona {
+        name: "templated".into(),
+        description: "".into(),
+        body: "static".into(),
+        path: std::path::PathBuf::new(),
+        config: mew_personas::PersonaConfig {
+            model: None,
+            tools: None,
+            tools_deny: None,
+            skills: None,
+            template: Some(true),
+            ..Default::default()
+        },
+    };
+    agent.apply_persona(&persona);
+    agent.set_skills(vec![mew_skills::Skill {
+        name: "skill-b".into(),
+        description: "second".into(),
+        body: String::new(),
+        path: std::path::PathBuf::new(),
+        template: false,
+    }]);
+    let ctx = agent
+        .template_ctx
+        .try_read()
+        .expect("template ctx lock")
+        .clone()
+        .expect("templated persona stores a template ctx");
+    assert!(
+        ctx.available_skills
+            .iter()
+            .any(|s| s.name == "skill-b" && s.description == "second"),
+        "set_skills must refresh the shared template ctx, got: {:?}",
+        ctx.available_skills
+    );
+    assert!(!ctx.available_skills.iter().any(|s| s.name == "skill-a"));
+}
+
 // --------------------------------------------------------------------------
 // Reasoning truncation integration
 // --------------------------------------------------------------------------

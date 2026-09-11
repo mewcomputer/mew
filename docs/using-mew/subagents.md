@@ -91,6 +91,17 @@ Be direct and specific. Reference file paths and line numbers.
 | `max_duration_secs` | no | Wall-clock cap in seconds (default: 300) |
 | `template` | no | When `true`, render the body through minijinja before using it as the system prompt |
 
+### System prompt composition
+
+Every subagent's system prompt is the shared subagent base followed by the
+subagent's body. The base (built-in resource `mew://system_prompts/subagent`)
+transcludes the base system prompt and adds the subagent contract: the
+`exit_tool` result channel, reasoning narration, progress updates, and the
+context budget. It always renders, so every subagent inherits the contract
+regardless of its `template` setting. The body is appended after it and is
+rendered only when `template: true`; bodies should hold role-specific
+instructions only.
+
 ### Templated subagents
 
 When `template: true` is set, the subagent body is rendered through

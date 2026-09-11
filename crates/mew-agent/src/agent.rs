@@ -799,6 +799,13 @@ impl Agent {
     /// `<available_skills>` block reflects the active persona's filter.
     pub fn set_skills(&mut self, skills: Vec<mew_skills::Skill>) {
         self.skills = skills;
+        // template_ctx is a snapshot shared with the Skill tool; without this
+        // refresh it would keep the skill list from when the persona applied.
+        if let Ok(mut g) = self.template_ctx.try_write() {
+            if let Some(ctx) = g.as_mut() {
+                ctx.available_skills = mew_prompts::template::SkillInfo::from_skills(&self.skills);
+            }
+        }
         self.rebuild_system();
     }
 
@@ -989,7 +996,7 @@ impl Agent {
             current_date: mew_prompts::template::TemplateContext::today(),
             tools,
             denied_tools,
-            skills: self.skills.iter().map(|s| s.name.clone()).collect(),
+            available_skills: mew_prompts::template::SkillInfo::from_skills(&self.skills),
             project_vars: self.project_vars.clone(),
             available_subagents: {
                 let mut subagents: Vec<_> = self

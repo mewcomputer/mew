@@ -5,8 +5,8 @@ use mew_client_core::{
 };
 use mew_message::{Message, Part, Role, ToolState};
 use mew_protocol::{
-    ClientKind, ClientMessage, FlaggedFileWire, GroupInfo, ModelInfo, PersonaInfo, SessionInfo,
-    SessionState, SessionUsageWire, Todo,
+    Attachment, ClientKind, ClientMessage, FlaggedFileWire, GroupInfo, ModelInfo, PersonaInfo,
+    SessionInfo, SessionState, SessionUsageWire, Todo,
 };
 use std::path::Path;
 
@@ -42,7 +42,10 @@ pub struct TranscriptItem {
 pub enum TranscriptPart {
     Text(String),
     Reasoning(String),
-    File(String),
+    File {
+        label: String,
+        attachment: Attachment,
+    },
     ToolCall {
         tool_name: String,
         call_id: String,
@@ -470,7 +473,14 @@ impl TranscriptItem {
                 ),
                 Part::File(part) => {
                     let label = part.filename.clone().unwrap_or_else(|| part.url.clone());
-                    (Some(label.clone()), Some(TranscriptPart::File(label)))
+                    let attachment = Attachment {
+                        path: part.url.clone(),
+                        mime: (!part.mime.is_empty()).then_some(part.mime.clone()),
+                    };
+                    (
+                        Some(label.clone()),
+                        Some(TranscriptPart::File { label, attachment }),
+                    )
                 }
                 Part::ToolCall(part) => {
                     let (status, output, error, diff) = match &part.state {
@@ -553,7 +563,7 @@ mod tests {
     use super::*;
     use mew_client_core::{ActionKind, ConnectionStatus};
     use mew_message::{
-        Message, Part, PartBase, ReasoningPart, TextPart, Time, ToolCallPart, ToolState,
+        FilePart, Message, Part, PartBase, ReasoningPart, TextPart, Time, ToolCallPart, ToolState,
         ToolStateCompleted, ToolTime,
     };
     use mew_protocol::{GroupInfo, PersonaInfo, ServerMessage, SessionInfo, SessionState};
@@ -684,6 +694,16 @@ mod tests {
             session_id,
             role: Role::Assistant,
             parts: vec![
+                Part::File(FilePart {
+                    base: PartBase {
+                        id: Ulid::new(),
+                        message_id,
+                        session_id,
+                    },
+                    mime: "image/png".into(),
+                    filename: Some("screenshot.png".into()),
+                    url: "/tmp/screenshot.png".into(),
+                }),
                 Part::Reasoning(ReasoningPart {
                     base: PartBase {
                         id: Ulid::new(),
@@ -727,10 +747,17 @@ mod tests {
         model.sync_from_client(&state);
         assert!(matches!(
             &model.transcript[0].parts[0],
-            TranscriptPart::Reasoning(text) if text == "inspect the workspace"
+            TranscriptPart::File { label, attachment }
+                if label == "screenshot.png"
+                    && attachment.path == "/tmp/screenshot.png"
+                    && attachment.mime.as_deref() == Some("image/png")
         ));
         assert!(matches!(
             &model.transcript[0].parts[1],
+            TranscriptPart::Reasoning(text) if text == "inspect the workspace"
+        ));
+        assert!(matches!(
+            &model.transcript[0].parts[2],
             TranscriptPart::ToolCall {
                 tool_name,
                 status: ToolStatus::Completed,

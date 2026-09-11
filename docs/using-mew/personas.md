@@ -155,8 +155,10 @@ being used as the system prompt. These variables are available:
 | `current_date` | str | Today's date in ISO 8601 (e.g. `2026-06-29`) |
 | `tools` | list of str | Tool names available this turn (after allowlist + denylist) |
 | `denied_tools` | list of str | Tools removed by the denylist |
-| `skills` | list of str | Available skill names |
-| `mcp_servers` | list of str | Connected MCP server names |
+| `skills` | list of str | Available skill names (derived from `available_skills`) |
+| `available_skills` | list of objects | Skills with `name` and `description` fields |
+| `project_vars` | map | Project-local variables from `.mew/project_vars.yaml` |
+| `available_subagents` | list of objects | Subagents with `name` and `description` fields |
 | `project_vars` | map | Project-local variables from `.mew/project_vars.yaml` |
 
 Template functions:
@@ -191,6 +193,8 @@ Model: {{ model_id }} on {{ provider_id }}.
 Available tools: {{ tools | join(", ") }}.
 {% if has_tool("bash") %}You can run shell commands.{% endif %}
 {% if denied_tools %}Denied: {{ denied_tools | join(", ") }}.{% endif %}
+{% for s in available_skills %}- {{ s.name }}: {{ s.description }}
+{% endfor %}
 ```
 
 If rendering fails (syntax error, missing variable), mew falls back to

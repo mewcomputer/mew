@@ -19,8 +19,10 @@
 //! - `current_date` (str) — the current date in ISO 8601 (e.g. "2026-06-29")
 //! - `tools` (list of str) — tool names available to the model this turn
 //! - `denied_tools` (list of str) — tools removed by the denylist
-//! - `skills` (list of str) — skill names available this turn
+//! - `skills` (list of str) — skill names available this turn (derived from `available_skills`)
+//! - `available_skills` (list of objects) — skills with `name` and `description`
 //! - `mcp_servers` (list of str) — connected MCP server names
+//! - `available_subagents` (list of objects) — subagents with `name` and `description`
 //! - `project_vars` (map of str→str) — project-local variables from `.mew/project_vars.yaml`
 //!
 //! ## Functions
@@ -62,12 +64,14 @@ pub struct TemplateContext {
     pub current_date: String,
     pub tools: Vec<String>,
     pub denied_tools: Vec<String>,
-    pub skills: Vec<String>,
     pub mcp_servers: Vec<String>,
     pub project_vars: std::collections::HashMap<String, String>,
     /// Subagent defs available to dispatch (name + description). Empty when
     /// no subagents are configured.
     pub available_subagents: Vec<SubagentInfo>,
+    /// Skills available this turn (name + description). Empty when no
+    /// skills are configured.
+    pub available_skills: Vec<SkillInfo>,
 }
 
 /// Minimal info about a subagent for template rendering.
@@ -75,6 +79,26 @@ pub struct TemplateContext {
 pub struct SubagentInfo {
     pub name: String,
     pub description: String,
+}
+
+/// Minimal info about a skill for template rendering.
+#[derive(Debug, Clone, Default)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+}
+
+impl SkillInfo {
+    /// Pair each discovered skill's name with its description.
+    pub fn from_skills(skills: &[mew_skills::Skill]) -> Vec<SkillInfo> {
+        skills
+            .iter()
+            .map(|s| SkillInfo {
+                name: s.name.clone(),
+                description: s.description.clone(),
+            })
+            .collect()
+    }
 }
 
 impl TemplateContext {
@@ -122,9 +146,9 @@ pub fn render(body: &str, ctx: &TemplateContext) -> String {
         .map(|s| MjValue::from(s.as_str()))
         .collect();
     let skills_val: Vec<MjValue> = ctx
-        .skills
+        .available_skills
         .iter()
-        .map(|s| MjValue::from(s.as_str()))
+        .map(|s| MjValue::from(s.name.as_str()))
         .collect();
     let mcp_val: Vec<MjValue> = ctx
         .mcp_servers
@@ -144,6 +168,17 @@ pub fn render(body: &str, ctx: &TemplateContext) -> String {
         })
         .collect();
 
+    let skills_objects_val: Vec<MjValue> = ctx
+        .available_skills
+        .iter()
+        .map(|s| {
+            minijinja::context! {
+                name => s.name.as_str(),
+                description => s.description.as_str(),
+            }
+        })
+        .collect();
+
     let env_ctx = context! {
         supports_vision => ctx.supports_vision,
         persona_name => &ctx.persona_name,
@@ -156,6 +191,7 @@ pub fn render(body: &str, ctx: &TemplateContext) -> String {
         cwd => &ctx.cwd,
         current_date => &ctx.current_date,
         tools => tools_val,
+        available_skills => skills_objects_val,
         denied_tools => denied_val,
         skills => skills_val,
         mcp_servers => mcp_val,
@@ -200,7 +236,11 @@ pub fn render(body: &str, ctx: &TemplateContext) -> String {
 
     // has_skill: check if a skill is available.
     // {% if has_skill("release-checklist") %}...{% endif %}
-    let skills_set: HashSet<String> = ctx.skills.iter().cloned().collect();
+    let skills_set: HashSet<String> = ctx
+        .available_skills
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
     env.add_function("has_skill", move |name: String| -> bool {
         skills_set.contains(&name)
     });
@@ -338,9 +378,11 @@ mod tests {
     #[test]
     fn base_prompt_is_independent_of_runtime_capabilities() {
         let mut first = ctx();
-        first.provider_id = "anthropic".into();
         first.tools = vec!["read".into(), "skill".into()];
-        first.skills = vec!["release-checklist".into()];
+        first.available_skills = vec![SkillInfo {
+            name: "release-checklist".into(),
+            description: "release checklist".into(),
+        }];
         first.mcp_servers = vec!["filesystem".into()];
         first.available_subagents = vec![SubagentInfo {
             name: "researcher".into(),
@@ -348,13 +390,17 @@ mod tests {
         }];
 
         let mut second = first.clone();
-        second.tools = vec!["bash".into(), "grep".into(), "mcp__github__search".into()];
-        second.skills = vec!["code-review".into(), "release-checklist".into()];
+        second.available_skills = vec![
+            SkillInfo {
+                name: "code-review".into(),
+                description: "code review".into(),
+            },
+            SkillInfo {
+                name: "release-checklist".into(),
+                description: "release checklist".into(),
+            },
+        ];
         second.mcp_servers = vec!["github".into(), "filesystem".into()];
-        second.available_subagents = vec![SubagentInfo {
-            name: "implementer".into(),
-            description: "implements a bounded change".into(),
-        }];
 
         let base = crate::vfs::read_builtin("system_prompts/base").unwrap();
         assert_eq!(render(base, &first), render(base, &second));
@@ -383,9 +429,60 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn test_render_available_skills_objects() {
+        let c = TemplateContext {
+            available_skills: vec![
+                SkillInfo {
+                    name: "alpha".into(),
+                    description: "the first one".into(),
+                },
+                SkillInfo {
+                    name: "beta".into(),
+                    description: "the second one".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let body =
+            "Skills:{%- for s in available_skills %}\n- {{ s.name }}: {{ s.description }}{% endfor %}";
+        assert_eq!(
+            render(body, &c),
+            "Skills:\n- alpha: the first one\n- beta: the second one"
+        );
+    }
+
+    #[test]
+    fn test_skills_names_derive_from_available_skills() {
+        let c = TemplateContext {
+            available_skills: vec![
+                SkillInfo {
+                    name: "alpha".into(),
+                    description: String::new(),
+                },
+                SkillInfo {
+                    name: "beta".into(),
+                    description: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(render("{{ skills | join(', ') }}", &c), "alpha, beta");
+    }
+
+    #[test]
     fn test_render_has_skill() {
         let c = TemplateContext {
-            skills: vec!["release-checklist".into(), "code-review".into()],
+            available_skills: vec![
+                SkillInfo {
+                    name: "release-checklist".into(),
+                    description: String::new(),
+                },
+                SkillInfo {
+                    name: "code-review".into(),
+                    description: String::new(),
+                },
+            ],
             ..Default::default()
         };
         let body = "{% if has_skill(\"release-checklist\") %}has{% else %}missing{% endif %}";

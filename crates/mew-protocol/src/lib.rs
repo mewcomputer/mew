@@ -521,7 +521,7 @@ impl From<SessionUsageWire> for mew_session::SessionUsage {
 }
 
 /// A file attachment for a prompt.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     pub path: String,
     /// MIME type if known (e.g. "image/png").
