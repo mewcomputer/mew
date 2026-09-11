@@ -10,9 +10,9 @@ use ratatui::{
 
 use super::display_width;
 use crate::app::{
-    App, GoalProposalState, PermissionState, PersonaSummary, PersonaSwitchConfirmState,
-    PickerBudget, PickerItem, PickerState, PlanApprovalState, SlashCommand, UserQuestionState,
-    PICKER_VISIBLE_ITEMS,
+    App, GoalComposeState, GoalProposalState, PermissionState, PersonaSummary,
+    PersonaSwitchConfirmState, PickerBudget, PickerItem, PickerState, PlanApprovalState,
+    SlashCommand, UserQuestionState, PICKER_VISIBLE_ITEMS,
 };
 
 /// A single selectable row in an inline autocomplete list (slash commands or
@@ -1262,6 +1262,83 @@ pub(super) fn draw_goal_proposal(
     )));
 
     f.render_widget(Paragraph::new(text), inner);
+}
+
+/// Draw the `/goal` compose modal: an editable objective line with
+/// Accept/Cancel, a replace warning when a goal is already active, and an
+/// "edited from" note when the objective changed in the modal.
+pub(super) fn draw_goal_compose(
+    f: &mut Frame,
+    state: &GoalComposeState,
+    area: Rect,
+    tokens: &crate::theme::Theme,
+) {
+    let width = 70u16.min(area.width.saturating_sub(4));
+    let height = 10u16.min(area.height.saturating_sub(2));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::bordered()
+        .title(Span::styled(
+            " Set goal ",
+            Style::default()
+                .fg(tokens.resolve("foreground"))
+                .add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(tokens.resolve("accent")));
+    f.render_widget(block, popup);
+
+    let inner = popup.inner(Margin::new(2, 1));
+    let warning = Style::default().fg(tokens.resolve("text.warning"));
+    let muted = Style::default().fg(tokens.resolve("text.muted"));
+
+    let mut text = Text::default();
+    text.push_line(Line::from(Span::styled("Objective:", muted)));
+    let objective_line = inner.y + 1;
+    text.push_line(Line::from(vec![Span::styled(
+        format!("  {}", state.title),
+        Style::default().fg(tokens.resolve("foreground")),
+    )]));
+    if state.original != state.title {
+        text.push_line(Line::from(Span::styled(
+            format!("  edited from: {}", state.original),
+            muted,
+        )));
+    }
+    if let Some(ref replacing) = state.replacing {
+        text.push_line(Line::from(vec![
+            Span::styled("  will replace: ", warning),
+            Span::styled(replacing.clone(), warning),
+        ]));
+    }
+    text.push_line(Line::from(""));
+    text.push_line(Line::from(vec![
+        Span::styled(
+            " [Enter] Set ",
+            Style::default()
+                .bg(tokens.resolve("surface.success"))
+                .fg(tokens.resolve("text.inverse"))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("   ", Style::default()),
+        Span::styled(
+            " [Esc] Cancel ",
+            Style::default().fg(tokens.resolve("text.placeholder")),
+        ),
+    ]));
+    text.push_line(Line::from(Span::styled(
+        "  the agent will keep working until this goal is complete",
+        muted,
+    )));
+
+    f.render_widget(Paragraph::new(text), inner);
+
+    // Terminal cursor at the objective edit position.
+    let cursor_col = inner.x + 2 + (display_width(&state.title[..state.cursor]) as u16);
+    f.set_cursor_position((cursor_col.min(inner.x + inner.width - 1), objective_line));
 }
 
 /// Draw the plan-approval modal (`handoff_plan`). A large centered modal with

@@ -1,3 +1,25 @@
+# 2026-09-10 — rework the TUI goal system
+
+`/goal <text>` no longer sets the goal sight-unseen and no longer loses
+text on Enter. The Enter-with-autocomplete behavior was the bug behind
+"no active goal" replies: pressing Enter while the slash completion list
+was showing applied the completion (replacing `/goal fix the bug` with
+`/goal `) instead of submitting the typed text. Enter now always submits
+what's typed; Tab applies completions. `/goal <text>` opens a new
+GoalCompose modal — an editable objective using the shared readline
+editor (with "edited from: <original>" when changed, and a "will
+replace: <active goal>" warning when one exists), Enter to set, Esc to
+cancel; nothing reaches the daemon until Accept. A local goal view
+(`App.active_goal`) mirrors the daemon's state and renders a goal
+section in the sidebar (objective + status) and a 🎯 status-bar pill
+while a goal is in flight; it updates on set/pause/resume/clear/
+complete and when an agent `propose_goal` proposal is accepted. Agent
+side untouched. Coverage: 5 new tests — Enter submits multi-word slash
+args, compose edit→SetGoal, Esc/empty-Enter cancel, replacing-goal
+capture, and proposal-accept registering the active goal (reject leaves
+it). `cargo test -p mew-tui` (258 + integration), `cargo test -p mew`,
+clippy `-D warnings`, and fmt clean.
+
 # 2026-09-10 — undo and visible cursors in every TUI text field
 
 Follow-up to the shared readline editor. Undo is no longer

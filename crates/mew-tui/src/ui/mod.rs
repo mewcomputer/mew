@@ -274,6 +274,12 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    if app.mode == Mode::GoalCompose {
+        if let Some(ref state) = app.goal_compose {
+            overlays::draw_goal_compose(f, state, area, &app.theme);
+        }
+    }
+
     if app.mode == Mode::CommandPalette {
         if let Some(ref mut picker) = app.picker {
             // The inline `@`-mention picker is drawn above the input by the

@@ -101,6 +101,11 @@ pub struct App {
     pub user_question: Option<UserQuestionState>,
     pub plan_approval: Option<PlanApprovalState>,
     pub goal_proposal: Option<GoalProposalState>,
+    /// The user's active goal (sidebar chip + status), mirroring the
+    /// daemon's authoritative state.
+    pub active_goal: Option<GoalView>,
+    /// A pending `/goal <text>` being edited before confirmation.
+    pub goal_compose: Option<GoalComposeState>,
     pub persona_switch_confirm: Option<PersonaSwitchConfirmState>,
     pub pending_persona_switch_apply: Option<String>,
     pub todos: Vec<mew_agent::Todo>,
@@ -348,6 +353,7 @@ pub enum Mode {
     HistorySearch,
     PasteConfirm,
     GoalProposal,
+    GoalCompose,
 }
 
 /// A single item in the command palette.
@@ -678,6 +684,32 @@ pub struct GoalProposalState {
     pub tx: Option<tokio::sync::oneshot::Sender<mew_agent::GoalDecision>>,
 }
 
+/// The user's active goal as shown in the sidebar and status bar. The
+/// daemon owns the authoritative goal state; this is the TUI's last-known
+/// view, updated from goal commands and proposal confirmations.
+#[derive(Debug, Clone)]
+pub struct GoalView {
+    pub objective: String,
+    pub status: mew_agent::GoalStatus,
+}
+
+/// A user-initiated goal being composed in the `/goal` modal: the
+/// objective starts from the slash argument and can be edited before
+/// accepting.
+#[derive(Debug)]
+pub struct GoalComposeState {
+    /// The objective being edited.
+    pub title: String,
+    /// Cursor into `title`, shared with the editor module.
+    pub cursor: usize,
+    /// Undo history for the objective editor.
+    pub undo: editor::UndoHistory,
+    /// The text as typed after `/goal`, before any modal editing.
+    pub original: String,
+    /// The current active goal this one would replace, if any.
+    pub replacing: Option<String>,
+}
+
 /// A pending `handoff_plan` approval. Shown as a large centered modal with
 /// the full plan rendered as markdown, an approve / request-changes toggle,
 /// and a feedback editor for the request-changes path.
@@ -726,6 +758,8 @@ impl App {
             user_question: None,
             plan_approval: None,
             goal_proposal: None,
+            active_goal: None,
+            goal_compose: None,
             persona_switch_confirm: None,
             pending_persona_switch_apply: None,
             todos: Vec::new(),
@@ -2693,17 +2727,22 @@ impl App {
         }
     }
 
-    /// Confirm the goal proposal. Accept sends `GoalDecision::Accepted`;
-    /// reject sends `GoalDecision::Rejected`.
+    /// Confirm the goal proposal. Accept sends `GoalDecision::Accepted` and
+    /// registers the objective as the TUI's active goal; reject sends
+    /// `GoalDecision::Rejected`.
     pub fn goal_proposal_confirm(&mut self) {
         if let Some(gp) = self.goal_proposal.take() {
+            let accepted = gp.selected == 0;
             if let Some(tx) = gp.tx {
-                let decision = if gp.selected == 0 {
+                let decision = if accepted {
                     mew_agent::GoalDecision::Accepted
                 } else {
                     mew_agent::GoalDecision::Rejected
                 };
                 let _ = tx.send(decision);
+            }
+            if accepted {
+                self.set_active_goal(gp.objective);
             }
         }
         self.mode = Mode::Normal;
@@ -2714,6 +2753,48 @@ impl App {
     pub fn cancel_goal_proposal(&mut self) {
         self.goal_proposal = None;
         self.mode = Mode::Normal;
+    }
+
+    /// Record the active goal locally (sidebar chip + status bar).
+    pub fn set_active_goal(&mut self, objective: String) {
+        self.active_goal = Some(GoalView {
+            objective,
+            status: mew_agent::GoalStatus::Active,
+        });
+    }
+
+    /// Update the local view of the active goal's status. No-op when no
+    /// goal is tracked.
+    pub fn update_goal_status(&mut self, status: mew_agent::GoalStatus) {
+        if let Some(g) = self.active_goal.as_mut() {
+            g.status = status;
+        }
+    }
+
+    /// Drop the local view of the active goal.
+    pub fn clear_active_goal(&mut self) {
+        self.active_goal = None;
+    }
+
+    /// Open the `/goal` compose modal with the typed objective. If a goal is
+    /// already active, the modal warns that it will be replaced.
+    pub fn open_goal_compose(&mut self, text: String) {
+        self.goal_compose = Some(GoalComposeState {
+            title: text.clone(),
+            cursor: text.len(),
+            undo: editor::UndoHistory::default(),
+            original: text,
+            replacing: self.active_goal.as_ref().map(|g| g.objective.clone()),
+        });
+        self.mode = Mode::GoalCompose;
+    }
+
+    /// Close the compose modal without setting a goal.
+    pub fn close_goal_compose(&mut self) {
+        self.goal_compose = None;
+        if self.mode == Mode::GoalCompose {
+            self.mode = Mode::Normal;
+        }
     }
 }
 

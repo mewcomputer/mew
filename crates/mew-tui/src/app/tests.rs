@@ -685,6 +685,40 @@ fn test_single_question_picks_option_and_submits() {
     assert_eq!(answers, vec!["dev"]);
 }
 
+#[test]
+fn test_goal_proposal_accept_registers_active_goal() {
+    use mew_agent::{AgentEvent, GoalDecision};
+    let mut app = App::new();
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<GoalDecision>();
+    app.handle_agent_event(AgentEvent::GoalProposed {
+        call_id: "c1".into(),
+        objective: "ship 0.1.3".into(),
+        tx,
+    });
+    assert_eq!(app.mode, Mode::GoalProposal);
+    app.goal_proposal_confirm(); // selected = 0 = accept
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(rx.try_recv(), Ok(GoalDecision::Accepted)));
+    let goal = app.active_goal.as_ref().expect("goal registered");
+    assert_eq!(goal.objective, "ship 0.1.3");
+    assert_eq!(goal.status, mew_agent::GoalStatus::Active);
+
+    // Rejecting does not clobber the registered goal.
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<GoalDecision>();
+    app.handle_agent_event(AgentEvent::GoalProposed {
+        call_id: "c2".into(),
+        objective: "no thanks".into(),
+        tx,
+    });
+    app.goal_proposal_toggle();
+    app.goal_proposal_confirm(); // selected = 1 = reject
+    assert!(matches!(rx.try_recv(), Ok(GoalDecision::Rejected)));
+    assert_eq!(
+        app.active_goal.as_ref().map(|g| g.objective.as_str()),
+        Some("ship 0.1.3")
+    );
+}
+
 fn open_plan_approval(app: &mut App) -> tokio::sync::oneshot::Receiver<mew_agent::PlanDecision> {
     use mew_agent::AgentEvent;
     let (tx, rx) = tokio::sync::oneshot::channel::<mew_agent::PlanDecision>();

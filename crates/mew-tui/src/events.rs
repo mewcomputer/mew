@@ -113,6 +113,7 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
         crate::app::Mode::UserQuestion => handle_user_question_key(app, key),
         crate::app::Mode::PlanApproval => handle_plan_approval_key(app, key),
         crate::app::Mode::GoalProposal => handle_goal_proposal_key(app, key),
+        crate::app::Mode::GoalCompose => handle_goal_compose_key(app, key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
         crate::app::Mode::PersonaSwitchConfirm => handle_persona_confirm_key(app, key),
         crate::app::Mode::Help => handle_help_key(app, key),
@@ -934,6 +935,46 @@ fn handle_goal_proposal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
     }
 }
 
+fn handle_goal_compose_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Enter => {
+            let text = app
+                .goal_compose
+                .as_ref()
+                .map(|g| g.title.trim().to_string())
+                .unwrap_or_default();
+            if text.is_empty() {
+                // An empty objective is a cancel, not a goal.
+                app.close_goal_compose();
+                return None;
+            }
+            app.close_goal_compose();
+            Some(Action::SetGoal(text))
+        }
+        KeyCode::Esc => {
+            app.close_goal_compose();
+            None
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.close_goal_compose();
+            None
+        }
+        _ => {
+            // The objective is a text field: all editing keys route through
+            // the shared readline editor (incl. ^Z/^Y undo).
+            if let Some(g) = app.goal_compose.as_mut() {
+                crate::app::editor::handle_key_with_undo(
+                    &mut g.title,
+                    &mut g.cursor,
+                    key,
+                    &mut g.undo,
+                );
+            }
+            None
+        }
+    }
+}
+
 fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     // Any key other than Esc dismisses the pending-cancel hint.
     if key.code != KeyCode::Esc {
@@ -1072,16 +1113,10 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 app.insert_newline();
                 return None;
             }
-            // If slash autocomplete is showing, select the highlighted command.
-            if app.mode == crate::app::Mode::SlashCommand
-                && !app.filtered_slash_commands().is_empty()
-            {
-                app.apply_slash_completion();
-                if let Some(text) = app.submit_input() {
-                    return Some(Action::SlashCommand(text));
-                }
-                return None;
-            }
+            // Enter always submits what's typed; Tab applies the highlighted
+            // slash completion. Applying the completion on Enter used to
+            // replace the typed text with the bare command name, silently
+            // dropping arguments (e.g. `/goal fix the bug` → `/goal`).
             if let Some(text) = app.submit_input() {
                 if text.starts_with('/') {
                     return Some(Action::SlashCommand(text));
@@ -1711,6 +1746,8 @@ pub enum Action {
     Clear,
     /// Switch to a different model.
     SwitchModel(String),
+    /// Set the active goal to the given objective (from the `/goal` modal).
+    SetGoal(String),
     /// Insert an @mention path into the input.
     InsertAtMention(String),
     /// Insert a namespace reference (skill, model, or subagent) into the input.
@@ -1901,6 +1938,64 @@ mod tests {
         );
         let uq = app.user_question.as_ref().expect("question stored");
         assert_eq!(uq.freeform_text, "hi");
+    }
+
+    #[test]
+    fn enter_submits_slash_input_with_args() {
+        // Regression: Enter always submits the typed slash text; the
+        // completion list must never replace it (Tab completes instead).
+        let mut app = crate::app::App::new();
+        app.input = "/goal fix the bug".into();
+        app.cursor = app.input.len();
+        app.mode = crate::app::Mode::SlashCommand;
+        let action = handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            action,
+            Some(Action::SlashCommand(ref t)) if t == "/goal fix the bug"
+        ));
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn goal_compose_accept_produces_set_goal_with_edited_objective() {
+        let mut app = crate::app::App::new();
+        app.open_goal_compose("fix the bug".into());
+        assert_eq!(app.mode, crate::app::Mode::GoalCompose);
+        // Edit through the shared readline editor, then accept.
+        handle_key_event(&mut app, char_key('s'));
+        let action = handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, Some(Action::SetGoal(ref t)) if t == "fix the bugs"));
+        assert_eq!(app.mode, crate::app::Mode::Normal);
+        assert!(app.goal_compose.is_none());
+    }
+
+    #[test]
+    fn goal_compose_esc_and_empty_enter_cancel() {
+        let mut app = crate::app::App::new();
+        app.open_goal_compose("ignore me".into());
+        assert!(
+            handle_key_event(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).is_none()
+        );
+        assert_eq!(app.mode, crate::app::Mode::Normal);
+        assert!(app.goal_compose.is_none());
+        assert!(app.active_goal.is_none());
+
+        // An objective that trims to empty is a cancel, not a goal.
+        app.open_goal_compose("   ".into());
+        assert!(
+            handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_none()
+        );
+        assert!(app.goal_compose.is_none());
+        assert!(app.active_goal.is_none());
+    }
+
+    #[test]
+    fn goal_compose_remembers_replacing_goal() {
+        let mut app = crate::app::App::new();
+        app.set_active_goal("old goal".into());
+        app.open_goal_compose("new goal".into());
+        let state = app.goal_compose.as_ref().expect("compose opened");
+        assert_eq!(state.replacing.as_deref(), Some("old goal"));
     }
 
     #[test]

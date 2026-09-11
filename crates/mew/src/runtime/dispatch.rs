@@ -82,6 +82,22 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             handle_switch_model(cx, &spec).await;
             Flow::Continue
         }
+        Action::SetGoal(text) => {
+            // The compose modal confirmed the objective: set it on the
+            // daemon and mirror it into the local goal view.
+            match cx
+                .target
+                .manage_goal(crate::runtime::target::GoalAction::Set(text.clone()))
+                .await
+            {
+                Ok(msg) => {
+                    cx.app.push_synthetic_message(msg);
+                    cx.app.set_active_goal(text);
+                }
+                Err(Unsupported(reason)) => cx.app.set_alert(reason),
+            }
+            Flow::Continue
+        }
         Action::InsertAtMention(mention) => {
             cx.app.insert_mention(&mention);
             Flow::Continue
@@ -295,6 +311,18 @@ where
     }
 }
 
+/// Send a goal-management action to the backend and surface its reply, if
+/// any, as a synthetic message (or an alert on an unsupported backend).
+async fn manage_goal<T: CommandTarget>(
+    cx: &mut Ctx<'_, T>,
+    action: crate::runtime::target::GoalAction,
+) {
+    match cx.target.manage_goal(action).await {
+        Ok(msg) => cx.app.push_synthetic_message(msg),
+        Err(Unsupported(reason)) => cx.app.set_alert(reason),
+    }
+}
+
 /// Handle `Action::SlashCommand` — parse and route the slash command.
 async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String) -> Flow {
     let result = cx.app.handle_slash(&text);
@@ -465,24 +493,30 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
             Flow::Continue
         }
         SlashResult::GoalCommand(cmd) => {
-            let action = match cmd {
+            match cmd {
+                // A fresh objective opens the compose modal for confirmation;
+                // nothing is set until the user accepts.
                 mew_tui::app::GGoalCommand::Set(text) => {
-                    crate::runtime::target::GoalAction::Set(text)
+                    cx.app.open_goal_compose(text);
                 }
-                mew_tui::app::GGoalCommand::Status => crate::runtime::target::GoalAction::Status,
-                mew_tui::app::GGoalCommand::Pause => crate::runtime::target::GoalAction::Pause,
-                mew_tui::app::GGoalCommand::Resume => crate::runtime::target::GoalAction::Resume,
-                mew_tui::app::GGoalCommand::Clear => crate::runtime::target::GoalAction::Clear,
+                mew_tui::app::GGoalCommand::Status => {
+                    manage_goal(cx, crate::runtime::target::GoalAction::Status).await;
+                }
+                mew_tui::app::GGoalCommand::Pause => {
+                    manage_goal(cx, crate::runtime::target::GoalAction::Pause).await;
+                    cx.app.update_goal_status(mew_agent::GoalStatus::Paused);
+                }
+                mew_tui::app::GGoalCommand::Resume => {
+                    manage_goal(cx, crate::runtime::target::GoalAction::Resume).await;
+                    cx.app.update_goal_status(mew_agent::GoalStatus::Active);
+                }
+                mew_tui::app::GGoalCommand::Clear => {
+                    manage_goal(cx, crate::runtime::target::GoalAction::Clear).await;
+                    cx.app.clear_active_goal();
+                }
                 mew_tui::app::GGoalCommand::Complete => {
-                    crate::runtime::target::GoalAction::Complete
-                }
-            };
-            match cx.target.manage_goal(action).await {
-                Ok(msg) => {
-                    cx.app.push_synthetic_message(msg);
-                }
-                Err(Unsupported(reason)) => {
-                    cx.app.set_alert(reason);
+                    manage_goal(cx, crate::runtime::target::GoalAction::Complete).await;
+                    cx.app.update_goal_status(mew_agent::GoalStatus::Complete);
                 }
             }
             Flow::Continue
