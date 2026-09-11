@@ -559,6 +559,9 @@ pub struct SettingsState {
     active: Panel,
     edit_mode: EditMode,
     buf: String,
+    /// Cursor into `buf`, shared with the editor module.
+    buf_cursor: usize,
+    buf_undo: crate::app::editor::UndoHistory,
     dirty: bool,
     pub message: Option<String>,
     scroll: usize,
@@ -588,6 +591,8 @@ impl SettingsState {
             active: Panel::Left,
             edit_mode: EditMode::Normal,
             buf: String::new(),
+            buf_cursor: 0,
+            buf_undo: crate::app::editor::UndoHistory::default(),
             dirty: false,
             message: None,
             scroll: 0,
@@ -829,6 +834,7 @@ impl SettingsState {
             crossterm::event::KeyCode::Esc => {
                 self.edit_mode = EditMode::Normal;
                 self.buf.clear();
+                self.buf_cursor = 0;
             }
             crossterm::event::KeyCode::Enter => {
                 if let Some(field) = self.selected_field() {
@@ -840,12 +846,16 @@ impl SettingsState {
                 }
                 self.edit_mode = EditMode::Normal;
                 self.buf.clear();
+                self.buf_cursor = 0;
             }
-            crossterm::event::KeyCode::Char(c) => self.buf.push(c),
-            crossterm::event::KeyCode::Backspace => {
-                self.buf.pop();
+            _ => {
+                crate::app::editor::handle_key_with_undo(
+                    &mut self.buf,
+                    &mut self.buf_cursor,
+                    key,
+                    &mut self.buf_undo,
+                );
             }
-            _ => {}
         }
     }
 
@@ -854,6 +864,7 @@ impl SettingsState {
             crossterm::event::KeyCode::Esc => {
                 self.edit_mode = EditMode::Normal;
                 self.buf.clear();
+                self.buf_cursor = 0;
             }
             crossterm::event::KeyCode::Enter => {
                 let name = self.buf.trim().to_string();
@@ -874,12 +885,16 @@ impl SettingsState {
                 }
                 self.edit_mode = EditMode::Normal;
                 self.buf.clear();
+                self.buf_cursor = 0;
             }
-            crossterm::event::KeyCode::Char(c) => self.buf.push(c),
-            crossterm::event::KeyCode::Backspace => {
-                self.buf.pop();
+            _ => {
+                crate::app::editor::handle_key_with_undo(
+                    &mut self.buf,
+                    &mut self.buf_cursor,
+                    key,
+                    &mut self.buf_undo,
+                );
             }
-            _ => {}
         }
         true
     }
@@ -1345,7 +1360,11 @@ impl SettingsState {
             let editing = selected && self.edit_mode == EditMode::Editing;
 
             let val = if editing {
-                format!("{}_│", self.buf)
+                format!(
+                    "{}│{}",
+                    &self.buf[..self.buf_cursor],
+                    &self.buf[self.buf_cursor..]
+                )
             } else {
                 let v = field.value(self);
                 if v.is_empty() {
@@ -1446,7 +1465,11 @@ impl SettingsState {
                     Style::default().fg(tokens.resolve("text.accent")).bg(bg),
                 ),
                 Span::styled(
-                    format!("{}_│", self.buf),
+                    format!(
+                        "{}│{}",
+                        &self.buf[..self.buf_cursor],
+                        &self.buf[self.buf_cursor..]
+                    ),
                     Style::default().fg(tokens.resolve("text.success")).bg(bg),
                 ),
             ]),

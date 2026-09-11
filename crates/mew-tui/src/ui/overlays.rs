@@ -544,7 +544,10 @@ fn draw_user_question_page(
         };
         f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
         if selected {
-            let col_offset = number.len() + prefix.len() + 2 + display_width(&uq.freeform_text);
+            let col_offset = number.len()
+                + prefix.len()
+                + 2
+                + display_width(&uq.freeform_text[..uq.freeform_cursor]);
             let col = area.x + col_offset.min(area.width as usize - 1) as u16;
             cursor_target = Some((col, y));
         }
@@ -930,7 +933,10 @@ pub(super) fn draw_picker(
         }
     }
 
-    let cursor_x = filter_area.x + 2 + (picker.cursor.min(filter_area.width as usize - 2) as u16);
+    let cursor_x = filter_area.x
+        + 2
+        + (display_width(&picker.filter[..picker.cursor]).min(filter_area.width as usize - 2)
+            as u16);
     f.set_cursor_position((cursor_x, filter_area.y));
 
     let div_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
@@ -1393,12 +1399,6 @@ pub(super) fn draw_plan_approval(
                     chunk.clone(),
                     Style::default().fg(tokens.resolve("foreground")),
                 ));
-                if i == feedback_raw.len() - 1 && j == chunks.len() - 1 {
-                    spans.push(Span::styled(
-                        "▏",
-                        Style::default().fg(tokens.resolve("text.placeholder")),
-                    ));
-                }
                 footer.push_line(Line::from(spans));
             }
         }
@@ -1415,6 +1415,20 @@ pub(super) fn draw_plan_approval(
 
     let footer_area = Rect::new(inner.x, footer_y, inner.width, footer_height);
     f.render_widget(Paragraph::new(footer), footer_area);
+
+    // Terminal cursor follows the feedback editor position (row 0 of the
+    // footer is the spacer, row 1 the button line).
+    if editing {
+        if let Some((row, col)) = feedback_cursor_position(
+            &state.feedback,
+            state.feedback_cursor,
+            wrap_w,
+            label_w,
+            cont_w,
+        ) {
+            f.set_cursor_position((inner.x + col as u16, footer_y + 2 + row as u16));
+        }
+    }
 }
 
 /// Word-wrap a single line of feedback text to `max_width` display columns.
@@ -1424,6 +1438,62 @@ fn wrap_feedback_line(text: &str, max_width: usize) -> Vec<String> {
         return vec![String::new()];
     }
     wrap_text(text, max_width)
+}
+
+/// Map a byte offset into `feedback` onto the wrapped footer grid the
+/// renderer draws: returns `(row_within_feedback_block, display_col)`,
+/// using the same word wrap as the renderer so the terminal cursor sits on
+/// the exact character being edited.
+fn feedback_cursor_position(
+    feedback: &str,
+    cursor: usize,
+    wrap_w: usize,
+    label_w: usize,
+    cont_w: usize,
+) -> Option<(usize, usize)> {
+    let cursor = cursor.min(feedback.len());
+    let lines: Vec<&str> = feedback.split('\n').collect();
+    let line_idx = feedback[..cursor].matches('\n').count();
+    if line_idx >= lines.len() {
+        return None;
+    }
+    let line_start = feedback[..cursor].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let line = lines[line_idx];
+    let local = (cursor - line_start).min(line.len());
+
+    let rows_before: usize = lines[..line_idx]
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let avail = if i == 0 {
+                wrap_w.saturating_sub(label_w)
+            } else {
+                wrap_w.saturating_sub(cont_w)
+            };
+            super::chat::wrap_text_to_width(l, avail as u16)
+                .len()
+                .max(1)
+        })
+        .sum();
+
+    let avail = if line_idx == 0 {
+        wrap_w.saturating_sub(label_w)
+    } else {
+        wrap_w.saturating_sub(cont_w)
+    };
+    let prefix_w = if line_idx == 0 { label_w } else { cont_w };
+    let col_in_line = display_width(&line[..local]);
+    let chunks = super::chat::wrap_text_to_width(line, avail as u16);
+    let mut cum = 0usize;
+    for (k, chunk) in chunks.iter().enumerate() {
+        let w = display_width(chunk);
+        if col_in_line < cum + w || k + 1 == chunks.len() {
+            let col = prefix_w + col_in_line.saturating_sub(cum);
+            return Some((rows_before + k, col));
+        }
+        cum += w;
+    }
+    None
 }
 
 fn format_tools(list: &Option<Vec<String>>) -> String {

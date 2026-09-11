@@ -229,10 +229,12 @@ pub struct App {
     /// long-finished todos without touching the agent-owned list.
     pub todo_done_at: std::collections::HashMap<usize, Instant>,
     pub background_jobs: Vec<BackgroundJobState>,
-    pub undo_stack: Vec<(String, usize)>,
-    pub redo_stack: Vec<(String, usize)>,
-    pub last_undo_push: Option<Instant>,
+    pub undo_history: editor::UndoHistory,
     pub history_search_query: String,
+    /// Cursor into `history_search_query`, shared with the editor module.
+    pub history_search_cursor: usize,
+    /// Undo history for the history search query.
+    pub history_search_undo: editor::UndoHistory,
     pub history_search_index: Option<usize>,
     pub history_search_saved: Option<(String, usize)>,
     pub pending_paste: Option<String>,
@@ -373,6 +375,8 @@ pub struct PickerState {
     pub filter: String,
     pub selected: usize,
     pub cursor: usize,
+    /// Undo history for the filter field.
+    pub filter_undo: editor::UndoHistory,
     /// Vertical scroll offset in rendered display rows (each wrapped line
     /// counts as one row). Set by the draw pass, which also keeps the
     /// selected item's row span in view.
@@ -654,6 +658,10 @@ pub struct UserQuestionState {
     pub page: usize,
     pub selected: usize,
     pub freeform_text: String,
+    /// Cursor into `freeform_text`, shared with the editor module.
+    pub freeform_cursor: usize,
+    /// Undo history for the freeform answer.
+    pub freeform_undo: editor::UndoHistory,
     pub review: bool,
     pub review_selected: usize,
     pub tx: Option<tokio::sync::oneshot::Sender<Vec<String>>>,
@@ -685,6 +693,10 @@ pub struct PlanApprovalState {
     /// True while the user is typing feedback for the request-changes path.
     pub editing_feedback: bool,
     pub feedback: String,
+    /// Cursor into `feedback`, shared with the editor module.
+    pub feedback_cursor: usize,
+    /// Undo history for the feedback editor.
+    pub feedback_undo: editor::UndoHistory,
     pub tx: Option<tokio::sync::oneshot::Sender<mew_agent::PlanDecision>>,
 }
 
@@ -805,10 +817,10 @@ impl App {
             sidebar_finished_ttl: 180,
             todo_done_at: std::collections::HashMap::new(),
             background_jobs: Vec::new(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            last_undo_push: None,
+            undo_history: editor::UndoHistory::default(),
             history_search_query: String::new(),
+            history_search_cursor: 0,
+            history_search_undo: editor::UndoHistory::default(),
             history_search_index: None,
             history_search_saved: None,
             pending_paste: None,
@@ -1095,6 +1107,7 @@ impl App {
             filter: String::new(),
             selected: 0,
             cursor: 0,
+            filter_undo: editor::UndoHistory::default(),
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
@@ -2116,6 +2129,8 @@ impl App {
                     page: 0,
                     selected: 0,
                     freeform_text: String::new(),
+                    freeform_cursor: 0,
+                    freeform_undo: editor::UndoHistory::default(),
                     review: false,
                     review_selected: 0,
                     tx: Some(tx),
@@ -2138,6 +2153,8 @@ impl App {
                     selected: 0,
                     editing_feedback: false,
                     feedback: String::new(),
+                    feedback_cursor: 0,
+                    feedback_undo: editor::UndoHistory::default(),
                     tx: Some(tx),
                 });
             }
@@ -2484,7 +2501,7 @@ impl App {
                     .map(|q| q.options.len())
                     .unwrap_or(0);
                 if uq.selected == freeform_index {
-                    uq.freeform_text.push(c);
+                    editor::insert(&mut uq.freeform_text, &mut uq.freeform_cursor, c);
                 }
             }
         }
@@ -2501,7 +2518,7 @@ impl App {
                     .map(|q| q.options.len())
                     .unwrap_or(0);
                 if uq.selected == freeform_index {
-                    uq.freeform_text.pop();
+                    editor::backspace(&mut uq.freeform_text, &mut uq.freeform_cursor);
                 }
             }
         }
@@ -2534,13 +2551,16 @@ impl App {
                 let answer = if uq.selected < question.options.len() {
                     question.options[uq.selected].label.clone()
                 } else if !uq.freeform_text.is_empty() {
-                    std::mem::take(&mut uq.freeform_text)
+                    let answer = std::mem::take(&mut uq.freeform_text);
+                    uq.freeform_cursor = 0;
+                    answer
                 } else {
                     // Freeform row picked but no text entered — ignore.
                     return;
                 };
                 uq.answers[uq.page] = answer;
                 uq.freeform_text.clear();
+                uq.freeform_cursor = 0;
                 if uq.page + 1 < uq.questions.len() {
                     uq.page += 1;
                     uq.selected = 0;
@@ -2608,7 +2628,7 @@ impl App {
     pub fn plan_approval_type_char(&mut self, c: char) {
         if let Some(pa) = self.plan_approval.as_mut() {
             if pa.editing_feedback {
-                pa.feedback.push(c);
+                editor::insert(&mut pa.feedback, &mut pa.feedback_cursor, c);
             }
         }
     }
@@ -2616,7 +2636,7 @@ impl App {
     pub fn plan_approval_backspace(&mut self) {
         if let Some(pa) = self.plan_approval.as_mut() {
             if pa.editing_feedback {
-                pa.feedback.pop();
+                editor::backspace(&mut pa.feedback, &mut pa.feedback_cursor);
             }
         }
     }
@@ -2833,6 +2853,7 @@ pub fn parse_namespace_refs(text: &str) -> Vec<NamespaceRef> {
 #[cfg(test)]
 mod tests;
 
+pub mod editor;
 pub mod input;
 pub mod pickers;
 pub mod slash;

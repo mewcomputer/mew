@@ -10,6 +10,7 @@ fn open_test_picker(app: &mut App, kind: &str, items: Vec<PickerItem>) {
         filter: String::new(),
         selected: 0,
         cursor: 0,
+        filter_undo: editor::UndoHistory::default(),
         scroll: 0,
         visible_items: PICKER_VISIBLE_ITEMS,
         hint: None,
@@ -1588,7 +1589,7 @@ fn test_undo_redo_basic() {
     // Undo restores to empty (coalesced entry).
     app.undo();
     assert_eq!(app.input, "");
-    assert!(app.undo_stack.is_empty());
+    assert!(app.undo_history.undo_is_empty());
 
     // Redo restores "hello".
     app.redo();
@@ -1618,11 +1619,11 @@ fn test_redo_cleared_on_new_edit() {
     app.undo();
     app.undo();
     assert_eq!(app.input, "");
-    assert!(!app.redo_stack.is_empty());
+    assert!(!app.undo_history.redo_is_empty());
 
     // New edit clears redo stack.
     app.insert_char('z');
-    assert!(app.redo_stack.is_empty());
+    assert!(app.undo_history.redo_is_empty());
     assert_eq!(app.input, "z");
 }
 
@@ -1636,7 +1637,7 @@ fn test_undo_paste_single_entry() {
         app.cursor += c.len_utf8();
     }
     assert_eq!(app.input, "pasted");
-    assert_eq!(app.undo_stack.len(), 1); // single entry, not 6
+    assert_eq!(app.undo_history.undo_len(), 1); // single entry, not 6
 
     app.undo();
     assert_eq!(app.input, "");
