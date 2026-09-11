@@ -19,6 +19,10 @@ pub struct Adapter {
     api_key: String,
     client: reqwest::Client,
     dump: bool,
+    /// Stable per-conversation identifier. OpenCode's gateway keys routing
+    /// and prompt-cache reuse off `x-opencode-session`, so the id must stay
+    /// constant for the whole conversation; we use the mew session id.
+    opencode_session: Option<String>,
 }
 
 impl Adapter {
@@ -30,12 +34,39 @@ impl Adapter {
             api_key,
             client: reqwest::Client::new(),
             dump: false,
+            opencode_session: None,
         }
     }
 
     pub fn set_dump(&mut self, v: bool) {
         self.dump = v;
     }
+
+    /// Set the stable per-conversation id for OpenCode endpoints. `None`
+    /// (the default) omits the header. Only requests to `opencode.ai` base
+    /// URLs are affected; other endpoints are untouched.
+    pub fn set_opencode_session(&mut self, session: Option<String>) {
+        self.opencode_session = session;
+    }
+
+    /// Identify the client to OpenCode's gateway and attach the conversation
+    /// id. OpenCode pushes API endpoints never see these headers: the check
+    /// keys off the base URL so a custom provider pointed at opencode.ai gets
+    /// the same treatment as the built-in `opencode-zen`/`opencode-go` ones.
+    fn with_opencode_headers(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if !self.base_url.contains("opencode.ai") {
+            return request;
+        }
+        let request = request.header("User-Agent", user_agent());
+        match &self.opencode_session {
+            Some(session) => request.header("x-opencode-session", session),
+            None => request,
+        }
+    }
+}
+
+fn user_agent() -> String {
+    format!("mew/{}", env!("CARGO_PKG_VERSION"))
 }
 
 #[async_trait]
@@ -58,14 +89,13 @@ impl Provider for Adapter {
         }
 
         let url = format!("{}/chat/completions", self.base_url);
-        let request = self
+        let builder = self
             .client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Accept", "text/event-stream")
-            .body(body)
-            .build()?;
+            .header("Accept", "text/event-stream");
+        let request = self.with_opencode_headers(builder).body(body).build()?;
 
         let policy = RetryPolicy::default();
         let (tx, rx) = mpsc::channel(128);
@@ -117,12 +147,11 @@ impl Provider for Adapter {
 
     async fn list_models(&self) -> Result<Vec<mew_provider::ModelInfo>, ProviderError> {
         let url = format!("{}/models", self.base_url);
-        let resp = self
+        let builder = self
             .client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .send()
-            .await?;
+            .header("Authorization", format!("Bearer {}", self.api_key));
+        let resp = self.with_opencode_headers(builder).send().await?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
@@ -955,6 +984,81 @@ mod tests {
             0xD7, 0x63, 0x60, 0x60, 0x60, 0x00, 0x00, 0x00, 0x04, 0x00, 0x01, 0xF6, 0x17, 0xA4,
             0x49, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
         ]
+    }
+
+    /// OpenCode endpoints identify the client and carry the conversation id;
+    /// the same adapter pointed at a non-opencode base URL sends neither.
+    #[test]
+    fn opencode_headers_only_for_opencode_endpoints() {
+        let mut adapter = Adapter::new(
+            "opencode-zen".to_string(),
+            "https://opencode.ai/zen/v1".to_string(),
+            "deepseek-v4-flash".to_string(),
+            "key".to_string(),
+        );
+        adapter.set_opencode_session(Some("01JZENCONVERSATIONID".to_string()));
+
+        let built = |a: &Adapter, url: &str| {
+            a.with_opencode_headers(a.client.get(url))
+                .build()
+                .expect("request builds")
+        };
+
+        let headers = built(&adapter, "https://opencode.ai/zen/v1/models")
+            .headers()
+            .clone();
+        assert_eq!(
+            headers.get("user-agent").and_then(|v| v.to_str().ok()),
+            Some(format!("mew/{}", env!("CARGO_PKG_VERSION")).as_str())
+        );
+        assert_eq!(
+            headers
+                .get("x-opencode-session")
+                .and_then(|v| v.to_str().ok()),
+            Some("01JZENCONVERSATIONID")
+        );
+
+        let plain = Adapter::new(
+            "deepseek".to_string(),
+            "https://api.deepseek.com/v1".to_string(),
+            "deepseek-v4-flash".to_string(),
+            "key".to_string(),
+        );
+        let plain_headers = built(&plain, "https://api.deepseek.com/v1/models")
+            .headers()
+            .clone();
+        assert!(plain_headers.get("x-opencode-session").is_none());
+        assert_ne!(
+            plain_headers
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string()),
+            Some(format!("mew/{}", env!("CARGO_PKG_VERSION")))
+        );
+    }
+
+    /// Without a configured session the user agent is still sent to
+    /// OpenCode, but `x-opencode-session` is omitted rather than empty.
+    #[test]
+    fn opencode_headers_without_session_omit_session_header() {
+        let adapter = Adapter::new(
+            "opencode-go".to_string(),
+            "https://opencode.ai/zen/go/v1".to_string(),
+            "minimax-text-01".to_string(),
+            "key".to_string(),
+        );
+        let request = adapter
+            .with_opencode_headers(adapter.client.get("https://opencode.ai/zen/go/v1/models"))
+            .build()
+            .expect("request builds");
+        assert!(request.headers().get("x-opencode-session").is_none());
+        assert_eq!(
+            request
+                .headers()
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok()),
+            Some(format!("mew/{}", env!("CARGO_PKG_VERSION")).as_str())
+        );
     }
 
     #[tokio::test]
@@ -2056,7 +2160,6 @@ mod tests {
             params: None,
             headers: reqwest::header::HeaderMap::new(),
             supports_vision: false,
-            ..Default::default()
         };
         let body = adapter.build_request_body(&req).await.unwrap();
         let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap();

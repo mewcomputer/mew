@@ -395,7 +395,7 @@ pub(crate) fn render_templated_context_files(
             .unwrap_or_default(),
         current_date: mew_prompts::template::TemplateContext::today(),
         tools: tool_names,
-        skills: agent.skills.iter().map(|s| s.name.clone()).collect(),
+        available_skills: mew_prompts::template::SkillInfo::from_skills(&agent.skills),
         project_vars: agent.project_vars.clone(),
         ..Default::default()
     };
@@ -449,6 +449,7 @@ pub(crate) fn wire_subagents(
             default_provider_id: provider_id.to_string(),
             router_provider_id: find_router_provider(cfg).map(|(id, _)| id),
             raw,
+            session_id: Some(agent.session_id),
         });
         // Register the spawn tools before building the runner so the
         // runner's tool map contains them. The runner decides per-child
@@ -504,8 +505,8 @@ pub(crate) fn build_session_agent(
     todos_path: Option<std::path::PathBuf>,
     discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
 ) -> Result<Agent> {
-    let provider =
-        build_provider(cfg, cat, provider_id, model_id, raw).context("build provider")?;
+    let provider = build_provider(cfg, cat, provider_id, model_id, raw, session_id)
+        .context("build provider")?;
     let cwd = session_cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     // Collect [provides] paths from discovered extensions.
@@ -584,7 +585,12 @@ pub(crate) fn build_session_agent(
     agent.set_shell_session(shell_session);
 
     // Wire the fallback-model provider builder.
-    agent.set_provider_builder(make_provider_builder(cfg.clone(), cat.cloned(), raw));
+    agent.set_provider_builder(make_provider_builder(
+        cfg.clone(),
+        cat.cloned(),
+        raw,
+        session_id,
+    ));
     // Plugin tools: register_plugin_tools is async but we're in a sync
     // builder. The daemon's agent builder closure must be sync. Plugin tool
     // registration is a no-op for NopDispatcher (the default), so skipping
@@ -669,7 +675,7 @@ pub(crate) fn build_session_agent(
                 .unwrap_or_default(),
             current_date: mew_prompts::template::TemplateContext::today(),
             tools: tool_names,
-            skills: agent.skills.iter().map(|s| s.name.clone()).collect(),
+            available_skills: mew_prompts::template::SkillInfo::from_skills(&agent.skills),
             mcp_servers: mcp_names,
             project_vars: agent.project_vars.clone(),
             available_subagents: subagent_infos,
