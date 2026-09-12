@@ -46,6 +46,7 @@ pub mod browser;
 pub mod client;
 pub mod files;
 pub mod groups;
+pub mod projects;
 pub mod remote;
 pub mod session;
 pub mod terminal;
@@ -108,6 +109,8 @@ pub struct DaemonServer {
     pub session_manager: Arc<SessionManager>,
     /// Session groups sidecar store (groups.json).
     pub groups_store: Arc<groups::GroupsStore>,
+    /// Workspace pin preferences (projects.json).
+    pub project_pins: Arc<projects::ProjectPinsStore>,
     /// Daemon-wide flag for auto-summary. Shared across all connections
     /// so the idle-summary task is spawned once, not per-connection.
     pub auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
@@ -133,11 +136,15 @@ impl DaemonServer {
         switcher: Option<ModelSwitcher>,
         lister: Option<ModelLister>,
     ) -> Self {
+        let project_pins = Arc::new(projects::ProjectPinsStore::from_session_dir(
+            session_dir.clone(),
+        ));
         let session_manager = Arc::new(SessionManager::new(
             builder.clone(),
             session_dir.clone(),
             switcher,
             lister,
+            project_pins.clone(),
         ));
         let groups_state = {
             let path = session_dir.join("groups.json");
@@ -154,6 +161,7 @@ impl DaemonServer {
             thinking_setter: None,
             session_manager,
             groups_store,
+            project_pins,
             auto_summary_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
@@ -170,6 +178,7 @@ impl DaemonServer {
             session_dir,
             Some(switcher),
             Some(lister),
+            self.project_pins.clone(),
         ));
         self
     }
@@ -190,6 +199,7 @@ impl DaemonServer {
             thinking_setter: self.thinking_setter.clone(),
             session_manager: self.session_manager.clone(),
             groups_store: self.groups_store.clone(),
+            project_pins: self.project_pins.clone(),
             auto_summary_enabled: self.auto_summary_enabled.clone(),
         }
     }
@@ -380,6 +390,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::ListPersonas
                 | ClientMessage::SwitchPersona { .. }
                 | ClientMessage::ListProjects
+                | ClientMessage::PinProject { .. }
                 | ClientMessage::RegenerateTitle { .. }
                 | ClientMessage::Ping
                 | ClientMessage::BrowserOpen { .. }
@@ -1353,6 +1364,28 @@ where
             ClientMessage::ListProjects => {
                 let projects = list_projects(&session_manager).await;
                 reply(ServerMessage::ProjectList { projects });
+            }
+            ClientMessage::PinProject { path, pinned } => {
+                let known = list_projects(&session_manager)
+                    .await
+                    .into_iter()
+                    .any(|project| project.path == path);
+                if !known {
+                    reply(ServerMessage::Error {
+                        message: format!("unknown workspace: {path}"),
+                    });
+                    continue;
+                }
+                if let Err(error) = session_manager.project_pins.set_pinned(path, pinned).await {
+                    reply(ServerMessage::Error {
+                        message: format!("failed to persist workspace pin: {error}"),
+                    });
+                    continue;
+                }
+                let projects = list_projects(&session_manager).await;
+                session_manager
+                    .broadcast_all(ServerMessage::ProjectList { projects })
+                    .await;
             }
             ClientMessage::ListFilesystemDir { path } => {
                 match crate::files::handle_list_filesystem_dir(path).await {
@@ -2614,6 +2647,9 @@ async fn list_projects(
 
     // Sort by last_used_at descending (None sorts last).
     let mut result: Vec<_> = projects.into_values().collect();
+    for project in &mut result {
+        project.pinned = session_manager.project_pins.is_pinned(&project.path).await;
+    }
     result.sort_by(|a, b| {
         b.last_used_at
             .unwrap_or(0)

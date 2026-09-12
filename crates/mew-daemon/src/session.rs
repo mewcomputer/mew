@@ -17,6 +17,7 @@ use mew_agent::{Agent, GoalDecision, PlanDecision};
 use mew_hooks::PermissionDecision;
 use mew_protocol::{ServerMessage, SessionInfo, SessionState};
 
+use crate::projects::ProjectPinsStore;
 use crate::{AgentBuildParams, AgentBuilder, ModelLister, ModelSwitcher};
 
 /// Error returned when attaching to a session fails.
@@ -254,6 +255,7 @@ pub struct SessionManager {
     pub(crate) switcher: Option<ModelSwitcher>,
     pub(crate) lister: Option<ModelLister>,
     pub(crate) session_dir: PathBuf,
+    pub(crate) project_pins: Arc<ProjectPinsStore>,
     pub(crate) active: Mutex<HashMap<String, Arc<Session>>>,
     loading: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
@@ -264,12 +266,14 @@ impl SessionManager {
         session_dir: PathBuf,
         switcher: Option<ModelSwitcher>,
         lister: Option<ModelLister>,
+        project_pins: Arc<ProjectPinsStore>,
     ) -> Self {
         Self {
             builder,
             switcher,
             lister,
             session_dir,
+            project_pins,
             active: Mutex::new(HashMap::new()),
             loading: Mutex::new(HashMap::new()),
         }

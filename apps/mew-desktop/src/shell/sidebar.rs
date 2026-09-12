@@ -186,6 +186,12 @@ impl DesktopShell {
                     };
                     let toggle_path = path.clone();
                     let new_path = path.clone();
+                    let pin_path = path.clone();
+                    let pin_label = if pinned {
+                        "Unpin workspace"
+                    } else {
+                        "Pin workspace"
+                    };
                     Some(
                         div()
                             .id(format!("sidebar-workspace-{workspace_id}"))
@@ -199,6 +205,33 @@ impl DesktopShell {
                             .text_xs()
                             .text_color(theme_rgb(&self.theme, "text.muted"))
                             .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
+                            .when(!path.is_empty(), |element| {
+                                element.child(
+                                    div()
+                                        .id(format!("pin-workspace-{workspace_id}"))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .size(px(22.))
+                                        .rounded(px(5.))
+                                        .cursor_pointer()
+                                        .role(Role::Button)
+                                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                        .aria_label(pin_label)
+                                        .hover(|element| {
+                                            element.bg(theme_rgb(&self.theme, "divider"))
+                                        })
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            cx.stop_propagation();
+                                            shell.pin_workspace(pin_path.clone(), !pinned, cx);
+                                        }))
+                                        .child(tabler_icon(
+                                            TablerIcon::Pin,
+                                            theme_rgb(&self.theme, "text.muted"),
+                                            px(12.),
+                                        )),
+                                )
+                            })
                             .child(
                                 div()
                                     .id(format!("toggle-workspace-{workspace_id}"))

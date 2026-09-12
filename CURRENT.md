@@ -6278,3 +6278,13 @@ across archived matches, and supports workspace-scoped new-task actions. The
 relevant focused tests pass, `cargo check -p mew-desktop` passes, and
 `just desktop-dev` was used for a live screenshot plus collapse, show-more,
 search, and new-task interaction smoke pass.
+
+## 2026-09-11 — persist and sync workspace pins
+
+Added the daemon-owned `projects.json` sidecar and `PinProject` protocol
+mutation. Workspace pins are validated against the canonical project list,
+written atomically, and rebroadcast as `ProjectList` so connected clients
+converge. The GPUI workspace header now exposes an accessible pin/unpin control.
+Verified protocol roundtrip, sidecar persistence, formatting, diff checks,
+daemon/desktop clippy, and a live `just desktop-dev` smoke pass that pinned,
+observed reordering, and restored the test state.

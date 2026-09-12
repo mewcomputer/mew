@@ -257,6 +257,11 @@ pub enum ClientMessage {
     /// Does NOT require a session — used before creating one to populate a
     /// project picker. The daemon responds with `ServerMessage::ProjectList`.
     ListProjects,
+    /// Pin or unpin a canonical workspace in the daemon-owned project list.
+    PinProject {
+        path: String,
+        pinned: bool,
+    },
 
     /// Regenerate the session title from the conversation history.
     /// Useful when auto-title was disabled or the first message was a poor title source.
@@ -1479,12 +1484,22 @@ mod tests {
         let decoded = round_trip(&msg);
         assert!(matches!(decoded, ClientMessage::ListProjects));
 
+        let pin = ClientMessage::PinProject {
+            path: "/home/user/myproject".into(),
+            pinned: true,
+        };
+        assert!(matches!(
+            round_trip(&pin),
+            ClientMessage::PinProject { pinned: true, .. }
+        ));
+
         let msg = ServerMessage::ProjectList {
             projects: vec![ProjectInfo {
                 path: "/home/user/myproject".to_string(),
                 display_name: "myproject".to_string(),
                 session_count: 3,
                 last_used_at: Some(1700000000),
+                pinned: true,
             }],
         };
         let decoded = round_trip(&msg);
@@ -1495,6 +1510,7 @@ mod tests {
                 assert_eq!(projects[0].display_name, "myproject");
                 assert_eq!(projects[0].session_count, 3);
                 assert_eq!(projects[0].last_used_at, Some(1700000000));
+                assert!(projects[0].pinned);
             }
             _ => panic!("expected ProjectList"),
         }
@@ -2724,6 +2740,7 @@ mod tests {
             summary: None,
             client_count: 2,
             cwd: None,
+            workspace_path: None,
             last_turn_failed: false,
             archived: false,
             pinned: false,
@@ -2759,6 +2776,7 @@ mod tests {
             summary: None,
             client_count: 0,
             cwd: None,
+            workspace_path: None,
             last_turn_failed: false,
             archived: false,
             pinned: false,
@@ -2825,6 +2843,7 @@ mod tests {
                 summary: None,
                 client_count: 1,
                 cwd: None,
+                workspace_path: None,
                 last_turn_failed: false,
                 archived: false,
                 pinned: false,
@@ -2846,6 +2865,7 @@ mod tests {
                 summary: None,
                 client_count: 0,
                 cwd: None,
+                workspace_path: None,
                 last_turn_failed: false,
                 archived: false,
                 pinned: false,
@@ -3553,6 +3573,7 @@ mod tests {
                 summary: None,
                 client_count: 1,
                 cwd: Some("/tmp".into()),
+                workspace_path: Some("/tmp".into()),
                 last_turn_failed: false,
                 archived: false,
                 pinned: false,

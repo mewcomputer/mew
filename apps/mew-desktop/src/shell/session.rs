@@ -844,6 +844,19 @@ impl DesktopShell {
         cx.notify();
     }
 
+    pub(super) fn pin_workspace(
+        &mut self,
+        workspace_path: String,
+        pinned: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_command(ClientMessage::PinProject {
+            path: workspace_path,
+            pinned,
+        });
+        cx.notify();
+    }
+
     pub(super) fn toggle_session_menu(&mut self, session_id: String, cx: &mut Context<Self>) {
         let row_index = self.sidebar_rows.iter().position(|row| {
             matches!(row, SidebarRow::Session(conversation) if conversation.session_id == session_id)
