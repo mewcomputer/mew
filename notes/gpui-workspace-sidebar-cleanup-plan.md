@@ -60,14 +60,14 @@ feedback, stable geometry, keyboard access, restraint, and user agency.
     the bottom.
 11. Configured workspaces with no sessions remain visible and can start a new
     task.
-12. A workspace row exposes a split open control:
+12. A workspace row keeps its header compact:
 
     ```text
-    [ editor logo  Open ][ chevron ]
+    [ folder name ][ kebab ][ new task ]
     ```
 
-    The main segment opens in the remembered editor. The chevron opens a
-    stable, anchored destination menu. GitHub destinations are deliberately
+    The kebab opens a stable, anchored destination menu containing editor,
+    platform, copy-path, and pin actions. GitHub destinations are deliberately
     deferred, but the menu model must allow them to be added later.
 
 ## Explicit non-goals
@@ -321,12 +321,12 @@ During search:
 - Press feedback begins on mouse-down. No interaction waits for a decorative
   animation to finish.
 
-### Workspace open split control
+### Workspace action menu
 
-- The main segment shows the remembered editor icon and `Open` label.
-- The chevron has its own hit target and opens the destination menu.
+- The workspace name remains the expand/collapse target.
+- A single kebab button opens the destination menu without changing row height.
 - Selecting an editor opens the workspace and makes that editor the next
-  primary target.
+  remembered target.
 - The menu is divided into installed editor destinations and platform actions
   such as Reveal in Finder, Open in Terminal, and Copy Path.
 - Do not show unavailable applications.
@@ -385,7 +385,7 @@ detection and invocation failures must produce a visible, dismissible error.
 - Preserve `cmd-k` search focus.
 - Up/Down traverses visible task rows; Home/End reach the first/last visible
   task; Enter attaches; Escape returns focus predictably.
-- Workspace disclosures, `Show more`, menus, menu items, split-button segments,
+- Workspace disclosures, `Show more`, menus, menu items, and workspace kebab actions,
   and Back are reachable by keyboard and expose roles, labels, selected state,
   and expanded state.
 - Menu focus stays inside the menu until selection or dismissal. Escape closes
@@ -550,7 +550,7 @@ Tests first where GPUI permits direct behavior assertions:
   explicitly focused;
 - deleting group UI does not remove group protocol handling elsewhere.
 
-### Phase 5: workspace open split control
+### Phase 5: workspace action menu
 
 Primary files:
 
@@ -565,7 +565,7 @@ Work:
 1. Model supported local open destinations separately from rendered controls.
 2. Detect installed destinations without blocking the GPUI render path.
 3. Persist and restore the selected editor.
-4. Render the split control on workspace hover and keyboard focus.
+4. Render the compact kebab action menu on workspace hover and keyboard focus.
 5. Implement primary open and the anchored destination menu.
 6. Hide/disable local-path actions for remote profiles with explicit copy.
 7. Surface launch failures without changing project/session state.
@@ -576,7 +576,7 @@ Tests first:
 - choosing an editor persists it and changes the primary destination;
 - command arguments preserve spaces and cannot become shell syntax;
 - remote profiles cannot invoke local workspace paths;
-- main segment and chevron dispatch different actions;
+- kebab and new-task controls dispatch different actions;
 - launch failure becomes visible error state;
 - persisted state roundtrips with the new preference absent and present.
 

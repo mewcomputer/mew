@@ -6300,3 +6300,11 @@ workspace paths with spaces are preserved. Verified config and desktop focused
 tests, desktop check and clippy, and a live `just desktop-dev` smoke pass that
 restored Zed, opened the destination menu, selected the editor, and copied a
 workspace path.
+
+## 2026-09-11 — consolidate workspace actions into a kebab menu
+
+Simplified workspace headers to `folder name · kebab · new task`. Editor,
+terminal, copy-path, and pin actions now live in one anchored workspace options
+menu, removing the split open control from the row. Verified desktop check and
+focused destination tests, then exercised the compact header, menu sections,
+pin action, and copy-path interaction in `just desktop-dev`.

@@ -872,18 +872,6 @@ impl DesktopShell {
         cx.notify();
     }
 
-    pub(super) fn open_workspace_primary(
-        &mut self,
-        workspace_path: String,
-        cx: &mut Context<Self>,
-    ) {
-        let destination = primary_workspace_destination(
-            self.remembered_editor.as_deref(),
-            &self.workspace_open_destinations,
-        );
-        self.open_workspace_destination(workspace_path, destination, cx);
-    }
-
     pub(super) fn open_workspace_destination(
         &mut self,
         workspace_path: String,

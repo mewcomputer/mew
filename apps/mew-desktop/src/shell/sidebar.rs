@@ -186,23 +186,7 @@ impl DesktopShell {
                     };
                     let toggle_path = path.clone();
                     let new_path = path.clone();
-                    let pin_path = path.clone();
-                    let pin_label = if pinned {
-                        "Unpin workspace"
-                    } else {
-                        "Pin workspace"
-                    };
                     let open_menu = self.workspace_open_menu.as_deref() == Some(path.as_str());
-                    let local_open_available = !matches!(
-                        self.connection_profile.as_ref(),
-                        Some(DesktopConnectionProfile::RemoteIroh { .. })
-                    );
-                    let primary_destination = primary_workspace_destination(
-                        self.remembered_editor.as_deref(),
-                        &self.workspace_open_destinations,
-                    );
-                    let primary_icon = workspace_destination_icon(&primary_destination);
-                    let primary_path = path.clone();
                     let menu_path = path.clone();
                     Some(
                         div()
@@ -218,33 +202,6 @@ impl DesktopShell {
                             .text_xs()
                             .text_color(theme_rgb(&self.theme, "text.muted"))
                             .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                            .when(!path.is_empty(), |element| {
-                                element.child(
-                                    div()
-                                        .id(format!("pin-workspace-{workspace_id}"))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .size(px(22.))
-                                        .rounded(px(5.))
-                                        .cursor_pointer()
-                                        .role(Role::Button)
-                                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                        .aria_label(pin_label)
-                                        .hover(|element| {
-                                            element.bg(theme_rgb(&self.theme, "divider"))
-                                        })
-                                        .on_click(cx.listener(move |shell, _, _, cx| {
-                                            cx.stop_propagation();
-                                            shell.pin_workspace(pin_path.clone(), !pinned, cx);
-                                        }))
-                                        .child(tabler_icon(
-                                            TablerIcon::Pin,
-                                            theme_rgb(&self.theme, "text.muted"),
-                                            px(12.),
-                                        )),
-                                )
-                            })
                             .child(
                                 div()
                                     .id(format!("toggle-workspace-{workspace_id}"))
@@ -296,90 +253,31 @@ impl DesktopShell {
                                             theme_rgb(&self.theme, "text.muted"),
                                             px(11.),
                                         ))
-                                    })
-                                    .child(div().flex_none().text_xs().child(count.to_string())),
+                                    }),
                             )
-                            .when(local_open_available && !path.is_empty(), |element| {
-                                element.child(
-                                    div()
-                                        .id(format!("open-workspace-{workspace_id}"))
-                                        .flex()
-                                        .items_center()
-                                        .h(px(22.))
-                                        .rounded(px(5.))
-                                        .border_1()
-                                        .border_color(theme_rgb(&self.theme, "divider"))
-                                        .bg(theme_rgb(&self.theme, "input"))
-                                        .overflow_hidden()
-                                        .child(
-                                            div()
-                                                .id(format!(
-                                                    "open-workspace-primary-{workspace_id}"
-                                                ))
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(4.))
-                                                .h_full()
-                                                .px(px(6.))
-                                                .cursor_pointer()
-                                                .role(Role::Button)
-                                                .desktop_focus(theme_rgb(
-                                                    &self.theme,
-                                                    "text.accent",
-                                                ))
-                                                .aria_label(SharedString::from(format!(
-                                                    "Open workspace in {}",
-                                                    primary_destination.label()
-                                                )))
-                                                .hover(|element| {
-                                                    element.bg(theme_rgb(&self.theme, "muted"))
-                                                })
-                                                .on_click(cx.listener(move |shell, _, _, cx| {
-                                                    cx.stop_propagation();
-                                                    shell.open_workspace_primary(
-                                                        primary_path.clone(),
-                                                        cx,
-                                                    );
-                                                }))
-                                                .child(tabler_icon(
-                                                    primary_icon,
-                                                    theme_rgb(&self.theme, "text.muted"),
-                                                    px(12.),
-                                                ))
-                                                .child("Open"),
-                                        )
-                                        .child(
-                                            div()
-                                                .id(format!("open-workspace-menu-{workspace_id}"))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .size(px(22.))
-                                                .cursor_pointer()
-                                                .role(Role::Button)
-                                                .desktop_focus(theme_rgb(
-                                                    &self.theme,
-                                                    "text.accent",
-                                                ))
-                                                .aria_label("Choose how to open workspace")
-                                                .hover(|element| {
-                                                    element.bg(theme_rgb(&self.theme, "muted"))
-                                                })
-                                                .on_click(cx.listener(move |shell, _, _, cx| {
-                                                    cx.stop_propagation();
-                                                    shell.toggle_workspace_open_menu(
-                                                        menu_path.clone(),
-                                                        cx,
-                                                    );
-                                                }))
-                                                .child(tabler_icon(
-                                                    TablerIcon::ChevronDown,
-                                                    theme_rgb(&self.theme, "text.muted"),
-                                                    px(11.),
-                                                )),
-                                        ),
-                                )
-                            })
+                            .child(
+                                div()
+                                    .id(format!("workspace-menu-trigger-{workspace_id}"))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .size(px(22.))
+                                    .rounded(px(5.))
+                                    .cursor_pointer()
+                                    .role(Role::Button)
+                                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                    .aria_label("Workspace options")
+                                    .hover(|element| element.bg(theme_rgb(&self.theme, "divider")))
+                                    .on_click(cx.listener(move |shell, _, _, cx| {
+                                        cx.stop_propagation();
+                                        shell.toggle_workspace_open_menu(menu_path.clone(), cx);
+                                    }))
+                                    .child(tabler_icon(
+                                        TablerIcon::Dots,
+                                        theme_rgb(&self.theme, "text.muted"),
+                                        px(13.),
+                                    )),
+                            )
                             .child(
                                 div()
                                     .id(format!("new-task-in-workspace-{workspace_id}"))
@@ -414,6 +312,7 @@ impl DesktopShell {
                                     deferred(self.render_workspace_open_menu(
                                         path.clone(),
                                         workspace_id.clone(),
+                                        pinned,
                                         cx,
                                     ))
                                     .with_priority(8),
@@ -1256,6 +1155,7 @@ impl DesktopShell {
         &self,
         workspace_path: String,
         workspace_id: String,
+        pinned: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let primary = primary_workspace_destination(
@@ -1278,7 +1178,7 @@ impl DesktopShell {
             .border_color(theme_rgb(&self.theme, "divider"))
             .bg(theme_rgb(&self.theme, "panel.background"))
             .role(Role::Menu)
-            .aria_label("Workspace open destinations")
+            .aria_label("Workspace options")
             .child(
                 div()
                     .px(px(7.))
@@ -1320,6 +1220,12 @@ impl DesktopShell {
                     .text_color(theme_rgb(&self.theme, "text.muted"))
                     .child("Actions"),
             )
+            .child(workspace_pin_menu_item(
+                &self.theme,
+                workspace_path.clone(),
+                pinned,
+                cx,
+            ))
             .children(
                 destinations
                     .into_iter()
@@ -1708,6 +1614,45 @@ fn workspace_open_menu_item(
             shell.open_workspace_destination(workspace_path.clone(), destination.clone(), cx);
         }))
         .child(tabler_icon(icon, theme_rgb(theme, "text.muted"), px(13.)))
+        .child(label)
+        .into_any_element()
+}
+
+fn workspace_pin_menu_item(
+    theme: &Theme,
+    workspace_path: String,
+    pinned: bool,
+    cx: &mut Context<DesktopShell>,
+) -> gpui::AnyElement {
+    let label = if pinned {
+        "Unpin workspace"
+    } else {
+        "Pin workspace"
+    };
+    div()
+        .id("workspace-pin-option")
+        .h(px(28.))
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .px(px(7.))
+        .rounded(px(5.))
+        .cursor_pointer()
+        .role(Role::MenuItem)
+        .aria_label(label)
+        .text_xs()
+        .text_color(theme_rgb(theme, "text.muted"))
+        .hover(|element| element.bg(theme_rgb(theme, "muted")))
+        .on_click(cx.listener(move |shell, _, _, cx| {
+            cx.stop_propagation();
+            shell.pin_workspace(workspace_path.clone(), !pinned, cx);
+            shell.workspace_open_menu = None;
+        }))
+        .child(tabler_icon(
+            TablerIcon::Pin,
+            theme_rgb(theme, "text.muted"),
+            px(13.),
+        ))
         .child(label)
         .into_any_element()
 }
