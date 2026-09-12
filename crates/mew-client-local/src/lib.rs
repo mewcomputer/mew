@@ -6,8 +6,8 @@ use mew_client_core::{
     TransportError,
 };
 use mew_protocol::ClientMessage;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
-use tungstenite::Message;
+use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
+use tungstenite::{protocol::WebSocketConfig, Message};
 
 #[derive(Debug, Clone)]
 pub struct LocalWebSocketTransport {
@@ -23,7 +23,11 @@ impl LocalWebSocketTransport {
 #[async_trait::async_trait]
 impl ClientTransport for LocalWebSocketTransport {
     async fn connect(&self) -> Result<Box<dyn ClientConnection>, TransportError> {
-        let (socket, _) = connect_async(&self.url)
+        let config = WebSocketConfig {
+            max_frame_size: None,
+            ..WebSocketConfig::default()
+        };
+        let (socket, _) = connect_async_with_config(&self.url, Some(config), false)
             .await
             .map_err(|error| TransportError::Other(format!("connect to {}: {error}", self.url)))?;
         Ok(Box::new(LocalWebSocketConnection {

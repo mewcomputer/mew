@@ -15,6 +15,17 @@ pub(super) fn transcript_part_block_count(
 }
 
 impl DesktopShell {
+    pub(super) fn prepare_for_history_prepend(&mut self, added_messages: usize) {
+        if added_messages == 0 {
+            return;
+        }
+        self.markdown_cache
+            .splice(0..0, std::iter::repeat_with(Vec::new).take(added_messages));
+        for row in &mut self.transcript_rows {
+            row.message_index = row.message_index.saturating_add(added_messages);
+        }
+    }
+
     pub(super) fn refresh_review(&mut self, cx: &mut Context<Self>) {
         if !self.model.session_is_ready() {
             self.clear_review();
@@ -122,7 +133,7 @@ impl DesktopShell {
         cx.notify();
     }
 
-    pub(super) fn sync_markdown_cache(&mut self) {
+    pub(super) fn sync_markdown_cache(&mut self) -> bool {
         let mut changed = self.markdown_cache.len() != self.model.ui.transcript.len();
         let mut changed_message_start = None;
         let mut changed_message_end = None;
@@ -184,6 +195,7 @@ impl DesktopShell {
                     cached_part.source_identity = 0;
                     cached_part.source_len = 0;
                     cached_part.render_blocks.clear();
+                    cached_part.streaming = None;
                     continue;
                 };
                 let source_len = source.len();
@@ -232,7 +244,7 @@ impl DesktopShell {
             }
         }
         if !changed {
-            return;
+            return false;
         }
         if self.markdown_cache.len() != self.model.ui.transcript.len() {
             self.rebuild_transcript_rows_from_cache();
@@ -264,6 +276,7 @@ impl DesktopShell {
                 }
             }
         }
+        true
     }
 
     pub(super) fn rebuild_transcript_rows_from_cache(&mut self) {
@@ -360,6 +373,27 @@ impl DesktopShell {
             let attachments = std::mem::take(&mut self.pending_attachments);
             self.send_command(ClientMessage::Prompt { text, attachments });
         }
+    }
+
+    pub(super) fn request_older_history(&mut self) {
+        if self.history_loading {
+            return;
+        }
+        let Some(before) = self.history_before else {
+            return;
+        };
+        let Some(session_id) = self.model.attached_session.clone() else {
+            return;
+        };
+        if self.transcript_scrolled_away {
+            self.pending_transcript_scroll_anchor = self.current_transcript_scroll_anchor();
+        }
+        self.history_loading = true;
+        self.send_command(ClientMessage::LoadSessionHistory {
+            session_id,
+            before,
+            limit: mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
+        });
     }
 
     pub(super) fn add_attachment(&mut self, path: PathBuf, cx: &mut Context<Self>) {

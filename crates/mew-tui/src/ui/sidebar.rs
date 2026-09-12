@@ -611,6 +611,7 @@ mod tests {
             summary: Some("summarized turn".into()),
             client_count: 0,
             cwd: None,
+            workspace_path: None,
             last_turn_failed: false,
             archived: false,
             pinned: false,

@@ -589,9 +589,8 @@ impl DesktopShell {
                             .flex()
                             .flex_col()
                             .gap(px(6.))
-                            .min_w_0()
                             .max_w(px(650.))
-                            .when(!is_user, |element| element.w_full())
+                            .when(!is_user, |element| element.w_full().min_w_0())
                             .when(is_user, |element| {
                                 element
                                     .flex_none()
@@ -603,8 +602,7 @@ impl DesktopShell {
                             })
                             .child(
                                 div()
-                                    .min_w_0()
-                                    .when(!is_user, |element| element.w_full())
+                                    .when(!is_user, |element| element.w_full().min_w_0())
                                     .text_sm()
                                     .line_height(px(20.))
                                     .text_color(theme_rgb(&self.theme, "text.body"))
@@ -974,7 +972,18 @@ impl DesktopShell {
                 };
                 (SharedString::from(line.to_owned()), color)
             })
-            .collect::<Vec<_>>();
+            .collect::<Arc<[_]>>();
+        let visible_line_count = lines.len();
+        let state = {
+            let mut lists = self.tool_text_lists.borrow_mut();
+            lists
+                .entry(id.clone())
+                .or_insert_with(|| gpui::ListState::new(0, gpui::ListAlignment::Top, px(96.)))
+                .clone()
+        };
+        if state.item_count() != visible_line_count {
+            state.reset(visible_line_count);
+        }
         div()
             .id(id.clone())
             .max_h(if expanded { px(520.) } else { px(180.) })
@@ -983,16 +992,19 @@ impl DesktopShell {
             .bg(theme_rgb(&self.theme, "background"))
             .rounded(px(6.))
             .p(px(8.))
-            .children(lines.into_iter().enumerate().map(|(index, (line, color))| {
+            .child(gpui::list(state, move |index, _, _| {
+                let Some((line, color)) = lines.get(index) else {
+                    return div().into_any_element();
+                };
                 div()
                     .id(format!("{id}-line-{index}"))
                     .w_full()
                     .min_w_0()
                     .text_xs()
                     .font_family(DEFAULT_FONT_FAMILY)
-                    .text_color(color)
+                    .text_color(*color)
                     .whitespace_nowrap()
-                    .child(line)
+                    .child(line.clone())
                     .into_any_element()
             }))
             .when(truncated, |element| {
@@ -1300,6 +1312,7 @@ impl DesktopShell {
         let control_yielded = self.model.ui.control_yielded_by.is_some();
 
         let composer_is_empty = self.model.ui.composer.is_empty();
+        let composer_value = self.model.ui.composer.clone();
         let turn_is_running = self.model.ui.running;
         let composer_focused = self.composer_focus_handle.is_focused(window);
         let attachments = self.attachments.clone();
@@ -1584,8 +1597,20 @@ impl DesktopShell {
                                     .track_focus(&composer_focus_handle)
                                     .role(Role::TextInput)
                                     .aria_label("Message composer")
+                                    .aria_value(composer_value.clone())
+                                    .aria_placeholder(if self.plan_feedback_request.is_some() {
+                                        "Plan feedback…"
+                                    } else {
+                                        "Do anything…"
+                                    })
                                     .aria_description("Type a message, then press Enter to send.")
                                     .cursor(gpui::CursorStyle::IBeam)
+                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                        shell.release_browser_focus();
+                                        window.focus(&shell.composer_focus_handle, cx);
+                                        shell.restart_composer_cursor_blink(cx);
+                                        cx.stop_propagation();
+                                    }))
                                     .on_key_down(cx.listener(Self::composer_key_down))
                                     .on_action(cx.listener(Self::composer_backspace))
                                     .on_action(cx.listener(Self::composer_delete))

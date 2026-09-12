@@ -108,6 +108,8 @@ impl DesktopShell {
         self.tool_text_cache.borrow_mut().clear();
         self.transcript_rows.clear();
         self.transcript_list.reset(0);
+        self.history_before = None;
+        self.history_loading = false;
         self.transcript_list.set_follow_mode(gpui::FollowMode::Tail);
         self.transcript_scrolled_away = false;
         self.pending_transcript_scroll_anchor = None;
@@ -312,6 +314,8 @@ impl DesktopShell {
         self.tool_text_cache.borrow_mut().clear();
         self.transcript_rows.clear();
         self.transcript_list.reset(0);
+        self.history_before = None;
+        self.history_loading = false;
         self.transcript_list
             .set_follow_mode(if self.pending_transcript_scroll_anchor.is_some() {
                 gpui::FollowMode::Normal
@@ -748,7 +752,7 @@ impl DesktopShell {
         }
     }
 
-    fn current_transcript_scroll_anchor(
+    pub(super) fn current_transcript_scroll_anchor(
         &self,
     ) -> Option<mew_config::DesktopTranscriptScrollAnchor> {
         if !self.transcript_scrolled_away {
@@ -1480,6 +1484,7 @@ impl DesktopShell {
                     | ClientEvent::SessionMetaChanged { .. }
                     | ClientEvent::SessionReady { .. }
                     | ClientEvent::SessionHistoryLoaded { .. }
+                    | ClientEvent::SessionHistoryPageLoaded { .. }
             )
         }) {
             self.refresh_open_tab_titles();
@@ -1487,11 +1492,21 @@ impl DesktopShell {
         if let Some(target) = self.pending_session_target.as_deref() {
             self.model.ui.selected_session = Some(target.to_owned());
         }
+        if let Some(session_id) = events.iter().find_map(|event| match event {
+            ClientEvent::SessionHistoryPageLoaded { session_id, .. } => Some(session_id),
+            _ => None,
+        }) {
+            self.history_before = state
+                .session(session_id)
+                .and_then(|session| session.history_before);
+            self.history_loading = false;
+        }
         if events.iter().any(|event| {
             matches!(
                 event,
                 ClientEvent::SessionReady { .. }
                     | ClientEvent::SessionHistoryLoaded { .. }
+                    | ClientEvent::SessionHistoryPageLoaded { .. }
                     | ClientEvent::MessageChanged { .. }
                     | ClientEvent::FlaggedFilesChanged { .. }
                     | ClientEvent::SessionMetaChanged { .. }
@@ -1525,11 +1540,38 @@ impl DesktopShell {
         } else if self.model.session_is_ready()
             && events.iter().any(client_event_requires_transcript_snapshot)
         {
+            let history_prepend = events.iter().any(|event| {
+                matches!(
+                    event,
+                    ClientEvent::SessionHistoryPageLoaded { replace: false, .. }
+                )
+            });
+            let previous_transcript_len = self.model.ui.transcript.len();
             self.model.sync_client_transcript(state);
-            self.markdown_cache.clear();
-            self.tool_text_lists.borrow_mut().clear();
-            self.tool_text_cache.borrow_mut().clear();
-            self.sync_markdown_cache();
+            if history_prepend {
+                let added_messages = self
+                    .model
+                    .ui
+                    .transcript
+                    .len()
+                    .saturating_sub(previous_transcript_len);
+                self.prepare_for_history_prepend(added_messages);
+            }
+            // Keep render caches across snapshots. MessageChanged and action
+            // events often arrive with an otherwise identical transcript; the
+            // cache synchronizer compares each part's source and only rebuilds
+            // rows whose content actually changed. Session switches already
+            // clear these caches in `clear_pending_session_view`.
+            let markdown_changed = self.sync_markdown_cache();
+            if !markdown_changed
+                && events
+                    .iter()
+                    .any(client_event_requires_transcript_remeasure)
+                && !self.transcript_rows.is_empty()
+            {
+                self.transcript_list
+                    .remeasure_items(0..self.transcript_rows.len());
+            }
         }
         let session_list_changed = events
             .iter()

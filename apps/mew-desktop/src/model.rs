@@ -110,7 +110,8 @@ impl ShellModel {
                     };
                 }
                 ClientEvent::SessionReady { session_id }
-                | ClientEvent::SessionHistoryLoaded { session_id } => {
+                | ClientEvent::SessionHistoryLoaded { session_id }
+                | ClientEvent::SessionHistoryPageLoaded { session_id, .. } => {
                     self.ui.selected_session = Some(session_id.clone());
                 }
                 ClientEvent::PermissionModeChanged { mode } => {

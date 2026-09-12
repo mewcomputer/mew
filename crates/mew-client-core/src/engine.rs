@@ -264,6 +264,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_pages_replace_then_prepend_and_update_cursor() {
+        let transport = InMemoryTransport::default();
+        let mut engine = ClientEngine::connect(&transport).await.unwrap();
+        transport.push_server_message(ServerMessage::SessionReady {
+            session_id: SESSION_ID.into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        });
+        engine.receive().await.unwrap();
+
+        let newest = mew_message::Message {
+            id: mew_message::MessageId::new(),
+            session_id: mew_message::SessionId::new(),
+            role: mew_message::Role::User,
+            parts: Vec::new(),
+            time: mew_message::Time {
+                created: 2,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let oldest = mew_message::Message {
+            id: mew_message::MessageId::new(),
+            session_id: mew_message::SessionId::new(),
+            role: mew_message::Role::Assistant,
+            parts: Vec::new(),
+            time: mew_message::Time {
+                created: 1,
+                completed: None,
+            },
+            assistant: None,
+        };
+        transport.push_server_message(ServerMessage::SessionHistoryPage {
+            session_id: SESSION_ID.into(),
+            messages: vec![newest.clone()],
+            next_cursor: Some(1),
+            replace: true,
+        });
+        let events = engine.receive().await.unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::SessionHistoryPageLoaded { session_id, replace: true }]
+                if session_id == SESSION_ID
+        ));
+        assert_eq!(
+            engine.state().session(SESSION_ID).unwrap().history_before,
+            Some(1)
+        );
+
+        transport.push_server_message(ServerMessage::SessionHistoryPage {
+            session_id: SESSION_ID.into(),
+            messages: vec![oldest.clone()],
+            next_cursor: None,
+            replace: false,
+        });
+        engine.receive().await.unwrap();
+        let session = engine.state().session(SESSION_ID).unwrap();
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].id, oldest.id);
+        assert_eq!(session.messages[1].id, newest.id);
+        assert_eq!(session.history_before, None);
+    }
+
+    #[tokio::test]
     async fn engine_sends_session_management_and_workspace_messages() {
         let transport = InMemoryTransport::default();
         let mut engine = ClientEngine::connect(&transport).await.unwrap();

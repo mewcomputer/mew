@@ -42,6 +42,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tungstenite::Message;
 
+const HISTORY_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
 pub mod browser;
 pub mod client;
 pub mod files;
@@ -357,6 +359,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::NewSession { .. }
                 | ClientMessage::NewSessionInGroup { .. }
                 | ClientMessage::AttachSession { .. }
+                | ClientMessage::LoadSessionHistory { .. }
                 | ClientMessage::ListSessions
                 | ClientMessage::DeleteSession { .. }
                 | ClientMessage::RenameSession { .. }
@@ -411,6 +414,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
         message,
         ClientMessage::RemoteHello { .. }
             | ClientMessage::AttachSession { .. }
+            | ClientMessage::LoadSessionHistory { .. }
             | ClientMessage::ListSessions
             | ClientMessage::ListProjects
             | ClientMessage::ListModels
@@ -435,6 +439,30 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::PlanApprovalResponse { .. }
                 | ClientMessage::YieldControl { .. }
         )
+}
+
+/// Select the newest messages before `before` without constructing a wire
+/// frame large enough to trip the WebSocket frame limit. The returned cursor
+/// is the index to pass for the next request.
+fn history_page(
+    messages: &[mew_message::Message],
+    before: usize,
+    limit: usize,
+) -> (Vec<mew_message::Message>, Option<usize>) {
+    let end = before.min(messages.len());
+    let limit = limit.max(1);
+    let mut start = end;
+    let mut bytes = 0usize;
+    while start > 0 && end - start < limit {
+        let message = &messages[start - 1];
+        let message_bytes = serde_json::to_vec(message).map_or(0, |encoded| encoded.len());
+        if start < end && bytes.saturating_add(message_bytes) > HISTORY_PAGE_MAX_BYTES {
+            break;
+        }
+        bytes = bytes.saturating_add(message_bytes);
+        start -= 1;
+    }
+    (messages[start..end].to_vec(), (start > 0).then_some(start))
 }
 
 async fn detach_connection_client(
@@ -748,8 +776,8 @@ where
             if matches!(
                 &client_msg,
                 ClientMessage::NewSession { client_kind, .. }
-                    | ClientMessage::NewSessionInGroup { client_kind, .. }
-                    | ClientMessage::AttachSession { client_kind, .. }
+                | ClientMessage::NewSessionInGroup { client_kind, .. }
+                | ClientMessage::AttachSession { client_kind, .. }
                     if *client_kind != ClientKind::Remote
             ) {
                 reply(ServerMessage::Error {
@@ -977,15 +1005,25 @@ where
                             variant: thinking_variant,
                         });
 
-                        // Always send the current message history on attach.
-                        // The client may be switching between sessions on the
-                        // same connection, so it needs the full history.
+                        // Send only the newest history page on attach. Older
+                        // pages are requested by the desktop as the user
+                        // scrolls toward the top of the transcript.
                         let messages = {
                             let agent = session.agent.lock().await;
                             let msgs = agent.messages.lock().await.clone();
                             msgs
                         };
-                        reply(ServerMessage::SessionHistory { messages });
+                        let (messages, next_cursor) = history_page(
+                            &messages,
+                            messages.len(),
+                            mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
+                        );
+                        reply(ServerMessage::SessionHistoryPage {
+                            session_id: session_id.clone(),
+                            messages,
+                            next_cursor,
+                            replace: true,
+                        });
 
                         // Replay current flagged-files set so the UI has it
                         // immediately after attach.
@@ -1047,6 +1085,40 @@ where
                         });
                     }
                 }
+            }
+            ClientMessage::LoadSessionHistory {
+                session_id,
+                before,
+                limit,
+            } => {
+                let Some(session) = attached_session.as_ref() else {
+                    reply(ServerMessage::Error {
+                        message: "no session attached".into(),
+                    });
+                    continue;
+                };
+                if session.id != session_id {
+                    reply(ServerMessage::Error {
+                        message: "history request does not match the attached session".into(),
+                    });
+                    continue;
+                }
+                let messages = {
+                    let agent = session.agent.lock().await;
+                    let messages = agent.messages.lock().await.clone();
+                    messages
+                };
+                let (messages, next_cursor) = history_page(
+                    &messages,
+                    before,
+                    limit.min(mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT),
+                );
+                reply(ServerMessage::SessionHistoryPage {
+                    session_id,
+                    messages,
+                    next_cursor,
+                    replace: false,
+                });
             }
             ClientMessage::ListSessions => {
                 let sessions = session_manager.list().await;
@@ -3237,6 +3309,36 @@ async fn send_msg<S: AsyncRead + AsyncWrite + Unpin + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_message(created: i64) -> mew_message::Message {
+        mew_message::Message {
+            id: mew_message::MessageId::new(),
+            session_id: mew_message::SessionId::new(),
+            role: mew_message::Role::User,
+            parts: Vec::new(),
+            time: mew_message::Time {
+                created,
+                completed: None,
+            },
+            assistant: None,
+        }
+    }
+
+    #[test]
+    fn history_page_reads_backwards_and_returns_a_cursor() {
+        let messages = (0..5).map(test_message).collect::<Vec<_>>();
+        let (page, cursor) = history_page(&messages, messages.len(), 2);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].time.created, 3);
+        assert_eq!(page[1].time.created, 4);
+        assert_eq!(cursor, Some(3));
+
+        let (older, cursor) = history_page(&messages, cursor.unwrap(), 2);
+        assert_eq!(older.len(), 2);
+        assert_eq!(older[0].time.created, 1);
+        assert_eq!(older[1].time.created, 2);
+        assert_eq!(cursor, Some(1));
+    }
 
     #[test]
     fn test_socket_liveness_guard_rejects_live_socket() {

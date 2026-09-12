@@ -189,6 +189,50 @@ test("newSession sends new_session and resolves with session_id", async () => {
   assert.equal(client.getSessionId(), "sess_abc");
 });
 
+test("history pages prepend older messages and can be requested by cursor", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connectP = client.connect();
+  setImmediate(() => latest().open());
+  await connectP;
+
+  const history: string[][] = [];
+  client.on("session-history", ({ messages }) => {
+    history.push(messages.map((message) => message.id));
+  });
+  const message = (id: string) => ({
+    id,
+    session_id: "sess_1",
+    role: "user" as const,
+    parts: [],
+    time: { created: 0 },
+  });
+
+  latest().peerSend({
+    type: "session_history_page",
+    session_id: "sess_1",
+    messages: [message("new")],
+    next_cursor: 1,
+    replace: true,
+  });
+  latest().peerSend({
+    type: "session_history_page",
+    session_id: "sess_1",
+    messages: [message("old")],
+    next_cursor: undefined,
+    replace: false,
+  });
+  client.loadSessionHistory("sess_1", 1, 24);
+
+  assert.deepEqual(history, [["new"], ["old", "new"]]);
+  assert.deepEqual(latest().sent, [{
+    type: "load_session_history",
+    session_id: "sess_1",
+    before: 1,
+    limit: 24,
+  }]);
+});
+
 test("serializes overlapping session requests so errors stay with their request", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });

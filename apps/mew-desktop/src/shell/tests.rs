@@ -377,6 +377,17 @@ mod shell_tests {
                 request_id: "request".into(),
             }
         ));
+        assert!(client_event_requires_transcript_remeasure(
+            &ClientEvent::MessageChanged {
+                session_id: "session".into(),
+            }
+        ));
+        assert!(!client_event_requires_transcript_remeasure(
+            &ClientEvent::RequiredActionChanged {
+                session_id: "session".into(),
+                request_id: "request".into(),
+            }
+        ));
     }
 
     #[test]

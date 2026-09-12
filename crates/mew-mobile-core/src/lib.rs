@@ -13,8 +13,10 @@ use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use iroh::{Endpoint, SecretKey};
 use tokio::sync::mpsc;
-use tokio_tungstenite::client_async;
-use tokio_tungstenite::tungstenite::{client::ClientRequestBuilder, Message};
+use tokio_tungstenite::client_async_with_config;
+use tokio_tungstenite::tungstenite::{
+    client::ClientRequestBuilder, protocol::WebSocketConfig, Message,
+};
 use tracing::{info, warn};
 
 use mew_message::{Part, ProviderEventWire};
@@ -825,7 +827,11 @@ async fn connect_and_run(
         .with_header("Upgrade", "websocket")
         .with_header("Sec-WebSocket-Version", "13")
         .with_header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
-    let (mut ws, _resp) = client_async(req, iroh_stream)
+    let config = WebSocketConfig {
+        max_frame_size: None,
+        ..WebSocketConfig::default()
+    };
+    let (mut ws, _resp) = client_async_with_config(req, iroh_stream, Some(config))
         .await
         .context("websocket handshake over iroh")?;
 
@@ -849,8 +855,8 @@ async fn connect_and_run(
     let ping = mew_protocol::encode_json(&ClientMessage::Ping)?;
     ws.send(Message::Text(ping)).await?;
 
-    // If we have a previously-attached session, re-send AttachSession
-    // so the daemon replays SessionHistory (spec: reconnect re-attach).
+    // If we have a previously-attached session, re-send AttachSession so the
+    // daemon replays the newest history page (spec: reconnect re-attach).
     let reattach = conn_state.attached_session.lock().unwrap().clone();
     if let Some(session_id) = reattach {
         let attach_msg = mew_protocol::encode_json(&ClientMessage::AttachSession {
@@ -1025,6 +1031,90 @@ async fn connect_and_run(
 
 /// Translate a `ServerMessage` into zero or more `CoreEvent`s, updating
 /// the shared `ConnState` as needed.
+fn project_history_messages(messages: &[mew_message::Message]) -> Vec<state::ChatMessage> {
+    messages
+        .iter()
+        .map(|msg| {
+            let parts: Vec<_> = msg
+                .parts
+                .iter()
+                .map(|p| match p {
+                    Part::Text(tp) => state::MessagePart {
+                        id: tp.base.id.to_string(),
+                        kind: state::PartKind::Text,
+                        text: Some(tp.text.clone()),
+                        tool_name: None,
+                        tool_state: None,
+                        tool_input: None,
+                        tool_output: None,
+                        tool_error: None,
+                        tool_call_id: None,
+                        tool_time_start: None,
+                        tool_time_end: None,
+                        tool_sensitivity: None,
+                    },
+                    Part::Reasoning(rp) => state::MessagePart {
+                        id: rp.base.id.to_string(),
+                        kind: state::PartKind::Reasoning,
+                        text: Some(rp.text.clone()),
+                        tool_name: None,
+                        tool_state: None,
+                        tool_input: None,
+                        tool_output: None,
+                        tool_error: None,
+                        tool_call_id: None,
+                        tool_time_start: None,
+                        tool_time_end: None,
+                        tool_sensitivity: None,
+                    },
+                    Part::ToolCall(tcp) => {
+                        let (input_str, output, error, time_start, time_end) =
+                            state::tool_state_fields(&tcp.state);
+                        state::MessagePart {
+                            id: tcp.base.id.to_string(),
+                            kind: state::PartKind::ToolCall,
+                            text: None,
+                            tool_name: Some(tcp.tool_name.clone()),
+                            tool_state: Some(format!("{:?}", tcp.state).to_lowercase()),
+                            tool_input: input_str,
+                            tool_output: output,
+                            tool_error: error,
+                            tool_call_id: Some(tcp.call_id.clone()),
+                            tool_time_start: time_start,
+                            tool_time_end: time_end,
+                            tool_sensitivity: None,
+                        }
+                    }
+                    _ => state::MessagePart {
+                        id: ulid::Ulid::new().to_string(),
+                        kind: state::PartKind::Error,
+                        text: None,
+                        tool_name: None,
+                        tool_state: None,
+                        tool_input: None,
+                        tool_output: None,
+                        tool_error: None,
+                        tool_call_id: None,
+                        tool_time_start: None,
+                        tool_time_end: None,
+                        tool_sensitivity: None,
+                    },
+                })
+                .collect();
+            state::ChatMessage {
+                id: ulid::Ulid::new().to_string(),
+                role: format!("{:?}", msg.role).to_lowercase(),
+                parts,
+                assistant_meta: msg.assistant.as_ref().map(|a| state::MobileAssistantMeta {
+                    model_id: a.model_id.clone(),
+                    cost: a.cost,
+                    manifest: a.manifest.as_ref().map(state::to_mobile_manifest),
+                }),
+            }
+        })
+        .collect()
+}
+
 fn translate_message(
     msg: &ServerMessage,
     conn_state: &Arc<ConnState>,
@@ -1168,86 +1258,32 @@ fn translate_message(
             // Rebuild session state from history replay.
             let mut ss_lock = conn_state.session_state.lock().unwrap();
             if let Some(ss) = ss_lock.as_mut() {
-                ss.messages.clear();
-                for msg in messages {
-                    let parts: Vec<_> = msg
-                        .parts
-                        .iter()
-                        .map(|p| match p {
-                            Part::Text(tp) => state::MessagePart {
-                                id: tp.base.id.to_string(),
-                                kind: state::PartKind::Text,
-                                text: Some(tp.text.clone()),
-                                tool_name: None,
-                                tool_state: None,
-                                tool_input: None,
-                                tool_output: None,
-                                tool_error: None,
-                                tool_call_id: None,
-                                tool_time_start: None,
-                                tool_time_end: None,
-                                tool_sensitivity: None,
-                            },
-                            Part::Reasoning(rp) => state::MessagePart {
-                                id: rp.base.id.to_string(),
-                                kind: state::PartKind::Reasoning,
-                                text: Some(rp.text.clone()),
-                                tool_name: None,
-                                tool_state: None,
-                                tool_input: None,
-                                tool_output: None,
-                                tool_error: None,
-                                tool_call_id: None,
-                                tool_time_start: None,
-                                tool_time_end: None,
-                                tool_sensitivity: None,
-                            },
-                            Part::ToolCall(tcp) => {
-                                let (input_str, output, error, time_start, time_end) =
-                                    state::tool_state_fields(&tcp.state);
-                                state::MessagePart {
-                                    id: tcp.base.id.to_string(),
-                                    kind: state::PartKind::ToolCall,
-                                    text: None,
-                                    tool_name: Some(tcp.tool_name.clone()),
-                                    tool_state: Some(format!("{:?}", tcp.state).to_lowercase()),
-                                    tool_input: input_str,
-                                    tool_output: output,
-                                    tool_error: error,
-                                    tool_call_id: Some(tcp.call_id.clone()),
-                                    tool_time_start: time_start,
-                                    tool_time_end: time_end,
-                                    tool_sensitivity: None,
-                                }
-                            }
-                            _ => state::MessagePart {
-                                id: ulid::Ulid::new().to_string(),
-                                kind: state::PartKind::Error,
-                                text: None,
-                                tool_name: None,
-                                tool_state: None,
-                                tool_input: None,
-                                tool_output: None,
-                                tool_error: None,
-                                tool_call_id: None,
-                                tool_time_start: None,
-                                tool_time_end: None,
-                                tool_sensitivity: None,
-                            },
-                        })
-                        .collect();
-                    ss.messages.push(state::ChatMessage {
-                        id: ulid::Ulid::new().to_string(),
-                        role: format!("{:?}", msg.role).to_lowercase(),
-                        parts,
-                        assistant_meta: msg.assistant.as_ref().map(|a| {
-                            state::MobileAssistantMeta {
-                                model_id: a.model_id.clone(),
-                                cost: a.cost,
-                                manifest: a.manifest.as_ref().map(state::to_mobile_manifest),
-                            }
-                        }),
-                    });
+                ss.messages = project_history_messages(messages);
+            }
+            let session_id = ss_lock.as_ref().map(|s| s.session_id.clone());
+            drop(ss_lock);
+            if let Some(sid) = session_id {
+                events.push(CoreEvent::SessionReloaded {
+                    daemon: d,
+                    session_id: sid,
+                });
+            }
+        }
+
+        ServerMessage::SessionHistoryPage {
+            messages, replace, ..
+        } => {
+            // The mobile projection currently has no history paginator, but
+            // it still accepts pages so desktop-sized daemon histories do not
+            // break the shared protocol.
+            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            if let Some(ss) = ss_lock.as_mut() {
+                let mut page_messages = project_history_messages(messages);
+                if *replace {
+                    ss.messages = page_messages;
+                } else {
+                    page_messages.append(&mut ss.messages);
+                    ss.messages = page_messages;
                 }
             }
             let session_id = ss_lock.as_ref().map(|s| s.session_id.clone());

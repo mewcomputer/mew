@@ -227,6 +227,8 @@ impl DesktopShell {
                 event.count,
                 event.is_following_tail,
             );
+            let reached_history_top =
+                event.is_scrolled && event.count > 0 && event.visible_range.start == 0;
             let shell_ref = shell_ref.clone();
             cx.defer(move |cx| {
                 let _ = shell_ref.update(cx, |shell, cx| {
@@ -234,6 +236,9 @@ impl DesktopShell {
                         shell.transcript_scrolled_away = scrolled_away;
                         shell.capture_session_view_state();
                         cx.notify();
+                    }
+                    if reached_history_top {
+                        shell.request_older_history();
                     }
                 });
             });
@@ -284,6 +289,8 @@ impl DesktopShell {
             auxiliary_view: AuxiliaryView::Changes,
             transcript_list,
             transcript_scrolled_away: false,
+            history_before: None,
+            history_loading: false,
             pending_transcript_scroll_anchor: None,
             transcript_rows: Vec::new(),
             transcript_rows_append_only: false,

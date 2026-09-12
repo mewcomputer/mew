@@ -28,9 +28,9 @@ use mew_message::Part;
 use mew_protocol::{ClientMessage, PermissionDecision as WirePermissionDecision, ServerMessage};
 use mew_provider::ProviderEvent;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tracing::warn;
-use tungstenite::Message;
+use tungstenite::{protocol::WebSocketConfig, Message};
 
 /// Shared state for pending request/response pairs.
 struct ClientState {
@@ -79,7 +79,13 @@ impl DaemonClient {
     /// SessionTitleChanged, SessionAlert, etc. The caller should drain
     /// it in the main event loop via `tokio::select!`.
     pub async fn connect(url: &str) -> Result<(Self, mpsc::Receiver<ServerMessage>)> {
-        let (ws_stream, _response) = connect_async(url).await.context("connect to daemon")?;
+        let config = WebSocketConfig {
+            max_frame_size: None,
+            ..WebSocketConfig::default()
+        };
+        let (ws_stream, _response) = connect_async_with_config(url, Some(config), false)
+            .await
+            .context("connect to daemon")?;
 
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
@@ -811,6 +817,7 @@ async fn translate_server_message(
         // AgentEvent — the TUI handles them via the reducer.
         ServerMessage::SessionList { .. }
         | ServerMessage::SessionHistory { .. }
+        | ServerMessage::SessionHistoryPage { .. }
         | ServerMessage::SessionTitleChanged { .. }
         | ServerMessage::SessionSummaryChanged { .. }
         | ServerMessage::SessionAlert { .. }

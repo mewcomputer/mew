@@ -1309,9 +1309,20 @@ pub(super) fn client_event_requires_transcript_snapshot(event: &ClientEvent) -> 
         event,
         ClientEvent::SessionReady { .. }
             | ClientEvent::SessionHistoryLoaded { .. }
+            | ClientEvent::SessionHistoryPageLoaded { .. }
             | ClientEvent::MessageChanged { .. }
             | ClientEvent::RequiredActionChanged { .. }
             | ClientEvent::RequestResolved { .. }
+    )
+}
+
+pub(super) fn client_event_requires_transcript_remeasure(event: &ClientEvent) -> bool {
+    matches!(
+        event,
+        ClientEvent::SessionReady { .. }
+            | ClientEvent::SessionHistoryLoaded { .. }
+            | ClientEvent::SessionHistoryPageLoaded { .. }
+            | ClientEvent::MessageChanged { .. }
     )
 }
 

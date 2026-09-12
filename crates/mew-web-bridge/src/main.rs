@@ -24,8 +24,8 @@ use futures::{SinkExt, StreamExt};
 use include_dir::{include_dir, Dir};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
-use tokio_tungstenite::tungstenite::client::ClientRequestBuilder;
-use tokio_tungstenite::{client_async, WebSocketStream};
+use tokio_tungstenite::tungstenite::{client::ClientRequestBuilder, protocol::WebSocketConfig};
+use tokio_tungstenite::{client_async_with_config, WebSocketStream};
 use tracing::{error, info, warn};
 
 /// The built React app, embedded at compile time from `mew-web-ui/dist/`.
@@ -245,7 +245,11 @@ async fn connect_to_daemon(socket_path: &str) -> Result<WebSocketStream<UnixStre
         .with_header("Upgrade", "websocket")
         .with_header("Sec-WebSocket-Version", "13")
         .with_header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==");
-    let (ws, _resp) = client_async(req, stream)
+    let config = WebSocketConfig {
+        max_frame_size: None,
+        ..WebSocketConfig::default()
+    };
+    let (ws, _resp) = client_async_with_config(req, stream, Some(config))
         .await
         .context("client-side WS handshake to daemon")?;
     Ok(ws)

@@ -972,6 +972,26 @@ impl App {
                 self.pending_md_rerender = self.messages.last().map(|m| m.id);
                 self.mark_chat_dirty();
             }
+            ServerMessage::SessionHistoryPage {
+                messages, replace, ..
+            } => {
+                if *replace {
+                    self.messages.clear();
+                }
+                if *replace {
+                    self.messages.extend(messages.iter().cloned());
+                } else {
+                    let mut page = messages.clone();
+                    page.append(&mut self.messages);
+                    self.messages = page;
+                }
+                self.md_stream = None;
+                self.md_state = mdstream::DocumentState::new();
+                self.md_render_cache.invalidate();
+                self.auto_scroll = *replace;
+                self.pending_md_rerender = self.messages.last().map(|m| m.id);
+                self.mark_chat_dirty();
+            }
             ServerMessage::ModelSwitched {
                 provider, model, ..
             } => {

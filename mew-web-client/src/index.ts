@@ -36,6 +36,7 @@ export type ClientMessage =
   | { type: "remote_hello"; token?: string; device_name: string }
   | { type: "new_session"; cwd: string | null; client_kind: string }
   | { type: "attach_session"; session_id: string; client_kind: string }
+  | { type: "load_session_history"; session_id: string; before: number; limit?: number }
   | { type: "list_sessions" }
   | { type: "delete_session"; session_id: string }
   | { type: "rename_session"; session_id: string; title: string }
@@ -499,6 +500,13 @@ export type ServerMessage =
   | { type: "session_cleared" }
   | { type: "session_list"; sessions: SessionInfo[] }
   | { type: "session_history"; messages: Message[] }
+  | {
+      type: "session_history_page";
+      session_id: string;
+      messages: Message[];
+      next_cursor?: number;
+      replace: boolean;
+    }
   | { type: "model_list"; models: ModelInfo[] }
   | { type: "model_switched"; provider: string; model: string }
   | { type: "persona_list"; personas: PersonaInfo[] }
@@ -780,6 +788,8 @@ export class MewClient {
   private openPromise: Promise<void> | null = null;
   /** Session id returned by `newSession`. */
   private sessionId: string | null = null;
+  /** Messages currently projected from the most recent history pages. */
+  private sessionHistoryMessages: Message[] = [];
   /** Session lifecycle requests share uncorrelated daemon errors. */
   private sessionCommandTail: Promise<void> = Promise.resolve();
 
@@ -891,6 +901,7 @@ export class MewClient {
       return new Promise<string>((resolve, reject) => {
         const onReady = (data: { session_id: string }) => {
           this.sessionId = data.session_id;
+          this.sessionHistoryMessages = [];
           this.off("session-ready", onReady);
           resolve(data.session_id);
         };
@@ -973,6 +984,7 @@ export class MewClient {
       return new Promise<string>((resolve, reject) => {
         const onReady = (data: { session_id: string }) => {
           this.sessionId = data.session_id;
+          this.sessionHistoryMessages = [];
           this.off("session-ready", onReady);
           this.off("errorMessage", onError);
           resolve(data.session_id);
@@ -987,6 +999,12 @@ export class MewClient {
         this.send({ type: "attach_session", session_id, client_kind: this.clientKind });
       });
     });
+  }
+
+  /** Request older messages for the attached session using the cursor from a
+   *  previous history page. */
+  loadSessionHistory(session_id: string, before: number, limit?: number): void {
+    this.send({ type: "load_session_history", session_id, before, limit });
   }
 
   /** List all sessions known to the daemon (active + persisted idle).
@@ -1364,8 +1382,17 @@ export class MewClient {
         this.emit("session-list", { sessions: msg.sessions });
         break;
       case "session_history":
+        this.sessionHistoryMessages = msg.messages;
         this.emit("session-history", { messages: msg.messages });
         break;
+      case "session_history_page": {
+        const messages = msg.replace
+          ? msg.messages
+          : [...msg.messages, ...this.sessionHistoryMessages];
+        this.sessionHistoryMessages = messages;
+        this.emit("session-history", { messages });
+        break;
+      }
       case "model_list":
         this.emit("model-list", { models: msg.models });
         break;

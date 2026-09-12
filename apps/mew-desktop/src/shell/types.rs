@@ -81,6 +81,8 @@ pub(super) struct DesktopShell {
     pub(super) auxiliary_view: AuxiliaryView,
     pub(super) transcript_list: gpui::ListState,
     pub(super) transcript_scrolled_away: bool,
+    pub(super) history_before: Option<usize>,
+    pub(super) history_loading: bool,
     pub(super) pending_transcript_scroll_anchor: Option<mew_config::DesktopTranscriptScrollAnchor>,
     pub(super) transcript_rows: Vec<TranscriptRenderRow>,
     pub(super) transcript_rows_append_only: bool,

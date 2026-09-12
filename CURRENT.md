@@ -6317,3 +6317,15 @@ The existing rename, pin, archive, and group actions remain available, while
 selection and Escape dismiss the menu cleanly. Verified all 105 desktop tests,
 arch-check, diff checks, and a live `just desktop-dev` interaction showing the
 menu anchored below a thread without row reflow.
+
+## 2026-09-11 — keep desktop chat responsive with bounded history pages
+
+Preserved markdown and tool-output caches across client snapshots, virtualized
+tool diffs, fixed the user bubble width regression, and made the composer a
+focusable accessible text field. Session attach now loads the newest history
+page first; scrolling to the top requests older pages through a cursor, keeping
+large sessions out of a single oversized WebSocket frame. The shared protocol,
+daemon, TUI, mobile, bridge, and web client all accept the paged history shape.
+Verified focused Rust and TypeScript tests, the full desktop and TUI unit
+suites, clippy, arch-check, formatting, diff checks, and a fresh `just
+desktop-dev` visual smoke pass with composer typing and transcript scrolling.
