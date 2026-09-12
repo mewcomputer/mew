@@ -549,13 +549,17 @@ impl DesktopShell {
             || self.permission_picker_open
             || self.thinking_picker_open
             || self.terminal_font_picker_open
-            || self.connection_picker_open;
+            || self.connection_picker_open
+            || self.session_menu_session.is_some()
+            || self.workspace_open_menu.is_some();
         self.model_picker_open = false;
         self.persona_picker_open = false;
         self.permission_picker_open = false;
         self.thinking_picker_open = false;
         self.terminal_font_picker_open = false;
         self.connection_picker_open = false;
+        self.session_menu_session = None;
+        self.workspace_open_menu = None;
         was_open
     }
 
@@ -915,16 +919,10 @@ impl DesktopShell {
     }
 
     pub(super) fn toggle_session_menu(&mut self, session_id: String, cx: &mut Context<Self>) {
-        let row_index = self.sidebar_rows.iter().position(|row| {
-            matches!(row, SidebarRow::Session(conversation) if conversation.session_id == session_id)
-        });
         if self.session_menu_session.as_deref() == Some(session_id.as_str()) {
             self.session_menu_session = None;
         } else {
             self.session_menu_session = Some(session_id);
-        }
-        if let Some(row_index) = row_index {
-            self.sidebar_list.remeasure_items(row_index..row_index + 1);
         }
         cx.notify();
     }

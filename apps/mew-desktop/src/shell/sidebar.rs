@@ -954,140 +954,152 @@ impl DesktopShell {
                             let rename_session_id = session_for_menu.clone();
                             let pin_session_id = session_for_menu.clone();
                             let archive_session_id = session_for_menu.clone();
-                            element.h_auto().child(
-                                div()
-                                    .id(format!("session-menu-{session_for_menu}"))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(2.))
-                                    .ml(px(14.))
-                                    .p(px(4.))
-                                    .rounded(px(7.))
-                                    .border_1()
-                                    .border_color(theme_rgb(&self.theme, "divider"))
-                                    .bg(theme_rgb(&self.theme, "panel.background"))
-                                    .role(Role::Menu)
-                                    .aria_label("Conversation options")
-                                    .child(session_menu_item(
-                                        &self.theme,
-                                        format!("rename-option-{session_for_menu}"),
-                                        TablerIcon::Pencil,
-                                        "Rename",
-                                        "Rename conversation",
-                                        move |shell, window, cx| {
-                                            shell.begin_rename(
-                                                rename_session_id.clone(),
-                                                window,
-                                                cx,
-                                            );
-                                        },
-                                        cx,
-                                    ))
-                                    .child(session_menu_item(
-                                        &self.theme,
-                                        format!("pin-option-{session_for_menu}"),
-                                        TablerIcon::Pin,
-                                        if pinned { "Unpin" } else { "Pin" },
-                                        if pinned {
-                                            "Unpin conversation"
-                                        } else {
-                                            "Pin conversation"
-                                        },
-                                        move |shell, _, cx| {
-                                            shell.pin_session(pin_session_id.clone(), !pinned, cx);
-                                        },
-                                        cx,
-                                    ))
-                                    .child(session_menu_item(
-                                        &self.theme,
-                                        format!("archive-option-{session_for_menu}"),
-                                        TablerIcon::Archive,
-                                        if archived { "Unarchive" } else { "Archive" },
-                                        if archived {
-                                            "Unarchive conversation"
-                                        } else {
-                                            "Archive conversation"
-                                        },
-                                        move |shell, _, cx| {
-                                            shell.archive_session(
-                                                archive_session_id.clone(),
-                                                !archived,
-                                                cx,
-                                            );
-                                        },
-                                        cx,
-                                    ))
-                                    .child(
-                                        div()
-                                            .h(px(1.))
-                                            .mx(px(4.))
-                                            .my(px(2.))
-                                            .bg(theme_rgb(&self.theme, "divider")),
-                                    )
-                                    .child(
-                                        div()
-                                            .px(px(7.))
-                                            .pb(px(2.))
-                                            .text_xs()
-                                            .text_color(theme_rgb(&self.theme, "text.muted"))
-                                            .child("Move to group"),
-                                    )
-                                    .child({
-                                        let session_id = session_for_menu.clone();
-                                        let no_group = div()
-                                            .id(format!("group-option-none-{session_for_menu}"))
-                                            .h(px(28.))
-                                            .flex()
-                                            .items_center()
-                                            .px(px(7.))
-                                            .rounded(px(5.))
-                                            .cursor_pointer()
-                                            .role(Role::MenuItem)
-                                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                            .aria_selected(current_group_id.is_none())
-                                            .aria_label("Remove conversation from its group")
-                                            .text_xs()
-                                            .text_color(theme_rgb(&self.theme, "text.muted"))
-                                            .hover(|element| {
-                                                element.bg(theme_rgb(&self.theme, "muted"))
-                                            })
-                                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                                cx.stop_propagation();
-                                                shell.assign_session_group(
-                                                    session_id.clone(),
-                                                    None,
+                            element.child(
+                                deferred(
+                                    div()
+                                        .id(format!("session-menu-{session_for_menu}"))
+                                        .absolute()
+                                        .top(px(row_height))
+                                        .left(px(14.))
+                                        .w(px(224.))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.))
+                                        .p(px(4.))
+                                        .rounded(px(7.))
+                                        .border_1()
+                                        .border_color(theme_rgb(&self.theme, "divider"))
+                                        .bg(theme_rgb(&self.theme, "panel.background"))
+                                        .role(Role::Menu)
+                                        .aria_label("Conversation options")
+                                        .child(session_menu_item(
+                                            &self.theme,
+                                            format!("rename-option-{session_for_menu}"),
+                                            TablerIcon::Pencil,
+                                            "Rename",
+                                            "Rename conversation",
+                                            move |shell, window, cx| {
+                                                shell.begin_rename(
+                                                    rename_session_id.clone(),
+                                                    window,
                                                     cx,
                                                 );
-                                            }))
-                                            .child("No group");
-                                        div()
-                                            .id(format!("group-options-{session_for_menu}"))
-                                            .flex()
-                                            .flex_col()
-                                            .max_h(px(168.))
-                                            .overflow_y_scroll()
-                                            .children(std::iter::once(no_group).chain(
-                                                groups.into_iter().map(|group| {
-                                                    let session_id = session_for_menu.clone();
-                                                    let group_id = group.id.clone();
-                                                    let selected = current_group_id.as_deref()
-                                                        == Some(&group_id);
-                                                    div()
-                                                        .id(format!("group-option-{group_id}"))
-                                                        .h(px(28.))
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap(px(6.))
-                                                        .px(px(7.))
-                                                        .rounded(px(5.))
-                                                        .cursor_pointer()
-                                                        .role(Role::MenuItem)
-                                                        .desktop_focus(theme_rgb(
-                                                            &self.theme,
-                                                            "text.accent",
-                                                        ))
-                                                        .aria_selected(selected)
-                                                        .aria_label(SharedString::from(format!(
+                                            },
+                                            cx,
+                                        ))
+                                        .child(session_menu_item(
+                                            &self.theme,
+                                            format!("pin-option-{session_for_menu}"),
+                                            TablerIcon::Pin,
+                                            if pinned { "Unpin" } else { "Pin" },
+                                            if pinned {
+                                                "Unpin conversation"
+                                            } else {
+                                                "Pin conversation"
+                                            },
+                                            move |shell, _, cx| {
+                                                shell.pin_session(
+                                                    pin_session_id.clone(),
+                                                    !pinned,
+                                                    cx,
+                                                );
+                                            },
+                                            cx,
+                                        ))
+                                        .child(session_menu_item(
+                                            &self.theme,
+                                            format!("archive-option-{session_for_menu}"),
+                                            TablerIcon::Archive,
+                                            if archived { "Unarchive" } else { "Archive" },
+                                            if archived {
+                                                "Unarchive conversation"
+                                            } else {
+                                                "Archive conversation"
+                                            },
+                                            move |shell, _, cx| {
+                                                shell.archive_session(
+                                                    archive_session_id.clone(),
+                                                    !archived,
+                                                    cx,
+                                                );
+                                            },
+                                            cx,
+                                        ))
+                                        .child(
+                                            div()
+                                                .h(px(1.))
+                                                .mx(px(4.))
+                                                .my(px(2.))
+                                                .bg(theme_rgb(&self.theme, "divider")),
+                                        )
+                                        .child(
+                                            div()
+                                                .px(px(7.))
+                                                .pb(px(2.))
+                                                .text_xs()
+                                                .text_color(theme_rgb(&self.theme, "text.muted"))
+                                                .child("Move to group"),
+                                        )
+                                        .child({
+                                            let session_id = session_for_menu.clone();
+                                            let no_group = div()
+                                                .id(format!("group-option-none-{session_for_menu}"))
+                                                .h(px(28.))
+                                                .flex()
+                                                .items_center()
+                                                .px(px(7.))
+                                                .rounded(px(5.))
+                                                .cursor_pointer()
+                                                .role(Role::MenuItem)
+                                                .desktop_focus(theme_rgb(
+                                                    &self.theme,
+                                                    "text.accent",
+                                                ))
+                                                .aria_selected(current_group_id.is_none())
+                                                .aria_label("Remove conversation from its group")
+                                                .text_xs()
+                                                .text_color(theme_rgb(&self.theme, "text.muted"))
+                                                .hover(|element| {
+                                                    element.bg(theme_rgb(&self.theme, "muted"))
+                                                })
+                                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    shell.assign_session_group(
+                                                        session_id.clone(),
+                                                        None,
+                                                        cx,
+                                                    );
+                                                }))
+                                                .child("No group");
+                                            div()
+                                                .id(format!("group-options-{session_for_menu}"))
+                                                .flex()
+                                                .flex_col()
+                                                .max_h(px(168.))
+                                                .overflow_y_scroll()
+                                                .children(std::iter::once(no_group).chain(
+                                                    groups.into_iter().map(|group| {
+                                                        let session_id = session_for_menu.clone();
+                                                        let group_id = group.id.clone();
+                                                        let selected = current_group_id.as_deref()
+                                                            == Some(&group_id);
+                                                        div()
+                                                            .id(format!("group-option-{group_id}"))
+                                                            .h(px(28.))
+                                                            .flex()
+                                                            .items_center()
+                                                            .gap(px(6.))
+                                                            .px(px(7.))
+                                                            .rounded(px(5.))
+                                                            .cursor_pointer()
+                                                            .role(Role::MenuItem)
+                                                            .desktop_focus(theme_rgb(
+                                                                &self.theme,
+                                                                "text.accent",
+                                                            ))
+                                                            .aria_selected(selected)
+                                                            .aria_label(SharedString::from(
+                                                                format!(
                                                             "Move conversation to group {}{}",
                                                             group.name,
                                                             if selected {
@@ -1095,41 +1107,50 @@ impl DesktopShell {
                                                             } else {
                                                                 ""
                                                             }
-                                                        )))
-                                                        .text_xs()
-                                                        .hover(|element| {
-                                                            element
-                                                                .bg(theme_rgb(&self.theme, "muted"))
-                                                        })
-                                                        .on_click(cx.listener(
-                                                            move |shell, _, _, cx| {
-                                                                cx.stop_propagation();
-                                                                shell.assign_session_group(
-                                                                    session_id.clone(),
-                                                                    Some(group_id.clone()),
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        ))
-                                                        .child(
-                                                            div().size(px(6.)).rounded_full().bg(
-                                                                theme_rgb(&self.theme, "accent"),
-                                                            ),
-                                                        )
-                                                        .child(
-                                                            div()
-                                                                .flex_1()
-                                                                .min_w_0()
-                                                                .overflow_hidden()
-                                                                .whitespace_nowrap()
-                                                                .text_ellipsis()
-                                                                .child(SharedString::from(
-                                                                    group.name,
-                                                                )),
-                                                        )
-                                                }),
-                                            ))
-                                    }),
+                                                        ),
+                                                            ))
+                                                            .text_xs()
+                                                            .hover(|element| {
+                                                                element.bg(theme_rgb(
+                                                                    &self.theme,
+                                                                    "muted",
+                                                                ))
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                move |shell, _, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    shell.assign_session_group(
+                                                                        session_id.clone(),
+                                                                        Some(group_id.clone()),
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            ))
+                                                            .child(
+                                                                div()
+                                                                    .size(px(6.))
+                                                                    .rounded_full()
+                                                                    .bg(theme_rgb(
+                                                                        &self.theme,
+                                                                        "accent",
+                                                                    )),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .flex_1()
+                                                                    .min_w_0()
+                                                                    .overflow_hidden()
+                                                                    .whitespace_nowrap()
+                                                                    .text_ellipsis()
+                                                                    .child(SharedString::from(
+                                                                        group.name,
+                                                                    )),
+                                                            )
+                                                    }),
+                                                ))
+                                        }),
+                                )
+                                .with_priority(9),
                             )
                         })
                         .into_any_element(),

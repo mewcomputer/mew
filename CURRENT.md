@@ -6308,3 +6308,12 @@ terminal, copy-path, and pin actions now live in one anchored workspace options
 menu, removing the split open control from the row. Verified desktop check and
 focused destination tests, then exercised the compact header, menu sections,
 pin action, and copy-path interaction in `just desktop-dev`.
+
+## 2026-09-11 — make thread menus floating overlays
+
+Reworked per-thread overflow menus so they render as deferred absolute
+overlays instead of inline children that remeasure and push the session list.
+The existing rename, pin, archive, and group actions remain available, while
+selection and Escape dismiss the menu cleanly. Verified all 105 desktop tests,
+arch-check, diff checks, and a live `just desktop-dev` interaction showing the
+menu anchored below a thread without row reflow.
