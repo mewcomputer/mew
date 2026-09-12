@@ -68,6 +68,7 @@ impl DesktopShell {
             .cloned()
             .collect();
         let expanded_workspaces = BTreeSet::new();
+        let workspace_open_destinations = detect_workspace_open_destinations();
         let sidebar_width = persisted_state
             .desktop_sidebar_width
             .unwrap_or(SIDEBAR_EXPANDED_WIDTH)
@@ -252,6 +253,9 @@ impl DesktopShell {
             sidebar_width,
             collapsed_groups,
             expanded_workspaces,
+            workspace_open_menu: None,
+            workspace_open_destinations,
+            remembered_editor: persisted_state.desktop_external_editor,
             sidebar_search: String::new(),
             sidebar_search_focus_handle,
             sidebar_focus_handle,

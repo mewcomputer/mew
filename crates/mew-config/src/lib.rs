@@ -568,6 +568,9 @@ pub struct State {
     /// Theme used when the native desktop is in dark mode.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub desktop_dark_theme: String,
+    /// Native desktop application used by the workspace open split control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_external_editor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1085,6 +1088,20 @@ values = ["sk_test_deadbeef"]
     }
 
     #[test]
+    fn test_state_external_editor_roundtrip_and_legacy_default() {
+        let legacy: State = toml::from_str("desktop_theme_mode = \"dark\"\n").unwrap();
+        assert_eq!(legacy.desktop_external_editor, None);
+
+        let state = State {
+            desktop_external_editor: Some("zed".into()),
+            ..Default::default()
+        };
+        let serialized = toml::to_string_pretty(&state).unwrap();
+        let deserialized: State = toml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.desktop_external_editor.as_deref(), Some("zed"));
+    }
+
+    #[test]
     fn test_state_desktop_window_roundtrip() {
         let mut session_views = HashMap::new();
         session_views.insert(
@@ -1342,6 +1359,7 @@ values = ["sk_test_deadbeef"]
             desktop_theme_mode: "system".into(),
             desktop_light_theme: "light".into(),
             desktop_dark_theme: "dark".into(),
+            desktop_external_editor: None,
             desktop_session_views: HashMap::new(),
             desktop_collapsed_groups: vec![],
             desktop_sidebar_width: None,

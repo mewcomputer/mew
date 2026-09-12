@@ -400,6 +400,7 @@ impl DesktopShell {
         self.layout.write_state(&mut state);
         state.desktop_collapsed_groups = self.collapsed_groups.iter().cloned().collect();
         state.desktop_sidebar_width = Some(self.sidebar_width);
+        state.desktop_external_editor = self.remembered_editor.clone();
         state.desktop_session_views = self
             .session_view_states
             .iter()
@@ -854,6 +855,74 @@ impl DesktopShell {
             path: workspace_path,
             pinned,
         });
+        cx.notify();
+    }
+
+    pub(super) fn toggle_workspace_open_menu(
+        &mut self,
+        workspace_path: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_open_menu.as_deref() == Some(workspace_path.as_str()) {
+            self.workspace_open_menu = None;
+        } else {
+            self.workspace_open_destinations = detect_workspace_open_destinations();
+            self.workspace_open_menu = Some(workspace_path);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn open_workspace_primary(
+        &mut self,
+        workspace_path: String,
+        cx: &mut Context<Self>,
+    ) {
+        let destination = primary_workspace_destination(
+            self.remembered_editor.as_deref(),
+            &self.workspace_open_destinations,
+        );
+        self.open_workspace_destination(workspace_path, destination, cx);
+    }
+
+    pub(super) fn open_workspace_destination(
+        &mut self,
+        workspace_path: String,
+        destination: WorkspaceOpenDestination,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(
+            self.connection_profile.as_ref(),
+            Some(DesktopConnectionProfile::RemoteIroh { .. })
+        ) {
+            self.model.last_error =
+                Some("local workspace actions are unavailable for a remote daemon".into());
+            cx.notify();
+            return;
+        }
+        if matches!(destination, WorkspaceOpenDestination::CopyPath) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(workspace_path));
+            self.workspace_open_menu = None;
+            cx.notify();
+            return;
+        }
+        let Some(command) = workspace_open_command(&destination, &workspace_path) else {
+            return;
+        };
+        match std::process::Command::new(&command.program)
+            .args(&command.args)
+            .spawn()
+        {
+            Ok(_) => {
+                if let WorkspaceOpenDestination::Application { id, .. } = destination {
+                    self.remembered_editor = Some(id);
+                    self.persist_layout();
+                }
+                self.workspace_open_menu = None;
+            }
+            Err(error) => {
+                self.model.last_error = Some(format!("could not open workspace: {error}"));
+            }
+        }
         cx.notify();
     }
 

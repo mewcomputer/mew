@@ -1,6 +1,133 @@
 use super::*;
 use unicode_segmentation::UnicodeSegmentation;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum WorkspaceOpenDestination {
+    DefaultApp,
+    Terminal,
+    Application { id: String, label: String },
+    CopyPath,
+}
+
+impl WorkspaceOpenDestination {
+    pub(super) fn label(&self) -> &str {
+        match self {
+            Self::DefaultApp => "Default app",
+            Self::Terminal => "Open in Terminal",
+            Self::Application { label, .. } => label,
+            Self::CopyPath => "Copy path",
+        }
+    }
+
+    pub(super) fn application_id(&self) -> Option<&str> {
+        match self {
+            Self::Application { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WorkspaceOpenCommand {
+    pub(super) program: String,
+    pub(super) args: Vec<String>,
+}
+
+pub(super) fn workspace_open_command(
+    destination: &WorkspaceOpenDestination,
+    path: &str,
+) -> Option<WorkspaceOpenCommand> {
+    if path.is_empty() {
+        return None;
+    }
+    let command = match destination {
+        WorkspaceOpenDestination::DefaultApp => WorkspaceOpenCommand {
+            program: platform_open_program().into(),
+            args: vec![path.into()],
+        },
+        WorkspaceOpenDestination::Terminal => WorkspaceOpenCommand {
+            program: platform_open_program().into(),
+            args: platform_open_application_args("Terminal", path),
+        },
+        WorkspaceOpenDestination::Application { id, .. } => WorkspaceOpenCommand {
+            program: platform_open_program().into(),
+            args: platform_open_application_args(id, path),
+        },
+        WorkspaceOpenDestination::CopyPath => return None,
+    };
+    Some(command)
+}
+
+pub(super) fn primary_workspace_destination(
+    remembered_editor: Option<&str>,
+    available: &[WorkspaceOpenDestination],
+) -> WorkspaceOpenDestination {
+    remembered_editor
+        .and_then(|id| {
+            available
+                .iter()
+                .find(|destination| destination.application_id() == Some(id))
+        })
+        .cloned()
+        .unwrap_or(WorkspaceOpenDestination::DefaultApp)
+}
+
+pub(super) fn detect_workspace_open_destinations() -> Vec<WorkspaceOpenDestination> {
+    let mut destinations = vec![
+        WorkspaceOpenDestination::DefaultApp,
+        WorkspaceOpenDestination::Terminal,
+    ];
+    for (id, label) in [
+        ("Zed", "Zed"),
+        ("Visual Studio Code", "Visual Studio Code"),
+        ("Cursor", "Cursor"),
+        ("Xcode", "Xcode"),
+        ("Android Studio", "Android Studio"),
+    ] {
+        if application_available(id) {
+            destinations.push(WorkspaceOpenDestination::Application {
+                id: id.into(),
+                label: label.into(),
+            });
+        }
+    }
+    destinations.push(WorkspaceOpenDestination::CopyPath);
+    destinations
+}
+
+#[cfg(target_os = "macos")]
+fn application_available(name: &str) -> bool {
+    std::process::Command::new("open")
+        .args(["-Ra", name])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn application_available(_name: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+const fn platform_open_program() -> &'static str {
+    "open"
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn platform_open_program() -> &'static str {
+    "xdg-open"
+}
+
+#[cfg(target_os = "macos")]
+fn platform_open_application_args(application: &str, path: &str) -> Vec<String> {
+    vec!["-a".into(), application.into(), path.into()]
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_open_application_args(_application: &str, path: &str) -> Vec<String> {
+    vec![path.into()]
+}
+
 pub(super) trait DesktopFocusExt: gpui::InteractiveElement + Sized {
     fn desktop_focus(self, color: gpui::Rgba) -> Self {
         self.tab_index(0)
@@ -989,6 +1116,57 @@ mod workspace_tests {
         assert!(!rows
             .iter()
             .any(|row| matches!(row, SidebarRow::ShowMore { .. })));
+    }
+}
+
+#[cfg(test)]
+mod workspace_open_tests {
+    use super::*;
+
+    #[test]
+    fn remembered_editor_falls_back_when_unavailable() {
+        let available = vec![WorkspaceOpenDestination::DefaultApp];
+        assert_eq!(
+            primary_workspace_destination(Some("Zed"), &available),
+            WorkspaceOpenDestination::DefaultApp
+        );
+    }
+
+    #[test]
+    fn remembered_editor_becomes_primary_when_available() {
+        let available = vec![
+            WorkspaceOpenDestination::DefaultApp,
+            WorkspaceOpenDestination::Application {
+                id: "Zed".into(),
+                label: "Zed".into(),
+            },
+        ];
+        assert_eq!(
+            primary_workspace_destination(Some("Zed"), &available),
+            available[1]
+        );
+    }
+
+    #[test]
+    fn open_command_keeps_paths_as_distinct_arguments() {
+        let destination = WorkspaceOpenDestination::Application {
+            id: "Zed".into(),
+            label: "Zed".into(),
+        };
+        let command = workspace_open_command(&destination, "/tmp/my project").unwrap();
+        assert_eq!(
+            command.args.last().map(String::as_str),
+            Some("/tmp/my project")
+        );
+        assert!(!command.args.iter().any(|arg| arg.contains('"')));
+    }
+
+    #[test]
+    fn empty_workspace_has_no_external_command() {
+        assert_eq!(
+            workspace_open_command(&WorkspaceOpenDestination::DefaultApp, ""),
+            None
+        );
     }
 }
 

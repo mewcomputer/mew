@@ -6288,3 +6288,15 @@ converge. The GPUI workspace header now exposes an accessible pin/unpin control.
 Verified protocol roundtrip, sidecar persistence, formatting, diff checks,
 daemon/desktop clippy, and a live `just desktop-dev` smoke pass that pinned,
 observed reordering, and restored the test state.
+
+## 2026-09-11 — add local workspace open destinations
+
+Added a persisted desktop external-editor preference and a workspace split
+control with a remembered primary action plus a separate chevron menu. The
+menu detects available local destinations, groups editor choices separately
+from actions, supports Terminal and copy-path actions, and refuses local-path
+launches for remote daemon profiles. Launch arguments remain structured so
+workspace paths with spaces are preserved. Verified config and desktop focused
+tests, desktop check and clippy, and a live `just desktop-dev` smoke pass that
+restored Zed, opened the destination menu, selected the editor, and copied a
+workspace path.
