@@ -204,8 +204,34 @@ mod shell_tests {
         assert_eq!(model_picker_list_height(0), px(64.));
         assert_eq!(model_picker_list_height(5), px(320.));
         assert_eq!(model_picker_list_height(32), px(320.));
-        assert_eq!(model_picker_height(32), px(336.));
-        assert_eq!(model_picker_list_height(32), persona_picker_list_height(32));
+        assert_eq!(model_picker_height(32), px(372.));
+        assert_eq!(persona_picker_list_height(2), px(176.));
+        assert_eq!(persona_picker_list_height(32), px(440.));
+    }
+
+    #[test]
+    fn model_picker_query_matches_ids_and_descriptions() {
+        assert!(model_matches_query(
+            "openai/gpt-5",
+            "openai",
+            "gpt-5",
+            Some("fast coding model"),
+            "coding"
+        ));
+        assert!(model_matches_query(
+            "anthropic/claude",
+            "anthropic",
+            "claude",
+            None,
+            "ANTHROPIC"
+        ));
+        assert!(!model_matches_query(
+            "openai/gpt-5",
+            "openai",
+            "gpt-5",
+            Some("fast coding model"),
+            "vision"
+        ));
     }
 
     #[test]

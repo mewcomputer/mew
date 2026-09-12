@@ -1,3 +1,18 @@
+# 2026-09-12 — make desktop persona and model pickers usable
+
+Persona options now size to their wrapped content inside a bounded scroll area,
+so longer descriptions no longer clip the next option. The model picker adds a
+focused, IME-capable search field with case-insensitive matching across model
+IDs, providers, names, and descriptions, plus clear and empty-result states;
+choosing a model restores composer focus instead of leaving the hidden search
+field active.
+Picker wheel events stop at the overlay, keeping the conversation from scrolling
+behind it while the model list remains virtualized. Coverage includes model
+matching and updated picker sizing; the rebuilt debug bundle was exercised with
+persona selection, model filtering, clearing, empty search, and model-list wheel
+scrolling. `cargo test -p mew-desktop` (107), clippy, fmt, `just arch-check`, and
+`git diff --check` are clean.
+
 # 2026-09-12 — stabilize transcript prepends and add conversation scrolling
 
 Desktop history loading now splices newly fetched rows into the existing GPUI

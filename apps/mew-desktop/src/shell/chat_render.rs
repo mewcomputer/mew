@@ -1848,8 +1848,8 @@ impl DesktopShell {
                                                     .hover(|element| {
                                                         element.bg(theme_rgb(&self.theme, "muted"))
                                                     })
-                                                    .on_click(cx.listener(|shell, _, _, cx| {
-                                                        shell.toggle_model_picker(cx);
+                                                    .on_click(cx.listener(|shell, _, window, cx| {
+                                                        shell.toggle_model_picker(window, cx);
                                                     }))
                                                     .flex()
                                                     .items_center()
@@ -2295,11 +2295,26 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let window_height = window.bounds().size.height;
+        let model_option_count = self
+            .model
+            .ui
+            .models
+            .iter()
+            .filter(|model| {
+                model_matches_query(
+                    &model.id,
+                    &model.provider,
+                    &model.model,
+                    model.description.as_deref(),
+                    &self.model_picker_query,
+                )
+            })
+            .count();
         let model_position = self.model_picker_open.then(|| {
             self.model_picker_bounds.map(|bounds| {
                 picker_popup_position_in_window(
                     bounds,
-                    model_picker_height(self.model.ui.models.len()),
+                    model_picker_height(model_option_count),
                     window_height,
                     px(8.),
                     px(8.),

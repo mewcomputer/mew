@@ -10,7 +10,11 @@ impl Render for DesktopShell {
             || self.terminal_font_picker_open
             || self.connection_picker_open
         {
-            let focus_handle = self.popover_focus_handle.clone();
+            let focus_handle = if self.model_picker_open {
+                self.model_picker_focus_handle.clone()
+            } else {
+                self.popover_focus_handle.clone()
+            };
             if !focus_handle.is_focused(window) {
                 window.defer(cx, move |window, cx| {
                     window.focus(&focus_handle, cx);

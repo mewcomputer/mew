@@ -7,6 +7,7 @@ pub(super) enum TextInputTarget {
     BrowserUrl,
     Rename,
     SidebarSearch,
+    ModelSearch,
 }
 
 pub(super) struct ComposerElement {
@@ -32,7 +33,9 @@ fn normalized_browser_url_range(text: &str, range: &Range<usize>) -> Range<usize
 
 impl DesktopShell {
     fn text_input_target(&self, window: &Window) -> TextInputTarget {
-        if self.sidebar_search_focus_handle.is_focused(window) {
+        if self.model_picker_open && self.model_picker_focus_handle.is_focused(window) {
+            TextInputTarget::ModelSearch
+        } else if self.sidebar_search_focus_handle.is_focused(window) {
             TextInputTarget::SidebarSearch
         } else if self.browser_url_focus_handle.is_focused(window) {
             TextInputTarget::BrowserUrl
@@ -49,6 +52,7 @@ impl DesktopShell {
             TextInputTarget::BrowserUrl => &self.browser_url,
             TextInputTarget::Rename => &self.rename_draft,
             TextInputTarget::SidebarSearch => &self.sidebar_search,
+            TextInputTarget::ModelSearch => &self.model_picker_query,
         }
     }
 
@@ -60,6 +64,7 @@ impl DesktopShell {
             }
             TextInputTarget::Rename => self.rename_selection.clone(),
             TextInputTarget::SidebarSearch => self.sidebar_search_selection.clone(),
+            TextInputTarget::ModelSearch => self.model_picker_selection.clone(),
         }
     }
 
@@ -83,6 +88,13 @@ impl DesktopShell {
                     self.sidebar_search_selection.end
                 }
             }
+            TextInputTarget::ModelSearch => {
+                if self.model_picker_selection_reversed {
+                    self.model_picker_selection.start
+                } else {
+                    self.model_picker_selection.end
+                }
+            }
         }
     }
 
@@ -95,6 +107,7 @@ impl DesktopShell {
             }
             TextInputTarget::Rename => self.rename_selection = selection,
             TextInputTarget::SidebarSearch => self.sidebar_search_selection = selection,
+            TextInputTarget::ModelSearch => self.model_picker_selection = selection,
         }
     }
 
@@ -784,6 +797,7 @@ impl Element for ComposerElement {
                 TextInputTarget::BrowserUrl => "browser-url-input",
                 TextInputTarget::Rename => "rename-input",
                 TextInputTarget::SidebarSearch => "sidebar-search-input",
+                TextInputTarget::ModelSearch => "model-picker-search-input",
             }
             .into(),
         ))
@@ -842,6 +856,7 @@ impl Element for ComposerElement {
             TextInputTarget::BrowserUrl => px(28.),
             TextInputTarget::Rename => px(20.),
             TextInputTarget::SidebarSearch => px(20.),
+            TextInputTarget::ModelSearch => px(20.),
         }
         .into();
         (window.request_layout(style, [], cx), ())
@@ -868,6 +883,7 @@ impl Element for ComposerElement {
                     }
                 }
                 TextInputTarget::SidebarSearch => "Search sessions…".to_owned(),
+                TextInputTarget::ModelSearch => "Filter models…".to_owned(),
                 _ => String::new(),
             }
         } else {
@@ -960,6 +976,7 @@ impl Element for ComposerElement {
             TextInputTarget::SidebarSearch => {
                 self.shell.read(cx).sidebar_search_focus_handle.clone()
             }
+            TextInputTarget::ModelSearch => self.shell.read(cx).model_picker_focus_handle.clone(),
         };
         let target = self.target;
         self.shell.update(cx, |shell, _| match target {
@@ -967,6 +984,7 @@ impl Element for ComposerElement {
             TextInputTarget::BrowserUrl => shell.browser_url_bounds = Some(bounds),
             TextInputTarget::Rename => {}
             TextInputTarget::SidebarSearch => {}
+            TextInputTarget::ModelSearch => {}
         });
         window.handle_input(
             &focus_handle,
@@ -1105,6 +1123,7 @@ impl EntityInputHandler for DesktopShell {
                 TextInputTarget::BrowserUrl => self.browser_url_selection_reversed,
                 TextInputTarget::Rename => self.rename_selection_reversed,
                 TextInputTarget::SidebarSearch => self.sidebar_search_selection_reversed,
+                TextInputTarget::ModelSearch => self.model_picker_selection_reversed,
             },
         })
     }
@@ -1124,6 +1143,7 @@ impl EntityInputHandler for DesktopShell {
                 .map(|range| normalized_browser_url_range(&self.browser_url, range)),
             TextInputTarget::Rename => self.rename_marked_range.clone(),
             TextInputTarget::SidebarSearch => self.sidebar_search_marked_range.clone(),
+            TextInputTarget::ModelSearch => self.model_picker_marked_range.clone(),
         };
         marked_range.map(|range| {
             utf16_offset_for_byte(text, range.start)..utf16_offset_for_byte(text, range.end)
@@ -1136,6 +1156,7 @@ impl EntityInputHandler for DesktopShell {
             TextInputTarget::BrowserUrl => self.browser_url_marked_range = None,
             TextInputTarget::Rename => self.rename_marked_range = None,
             TextInputTarget::SidebarSearch => self.sidebar_search_marked_range = None,
+            TextInputTarget::ModelSearch => self.model_picker_marked_range = None,
         }
     }
 
@@ -1152,6 +1173,9 @@ impl EntityInputHandler for DesktopShell {
             TextInputTarget::Rename => self.replace_rename_text(range_utf16, text, cx),
             TextInputTarget::SidebarSearch => {
                 self.replace_sidebar_search_text(range_utf16, text, cx)
+            }
+            TextInputTarget::ModelSearch => {
+                self.replace_model_picker_query_text(range_utf16, text, cx)
             }
         }
     }
@@ -1175,6 +1199,12 @@ impl EntityInputHandler for DesktopShell {
                 self.replace_rename_and_mark(range_utf16, text, new_selected_range_utf16, cx)
             }
             TextInputTarget::SidebarSearch => self.replace_sidebar_search_and_mark(
+                range_utf16,
+                text,
+                new_selected_range_utf16,
+                cx,
+            ),
+            TextInputTarget::ModelSearch => self.replace_model_picker_query_and_mark(
                 range_utf16,
                 text,
                 new_selected_range_utf16,
@@ -1218,6 +1248,7 @@ impl EntityInputHandler for DesktopShell {
             TextInputTarget::BrowserUrl => self.browser_url_selection_reversed = false,
             TextInputTarget::Rename => self.rename_selection_reversed = false,
             TextInputTarget::SidebarSearch => self.sidebar_search_selection_reversed = false,
+            TextInputTarget::ModelSearch => self.model_picker_selection_reversed = false,
         }
     }
 

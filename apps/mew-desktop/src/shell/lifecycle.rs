@@ -183,6 +183,7 @@ impl DesktopShell {
         let browser_url_focus_handle = cx.focus_handle();
         let rename_focus_handle = cx.focus_handle();
         let sidebar_search_focus_handle = cx.focus_handle().tab_stop(true);
+        let model_picker_focus_handle = cx.focus_handle().tab_stop(true);
         let sidebar_focus_handle = cx.focus_handle().tab_stop(true);
         let popover_focus_handle = cx.focus_handle();
         let composer_focus_subscription =
@@ -274,6 +275,12 @@ impl DesktopShell {
             sidebar_search_selection: 0..0,
             sidebar_search_selection_reversed: false,
             sidebar_search_marked_range: None,
+            model_picker_query: String::new(),
+            model_picker_focus_handle,
+            model_picker_selection: 0..0,
+            model_picker_selection_reversed: false,
+            model_picker_marked_range: None,
+            model_picker_filtered_indices: Vec::new(),
             pending_group_deletion: None,
             session_view_states,
             session_menu_session: None,

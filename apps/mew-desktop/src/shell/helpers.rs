@@ -353,15 +353,30 @@ pub(super) fn model_picker_list_height(option_count: usize) -> Pixels {
 }
 
 pub(super) fn model_picker_height(option_count: usize) -> Pixels {
-    model_picker_list_height(option_count) + px(16.)
+    model_picker_list_height(option_count) + px(52.)
 }
 
 pub(super) fn persona_picker_list_height(option_count: usize) -> Pixels {
-    px((option_count.clamp(1, 5) as f32 * 64.).min(320.))
+    px((option_count.clamp(1, 5) as f32 * 88.).min(440.))
 }
 
 pub(super) fn persona_picker_height(option_count: usize) -> Pixels {
     persona_picker_list_height(option_count) + px(16.)
+}
+
+pub(super) fn model_matches_query(
+    id: &str,
+    provider: &str,
+    model: &str,
+    description: Option<&str>,
+    query: &str,
+) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty()
+        || id.to_lowercase().contains(&query)
+        || provider.to_lowercase().contains(&query)
+        || model.to_lowercase().contains(&query)
+        || description.is_some_and(|description| description.to_lowercase().contains(&query))
 }
 
 pub(super) fn should_animate_transcript_row(row_index: usize, row_count: usize) -> bool {
