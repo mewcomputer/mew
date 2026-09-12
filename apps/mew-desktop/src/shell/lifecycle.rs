@@ -221,24 +221,30 @@ impl DesktopShell {
         transcript_list.set_follow_mode(gpui::FollowMode::Tail);
         let shell_ref = cx.entity().downgrade();
         transcript_list.set_scroll_handler(move |event, _window, cx| {
+            let is_scrolled = event.is_scrolled;
             let scrolled_away = transcript_is_scrolled_away(
-                event.is_scrolled,
+                is_scrolled,
                 event.visible_range.end,
                 event.count,
                 event.is_following_tail,
             );
             let reached_history_top =
-                event.is_scrolled && event.count > 0 && event.visible_range.start == 0;
+                is_scrolled && event.count > 0 && event.visible_range.start == 0;
             let shell_ref = shell_ref.clone();
             cx.defer(move |cx| {
                 let _ = shell_ref.update(cx, |shell, cx| {
+                    let scroll_state_changed = shell.transcript_scrolled_away != scrolled_away;
                     if shell.transcript_scrolled_away != scrolled_away {
                         shell.transcript_scrolled_away = scrolled_away;
                         shell.capture_session_view_state();
-                        cx.notify();
                     }
                     if reached_history_top {
                         shell.request_older_history();
+                    }
+                    // The scrollbar thumb is rendered by the shell rather than by the list,
+                    // so keep it in sync with wheel and trackpad scrolling as well.
+                    if scroll_state_changed || is_scrolled {
+                        cx.notify();
                     }
                 });
             });
@@ -289,11 +295,13 @@ impl DesktopShell {
             auxiliary_view: AuxiliaryView::Changes,
             transcript_list,
             transcript_scrolled_away: false,
+            transcript_scrollbar_grab_offset: None,
             history_before: None,
             history_loading: false,
             pending_transcript_scroll_anchor: None,
             transcript_rows: Vec::new(),
             transcript_rows_append_only: false,
+            transcript_rows_prepend_count: None,
             markdown_cache: Vec::new(),
             tool_text_lists: RefCell::new(BTreeMap::new()),
             tool_text_cache: RefCell::new(BTreeMap::new()),

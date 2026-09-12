@@ -108,6 +108,7 @@ impl DesktopShell {
         self.tool_text_cache.borrow_mut().clear();
         self.transcript_rows.clear();
         self.transcript_list.reset(0);
+        self.transcript_rows_prepend_count = None;
         self.history_before = None;
         self.history_loading = false;
         self.transcript_list.set_follow_mode(gpui::FollowMode::Tail);
@@ -316,6 +317,8 @@ impl DesktopShell {
         self.transcript_list.reset(0);
         self.history_before = None;
         self.history_loading = false;
+        self.transcript_scrollbar_grab_offset = None;
+        self.transcript_rows_prepend_count = None;
         self.transcript_list
             .set_follow_mode(if self.pending_transcript_scroll_anchor.is_some() {
                 gpui::FollowMode::Normal

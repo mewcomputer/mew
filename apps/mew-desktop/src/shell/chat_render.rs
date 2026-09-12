@@ -1,5 +1,46 @@
 use super::*;
 
+const TRANSCRIPT_SCROLLBAR_MIN_THUMB: f32 = 28.;
+const TRANSCRIPT_SCROLLBAR_HIT_WIDTH: f32 = 16.;
+const TRANSCRIPT_SCROLLBAR_THUMB_WIDTH: f32 = 6.;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TranscriptScrollbarMetrics {
+    pub(super) viewport_height: f32,
+    pub(super) max_offset: f32,
+    pub(super) thumb_height: f32,
+    pub(super) thumb_top: f32,
+    pub(super) travel: f32,
+}
+
+pub(super) fn transcript_scrollbar_metrics(
+    list: &gpui::ListState,
+) -> Option<TranscriptScrollbarMetrics> {
+    let viewport_height = f32::from(list.viewport_bounds().size.height);
+    let max_offset = f32::from(list.max_offset_for_scrollbar().y).max(0.);
+    if viewport_height <= 1. || max_offset <= 1. {
+        return None;
+    }
+
+    let thumb_height = (viewport_height * viewport_height / (viewport_height + max_offset))
+        .clamp(TRANSCRIPT_SCROLLBAR_MIN_THUMB, viewport_height);
+    let travel = (viewport_height - thumb_height).max(0.);
+    let scroll_offset = (-f32::from(list.scroll_px_offset_for_scrollbar().y)).clamp(0., max_offset);
+    let thumb_top = if travel > 0. {
+        scroll_offset / max_offset * travel
+    } else {
+        0.
+    };
+
+    Some(TranscriptScrollbarMetrics {
+        viewport_height,
+        max_offset,
+        thumb_height,
+        thumb_top,
+        travel,
+    })
+}
+
 pub(super) fn tool_display_label(tool_name: &str) -> String {
     let name = tool_name.rsplit(['.', ':']).next().unwrap_or(tool_name);
     match name {
@@ -1046,10 +1087,29 @@ impl DesktopShell {
     pub(super) fn sync_transcript_list(&mut self) {
         let count = self.transcript_rows.len();
         let old_count = self.transcript_list.item_count();
+        if old_count == count {
+            self.transcript_rows_prepend_count = None;
+        }
         if old_count != count {
             let was_at_end =
                 old_count == 0 || self.transcript_list.is_scrolled_to_end().unwrap_or(false);
-            if self.transcript_rows_append_only && count >= old_count {
+            let prepended_rows =
+                self.transcript_rows_prepend_count
+                    .take()
+                    .and_then(|message_count| {
+                        Self::transcript_prepend_row_count(
+                            &self.transcript_rows,
+                            old_count,
+                            count,
+                            message_count,
+                        )
+                    });
+            if let Some(prepended_rows) = prepended_rows {
+                // ListState keeps its logical anchor when rows are inserted before the
+                // viewport. Resetting the list here loses that anchor and makes a history
+                // page visibly jump while the newly loaded rows are measured.
+                self.transcript_list.splice(0..0, prepended_rows);
+            } else if self.transcript_rows_append_only && count >= old_count {
                 self.transcript_list
                     .splice(old_count..old_count, count - old_count);
             } else {
@@ -1060,6 +1120,75 @@ impl DesktopShell {
             }
         }
         self.restore_pending_transcript_scroll_anchor();
+    }
+
+    fn transcript_prepend_row_count(
+        rows: &[TranscriptRenderRow],
+        old_count: usize,
+        count: usize,
+        added_messages: usize,
+    ) -> Option<usize> {
+        if added_messages == 0 || count < old_count {
+            return None;
+        }
+        let prepended_rows = rows
+            .iter()
+            .take_while(|row| row.message_index < added_messages)
+            .count();
+        (prepended_rows > 0 && old_count + prepended_rows == count).then_some(prepended_rows)
+    }
+
+    fn render_transcript_scrollbar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let metrics = transcript_scrollbar_metrics(&self.transcript_list)?;
+        let scroll_offset = (-f32::from(self.transcript_list.scroll_px_offset_for_scrollbar().y))
+            .clamp(0., metrics.max_offset);
+        let percentage = if metrics.max_offset > 0. {
+            scroll_offset / metrics.max_offset * 100.
+        } else {
+            0.
+        };
+        let thumb = div()
+            .id("conversation-scrollbar-thumb")
+            .absolute()
+            .top(px(metrics.thumb_top))
+            .right(px((TRANSCRIPT_SCROLLBAR_HIT_WIDTH
+                - TRANSCRIPT_SCROLLBAR_THUMB_WIDTH)
+                / 2.))
+            .w(px(TRANSCRIPT_SCROLLBAR_THUMB_WIDTH))
+            .h(px(metrics.thumb_height))
+            .rounded(px(TRANSCRIPT_SCROLLBAR_THUMB_WIDTH / 2.))
+            .bg(theme_rgb(&self.theme, "text.muted").opacity(0.48))
+            .hover(|element| element.bg(theme_rgb(&self.theme, "text.body").opacity(0.72)))
+            .cursor(gpui::CursorStyle::PointingHand)
+            .role(Role::ScrollBar)
+            .aria_label("Conversation scroll")
+            .aria_orientation(gpui::Orientation::Vertical)
+            .aria_min_numeric_value(0.)
+            .aria_max_numeric_value(100.)
+            .aria_numeric_value(f64::from(percentage))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|shell, event, window, cx| {
+                    shell.transcript_scrollbar_mouse_down(event, window, cx);
+                    cx.stop_propagation();
+                }),
+            );
+        Some(
+            div()
+                .id("conversation-scrollbar")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .right_0()
+                .w(px(TRANSCRIPT_SCROLLBAR_HIT_WIDTH))
+                .cursor(gpui::CursorStyle::Arrow)
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(Self::transcript_scrollbar_mouse_down),
+                )
+                .child(thumb)
+                .into_any_element(),
+        )
     }
 
     fn restore_pending_transcript_scroll_anchor(&mut self) {
@@ -1257,15 +1386,28 @@ impl DesktopShell {
                 .flex_1()
                 .min_h_0()
                 .child(
-                    gpui::list(
-                        self.transcript_list.clone(),
-                        cx.processor(Self::render_transcript_row),
-                    )
-                    .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .p(px(CHAT_TRANSCRIPT_PADDING)),
+                    div()
+                        .id("conversation-transcript-list")
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .child(
+                            gpui::list(
+                                self.transcript_list.clone(),
+                                cx.processor(Self::render_transcript_row),
+                            )
+                            .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .p(px(CHAT_TRANSCRIPT_PADDING)),
+                        )
+                        .when_some(
+                            self.render_transcript_scrollbar(cx),
+                            |element, scrollbar| element.child(scrollbar),
+                        ),
                 )
                 .when_some(transcript_attention_state, |element, attention| {
                     element.child(
@@ -2343,7 +2485,10 @@ fn split_tool_text_lines(text: &str) -> Vec<SharedString> {
 
 #[cfg(test)]
 mod tests {
-    use super::{formatted_tool_input, split_tool_text_lines, tool_display_label, tool_summary};
+    use super::{
+        formatted_tool_input, split_tool_text_lines, tool_display_label, tool_summary,
+        TranscriptRenderRow,
+    };
     use gpui::SharedString;
 
     #[test]
@@ -2390,6 +2535,50 @@ mod tests {
                 SharedString::from(""),
                 SharedString::from("two")
             ]
+        );
+    }
+
+    #[test]
+    fn history_prepend_uses_only_the_new_message_rows() {
+        let rows = vec![
+            TranscriptRenderRow {
+                message_index: 0,
+                part_index: 0,
+                block_index: 0,
+            },
+            TranscriptRenderRow {
+                message_index: 1,
+                part_index: 0,
+                block_index: 0,
+            },
+            TranscriptRenderRow {
+                message_index: 2,
+                part_index: 0,
+                block_index: 0,
+            },
+            TranscriptRenderRow {
+                message_index: 2,
+                part_index: 0,
+                block_index: 1,
+            },
+            TranscriptRenderRow {
+                message_index: 3,
+                part_index: 0,
+                block_index: 0,
+            },
+        ];
+
+        assert_eq!(
+            super::DesktopShell::transcript_prepend_row_count(&rows, 3, 5, 2),
+            Some(2)
+        );
+        assert_eq!(
+            super::DesktopShell::transcript_prepend_row_count(&rows, 3, 4, 2),
+            None
+        );
+        assert_eq!(
+            super::DesktopShell::transcript_prepend_row_count(&rows, 3, 5, 0),
+            None
         );
     }
 }

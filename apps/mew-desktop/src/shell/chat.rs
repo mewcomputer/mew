@@ -1,3 +1,4 @@
+use super::chat_render::{transcript_scrollbar_metrics, TranscriptScrollbarMetrics};
 use super::*;
 
 impl DesktopShell {
@@ -158,12 +159,78 @@ impl DesktopShell {
         cx.notify();
     }
 
+    pub(super) fn transcript_scrollbar_mouse_down(
+        &mut self,
+        event: &gpui::MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(metrics) = transcript_scrollbar_metrics(&self.transcript_list) else {
+            return;
+        };
+        let viewport = self.transcript_list.viewport_bounds();
+        let pointer_y = f32::from(event.position.y) - f32::from(viewport.origin.y);
+        if !(0.0..=metrics.viewport_height).contains(&pointer_y) {
+            return;
+        }
+
+        let grab_offset = if (metrics.thumb_top..=metrics.thumb_top + metrics.thumb_height)
+            .contains(&pointer_y)
+        {
+            pointer_y - metrics.thumb_top
+        } else {
+            metrics.thumb_height / 2.
+        };
+        self.transcript_scrollbar_grab_offset = Some(grab_offset);
+        self.transcript_is_selecting = false;
+        self.transcript_link_candidate = None;
+        self.transcript_list.scrollbar_drag_started();
+        self.update_transcript_scrollbar(pointer_y, grab_offset, metrics, cx);
+    }
+
+    fn update_transcript_scrollbar(
+        &mut self,
+        pointer_y: f32,
+        grab_offset: f32,
+        metrics: TranscriptScrollbarMetrics,
+        cx: &mut Context<Self>,
+    ) {
+        let thumb_top = (pointer_y - grab_offset).clamp(0., metrics.travel);
+        let scroll_offset = if metrics.travel > 0. {
+            thumb_top / metrics.travel * metrics.max_offset
+        } else {
+            0.
+        };
+        self.transcript_list
+            .set_follow_mode(gpui::FollowMode::Normal);
+        self.transcript_list
+            .set_offset_from_scrollbar(point(px(0.), px(-scroll_offset)));
+        let at_end = scroll_offset >= (metrics.max_offset - 1.).max(0.);
+        if at_end {
+            self.transcript_list.set_follow_mode(gpui::FollowMode::Tail);
+            self.transcript_list.scroll_to_end();
+        }
+        self.transcript_scrolled_away = !at_end;
+        self.capture_session_view_state();
+        cx.notify();
+    }
+
     pub(super) fn transcript_mouse_move_at_position(
         &mut self,
         event: &gpui::MouseMoveEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(grab_offset) = self.transcript_scrollbar_grab_offset {
+            if event.dragging() {
+                if let Some(metrics) = transcript_scrollbar_metrics(&self.transcript_list) {
+                    let viewport = self.transcript_list.viewport_bounds();
+                    let pointer_y = f32::from(event.position.y) - f32::from(viewport.origin.y);
+                    self.update_transcript_scrollbar(pointer_y, grab_offset, metrics, cx);
+                }
+            }
+            return;
+        }
         if !self.transcript_is_selecting || !event.dragging() {
             return;
         }
@@ -204,6 +271,12 @@ impl DesktopShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.transcript_scrollbar_grab_offset.take().is_some() {
+            self.transcript_list.scrollbar_drag_ended();
+            self.capture_session_view_state();
+            cx.notify();
+            return;
+        }
         self.transcript_is_selecting = false;
         if let Some(url) = self.transcript_link_candidate.take() {
             self.open_transcript_link(url, cx);
@@ -671,6 +744,7 @@ impl DesktopShell {
 
     pub(super) fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
         self.pending_transcript_scroll_anchor = None;
+        self.transcript_scrollbar_grab_offset = None;
         self.transcript_scrolled_away = false;
         self.transcript_list.set_follow_mode(gpui::FollowMode::Tail);
         self.transcript_list.scroll_to_end();

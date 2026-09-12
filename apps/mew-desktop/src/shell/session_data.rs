@@ -21,9 +21,13 @@ impl DesktopShell {
         }
         self.markdown_cache
             .splice(0..0, std::iter::repeat_with(Vec::new).take(added_messages));
+        if let Some(anchor) = &mut self.pending_transcript_scroll_anchor {
+            anchor.message_index = anchor.message_index.saturating_add(added_messages);
+        }
         for row in &mut self.transcript_rows {
             row.message_index = row.message_index.saturating_add(added_messages);
         }
+        self.transcript_rows_prepend_count = Some(added_messages);
     }
 
     pub(super) fn refresh_review(&mut self, cx: &mut Context<Self>) {

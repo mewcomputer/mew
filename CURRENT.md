@@ -1,3 +1,16 @@
+# 2026-09-12 — stabilize transcript prepends and add conversation scrolling
+
+Desktop history loading now splices newly fetched rows into the existing GPUI
+list instead of resetting it, shifts saved transcript anchors with prepended
+messages, and preserves the same visible message while older pages arrive. The
+conversation view also has a native-looking, accessible scrollbar backed by
+`ListState`, with track navigation, thumb dragging, bottom-follow restoration,
+and live updates during wheel scrolling. Coverage includes the prepend-row
+invariant and the full desktop test suite. `cargo test -p mew-desktop`, clippy,
+`just arch-check`, formatting, and `just desktop-dev` all pass; the rebuilt
+bundle was exercised visually with wheel scrolling, track clicks, and thumb
+dragging.
+
 # 2026-09-10 — rework the TUI goal system
 
 `/goal <text>` no longer sets the goal sight-unseen and no longer loses
