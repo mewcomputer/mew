@@ -2,11 +2,14 @@ use super::*;
 
 impl Render for DesktopShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(frame_probe) = self.frame_probe.as_mut() {
+            frame_probe.record_root_render();
+            frame_probe.collect();
+        }
         self.ensure_browser_portal(window, cx);
         if self.model_picker_open
             || self.persona_picker_open
             || self.permission_picker_open
-            || self.thinking_picker_open
             || self.terminal_font_picker_open
             || self.connection_picker_open
         {

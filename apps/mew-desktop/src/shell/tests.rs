@@ -2,8 +2,44 @@
 mod shell_tests {
     use super::super::composer::composer_input_height;
     use super::super::lifecycle::transcript_is_scrolled_away;
+    use super::super::session::replace_browser_event_value;
     use super::super::session_data::transcript_part_block_count;
     use super::super::*;
+
+    #[test]
+    fn frame_trace_percentile_uses_nearest_rank() {
+        let mut samples = [
+            Duration::from_millis(4),
+            Duration::from_millis(1),
+            Duration::from_millis(3),
+            Duration::from_millis(2),
+        ];
+
+        assert_eq!(
+            percentile_duration(&mut samples, 50),
+            Duration::from_millis(2)
+        );
+        assert_eq!(
+            percentile_duration(&mut samples, 95),
+            Duration::from_millis(4)
+        );
+        assert_eq!(percentile_duration(&mut [], 95), Duration::ZERO);
+    }
+
+    #[test]
+    fn browser_event_values_only_invalidate_when_changed() {
+        let mut value = "https://example.com".to_owned();
+        assert!(!replace_browser_event_value(
+            &mut value,
+            "https://example.com".to_owned()
+        ));
+        assert_eq!(value, "https://example.com");
+        assert!(replace_browser_event_value(
+            &mut value,
+            "https://example.org".to_owned()
+        ));
+        assert_eq!(value, "https://example.org");
+    }
 
     #[test]
     fn composer_offsets_round_trip_unicode() {
@@ -200,11 +236,65 @@ mod shell_tests {
     }
 
     #[test]
+    fn right_aligned_picker_stays_put_when_the_trigger_width_changes() {
+        let wide_trigger = Bounds::new(point(px(500.), px(300.)), gpui::size(px(120.), px(40.)));
+        let narrow_trigger = Bounds::new(point(px(560.), px(300.)), gpui::size(px(60.), px(40.)));
+        let wide_position = picker_popup_position_in_window_right_aligned(
+            wide_trigger,
+            px(300.),
+            px(160.),
+            px(1000.),
+            px(700.),
+            px(8.),
+            px(8.),
+        );
+        let narrow_position = picker_popup_position_in_window_right_aligned(
+            narrow_trigger,
+            px(300.),
+            px(160.),
+            px(1000.),
+            px(700.),
+            px(8.),
+            px(8.),
+        );
+        assert_eq!(wide_position, narrow_position);
+        assert_eq!(wide_position, point(px(320.), px(132.)));
+    }
+
+    #[test]
     fn picker_viewports_match_and_stay_bounded() {
         assert_eq!(model_picker_list_height(0), px(64.));
         assert_eq!(model_picker_list_height(5), px(320.));
         assert_eq!(model_picker_list_height(32), px(320.));
-        assert_eq!(model_picker_height(32), px(372.));
+        assert_eq!(model_picker_height(32, 0), px(372.));
+        assert_eq!(model_picker_height(32, 3), px(444.));
+        assert_eq!(effort_index_for_pointer(0., 200., 3), Some(0));
+        assert_eq!(effort_index_for_pointer(100., 200., 3), Some(1));
+        assert_eq!(effort_index_for_pointer(200., 200., 3), Some(2));
+        assert_eq!(effort_index_for_pointer(80., 0., 3), None);
+        assert_eq!(effort_position_for_pointer(10., 200., 3), Some(0.));
+        assert_eq!(effort_position_for_pointer(33.333, 200., 3), Some(0.));
+        assert_eq!(effort_position_for_pointer(100., 200., 3), Some(0.5));
+        assert_eq!(effort_position_for_pointer(200., 200., 3), Some(1.));
+        assert!((effort_track_inset(200., 3) - 33.333_332).abs() < 0.001);
+        assert!((effort_track_inset(200., 7) - 14.285_714).abs() < 0.001);
+        assert!((effort_track_content_width(200., 7) - 171.428_57).abs() < 0.001);
+        assert!((effort_stop_offset(0, 200., 3).unwrap() - 33.333_332).abs() < 0.001);
+        assert!((effort_stop_offset(1, 200., 3).unwrap() - 100.).abs() < 0.001);
+        assert!((effort_stop_offset(2, 200., 3).unwrap() - 166.666_67).abs() < 0.001);
+        assert_eq!(effort_stop_offset(3, 200., 3), None);
+        assert_eq!(effort_stop_offset(0, 0., 3), None);
+        assert!((effort_stop_slot_width(200., 3) - 66.666_664).abs() < 0.001);
+        assert!((effort_stop_slot_width(200., 1) - 200.).abs() < 0.001);
+        assert_eq!(effort_stop_slot_width(0., 3), 0.);
+        assert_eq!(effort_position_for_index(0, 7), 0.);
+        assert_eq!(effort_position_for_index(3, 7), 0.5);
+        assert_eq!(effort_position_for_index(6, 7), 1.);
+        assert!(!thinking_effort_drag_is_active(None, true));
+        assert!(!thinking_effort_drag_is_active(Some(0.5), false));
+        assert!(thinking_effort_drag_is_active(Some(0.5), true));
+        assert_eq!(effort_index_for_position(0.5, 3), Some(1));
+        assert_eq!(effort_position_for_index(2, 3), 1.);
         assert_eq!(persona_picker_list_height(2), px(176.));
         assert_eq!(persona_picker_list_height(32), px(440.));
     }
@@ -232,6 +322,131 @@ mod shell_tests {
             Some("fast coding model"),
             "vision"
         ));
+    }
+
+    #[test]
+    fn recent_model_indices_preserve_saved_order_and_ignore_unknown_duplicates() {
+        let models = vec![
+            mew_protocol::ModelInfo {
+                id: "openai/gpt-5".into(),
+                provider: "openai".into(),
+                model: "gpt-5".into(),
+                description: None,
+                thinking_variants: Vec::new(),
+                thinking_budget: None,
+                context_window: None,
+            },
+            mew_protocol::ModelInfo {
+                id: "anthropic/claude".into(),
+                provider: "anthropic".into(),
+                model: "claude".into(),
+                description: None,
+                thinking_variants: Vec::new(),
+                thinking_budget: None,
+                context_window: None,
+            },
+            mew_protocol::ModelInfo {
+                id: "z-ai/glm".into(),
+                provider: "z-ai".into(),
+                model: "glm".into(),
+                description: None,
+                thinking_variants: Vec::new(),
+                thinking_budget: None,
+                context_window: None,
+            },
+        ];
+        let recent = vec![
+            "missing/model".into(),
+            "anthropic/claude".into(),
+            "openai/gpt-5".into(),
+            "anthropic/claude".into(),
+            "z-ai/glm".into(),
+        ];
+
+        assert_eq!(recent_model_indices(&models, &recent), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn model_picker_rows_put_recent_models_before_all_models() {
+        let models = vec![
+            mew_protocol::ModelInfo {
+                id: "openai/gpt-5".into(),
+                provider: "openai".into(),
+                model: "gpt-5".into(),
+                description: None,
+                thinking_variants: Vec::new(),
+                thinking_budget: None,
+                context_window: None,
+            },
+            mew_protocol::ModelInfo {
+                id: "anthropic/claude".into(),
+                provider: "anthropic".into(),
+                model: "claude".into(),
+                description: None,
+                thinking_variants: Vec::new(),
+                thinking_budget: None,
+                context_window: None,
+            },
+        ];
+
+        let (selectable, rows) = build_model_picker_rows(&models, &["anthropic/claude".into()], "");
+
+        assert_eq!(
+            selectable,
+            vec![1, 0, 1],
+            "recent rows should be selected before the all-model rows"
+        );
+        assert_eq!(
+            rows,
+            vec![
+                ModelPickerRow::Header("Recent"),
+                ModelPickerRow::Model {
+                    index: 1,
+                    recent: true,
+                },
+                ModelPickerRow::Header("All Models"),
+                ModelPickerRow::Model {
+                    index: 0,
+                    recent: false,
+                },
+                ModelPickerRow::Model {
+                    index: 1,
+                    recent: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn model_picker_rows_hide_recent_section_while_searching() {
+        let models = vec![mew_protocol::ModelInfo {
+            id: "openai/gpt-5".into(),
+            provider: "openai".into(),
+            model: "gpt-5".into(),
+            description: None,
+            thinking_variants: Vec::new(),
+            thinking_budget: None,
+            context_window: None,
+        }];
+        let (selectable, rows) =
+            build_model_picker_rows(&models, &["openai/gpt-5".into()], "anthropic");
+
+        assert!(selectable.is_empty());
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn pushing_recent_model_moves_it_to_the_front_and_caps_the_list() {
+        let mut recent = ["a", "b", "c", "d", "e", "f"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        push_recent_model(&mut recent, "g");
+        assert_eq!(recent, ["g", "a", "b", "c", "d", "e"]);
+
+        push_recent_model(&mut recent, "c");
+        assert_eq!(recent, ["c", "g", "a", "b", "d", "e"]);
     }
 
     #[test]
@@ -967,6 +1182,48 @@ mod shell_tests {
         assert!(thinking_variants_for_model(&models, Some("z-ai"), Some("glm-5")).is_empty());
         assert!(thinking_variants_for_model(&models, None, Some("glm-5")).is_empty());
         assert!(thinking_variants_for_model(&models, Some("missing"), Some("glm-5")).is_empty());
+    }
+
+    #[test]
+    fn thinking_variants_hide_catalog_off_entries() {
+        let models = vec![mew_protocol::ModelInfo {
+            id: "alibaba-token-plan/qwen3.8-max-preview".into(),
+            provider: "alibaba-token-plan".into(),
+            model: "qwen3.8-max-preview".into(),
+            description: None,
+            thinking_variants: vec![
+                mew_protocol::ThinkingVariantInfo { name: "low".into() },
+                mew_protocol::ThinkingVariantInfo {
+                    name: "medium".into(),
+                },
+                mew_protocol::ThinkingVariantInfo {
+                    name: "xhigh".into(),
+                },
+                mew_protocol::ThinkingVariantInfo {
+                    name: " off ".into(),
+                },
+            ],
+            thinking_budget: None,
+            context_window: None,
+        }];
+
+        assert_eq!(
+            thinking_variants_for_model(
+                &models,
+                Some("alibaba-token-plan"),
+                Some("qwen3.8-max-preview")
+            ),
+            vec!["low", "medium", "xhigh"]
+        );
+    }
+
+    #[test]
+    fn thinking_effort_option_ids_are_unique_when_catalog_has_off_variant() {
+        let ids = (0..5)
+            .map(thinking_effort_option_id)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(ids.len(), 5);
     }
 
     fn conversation(session_id: &str, archived: bool, group_id: Option<&str>) -> ConversationItem {

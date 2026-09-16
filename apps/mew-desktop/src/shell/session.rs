@@ -1,5 +1,13 @@
 use super::*;
 
+pub(super) fn replace_browser_event_value(current: &mut String, next: String) -> bool {
+    if *current == next {
+        return false;
+    }
+    *current = next;
+    true
+}
+
 impl DesktopShell {
     pub(super) fn new_conversation(&mut self, cx: &mut Context<Self>) {
         self.begin_new_conversation(None, None, cx);
@@ -251,15 +259,15 @@ impl DesktopShell {
                 BrowserEvent::AddressChanged { owner, url }
                     if owner.as_deref().is_none_or(|owner| owner == BROWSER_OWNER) =>
                 {
-                    self.browser_url = url;
-                    self.browser_error = None;
-                    changed = true;
+                    if replace_browser_event_value(&mut self.browser_url, url) {
+                        self.browser_error = None;
+                        changed = true;
+                    }
                 }
                 BrowserEvent::TitleChanged { owner, title, .. }
                     if owner.as_deref().is_none_or(|owner| owner == BROWSER_OWNER) =>
                 {
-                    self.browser_title = title;
-                    changed = true;
+                    changed |= replace_browser_event_value(&mut self.browser_title, title);
                 }
                 _ => {}
             }
@@ -554,7 +562,6 @@ impl DesktopShell {
         let was_open = self.model_picker_open
             || self.persona_picker_open
             || self.permission_picker_open
-            || self.thinking_picker_open
             || self.terminal_font_picker_open
             || self.connection_picker_open
             || self.session_menu_session.is_some()
@@ -562,7 +569,6 @@ impl DesktopShell {
         self.model_picker_open = false;
         self.persona_picker_open = false;
         self.permission_picker_open = false;
-        self.thinking_picker_open = false;
         self.terminal_font_picker_open = false;
         self.connection_picker_open = false;
         self.session_menu_session = None;
@@ -1621,10 +1627,11 @@ impl DesktopShell {
                 self.send_command(ClientMessage::SwitchModel { provider, model });
             }
         }
-        if let Some((provider, model)) = &self.awaiting_model_switch {
-            let switch_completed = state.current_provider.as_deref() == Some(provider)
-                && state.current_model.as_deref() == Some(model);
+        if let Some((provider, model)) = self.awaiting_model_switch.clone() {
+            let switch_completed = state.current_provider.as_deref() == Some(provider.as_str())
+                && state.current_model.as_deref() == Some(model.as_str());
             if switch_completed {
+                self.remember_recent_model(&provider, &model);
                 self.awaiting_model_switch = None;
             }
         }

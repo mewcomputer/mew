@@ -1,4 +1,5 @@
 use super::*;
+use std::{fs::OpenOptions, io::Write};
 
 pub(super) const BUNDLED_MONO_REGULAR: &[u8] =
     include_bytes!("../../../../crates/mew-raster/assets/IoskeleyMono-Regular.ttf");
@@ -66,11 +67,17 @@ pub(super) struct DesktopShell {
     pub(super) model_picker_selection_reversed: bool,
     pub(super) model_picker_marked_range: Option<Range<usize>>,
     pub(super) model_picker_filtered_indices: Vec<usize>,
+    pub(super) model_picker_rows: Vec<ModelPickerRow>,
+    pub(super) recent_models: Vec<String>,
+    pub(super) thinking_effort_drag_index: Option<usize>,
+    pub(super) thinking_effort_drag_position: Option<f32>,
+    pub(super) thinking_effort_track_bounds: Option<Bounds<Pixels>>,
+    pub(super) thinking_effort_animation_id: u64,
+    pub(super) thinking_effort_animation_from: Option<f32>,
     pub(super) pending_group_deletion: Option<String>,
     pub(super) session_view_states: BTreeMap<String, SessionViewState>,
     pub(super) session_menu_session: Option<String>,
     pub(super) hovered_group: Option<String>,
-    pub(super) hovered_session: Option<String>,
     pub(super) drag_over_group: Option<String>,
     pub(super) rename_session_id: Option<String>,
     pub(super) rename_draft: String,
@@ -127,7 +134,6 @@ pub(super) struct DesktopShell {
     pub(super) model_picker_bounds: Option<Bounds<Pixels>>,
     pub(super) persona_picker_bounds: Option<Bounds<Pixels>>,
     pub(super) permission_picker_bounds: Option<Bounds<Pixels>>,
-    pub(super) thinking_picker_bounds: Option<Bounds<Pixels>>,
     pub(super) slash_menu_dismissed: bool,
     pub(super) slash_menu_index: usize,
     pub(super) mention_menu_dismissed: bool,
@@ -153,7 +159,6 @@ pub(super) struct DesktopShell {
     pub(super) model_picker_open: bool,
     pub(super) persona_picker_open: bool,
     pub(super) permission_picker_open: bool,
-    pub(super) thinking_picker_open: bool,
     pub(super) terminal_font_picker_open: bool,
     pub(super) terminal_font_family: String,
     pub(super) terminal_view: Entity<TerminalView>,
@@ -184,6 +189,157 @@ pub(super) struct DesktopShell {
     pub(super) _appearance_subscription: Subscription,
     pub(super) _bounds_subscription: Subscription,
     pub(super) _supervisor: Option<DesktopSupervisor>,
+    pub(super) frame_probe: Option<DesktopFrameProbe>,
+}
+
+const DESKTOP_FRAME_TRACE_ENV: &str = "MEW_DESKTOP_FRAME_TRACE";
+const DESKTOP_FRAME_TRACE_BATCH_SIZE: usize = 60;
+
+struct DesktopFrameSample {
+    draw_duration: Duration,
+    dirty_to_draw_duration: Option<Duration>,
+    invalidations: u64,
+}
+
+pub(super) struct DesktopFrameProbe {
+    collector: gpui::FrameTimingCollector,
+    trace_file: Option<std::fs::File>,
+    samples: Vec<DesktopFrameSample>,
+    root_renders: usize,
+    transcript_renders: usize,
+}
+
+impl DesktopFrameProbe {
+    pub(super) fn from_env() -> Option<Self> {
+        let enabled = std::env::var(DESKTOP_FRAME_TRACE_ENV)
+            .map(|value| {
+                !matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "" | "0" | "false" | "off"
+                )
+            })
+            .unwrap_or(false);
+        if !enabled {
+            return None;
+        }
+
+        gpui::profiler::set_frame_trace_enabled(true);
+        eprintln!("[mew desktop perf] frame tracing enabled");
+        let trace_path = std::env::temp_dir().join("mew-desktop-frame-trace.log");
+        let trace_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(trace_path)
+            .ok();
+        if trace_file.is_some() {
+            eprintln!(
+                "[mew desktop perf] writing 60-frame reports to {}",
+                std::env::temp_dir()
+                    .join("mew-desktop-frame-trace.log")
+                    .display()
+            );
+        }
+        Some(Self {
+            collector: gpui::FrameTimingCollector::new(),
+            trace_file,
+            samples: Vec::with_capacity(DESKTOP_FRAME_TRACE_BATCH_SIZE),
+            root_renders: 0,
+            transcript_renders: 0,
+        })
+    }
+
+    pub(super) fn record_root_render(&mut self) {
+        self.root_renders += 1;
+    }
+
+    pub(super) fn record_transcript_render(&mut self) {
+        self.transcript_renders += 1;
+    }
+
+    pub(super) fn collect(&mut self) {
+        self.samples
+            .extend(
+                self.collector
+                    .collect_unseen()
+                    .into_iter()
+                    .map(|frame| DesktopFrameSample {
+                        draw_duration: frame.draw_duration(),
+                        dirty_to_draw_duration: frame.dirty_to_draw_duration(),
+                        invalidations: frame.invalidations,
+                    }),
+            );
+
+        if self.samples.len() >= DESKTOP_FRAME_TRACE_BATCH_SIZE {
+            self.report();
+            self.samples.clear();
+        }
+    }
+
+    fn report(&mut self) {
+        let mut draw_durations: Vec<_> = self
+            .samples
+            .iter()
+            .map(|sample| sample.draw_duration)
+            .collect();
+        let mut dirty_to_draw_durations: Vec<_> = self
+            .samples
+            .iter()
+            .filter_map(|sample| sample.dirty_to_draw_duration)
+            .collect();
+        let frame_count = self.samples.len();
+        let draw_total = draw_durations
+            .iter()
+            .map(Duration::as_secs_f64)
+            .sum::<f64>();
+        let invalidation_total = self
+            .samples
+            .iter()
+            .map(|sample| sample.invalidations)
+            .sum::<u64>();
+        let draw_max = draw_durations.iter().copied().max().unwrap_or_default();
+        let dirty_p95 = percentile_duration(&mut dirty_to_draw_durations, 95);
+        let draw_p95 = percentile_duration(&mut draw_durations, 95);
+
+        let report = format!(
+            "[mew desktop perf] frames={frame_count} root_renders={} transcript_renders={} draw_ms(avg/p95/max)={:.2}/{:.2}/{:.2} dirty_to_draw_p95_ms={:.2} invalidations(avg/max)={:.2}/{}",
+            self.root_renders,
+            self.transcript_renders,
+            draw_total * 1000. / frame_count as f64,
+            draw_p95.as_secs_f64() * 1000.,
+            draw_max.as_secs_f64() * 1000.,
+            dirty_p95.as_secs_f64() * 1000.,
+            invalidation_total as f64 / frame_count as f64,
+            self.samples
+                .iter()
+                .map(|sample| sample.invalidations)
+                .max()
+                .unwrap_or_default(),
+        );
+        eprintln!("{report}");
+        if let Some(trace_file) = self.trace_file.as_mut() {
+            let _ = writeln!(trace_file, "{report}");
+            let _ = trace_file.flush();
+        }
+        self.root_renders = 0;
+        self.transcript_renders = 0;
+    }
+}
+
+pub(super) fn percentile_duration(samples: &mut [Duration], percentile: usize) -> Duration {
+    if samples.is_empty() {
+        return Duration::ZERO;
+    }
+
+    samples.sort_unstable();
+    let rank = (samples.len() * percentile.clamp(1, 100)).div_ceil(100);
+    samples[rank.saturating_sub(1).min(samples.len() - 1)]
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ModelPickerRow {
+    Header(&'static str),
+    Model { index: usize, recent: bool },
 }
 
 /// Pumps native CEF work without invalidating the entire shell at a fixed
@@ -436,6 +592,10 @@ pub(super) struct SidebarResizeDrag;
 
 pub(super) struct SidebarResizePreview;
 
+pub(super) struct ThinkingEffortDrag;
+
+pub(super) struct ThinkingEffortPreview;
+
 impl Render for WorkbenchResizePreview {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div().size(px(1.)).bg(gpui::transparent_black())
@@ -443,6 +603,12 @@ impl Render for WorkbenchResizePreview {
 }
 
 impl Render for SidebarResizePreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(1.)).bg(gpui::transparent_black())
+    }
+}
+
+impl Render for ThinkingEffortPreview {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div().size(px(1.)).bg(gpui::transparent_black())
     }
@@ -725,6 +891,8 @@ pub(super) const CHAT_TRANSCRIPT_PADDING: f32 = 24.;
 pub(super) const CHAT_MIN_WIDTH: f32 = 420.;
 pub(super) const WORKBENCH_MIN_WIDTH: f32 = 280.;
 pub(super) const WORKBENCH_MAX_WIDTH: f32 = 960.;
+pub(super) const EFFORT_TRACK_MAX_INSET: f32 = 38.;
+pub(super) const RECENT_MODEL_LIMIT: usize = 6;
 pub(super) const TERMINAL_EXPANDED_ROWS: u16 = 7;
 pub(super) const TERMINAL_COLS: u16 = 80;
 pub(super) const TERMINAL_EXPANDED_HEIGHT: f32 = 190.;

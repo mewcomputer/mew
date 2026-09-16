@@ -233,8 +233,10 @@ impl DesktopShell {
                 is_scrolled && event.count > 0 && event.visible_range.start == 0;
             let shell_ref = shell_ref.clone();
             cx.defer(move |cx| {
-                let _ = shell_ref.update(cx, |shell, cx| {
-                    let scroll_state_changed = shell.transcript_scrolled_away != scrolled_away;
+                let _ = shell_ref.update(cx, |shell, _cx| {
+                    // ListState already invalidates the containing view for the scroll repaint.
+                    // Keep this deferred work limited to state and history updates so a wheel
+                    // tick does not enqueue a second full-shell render.
                     if shell.transcript_scrolled_away != scrolled_away {
                         shell.transcript_scrolled_away = scrolled_away;
                         shell.capture_session_view_state();
@@ -242,14 +244,10 @@ impl DesktopShell {
                     if reached_history_top {
                         shell.request_older_history();
                     }
-                    // The scrollbar thumb is rendered by the shell rather than by the list,
-                    // so keep it in sync with wheel and trackpad scrolling as well.
-                    if scroll_state_changed || is_scrolled {
-                        cx.notify();
-                    }
                 });
             });
         });
+        let frame_probe = DesktopFrameProbe::from_env();
         Self {
             model,
             theme,
@@ -281,11 +279,17 @@ impl DesktopShell {
             model_picker_selection_reversed: false,
             model_picker_marked_range: None,
             model_picker_filtered_indices: Vec::new(),
+            model_picker_rows: Vec::new(),
+            recent_models: persisted_state.recent_models,
+            thinking_effort_drag_index: None,
+            thinking_effort_drag_position: None,
+            thinking_effort_track_bounds: None,
+            thinking_effort_animation_id: 0,
+            thinking_effort_animation_from: None,
             pending_group_deletion: None,
             session_view_states,
             session_menu_session: None,
             hovered_group: None,
-            hovered_session: None,
             drag_over_group: None,
             rename_session_id: None,
             rename_draft: String::new(),
@@ -342,7 +346,6 @@ impl DesktopShell {
             model_picker_bounds: None,
             persona_picker_bounds: None,
             permission_picker_bounds: None,
-            thinking_picker_bounds: None,
             slash_menu_dismissed: false,
             slash_menu_index: 0,
             mention_menu_dismissed: false,
@@ -368,7 +371,6 @@ impl DesktopShell {
             model_picker_open: false,
             persona_picker_open: false,
             permission_picker_open: false,
-            thinking_picker_open: false,
             terminal_font_picker_open: false,
             terminal_font_family,
             terminal_view,
@@ -399,6 +401,7 @@ impl DesktopShell {
             _appearance_subscription: appearance_subscription,
             _bounds_subscription: bounds_subscription,
             _supervisor: supervisor,
+            frame_probe,
         }
     }
 

@@ -13,30 +13,42 @@ impl DesktopShell {
     ) -> gpui::AnyElement {
         let selection =
             self.transcript_selection_range(message_index, block_index, inline.text.len());
-        let highlights = self.inline_highlights(inline, selection);
+        let highlights = if inline.highlights.is_empty() && selection.is_none() {
+            Vec::new()
+        } else {
+            self.inline_highlights(inline, selection)
+        };
         let code_font_overrides = inline
             .highlights
             .iter()
             .filter(|highlight| highlight.style == InlineStyle::Code)
             .map(|highlight| (highlight.range.clone(), DEFAULT_FONT_FAMILY.into()));
         let code_font_overrides = code_font_overrides.collect::<Vec<_>>();
-        let text = gpui::StyledText::new(inline.text.clone())
-            .with_font_family_overrides(code_font_overrides)
-            .with_highlights(highlights);
+        let mut text = gpui::StyledText::new(inline.text.clone());
+        if !code_font_overrides.is_empty() {
+            text = text.with_font_family_overrides(code_font_overrides);
+        }
+        if !highlights.is_empty() {
+            text = text.with_highlights(highlights);
+        }
         // Keep the interaction layout tied to the actual element being
         // painted. A separately-created TextLayout is never measured by
         // GPUI, so querying it from a mouse or accessibility event panics.
         let down_layout = text.layout().clone();
         let down_text = inline.text.clone();
         let down_links = inline.links.clone();
-        self.transcript_text_registry
-            .borrow_mut()
-            .push(TranscriptTextEntry {
-                message_index,
-                block_index,
-                text: inline.text.clone(),
-                layout: down_layout.clone(),
-            });
+        // The registry is only consulted while a transcript selection is active.
+        // Avoid rebuilding it for every visible markdown span during ordinary scrolling.
+        if self.transcript_selection.is_some() {
+            self.transcript_text_registry
+                .borrow_mut()
+                .push(TranscriptTextEntry {
+                    message_index,
+                    block_index,
+                    text: inline.text.clone(),
+                    layout: down_layout.clone(),
+                });
+        }
         let element = div()
             .id(format!(
                 "markdown-inline-container-{message_index}-{block_index}"
@@ -910,7 +922,7 @@ impl DesktopShell {
             self.model_picker_open,
             self.persona_picker_open,
             self.permission_picker_open,
-            self.thinking_picker_open,
+            false,
             self.terminal_font_picker_open,
             self.connection_picker_open,
         ) {

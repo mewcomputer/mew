@@ -1138,7 +1138,10 @@ impl DesktopShell {
         (prepended_rows > 0 && old_count + prepended_rows == count).then_some(prepended_rows)
     }
 
-    fn render_transcript_scrollbar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(super) fn render_transcript_scrollbar(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let metrics = transcript_scrollbar_metrics(&self.transcript_list)?;
         let scroll_offset = (-f32::from(self.transcript_list.scroll_px_offset_for_scrollbar().y))
             .clamp(0., metrics.max_offset);
@@ -1326,7 +1329,12 @@ impl DesktopShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        self.transcript_text_registry.borrow_mut().clear();
+        if let Some(frame_probe) = self.frame_probe.as_mut() {
+            frame_probe.record_transcript_render();
+        }
+        if self.transcript_selection.is_some() {
+            self.transcript_text_registry.borrow_mut().clear();
+        }
         let selected_session = self.model.ui.selected_session.is_some();
         let last_turn_failed = self
             .model
@@ -1438,13 +1446,6 @@ impl DesktopShell {
         let persona_display =
             non_empty_label(self.model.ui.current_persona.as_deref(), "choose a persona");
         let permission_display = permission_mode_label(self.model.ui.permission_mode.as_deref());
-        let thinking_variants = thinking_variants_for_model(
-            &self.model.ui.models,
-            self.model.ui.current_provider.as_deref(),
-            self.model.ui.model.as_deref(),
-        );
-        let thinking_display =
-            non_empty_label(self.model.ui.thinking_variant.as_deref(), "thinking off");
         let session_path = selected_session_path(
             &self.model.ui.conversations,
             self.model.ui.selected_session.as_deref(),
@@ -1463,7 +1464,6 @@ impl DesktopShell {
         let model_picker_trigger_shell = cx.entity().downgrade();
         let persona_picker_trigger_shell = cx.entity().downgrade();
         let permission_picker_trigger_shell = cx.entity().downgrade();
-        let thinking_picker_trigger_shell = cx.entity().downgrade();
 
         let conversation = div()
             .id("conversation-surface")
@@ -1703,13 +1703,13 @@ impl DesktopShell {
                             .id("composer")
                             .flex_col()
                             .items_stretch()
-                            .gap(px(12.))
+                            .gap(px(8.))
                             .min_h_0()
                             .border_1()
                             .border_color(theme_rgb(&self.theme, "divider"))
                             .rounded(px(16.))
                             .bg(theme_rgb(&self.theme, "panel.background"))
-                            .p(px(12.))
+                            .p(px(10.))
                             .text_sm()
                             .role(Role::Group)
                             .aria_label("Message composer. Drop files here to attach.")
@@ -1786,9 +1786,9 @@ impl DesktopShell {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .justify_between()
+                                    .justify_start()
                                     .w_full()
-                                    .gap(px(12.))
+                                    .gap(px(8.))
                                     .child(
                                         div()
                                             .flex()
@@ -1819,7 +1819,7 @@ impl DesktopShell {
                                                         },
                                                     ))
                                                     .child(tabler_icon(
-                                                        TablerIcon::Paperclip,
+                                                        TablerIcon::Plus,
                                                         theme_rgb(
                                                             &self.theme,
                                                             "secondary_foreground",
@@ -1827,140 +1827,6 @@ impl DesktopShell {
                                                         px(14.),
                                                     )),
                                             )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(theme_rgb(
-                                                        &self.theme,
-                                                        "secondary_foreground",
-                                                    ))
-                                                    .cursor_pointer()
-                                                    .id("model-picker-trigger")
-                                                    .relative()
-                                                    .role(Role::Button)
-                                                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                                    .aria_label(SharedString::from(format!(
-                                                        "Choose model: {model_display}"
-                                                    )))
-                                                    .px(px(6.))
-                                                    .py(px(4.))
-                                                    .rounded(px(6.))
-                                                    .hover(|element| {
-                                                        element.bg(theme_rgb(&self.theme, "muted"))
-                                                    })
-                                                    .on_click(cx.listener(|shell, _, window, cx| {
-                                                        shell.toggle_model_picker(window, cx);
-                                                    }))
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(4.))
-                                                    .child(tabler_icon(
-                                                        TablerIcon::SlidersHorizontal,
-                                                        theme_rgb(
-                                                            &self.theme,
-                                                            "secondary_foreground",
-                                                        ),
-                                                        px(13.),
-                                                    ))
-                                                    .child(SharedString::from(model_display))
-                                                    .child(tabler_icon(
-                                                        TablerIcon::ChevronDown,
-                                                        theme_rgb(
-                                                            &self.theme,
-                                                            "secondary_foreground",
-                                                        ),
-                                                        px(12.),
-                                                    ))
-                                                    .child(
-                                                        canvas(
-                                                            move |bounds, _, cx| {
-                                                                model_picker_trigger_shell
-                                                                    .update(cx, |shell, cx| {
-                                                                        if shell.model_picker_bounds
-                                                                            != Some(bounds)
-                                                                        {
-                                                                            shell.model_picker_bounds =
-                                                                                Some(bounds);
-                                                                            cx.notify();
-                                                                        }
-                                                                    })
-                                                                    .ok();
-                                                            },
-                                                            |_bounds, _state, _window, _cx| {},
-                                                        )
-                                                        .absolute()
-                                                        .inset_0()
-                                                        .size_full(),
-                                                    )
-                                            )
-                                            .when(!thinking_variants.is_empty(), |element| {
-                                                element.child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(theme_rgb(
-                                                            &self.theme,
-                                                            "secondary_foreground",
-                                                        ))
-                                                        .cursor_pointer()
-                                                        .id("thinking-picker-trigger")
-                                                        .relative()
-                                                        .role(Role::Button)
-                                                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                                        .aria_label(SharedString::from(format!(
-                                                            "Choose thinking variant: {thinking_display}"
-                                                        )))
-                                                        .px(px(6.))
-                                                        .py(px(4.))
-                                                        .rounded(px(6.))
-                                                        .hover(|element| {
-                                                            element.bg(theme_rgb(&self.theme, "muted"))
-                                                        })
-                                                        .on_click(cx.listener(|shell, _, _, cx| {
-                                                            shell.toggle_thinking_picker(cx);
-                                                        }))
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap(px(4.))
-                                                        .child(tabler_icon(
-                                                            TablerIcon::Bulb,
-                                                            theme_rgb(
-                                                                &self.theme,
-                                                                "secondary_foreground",
-                                                            ),
-                                                            px(13.),
-                                                        ))
-                                                        .child(SharedString::from(thinking_display.clone()))
-                                                        .child(tabler_icon(
-                                                            TablerIcon::ChevronDown,
-                                                            theme_rgb(
-                                                                &self.theme,
-                                                                "secondary_foreground",
-                                                            ),
-                                                            px(12.),
-                                                        ))
-                                                        .child(
-                                                            canvas(
-                                                                move |bounds, _, cx| {
-                                                                    thinking_picker_trigger_shell
-                                                                        .update(cx, |shell, cx| {
-                                                                            if shell.thinking_picker_bounds
-                                                                                != Some(bounds)
-                                                                            {
-                                                                                shell.thinking_picker_bounds =
-                                                                                    Some(bounds);
-                                                                                cx.notify();
-                                                                            }
-                                                                        })
-                                                                        .ok();
-                                                                },
-                                                                |_bounds, _state, _window, _cx| {},
-                                                            )
-                                                            .absolute()
-                                                            .inset_0()
-                                                            .size_full(),
-                                                        ),
-                                                )
-                                            })
                                             .child(
                                                 div()
                                                     .text_xs()
@@ -2087,6 +1953,79 @@ impl DesktopShell {
                                                 .inset_0()
                                                 .size_full(),
                                             )
+                                    )
+                                    .child(div().flex_1().min_w_0())
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(theme_rgb(
+                                                &self.theme,
+                                                "secondary_foreground",
+                                            ))
+                                            .cursor_pointer()
+                                            .id("model-picker-trigger")
+                                            .relative()
+                                            .role(Role::Button)
+                                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                            .aria_label(SharedString::from(format!(
+                                                "Choose model and effort: {model_display}"
+                                            )))
+                                            .px(px(6.))
+                                            .py(px(4.))
+                                            .rounded(px(6.))
+                                            .hover(|element| {
+                                                element.bg(theme_rgb(&self.theme, "muted"))
+                                            })
+                                            .on_click(cx.listener(|shell, _, window, cx| {
+                                                shell.toggle_model_picker(window, cx);
+                                            }))
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.))
+                                            .max_w(px(220.))
+                                            .child(tabler_icon(
+                                                TablerIcon::SlidersHorizontal,
+                                                theme_rgb(
+                                                    &self.theme,
+                                                    "secondary_foreground",
+                                                ),
+                                                px(13.),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .child(SharedString::from(model_display)),
+                                            )
+                                            .child(tabler_icon(
+                                                TablerIcon::ChevronDown,
+                                                theme_rgb(
+                                                    &self.theme,
+                                                    "secondary_foreground",
+                                                ),
+                                                px(12.),
+                                            ))
+                                            .child(
+                                                canvas(
+                                                    move |bounds, _, cx| {
+                                                        model_picker_trigger_shell
+                                                            .update(cx, |shell, cx| {
+                                                                if shell.model_picker_bounds
+                                                                    != Some(bounds)
+                                                                {
+                                                                    shell.model_picker_bounds =
+                                                                        Some(bounds);
+                                                                    cx.notify();
+                                                                }
+                                                            })
+                                                            .ok();
+                                                    },
+                                                    |_bounds, _state, _window, _cx| {},
+                                                )
+                                                .absolute()
+                                                .inset_0()
+                                                .size_full(),
+                                            ),
                                     )
                                     .child(if turn_is_running {
                                         div()
@@ -2294,6 +2233,7 @@ impl DesktopShell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let window_width = window.bounds().size.width;
         let window_height = window.bounds().size.height;
         let model_option_count = self
             .model
@@ -2310,11 +2250,26 @@ impl DesktopShell {
                 )
             })
             .count();
+        let model_effort_option_count = {
+            let count = thinking_variants_for_model(
+                &self.model.ui.models,
+                self.model.ui.current_provider.as_deref(),
+                self.model.ui.model.as_deref(),
+            )
+            .len();
+            if count == 0 {
+                0
+            } else {
+                count + 1
+            }
+        };
         let model_position = self.model_picker_open.then(|| {
             self.model_picker_bounds.map(|bounds| {
-                picker_popup_position_in_window(
+                picker_popup_position_in_window_right_aligned(
                     bounds,
-                    model_picker_height(model_option_count),
+                    px(300.),
+                    model_picker_height(model_option_count, model_effort_option_count),
+                    window_width,
                     window_height,
                     px(8.),
                     px(8.),
@@ -2337,24 +2292,6 @@ impl DesktopShell {
                 picker_popup_position_in_window(
                     bounds,
                     persona_picker_height(PERMISSION_MODES.len()),
-                    window_height,
-                    px(8.),
-                    px(8.),
-                )
-            })
-        });
-        let thinking_position = self.thinking_picker_open.then(|| {
-            let option_count = thinking_variants_for_model(
-                &self.model.ui.models,
-                self.model.ui.current_provider.as_deref(),
-                self.model.ui.model.as_deref(),
-            )
-            .len()
-                + 1;
-            self.thinking_picker_bounds.map(|bounds| {
-                picker_popup_position_in_window(
-                    bounds,
-                    persona_picker_height(option_count),
                     window_height,
                     px(8.),
                     px(8.),
@@ -2434,18 +2371,6 @@ impl DesktopShell {
                             .position(position)
                             .snap_to_window_with_margin(px(8.))
                             .child(self.render_permission_picker(cx)),
-                    )
-                    .with_priority(4),
-                )
-            })
-            .when_some(thinking_position.flatten(), |element, position| {
-                element.child(
-                    deferred(
-                        anchored()
-                            .anchor(Anchor::TopLeft)
-                            .position(position)
-                            .snap_to_window_with_margin(px(8.))
-                            .child(self.render_thinking_picker(cx)),
                     )
                     .with_priority(4),
                 )

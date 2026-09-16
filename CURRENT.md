@@ -6357,3 +6357,153 @@ daemon, TUI, mobile, bridge, and web client all accept the paged history shape.
 Verified focused Rust and TypeScript tests, the full desktop and TUI unit
 suites, clippy, arch-check, formatting, diff checks, and a fresh `just
 desktop-dev` visual smoke pass with composer typing and transcript scrolling.
+
+## 2026-09-12 — simplify the desktop composer controls
+
+Refreshed the GPUI composer around one compact model-and-effort control. The
+attachment action is now a quiet plus button, permission and persona remain
+available without competing with send, and the separate thinking trigger is
+gone. The model popover keeps search and virtualized results, adds an effort
+track with named snap points, and returns focus to the composer after a
+selection. Verified the desktop test suite, clippy, arch-check, formatting and
+diff checks, then used `just desktop-dev` to exercise model search, effort
+selection, focus return, and isolated picker scrolling over a populated
+transcript.
+
+## 2026-09-12 — make effort and picker positioning direct
+
+Made the effort control genuinely draggable with bounded pointer-to-stop
+mapping and release handling, while retaining keyboard and click access. Model
+rows now use smaller, single-line ellipsized text so long provider names cannot
+overlap descriptions or neighboring rows. The composer keeps the model trigger
+right-aligned, and the picker itself anchors by its right edge so changing the
+selected effort does not move the overlay. Verified drag changes from high to
+max and back to off in `just desktop-dev`, with the popup staying fixed.
+
+## 2026-09-12 — give the effort track a direct, themed motion pass
+
+Reworked the effort control to mirror the Codex treatment: a themed accent
+progress path, small accent stop markers, a white themed thumb with an accent
+center, and shared endpoints between the track and labels. Dragging now follows
+the pointer continuously, then eases the thumb and fill into the nearest named
+stop on release. The animation uses GPUI's reduced-motion-aware animation
+wrapper and all colors resolve through the active theme. Verified the rebuilt
+control visually by dragging high → max and max → off in `just desktop-dev`.
+
+## 2026-09-12 — keep outside clicks out of the effort drag
+
+The effort track now ignores mouse-up events unless a pointer drag is active.
+This keeps the optimistic selected stop separate from the live drag position,
+so clicking elsewhere after a completed drag cannot move the slider. Added a
+focused regression assertion and verified the desktop tests, clippy, formatting,
+and diff checks.
+
+## 2026-09-12 — align multi-stop effort geometry
+
+Widened the model picker and derived the effort track inset from the number of
+available stops, keeping the line, thumb, markers, and labels on one coordinate
+system as thinking levels grow beyond four. Added geometry assertions for the
+seven-stop case. Verified the full desktop tests, clippy, formatting, diff
+checks, and the rebuilt picker with a real drag plus an outside-click guard.
+
+## 2026-09-12 — keep effort options accessible after model switches
+
+Fixed a GPUI accessibility-tree panic when reopening models with a catalog
+provided `off` thinking variant. The picker already adds its own `Off` stop, so
+both entries previously generated the same accessibility id; effort options
+now use stable index-based ids. Added a regression test covering the duplicate
+case. Verified all desktop tests, clippy, formatting, diff checks, and a visual
+select/reopen pass for qwen3.8-max-preview with the effort picker open.
+
+## 2026-09-12 — center the effort thumb marker
+
+Centered the accent marker inside the effort thumb so it no longer renders as
+an offset dot at the thumb's top-left edge. Verified the full desktop tests,
+clippy, formatting, diff checks, and a fresh packaged visual pass with
+qwen3.8-max-preview selected.
+
+## 2026-09-12 — define separate desktop distribution
+
+Captured the packaging direction in
+`notes/mew-desktop-distribution-plan.md`: CLI/TUI artifacts stay independent,
+the native client gets architecture-specific macOS DMGs and archives with its
+daemon and CEF runtime bundled, and signing/notarization plus auto-updates are
+deferred until Apple developer credentials are available.
+
+## 2026-09-12 — package unsigned native desktop releases
+
+Added `just desktop-package` and a macOS release wrapper that stamps the
+workspace version into the app and helper plists, stages the bundled daemon,
+CEF runtime, and generated notices, emits architecture-qualified DMG and ZIP
+artifacts, and writes SHA256 checksums. `mew --version` now exposes the semver
+release identity while daemon diagnostics retain the git revision. The tag
+workflow publishes desktop assets separately from CLI/TUI tarballs, with
+signing and notarization omitted.
+Verified the arm64 release build, DMG mount/integrity, archive contents,
+checksums, packaged app launch, model selection, focused Rust tests, clippy,
+formatting, architecture checks, and shell syntax.
+
+## 2026-09-12 — align effort stop markers and labels
+
+Positioned each effort marker and its hit target from the same inset stop
+offset, then used centered label slots on that geometry instead of flex
+centers. The track, thumb, dots, labels, click targets, and drag mapping now
+share one measured coordinate system at every stop count. Added regression
+assertions for stop offsets and label slot widths.
+Verified the focused and full desktop tests, clippy, formatting, diff checks,
+and a rebuilt `just desktop-dev` visual pass with direct selection and thumb
+dragging across the deepseek-v4-pro Off/high/max picker.
+
+## 2026-09-12 — remove duplicate qwen Off variant
+
+Filtered catalog thinking variants that spell `off` (including padded or
+capitalized values) before the desktop picker adds its own `Off` stop. Qwen
+models now expose Off/low/medium/xhigh without a trailing duplicate, while
+the provider catalog still retains its explicit backend off parameters. Added
+a regression test for padded metadata. Verified 114 desktop tests, clippy,
+formatting, diff checks, and architecture checks. The rebuilt `just
+desktop-dev` launch hit the known macOS hiservices signal before the final
+process could be attached for an additional visual pass.
+
+## 2026-09-12 — reduce high-frequency scroll invalidation
+
+Stopped the transcript scroll handler from enqueueing a second full-shell
+notification on every wheel or trackpad tick; `ListState` already invalidates
+the containing view for its own virtualized repaint. Session-row hover controls
+now use GPUI group-hover styling, avoiding shell state updates as the pointer
+crosses rows. Sidebar rows also defer cloning the full workspace-group list
+until a session menu is actually open. Verified 114 desktop tests, clippy,
+formatting, diff checks, architecture checks, and rapid bidirectional scrolling
+in the rebuilt packaged app with the transcript scrollbar tracking correctly.
+
+## 2026-09-12 — measure and trim desktop frame work
+
+Added an opt-in GPUI frame probe behind `MEW_DESKTOP_FRAME_TRACE=1`. It reports
+60-frame draw average/p95/max, dirty-to-draw p95, invalidation counts, and
+writes the same batches to the system temp directory as
+`mew-desktop-frame-trace.log`. A baseline long-transcript sample measured about
+25 ms average draw time and 27–28 ms p95, making render cost rather than
+duplicate scroll notifications the next target. The browser pump now ignores
+duplicate address/title events so CEF metadata chatter cannot invalidate the
+whole shell repeatedly. The transcript registry is also cleared at the empty
+state boundary instead of on every non-empty center render.
+Verified 116 desktop tests, the full Rust workspace suite (including CLI,
+daemon, bridge, and integration tests), clippy, formatting, diff checks, and
+architecture checks. The final `just desktop-dev` visual launch still hit the
+known macOS hiservices signal-6 harness failure after prior packaged visual
+scroll checks remained stable.
+
+## 2026-09-12 — skip idle transcript selection bookkeeping
+
+Transcript inline spans now populate the selection registry only while a
+selection exists. Ordinary scrolling no longer clones and stores every visible
+span's text layout just to maintain an unused selection index. Verified 116
+desktop tests, clippy, formatting, and architecture checks.
+
+## 2026-09-12 — trim plain transcript span setup
+
+Plain markdown spans now skip empty highlight and code-font override setup
+before GPUI receives the text element. This keeps the hot path focused on the
+actual text layout work while preserving styled spans and selection behavior.
+Verified 116 desktop tests, clippy, formatting, diff checks, and architecture
+checks.

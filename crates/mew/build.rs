@@ -1,8 +1,9 @@
 //! Embeds the git revision of this checkout into the binary as
 //! `MEW_GIT_HASH` (`<short-hash>-dirty` when the tree has uncommitted
 //! changes, or `unknown` when git isn't available). `mew daemon --status`
-//! and `mew --version` surface it so a running daemon can be checked
-//! against the local build.
+//! and `mew daemon --status` surfaces it so a running daemon can be checked
+//! against the local build. `mew --version` reports the semver release
+//! identity separately.
 //!
 //! No `rerun-if-changed` directives are emitted, so cargo re-runs this
 //! script whenever any file in the package changes; the hash can lag a

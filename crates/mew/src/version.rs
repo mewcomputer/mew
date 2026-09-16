@@ -1,8 +1,8 @@
 //! Build-time version identity.
 //!
-//! Version numbers lie about which code a binary actually contains, so
-//! mew identifies builds by git revision instead. `build.rs` stamps
-//! `MEW_GIT_HASH` into the binary at compile time.
+//! The package version is the stable release identity exposed by
+//! `mew --version`. `build.rs` also stamps `MEW_GIT_HASH` into the binary so
+//! daemon diagnostics can distinguish two builds of the same release.
 
 /// Short git revision of this build: `3f2a1b9`, `3f2a1b9-dirty` when the
 /// tree had uncommitted changes at build time, or `unknown` when git

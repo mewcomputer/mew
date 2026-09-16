@@ -688,11 +688,10 @@ impl DesktopShell {
                     let renaming = self.rename_session_id.as_deref() == Some(&session_id);
                     let pinned = conversation.pinned;
                     let archived = conversation.archived;
-                    let groups = self.model.ui.groups.clone();
                     let current_group_id = conversation.group_id.clone();
                     let menu_session_id = session_id.clone();
                     let session_for_menu = session_id.clone();
-                    let hovered = self.hovered_session.as_deref() == Some(&session_id);
+                    let session_group = SharedString::from(format!("sidebar-session-{session_id}"));
                     let move_control = div()
                         .absolute()
                         .top_0()
@@ -714,6 +713,9 @@ impl DesktopShell {
                                 1.,
                             ),
                         ))
+                        .invisible()
+                        .group_hover(session_group.clone(), |style| style.visible())
+                        .when(menu_open, |element| element.visible())
                         .child(
                             div()
                                 .id(format!("session-menu-trigger-{menu_session_id}"))
@@ -741,8 +743,6 @@ impl DesktopShell {
                                     px(13.),
                                 )),
                         );
-                    let enter_session_id = session_id.clone();
-                    let exit_session_id = session_id.clone();
                     let rename_input_id = session_id.clone();
                     let rename_focus_handle = self.rename_focus_handle.clone();
                     let select_session_id = session_id.clone();
@@ -758,19 +758,8 @@ impl DesktopShell {
                         .pr(px(8.))
                         .rounded(px(6.))
                         .relative()
+                        .group(session_group.clone())
                         .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                        .on_mouse_move(cx.listener(move |shell, _, _, cx| {
-                            if shell.hovered_session.as_deref() != Some(&enter_session_id) {
-                                shell.hovered_session = Some(enter_session_id.clone());
-                                cx.notify();
-                            }
-                        }))
-                        .on_mouse_exit(cx.listener(move |shell, _, _, cx| {
-                            if shell.hovered_session.as_deref() == Some(&exit_session_id) {
-                                shell.hovered_session = None;
-                                cx.notify();
-                            }
-                        }))
                         .child(
                             div()
                                 .id(format!("select-session-{select_session_id}"))
@@ -833,20 +822,43 @@ impl DesktopShell {
                                         .gap(px(7.))
                                         .w_full()
                                         .min_w_0()
-                                        .child(if hovered && !renaming {
-                                            tabler_icon(
-                                                TablerIcon::GripVertical,
-                                                theme_rgb(&self.theme, "text.muted"),
-                                                px(12.),
-                                            )
-                                            .into_any_element()
-                                        } else {
+                                        .child(
                                             div()
-                                                .size(px(6.))
-                                                .rounded_full()
-                                                .bg(status_color)
-                                                .into_any_element()
-                                        })
+                                                .relative()
+                                                .size(px(12.))
+                                                .child(
+                                                    div()
+                                                        .absolute()
+                                                        .top(px(3.))
+                                                        .left(px(3.))
+                                                        .size(px(6.))
+                                                        .rounded_full()
+                                                        .bg(status_color),
+                                                )
+                                                .when(!renaming, |element| {
+                                                    element.child(
+                                                        div()
+                                                            .absolute()
+                                                            .inset_0()
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .invisible()
+                                                            .group_hover(
+                                                                session_group.clone(),
+                                                                |style| style.visible(),
+                                                            )
+                                                            .child(tabler_icon(
+                                                                TablerIcon::GripVertical,
+                                                                theme_rgb(
+                                                                    &self.theme,
+                                                                    "text.muted",
+                                                                ),
+                                                                px(12.),
+                                                            )),
+                                                    )
+                                                }),
+                                        )
                                         .child(if renaming {
                                             div()
                                                 .id(format!("rename-session-{rename_input_id}"))
@@ -948,9 +960,10 @@ impl DesktopShell {
                                     )
                                 }),
                         )
-                        .when(hovered, |element| element.child(move_control));
+                        .child(move_control);
                     Some(
                         row.when(menu_open, |element| {
+                            let groups = self.model.ui.groups.clone();
                             let rename_session_id = session_for_menu.clone();
                             let pin_session_id = session_for_menu.clone();
                             let archive_session_id = session_for_menu.clone();

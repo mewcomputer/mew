@@ -4,6 +4,20 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 profile="${MEW_DESKTOP_PROFILE:-release}"
 
+if [[ -n "${MEW_VERSION:-}" ]]; then
+    version="${MEW_VERSION#v}"
+else
+    package_id="$(cargo pkgid --manifest-path "$repo_root/Cargo.toml" -p mew-desktop)"
+    version="${package_id##*#}"
+fi
+
+case "$version" in
+    ''|*[!0-9.]*|.*|*.)
+        echo "invalid desktop version: $version" >&2
+        exit 1
+        ;;
+esac
+
 case "$profile" in
     debug|release) ;;
     *)
@@ -19,6 +33,12 @@ case "$(uname -s)" in
         contents="$app/Contents"
         frameworks="$contents/Frameworks"
         mkdir -p "$contents/MacOS" "$contents/Resources" "$frameworks"
+        for binary in "$target_dir/mew-desktop" "$target_dir/mew"; do
+            if [[ ! -x "$binary" ]]; then
+                echo "desktop binary is missing or not executable: $binary" >&2
+                exit 1
+            fi
+        done
         rm -f "$contents/MacOS/mew-desktop" "$contents/MacOS/mew"
         cp "$target_dir/mew-desktop" "$contents/MacOS/mew-desktop"
         cp "$target_dir/mew" "$contents/MacOS/mew"
@@ -45,6 +65,14 @@ case "$(uname -s)" in
                     fi
                 done
             fi
+        fi
+        if [[ -z "$cef_framework" ]]; then
+            for candidate in "$target_dir"/build/cef-dll-sys-*/out/cef_macos_"$cef_arch"/Chromium\ Embedded\ Framework.framework; do
+                if [[ -d "$candidate" ]]; then
+                    cef_framework="$candidate"
+                    break
+                fi
+            done
         fi
         cef_helper="${MEW_CEF_HELPER_PATH:-$target_dir/mew-cef-host-helper}"
         if [[ ! -d "$cef_framework" || ! -x "$cef_helper" ]]; then
@@ -75,8 +103,16 @@ case "$(uname -s)" in
             cp "$repo_root/apps/mew-desktop/Info.plist" "$helper_bundle/Contents/Info.plist"
             /usr/bin/plutil -replace CFBundleExecutable -string "$helper_name" \
                 "$helper_bundle/Contents/Info.plist"
+            /usr/bin/plutil -replace CFBundleShortVersionString -string "$version" \
+                "$helper_bundle/Contents/Info.plist"
+            /usr/bin/plutil -replace CFBundleVersion -string "$version" \
+                "$helper_bundle/Contents/Info.plist"
         done
         cp "$repo_root/apps/mew-desktop/Info.plist" "$contents/Info.plist"
+        /usr/bin/plutil -replace CFBundleShortVersionString -string "$version" \
+            "$contents/Info.plist"
+        /usr/bin/plutil -replace CFBundleVersion -string "$version" \
+            "$contents/Info.plist"
         chmod 755 "$contents/MacOS/mew-desktop" "$contents/MacOS/mew" \
             "$contents/MacOS/mew-cef-host-helper" \
             "$frameworks"/*/Contents/MacOS/*

@@ -352,8 +352,159 @@ pub(super) fn model_picker_list_height(option_count: usize) -> Pixels {
     px((option_count.clamp(1, 5) as f32 * 64.).min(320.))
 }
 
-pub(super) fn model_picker_height(option_count: usize) -> Pixels {
-    model_picker_list_height(option_count) + px(52.)
+pub(super) fn model_picker_height(option_count: usize, effort_option_count: usize) -> Pixels {
+    let effort_height = if effort_option_count > 0 { 72. } else { 0. };
+    model_picker_list_height(option_count) + px(52. + effort_height)
+}
+
+pub(super) fn recent_model_indices(
+    models: &[mew_protocol::ModelInfo],
+    recent_models: &[String],
+) -> Vec<usize> {
+    let mut indices = Vec::new();
+    let mut seen = BTreeSet::new();
+    for recent_model in recent_models {
+        let Some(index) = models.iter().position(|model| model.id == *recent_model) else {
+            continue;
+        };
+        if seen.insert(index) {
+            indices.push(index);
+            if indices.len() == RECENT_MODEL_LIMIT {
+                break;
+            }
+        }
+    }
+    indices
+}
+
+pub(super) fn build_model_picker_rows(
+    models: &[mew_protocol::ModelInfo],
+    recent_models: &[String],
+    query: &str,
+) -> (Vec<usize>, Vec<ModelPickerRow>) {
+    let filtered_indices = models
+        .iter()
+        .enumerate()
+        .filter(|(_, model)| {
+            model_matches_query(
+                &model.id,
+                &model.provider,
+                &model.model,
+                model.description.as_deref(),
+                query,
+            )
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    let mut selectable = Vec::with_capacity(filtered_indices.len());
+    let mut rows = Vec::with_capacity(filtered_indices.len() + 2);
+    if query.trim().is_empty() {
+        let recent_indices = recent_model_indices(models, recent_models);
+        if !recent_indices.is_empty() {
+            rows.push(ModelPickerRow::Header("Recent"));
+            for index in recent_indices {
+                rows.push(ModelPickerRow::Model {
+                    index,
+                    recent: true,
+                });
+                selectable.push(index);
+            }
+            rows.push(ModelPickerRow::Header("All Models"));
+        }
+    }
+    for index in filtered_indices {
+        rows.push(ModelPickerRow::Model {
+            index,
+            recent: false,
+        });
+        selectable.push(index);
+    }
+    (selectable, rows)
+}
+
+pub(super) fn push_recent_model(recent_models: &mut Vec<String>, model_id: &str) {
+    if model_id.is_empty() {
+        return;
+    }
+    recent_models.retain(|recent| recent != model_id);
+    recent_models.insert(0, model_id.to_owned());
+    recent_models.truncate(RECENT_MODEL_LIMIT);
+}
+
+pub(super) fn effort_index_for_pointer(
+    pointer_x: f32,
+    track_width: f32,
+    option_count: usize,
+) -> Option<usize> {
+    effort_position_for_pointer(pointer_x, track_width, option_count)
+        .and_then(|position| effort_index_for_position(position, option_count))
+}
+
+pub(super) fn thinking_effort_option_id(index: usize) -> String {
+    format!("model-picker-effort-option-{index}")
+}
+
+pub(super) fn effort_position_for_pointer(
+    pointer_x: f32,
+    track_width: f32,
+    option_count: usize,
+) -> Option<f32> {
+    if track_width <= 0. {
+        return None;
+    }
+    let inset = effort_track_inset(track_width, option_count);
+    let travel = effort_track_content_width(track_width, option_count);
+    Some(((pointer_x - inset) / travel.max(1.)).clamp(0., 1.))
+}
+
+pub(super) fn thinking_effort_drag_is_active(position: Option<f32>, has_active_drag: bool) -> bool {
+    has_active_drag && position.is_some()
+}
+
+pub(super) fn effort_track_inset(track_width: f32, option_count: usize) -> f32 {
+    if track_width <= 0. || option_count == 0 {
+        return 0.;
+    }
+    (track_width / (option_count as f32 * 2.)).min(EFFORT_TRACK_MAX_INSET)
+}
+
+pub(super) fn effort_track_content_width(track_width: f32, option_count: usize) -> f32 {
+    (track_width - effort_track_inset(track_width, option_count) * 2.).max(0.)
+}
+
+pub(super) fn effort_stop_offset(
+    index: usize,
+    track_width: f32,
+    option_count: usize,
+) -> Option<f32> {
+    (option_count > 0 && index < option_count && track_width > 0.).then(|| {
+        effort_track_inset(track_width, option_count)
+            + effort_position_for_index(index, option_count)
+                * effort_track_content_width(track_width, option_count)
+    })
+}
+
+pub(super) fn effort_stop_slot_width(track_width: f32, option_count: usize) -> f32 {
+    if track_width <= 0. {
+        return 0.;
+    }
+    if option_count <= 1 {
+        return track_width;
+    }
+    effort_track_content_width(track_width, option_count) / (option_count - 1) as f32
+}
+
+pub(super) fn effort_index_for_position(position: f32, option_count: usize) -> Option<usize> {
+    (option_count > 0)
+        .then(|| (position.clamp(0., 1.) * option_count.saturating_sub(1) as f32).round() as usize)
+}
+
+pub(super) fn effort_position_for_index(index: usize, option_count: usize) -> f32 {
+    if option_count <= 1 {
+        return 0.;
+    }
+    index.min(option_count - 1) as f32 / (option_count - 1) as f32
 }
 
 pub(super) fn persona_picker_list_height(option_count: usize) -> Pixels {
@@ -641,6 +792,7 @@ pub(super) fn thinking_variants_for_model(
             entry
                 .thinking_variants
                 .iter()
+                .filter(|variant| !variant.name.trim().eq_ignore_ascii_case("off"))
                 .map(|variant| variant.name.clone())
                 .collect()
         })
@@ -673,6 +825,26 @@ pub(super) fn picker_popup_position_in_window(
     };
 
     point(trigger_bounds.origin.x, px(y))
+}
+
+pub(super) fn picker_popup_position_in_window_right_aligned(
+    trigger_bounds: Bounds<Pixels>,
+    popup_width: Pixels,
+    popup_height: Pixels,
+    window_width: Pixels,
+    window_height: Pixels,
+    gap: Pixels,
+    margin: Pixels,
+) -> Point<Pixels> {
+    let y =
+        picker_popup_position_in_window(trigger_bounds, popup_height, window_height, gap, margin).y;
+    let trigger_right = f32::from(trigger_bounds.origin.x + trigger_bounds.size.width);
+    let popup_width = f32::from(popup_width);
+    let window_width = f32::from(window_width);
+    let margin = f32::from(margin);
+    let max_x = (window_width - popup_width - margin).max(margin);
+    let x = (trigger_right - popup_width).clamp(margin, max_x);
+    point(px(x), y)
 }
 
 pub(super) fn pending_actions_anchor(composer_bounds: Bounds<Pixels>) -> Point<Pixels> {

@@ -1,6 +1,20 @@
 use super::*;
 
 impl DesktopShell {
+    pub(super) fn remember_recent_model(&mut self, provider: &str, model: &str) {
+        let full_id = format!("{provider}/{model}");
+        push_recent_model(&mut self.recent_models, &full_id);
+
+        let Ok(mut state) = mew_config::load_state() else {
+            tracing::warn!(%full_id, "desktop: could not load state while saving recent model");
+            return;
+        };
+        state.recent_models = self.recent_models.clone();
+        if let Err(error) = mew_config::save_state(&state) {
+            tracing::warn!(%error, "desktop: could not persist recent model");
+        }
+    }
+
     fn persist_theme_preferences(&mut self) {
         let Ok(mut state) = mew_config::load_state() else {
             self.model.last_error = Some("could not load theme preferences".into());
@@ -91,9 +105,14 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) {
         self.model_picker_open = false;
+        self.thinking_effort_drag_index = None;
+        self.thinking_effort_drag_position = None;
+        self.thinking_effort_track_bounds = None;
+        self.thinking_effort_animation_from = None;
         self.terminal_font_picker_open = false;
         window.focus(&self.composer_focus_handle, cx);
         if self.model.session_is_ready() {
+            self.awaiting_model_switch = Some((provider.clone(), model.clone()));
             self.send_command(ClientMessage::SwitchModel { provider, model });
         } else {
             self.pending_model = Some((provider, model));
@@ -109,9 +128,12 @@ impl DesktopShell {
 
     pub(super) fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model_picker_open = !self.model_picker_open;
+        self.thinking_effort_drag_index = None;
+        self.thinking_effort_drag_position = None;
+        self.thinking_effort_track_bounds = None;
+        self.thinking_effort_animation_from = None;
         self.persona_picker_open = false;
         self.permission_picker_open = false;
-        self.thinking_picker_open = false;
         self.terminal_font_picker_open = false;
         if self.model_picker_open {
             self.model_picker_query.clear();
@@ -323,7 +345,6 @@ impl DesktopShell {
         self.persona_picker_open = !self.persona_picker_open;
         self.model_picker_open = false;
         self.permission_picker_open = false;
-        self.thinking_picker_open = false;
         self.terminal_font_picker_open = false;
         cx.notify();
     }
@@ -332,7 +353,6 @@ impl DesktopShell {
         self.permission_picker_open = !self.permission_picker_open;
         self.model_picker_open = false;
         self.persona_picker_open = false;
-        self.thinking_picker_open = false;
         self.terminal_font_picker_open = false;
         cx.notify();
     }
@@ -345,29 +365,87 @@ impl DesktopShell {
         cx.notify();
     }
 
-    pub(super) fn toggle_thinking_picker(&mut self, cx: &mut Context<Self>) {
-        self.thinking_picker_open = !self.thinking_picker_open;
-        self.model_picker_open = false;
-        self.persona_picker_open = false;
-        self.permission_picker_open = false;
-        self.terminal_font_picker_open = false;
-        cx.notify();
-    }
-
     /// `variant` of `None` disables thinking (the daemon treats an empty
     /// string the same as "none").
     pub(super) fn choose_thinking_variant(
         &mut self,
         variant: Option<String>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.thinking_picker_open = false;
+        self.model_picker_open = false;
+        self.thinking_effort_drag_index = None;
+        self.thinking_effort_drag_position = None;
+        self.thinking_effort_track_bounds = None;
+        self.thinking_effort_animation_from = None;
+        window.focus(&self.composer_focus_handle, cx);
+        self.send_thinking_variant(variant);
+        cx.notify();
+    }
+
+    fn send_thinking_variant(&mut self, variant: Option<String>) {
         if self.model.session_is_ready() {
             self.send_command(ClientMessage::SetThinkingVariant {
                 variant: variant.unwrap_or_default(),
             });
         }
-        cx.notify();
+    }
+
+    fn update_thinking_effort_drag(
+        &mut self,
+        pointer_x: f32,
+        track_width: f32,
+        variants: &[Option<String>],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(position) = effort_position_for_pointer(pointer_x, track_width, variants.len())
+        else {
+            return;
+        };
+        let Some(index) = effort_index_for_pointer(pointer_x, track_width, variants.len()) else {
+            return;
+        };
+        let position_changed = self
+            .thinking_effort_drag_position
+            .is_none_or(|previous| (previous - position).abs() > f32::EPSILON);
+        let index_changed = self.thinking_effort_drag_index != Some(index);
+        self.thinking_effort_drag_position = Some(position);
+        self.thinking_effort_drag_index = Some(index);
+        if index_changed {
+            self.send_thinking_variant(variants[index].clone());
+        }
+        if position_changed {
+            cx.notify();
+        }
+    }
+
+    fn finish_thinking_effort_drag(
+        &mut self,
+        pointer: Point<Pixels>,
+        variants: &[Option<String>],
+        cx: &mut Context<Self>,
+    ) {
+        if !thinking_effort_drag_is_active(self.thinking_effort_drag_position, cx.has_active_drag())
+        {
+            return;
+        }
+        if let Some(bounds) = self.thinking_effort_track_bounds {
+            let pointer_x = f32::from(pointer.x) - f32::from(bounds.origin.x);
+            let track_width = f32::from(bounds.size.width);
+            if let Some(position) =
+                effort_position_for_pointer(pointer_x, track_width, variants.len())
+            {
+                self.update_thinking_effort_drag(pointer_x, track_width, variants, cx);
+                self.thinking_effort_drag_position = None;
+                self.thinking_effort_animation_from = Some(position);
+                self.thinking_effort_animation_id =
+                    self.thinking_effort_animation_id.wrapping_add(1);
+                cx.notify();
+            }
+        }
+        // Keep the optimistic stop selected until the daemon broadcasts the
+        // change. Clearing it here makes the thumb jump back when the round
+        // trip takes longer than the mouse-up event.
     }
 
     pub(super) fn toggle_terminal_font_picker(&mut self, cx: &mut Context<Self>) {
@@ -375,7 +453,6 @@ impl DesktopShell {
         self.model_picker_open = false;
         self.persona_picker_open = false;
         self.permission_picker_open = false;
-        self.thinking_picker_open = false;
         cx.notify();
     }
 
@@ -392,6 +469,7 @@ impl DesktopShell {
     fn render_model_option(
         &self,
         index: usize,
+        recent: bool,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let model = self.model.ui.models.get(index)?;
@@ -401,9 +479,10 @@ impl DesktopShell {
             && self.model.ui.model.as_deref() == Some(model.model.as_str());
         let label = SharedString::from(model.id.clone());
         let description = model.description.clone();
+        let section = if recent { "recent" } else { "all" };
         Some(
             div()
-                .id(format!("model-option-{}", model.id))
+                .id(format!("model-option-{section}-{}", model.id))
                 .flex()
                 .flex_col()
                 .justify_center()
@@ -426,14 +505,24 @@ impl DesktopShell {
                 .on_click(cx.listener(move |shell, _, window, cx| {
                     shell.choose_model(provider.clone(), model_id.clone(), window, cx);
                 }))
-                .child(div().min_w_0().whitespace_normal().text_sm().child(label))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_xs()
+                        .child(label),
+                )
                 .when_some(
                     description.map(SharedString::from),
                     |element, description| {
                         element.child(
                             div()
                                 .min_w_0()
-                                .whitespace_normal()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
                                 .text_xs()
                                 .text_color(theme_rgb(&self.theme, "text.muted"))
                                 .child(description),
@@ -451,35 +540,48 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
         range
-            .filter_map(|index| {
-                self.model_picker_filtered_indices
-                    .get(index)
-                    .copied()
-                    .and_then(|model_index| self.render_model_option(model_index, cx))
-            })
+            .filter_map(
+                |row_index| match self.model_picker_rows.get(row_index).cloned()? {
+                    ModelPickerRow::Header(label) => Some(self.render_model_picker_header(label)),
+                    ModelPickerRow::Model { index, recent } => {
+                        self.render_model_option(index, recent, cx)
+                    }
+                },
+            )
             .collect()
+    }
+
+    fn render_model_picker_header(&self, label: &'static str) -> gpui::AnyElement {
+        div()
+            .id(format!(
+                "model-picker-header-{}",
+                label.to_lowercase().replace(' ', "-")
+            ))
+            .flex()
+            .items_end()
+            .h(px(64.))
+            .w_full()
+            .px(px(10.))
+            .pb(px(8.))
+            .text_xs()
+            .text_color(theme_rgb(&self.theme, "text.muted"))
+            .child(label)
+            .into_any_element()
     }
 
     pub(super) fn render_model_picker(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.model_picker_query.clone();
-        self.model_picker_filtered_indices = self
-            .model
-            .ui
-            .models
-            .iter()
-            .enumerate()
-            .filter(|(_, model)| {
-                model_matches_query(
-                    &model.id,
-                    &model.provider,
-                    &model.model,
-                    model.description.as_deref(),
-                    &query,
-                )
-            })
-            .map(|(index, _)| index)
-            .collect();
-        let option_count = self.model_picker_filtered_indices.len();
+        let (filtered_indices, rows) =
+            build_model_picker_rows(&self.model.ui.models, &self.recent_models, &query);
+        self.model_picker_filtered_indices = filtered_indices;
+        self.model_picker_rows = rows;
+        let option_count = self.model_picker_rows.len();
+        let thinking_variants = thinking_variants_for_model(
+            &self.model.ui.models,
+            self.model.ui.current_provider.as_deref(),
+            self.model.ui.model.as_deref(),
+        );
+        let current_thinking_variant = self.model.ui.thinking_variant.clone();
         let options = if option_count > 0 {
             gpui::uniform_list(
                 "model-picker-list",
@@ -496,11 +598,318 @@ impl DesktopShell {
                 "No models match your search"
             };
             div()
+                .flex_1()
                 .p(px(8.))
                 .text_sm()
                 .text_color(theme_rgb(&self.theme, "text.muted"))
                 .child(message)
                 .into_any_element()
+        };
+        let effort_option_count = if thinking_variants.is_empty() {
+            0
+        } else {
+            thinking_variants.len() + 1
+        };
+        let effort_picker = if effort_option_count > 0 {
+            let mut effort_values = vec![("Off".to_owned(), None)];
+            effort_values.extend(
+                thinking_variants
+                    .iter()
+                    .map(|variant| (variant.clone(), Some(variant.clone()))),
+            );
+            let effort_variants = effort_values
+                .iter()
+                .map(|(_, variant)| variant.clone())
+                .collect::<Vec<_>>();
+            let selected_effort_index = self
+                .thinking_effort_drag_index
+                .filter(|index| *index < effort_values.len())
+                .or_else(|| {
+                    effort_values.iter().position(|(_, variant)| {
+                        current_thinking_variant.as_ref() == variant.as_ref()
+                    })
+                })
+                .unwrap_or(0);
+            let effort_accent = theme_rgb(&self.theme, "text.accent");
+            let effort_muted = theme_rgb(&self.theme, "muted");
+            let effort_track_muted = effort_muted.opacity(0.78);
+            let effort_track_width = self
+                .thinking_effort_track_bounds
+                .map(|bounds| f32::from(bounds.size.width))
+                .unwrap_or(300.);
+            let effort_track_inset = effort_track_inset(effort_track_width, effort_values.len());
+            let render_effort_dot = |index: usize,
+                                     label: String,
+                                     variant: Option<String>,
+                                     stop_offset: f32,
+                                     cx: &mut Context<Self>| {
+                let selected = selected_effort_index == index;
+                div()
+                    .id(thinking_effort_option_id(index))
+                    .absolute()
+                    .left(px(stop_offset))
+                    .ml(px(-12.))
+                    .top_0()
+                    .size(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .cursor_pointer()
+                    .role(Role::MenuItem)
+                    .desktop_focus(effort_accent)
+                    .aria_label(SharedString::from(label))
+                    .aria_selected(selected)
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.choose_thinking_variant(variant.clone(), window, cx);
+                    }))
+                    .child(
+                        div()
+                            .size(px(if selected { 6. } else { 5. }))
+                            .rounded_full()
+                            .bg(effort_accent.opacity(if selected { 1. } else { 0.72 })),
+                    )
+                    .into_any_element()
+            };
+            let effort_dots = effort_values
+                .iter()
+                .enumerate()
+                .map(|(index, (label, variant))| {
+                    let stop_offset =
+                        effort_stop_offset(index, effort_track_width, effort_values.len())
+                            .unwrap_or(0.);
+                    render_effort_dot(index, label.clone(), variant.clone(), stop_offset, cx)
+                })
+                .collect::<Vec<_>>();
+            let effort_label_slot_width =
+                effort_stop_slot_width(effort_track_width, effort_values.len());
+            let effort_labels = effort_values
+                .iter()
+                .enumerate()
+                .map(|(index, (label, _))| {
+                    let stop_offset =
+                        effort_stop_offset(index, effort_track_width, effort_values.len())
+                            .unwrap_or(0.);
+                    div()
+                        .absolute()
+                        .left(px(stop_offset))
+                        .ml(px(-effort_label_slot_width / 2.))
+                        .w(px(effort_label_slot_width))
+                        .text_center()
+                        .text_xs()
+                        .text_color(theme_rgb(&self.theme, "text.muted"))
+                        .child(SharedString::from(label.clone()))
+                })
+                .collect::<Vec<_>>();
+            let effort_display = effort_values
+                .get(selected_effort_index)
+                .map(|(label, _)| label.clone())
+                .unwrap_or_else(|| "Off".to_owned());
+            let target_effort_position =
+                effort_position_for_index(selected_effort_index, effort_values.len());
+            let drag_effort_position = self.thinking_effort_drag_position;
+            let display_effort_position = drag_effort_position.unwrap_or(target_effort_position);
+            let animation_from = self.thinking_effort_animation_from;
+            let animation_id = self.thinking_effort_animation_id;
+            let drag_variants = effort_variants.clone();
+            let direct_drag_variants = effort_variants.clone();
+            let release_drag_variants = effort_variants.clone();
+            let release_drag_out_variants = effort_variants.clone();
+            let track_bounds_shell = cx.entity();
+            let effort_track = div()
+                .absolute()
+                .left(px(effort_track_inset))
+                .right(px(effort_track_inset))
+                .top(px(10.))
+                .h(px(5.))
+                .rounded_full()
+                .bg(linear_gradient(
+                    90.,
+                    linear_color_stop(effort_accent, display_effort_position),
+                    linear_color_stop(effort_track_muted, display_effort_position),
+                ));
+            let effort_track = match (drag_effort_position, animation_from) {
+                (None, Some(from)) => effort_track
+                    .with_animation(
+                        ElementId::Name(
+                            format!("model-picker-effort-track-animation-{animation_id}").into(),
+                        ),
+                        Animation::new(Duration::from_millis(180))
+                            .with_easing(gpui::ease_out_quint()),
+                        move |element, delta| {
+                            let position = from + (target_effort_position - from) * delta;
+                            element.bg(linear_gradient(
+                                90.,
+                                linear_color_stop(effort_accent, position),
+                                linear_color_stop(effort_track_muted, position),
+                            ))
+                        },
+                    )
+                    .into_any_element(),
+                _ => effort_track.into_any_element(),
+            };
+            let effort_thumb = div()
+                .absolute()
+                .top_0()
+                .left(relative(display_effort_position))
+                .ml(px(-12.))
+                .size(px(24.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme_rgb(&self.theme, "text.body"))
+                .border_1()
+                .border_color(theme_rgb(&self.theme, "text.body"))
+                .child(div().size(px(5.)).rounded_full().bg(effort_accent));
+            let effort_thumb = match (drag_effort_position, animation_from) {
+                (None, Some(from)) => effort_thumb
+                    .with_animation(
+                        ElementId::Name(
+                            format!("model-picker-effort-thumb-animation-{animation_id}").into(),
+                        ),
+                        Animation::new(Duration::from_millis(180))
+                            .with_easing(gpui::ease_out_quint()),
+                        move |element, delta| {
+                            let position = from + (target_effort_position - from) * delta;
+                            element.left(relative(position))
+                        },
+                    )
+                    .into_any_element(),
+                _ => effort_thumb.into_any_element(),
+            };
+            let effort_thumb = div()
+                .absolute()
+                .left(px(effort_track_inset))
+                .right(px(effort_track_inset))
+                .top_0()
+                .bottom_0()
+                .child(effort_thumb);
+            Some(
+                div()
+                    .id("model-picker-effort")
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .pt(px(8.))
+                    .border_t_1()
+                    .border_color(theme_rgb(&self.theme, "divider"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.))
+                                    .text_color(theme_rgb(&self.theme, "text.muted"))
+                                    .child(tabler_icon(
+                                        TablerIcon::Bulb,
+                                        theme_rgb(&self.theme, "text.muted"),
+                                        px(13.),
+                                    ))
+                                    .child("Effort"),
+                            )
+                            .child(
+                                div()
+                                    .text_color(theme_rgb(&self.theme, "text.body"))
+                                    .child(SharedString::from(effort_display)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("model-picker-effort-track")
+                            .relative()
+                            .flex()
+                            .items_center()
+                            .w_full()
+                            .h(px(24.))
+                            .cursor(gpui::CursorStyle::PointingHand)
+                            .on_drag(ThinkingEffortDrag, |_, _, _, cx| {
+                                cx.new(|_| ThinkingEffortPreview)
+                            })
+                            .on_drag_move::<ThinkingEffortDrag>(cx.listener(
+                                move |shell,
+                                      event: &gpui::DragMoveEvent<ThinkingEffortDrag>,
+                                      _,
+                                      cx| {
+                                    let pointer_x = f32::from(event.event.position.x)
+                                        - f32::from(event.bounds.origin.x);
+                                    let track_width = f32::from(event.bounds.size.width);
+                                    shell.update_thinking_effort_drag(
+                                        pointer_x,
+                                        track_width,
+                                        &drag_variants,
+                                        cx,
+                                    );
+                                },
+                            ))
+                            .on_mouse_move(cx.listener(
+                                move |shell, event: &gpui::MouseMoveEvent, _, cx| {
+                                    if !event.dragging() {
+                                        return;
+                                    }
+                                    let Some(bounds) = shell.thinking_effort_track_bounds else {
+                                        return;
+                                    };
+                                    let pointer_x =
+                                        f32::from(event.position.x) - f32::from(bounds.origin.x);
+                                    shell.update_thinking_effort_drag(
+                                        pointer_x,
+                                        f32::from(bounds.size.width),
+                                        &direct_drag_variants,
+                                        cx,
+                                    );
+                                },
+                            ))
+                            .on_mouse_up(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |shell, event: &gpui::MouseUpEvent, _, cx| {
+                                    shell.finish_thinking_effort_drag(
+                                        event.position,
+                                        &release_drag_variants,
+                                        cx,
+                                    );
+                                }),
+                            )
+                            .on_mouse_up_out(
+                                gpui::MouseButton::Left,
+                                cx.listener(move |shell, event: &gpui::MouseUpEvent, _, cx| {
+                                    shell.finish_thinking_effort_drag(
+                                        event.position,
+                                        &release_drag_out_variants,
+                                        cx,
+                                    );
+                                }),
+                            )
+                            .child(effort_track)
+                            .children(effort_dots)
+                            .child(effort_thumb)
+                            .child(
+                                canvas(
+                                    move |bounds, _, cx| {
+                                        track_bounds_shell.update(cx, |shell, cx| {
+                                            if shell.thinking_effort_track_bounds != Some(bounds) {
+                                                shell.thinking_effort_track_bounds = Some(bounds);
+                                                cx.notify();
+                                            }
+                                        });
+                                    },
+                                    |_bounds, _state, _window, _cx| {},
+                                )
+                                .absolute()
+                                .inset_0()
+                                .size_full(),
+                            ),
+                    )
+                    .child(div().relative().w_full().h(px(16.)).children(effort_labels))
+                    .into_any_element(),
+            )
+        } else {
+            None
         };
         let search_focus_handle = self.model_picker_focus_handle.clone();
         let clear_search = (!self.model_picker_query.is_empty()).then(|| {
@@ -532,10 +941,10 @@ impl DesktopShell {
         });
         div()
             .id("model-picker")
-            .w(px(300.))
+            .w(px(400.))
             .flex()
             .flex_col()
-            .h(model_picker_height(option_count))
+            .h(model_picker_height(option_count, effort_option_count))
             .p(px(8.))
             .border_1()
             .border_color(theme_rgb(&self.theme, "divider"))
@@ -600,6 +1009,9 @@ impl DesktopShell {
                     }),
             )
             .child(options)
+            .when_some(effort_picker, |element, effort_picker| {
+                element.child(effort_picker)
+            })
     }
 
     fn render_persona_option(
@@ -763,77 +1175,6 @@ impl DesktopShell {
             .on_key_down(cx.listener(Self::shell_key_down))
             .track_focus(&self.popover_focus_handle)
             .children(options)
-    }
-
-    pub(super) fn render_thinking_picker(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let current = self.model.ui.thinking_variant.clone();
-        let variants = thinking_variants_for_model(
-            &self.model.ui.models,
-            self.model.ui.current_provider.as_deref(),
-            self.model.ui.model.as_deref(),
-        );
-        let render_option = |label: String, variant: Option<String>, cx: &mut Context<Self>| {
-            let selected = current == variant;
-            div()
-                .id(format!(
-                    "thinking-option-{}",
-                    variant.as_deref().unwrap_or("off")
-                ))
-                .flex()
-                .items_center()
-                .min_h(px(34.))
-                .p(px(9.))
-                .rounded(px(7.))
-                .cursor_pointer()
-                .role(Role::MenuItem)
-                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                .aria_label(SharedString::from(label.clone()))
-                .aria_selected(selected)
-                .when(selected, |element| {
-                    element.bg(theme_rgb(&self.theme, "accent"))
-                })
-                .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    shell.choose_thinking_variant(variant.clone(), cx);
-                }))
-                .child(div().text_sm().child(SharedString::from(label)))
-                .into_any_element()
-        };
-        let mut options = vec![render_option("off".into(), None, cx)];
-        options.extend(
-            variants
-                .iter()
-                .map(|variant| render_option(variant.clone(), Some(variant.clone()), cx)),
-        );
-        let option_count = options.len();
-
-        div()
-            .id("thinking-picker")
-            .w(px(220.))
-            .flex()
-            .flex_col()
-            .h_auto()
-            .max_h(persona_picker_height(option_count))
-            .overflow_y_scroll()
-            .p(px(8.))
-            .border_1()
-            .border_color(theme_rgb(&self.theme, "divider"))
-            .rounded(px(10.))
-            .bg(theme_rgb(&self.theme, "panel.background"))
-            .role(Role::Menu)
-            .aria_label("Choose thinking variant")
-            .on_key_down(cx.listener(Self::shell_key_down))
-            .track_focus(&self.popover_focus_handle)
-            .when(option_count > 1, |element| element.children(options))
-            .when(option_count == 1, |element| {
-                element.child(
-                    div()
-                        .p(px(8.))
-                        .text_sm()
-                        .text_color(theme_rgb(&self.theme, "text.muted"))
-                        .child("No thinking variants for this model"),
-                )
-            })
     }
 
     pub(super) fn render_slash_menu(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

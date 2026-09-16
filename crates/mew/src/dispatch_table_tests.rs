@@ -950,6 +950,7 @@ async fn test_session_meta_actions_reach_target() {
         archived: false,
         pinned: false,
         group_id: None,
+        workspace_path: None,
         change_stats: None,
         usage: None,
         context_tokens: None,
