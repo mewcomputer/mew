@@ -1113,10 +1113,23 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 app.insert_newline();
                 return None;
             }
-            // Enter always submits what's typed; Tab applies the highlighted
-            // slash completion. Applying the completion on Enter used to
-            // replace the typed text with the bare command name, silently
-            // dropping arguments (e.g. `/goal fix the bug` → `/goal`).
+            // While the slash autocomplete is open, Enter runs the highlighted
+            // command rather than the raw prefix, so a partial name like
+            // `/mode` resolves to `/model` instead of being sent to the model
+            // as an unknown command. Tab applies the same completion without
+            // submitting. A query that already names a command submits as
+            // typed; the menu only stays open while the input is a bare name
+            // prefix (any argument introduces a space, which matches no
+            // command name), so completion can never drop arguments. This
+            // matches the desktop composer: a partial query completes the
+            // highlighted entry, an exact command submits as typed.
+            if app.mode == crate::app::Mode::SlashCommand {
+                let typed = app.input.trim();
+                let matches = app.filtered_slash_commands();
+                if !matches.is_empty() && !matches.iter().any(|c| c.name == typed) {
+                    app.apply_slash_completion();
+                }
+            }
             if let Some(text) = app.submit_input() {
                 if text.starts_with('/') {
                     return Some(Action::SlashCommand(text));
@@ -1942,8 +1955,9 @@ mod tests {
 
     #[test]
     fn enter_submits_slash_input_with_args() {
-        // Regression: Enter always submits the typed slash text; the
-        // completion list must never replace it (Tab completes instead).
+        // Enter submits slash text that carries arguments as typed; the
+        // completion list is closed (`/goal fix the bug` is not a bare name
+        // prefix) so it must never replace the arguments.
         let mut app = crate::app::App::new();
         app.input = "/goal fix the bug".into();
         app.cursor = app.input.len();
@@ -1954,6 +1968,53 @@ mod tests {
             Some(Action::SlashCommand(ref t)) if t == "/goal fix the bug"
         ));
         assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn enter_runs_highlighted_slash_completion() {
+        // Regression: a partial name prefix (`/mode`) must run the highlighted
+        // command (`/model`) on Enter, not submit the raw prefix to the model.
+        let mut app = crate::app::App::new();
+        for c in "/mode".chars() {
+            handle_key_event(&mut app, char_key(c));
+        }
+        assert_eq!(app.mode, crate::app::Mode::SlashCommand);
+        let action = handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, Some(Action::SlashCommand(ref t)) if t == "/model"));
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn enter_runs_the_selected_slash_completion() {
+        // The entry highlighted by the arrow keys is the one that runs, not
+        // simply the first prefix match.
+        let mut app = crate::app::App::new();
+        for c in "/m".chars() {
+            handle_key_event(&mut app, char_key(c));
+        }
+        // `/m` matches /model, /models, /mouse; move to /models.
+        handle_key_event(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let action = handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, Some(Action::SlashCommand(ref t)) if t == "/models"));
+    }
+
+    #[test]
+    fn enter_submits_exact_slash_command_as_typed() {
+        // A fully typed command submits as typed rather than being replaced
+        // by the highlighted entry (e.g. `/models` must not degrade to
+        // `/model`).
+        for typed in ["/quit", "/models"] {
+            let mut app = crate::app::App::new();
+            for c in typed.chars() {
+                handle_key_event(&mut app, char_key(c));
+            }
+            let action =
+                handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(
+                matches!(action, Some(Action::SlashCommand(ref t)) if t == typed),
+                "{typed} should submit as typed, got {action:?}"
+            );
+        }
     }
 
     #[test]

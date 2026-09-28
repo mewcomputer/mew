@@ -1,3 +1,18 @@
+# 2026-09-28 — TUI Enter accepts the highlighted slash command
+
+The TUI composer submitted the raw slash prefix on Enter, so a partial name like
+`/mode` fell through to the model as an unknown command instead of selecting the
+highlighted `/model`. Commit `0524c7e` had dropped Enter-completes in favor of
+Tab-only completion, but its stated rationale (losing arguments such as
+`/goal fix the bug` → `/goal`) never applied: the autocomplete only stays open
+for a bare command-name prefix, and any argument introduces a space that closes
+it. Enter now runs the highlighted entry in one press when the menu is open and the
+input does not already name a command, matching the desktop composer's intent.
+A query that names a command (or carries arguments) still submits as typed.
+
+Verified the new regression tests, the full `mew-tui` suite, `cargo clippy
+-p mew-tui --all-targets -D warnings`, and `cargo fmt --check`.
+
 # 2026-09-27 — fix where the global AGENTS.md is read from
 
 `mew-context` resolved the global context directory with
