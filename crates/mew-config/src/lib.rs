@@ -556,12 +556,21 @@ pub struct State {
     /// Native desktop view state keyed by daemon session ID.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub desktop_session_views: HashMap<String, DesktopSessionViewState>,
+    /// Native desktop session rail groups collapsed by group ID.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desktop_collapsed_groups: Vec<String>,
+    /// Native desktop expanded session rail width in logical points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_sidebar_width: Option<f32>,
     /// Theme used when the native desktop is in light mode.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub desktop_light_theme: String,
     /// Theme used when the native desktop is in dark mode.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub desktop_dark_theme: String,
+    /// Native desktop application used by the workspace open split control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_external_editor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -579,6 +588,15 @@ pub struct DesktopWindowState {
     pub y: f32,
     pub width: f32,
     pub height: f32,
+}
+
+/// Semantic transcript position retained for a desktop session.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DesktopTranscriptScrollAnchor {
+    pub message_index: usize,
+    pub part_index: usize,
+    pub block_index: usize,
+    pub offset: f32,
 }
 
 /// Persisted per-session native desktop layout and auxiliary view state.
@@ -608,6 +626,8 @@ pub struct DesktopSessionViewState {
     pub browser_url: String,
     #[serde(default)]
     pub browser_title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_scroll_anchor: Option<DesktopTranscriptScrollAnchor>,
 }
 
 fn default_true() -> bool {
@@ -1068,6 +1088,20 @@ values = ["sk_test_deadbeef"]
     }
 
     #[test]
+    fn test_state_external_editor_roundtrip_and_legacy_default() {
+        let legacy: State = toml::from_str("desktop_theme_mode = \"dark\"\n").unwrap();
+        assert_eq!(legacy.desktop_external_editor, None);
+
+        let state = State {
+            desktop_external_editor: Some("zed".into()),
+            ..Default::default()
+        };
+        let serialized = toml::to_string_pretty(&state).unwrap();
+        let deserialized: State = toml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.desktop_external_editor.as_deref(), Some("zed"));
+    }
+
+    #[test]
     fn test_state_desktop_window_roundtrip() {
         let mut session_views = HashMap::new();
         session_views.insert(
@@ -1085,6 +1119,12 @@ values = ["sk_test_deadbeef"]
                 browser_panel_open: false,
                 browser_url: "https://example.com".into(),
                 browser_title: "Example".into(),
+                transcript_scroll_anchor: Some(DesktopTranscriptScrollAnchor {
+                    message_index: 3,
+                    part_index: 1,
+                    block_index: 2,
+                    offset: 18.5,
+                }),
             },
         );
         let state = State {
@@ -1101,6 +1141,7 @@ values = ["sk_test_deadbeef"]
             }],
             desktop_active_remote_profile: Some("node-id".into()),
             desktop_session_views: session_views,
+            desktop_sidebar_width: Some(312.),
             ..Default::default()
         };
         let serialized = toml::to_string_pretty(&state).unwrap();
@@ -1117,6 +1158,16 @@ values = ["sk_test_deadbeef"]
         assert_eq!(
             deserialized.desktop_session_views,
             state.desktop_session_views
+        );
+        assert_eq!(deserialized.desktop_sidebar_width, Some(312.));
+        assert_eq!(
+            deserialized.desktop_session_views["session-1"].transcript_scroll_anchor,
+            Some(DesktopTranscriptScrollAnchor {
+                message_index: 3,
+                part_index: 1,
+                block_index: 2,
+                offset: 18.5,
+            })
         );
     }
 
@@ -1147,6 +1198,26 @@ values = ["sk_test_deadbeef"]
         assert_eq!(loaded.last_model, "deepseek-v4-flash");
         assert_eq!(loaded.last_provider, "opencode-zen");
         assert_eq!(loaded.disabled_plugins, vec!["buddy", "linter"]);
+    }
+
+    #[test]
+    fn test_desktop_collapsed_groups_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state.toml");
+        let state = State {
+            desktop_collapsed_groups: vec!["group-a".into(), "__archived__".into()],
+            desktop_sidebar_width: Some(312.),
+            ..Default::default()
+        };
+
+        save_state_to(&path, &state).expect("save");
+
+        let loaded = load_state_from(&path).expect("load");
+        assert_eq!(
+            loaded.desktop_collapsed_groups,
+            state.desktop_collapsed_groups
+        );
+        assert_eq!(loaded.desktop_sidebar_width, Some(312.));
     }
 
     #[test]
@@ -1288,7 +1359,10 @@ values = ["sk_test_deadbeef"]
             desktop_theme_mode: "system".into(),
             desktop_light_theme: "light".into(),
             desktop_dark_theme: "dark".into(),
+            desktop_external_editor: None,
             desktop_session_views: HashMap::new(),
+            desktop_collapsed_groups: vec![],
+            desktop_sidebar_width: None,
         };
         let healed = heal_state(&cfg, &state);
         assert!(healed.last_provider.is_empty());

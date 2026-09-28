@@ -69,6 +69,7 @@ impl App {
             filter: String::new(),
             selected: if !self.recent_models.is_empty() { 1 } else { 0 },
             cursor: 0,
+            filter_undo: editor::UndoHistory::default(),
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: Some("→ thinking variants".into()),
@@ -129,6 +130,7 @@ impl App {
             filter: String::new(),
             selected: 0,
             cursor: 0,
+            filter_undo: editor::UndoHistory::default(),
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: Some("⏎ attach · ^A archive · ^P pin".into()),
@@ -164,6 +166,7 @@ impl App {
             filter: String::new(),
             selected: 0,
             cursor: 0,
+            filter_undo: editor::UndoHistory::default(),
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: Some("new session in project".into()),
@@ -248,6 +251,7 @@ impl App {
             filter: String::new(),
             selected: pre_selected,
             cursor: 0,
+            filter_undo: editor::UndoHistory::default(),
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
@@ -329,6 +333,7 @@ impl App {
             filter: String::new(),
             selected: 0,
             cursor: 0,
+            filter_undo: editor::UndoHistory::default(),
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
@@ -378,6 +383,7 @@ impl App {
             filter: String::new(),
             selected: pre_selected,
             cursor: 0,
+            filter_undo: editor::UndoHistory::default(),
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
@@ -410,6 +416,7 @@ impl App {
             filter: String::new(),
             selected: 0,
             cursor: 0,
+            filter_undo: editor::UndoHistory::default(),
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
@@ -457,6 +464,7 @@ impl App {
             filter: String::new(),
             selected: 0,
             cursor: 0,
+            filter_undo: editor::UndoHistory::default(),
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
@@ -466,22 +474,16 @@ impl App {
 
     pub fn picker_insert(&mut self, c: char) {
         if let Some(ref mut p) = self.picker {
-            p.filter.insert(p.cursor, c);
-            p.cursor += c.len_utf8();
+            editor::insert(&mut p.filter, &mut p.cursor, c);
             p.selected = 0;
         }
     }
 
     pub fn picker_backspace(&mut self) {
         if let Some(ref mut p) = self.picker {
-            if p.cursor > 0 {
-                let prev = p.filter[..p.cursor]
-                    .char_indices()
-                    .last()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                p.filter.remove(prev);
-                p.cursor = prev;
+            let before = p.filter.len();
+            editor::backspace(&mut p.filter, &mut p.cursor);
+            if p.filter.len() != before {
                 p.selected = p.selected.min(p.filtered().len().saturating_sub(1));
             }
         }
@@ -501,21 +503,13 @@ impl App {
 
     pub fn picker_cursor_left(&mut self) {
         if let Some(ref mut p) = self.picker {
-            p.cursor = p.filter[..p.cursor]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+            editor::cursor_left(&p.filter, &mut p.cursor);
         }
     }
 
     pub fn picker_cursor_right(&mut self) {
         if let Some(ref mut p) = self.picker {
-            p.cursor = p.filter[p.cursor..]
-                .chars()
-                .next()
-                .map(|c| p.cursor + c.len_utf8())
-                .unwrap_or(p.filter.len());
+            editor::cursor_right(&p.filter, &mut p.cursor);
         }
     }
 
@@ -539,6 +533,7 @@ impl App {
             filter: String::new(),
             selected: 0,
             cursor: 0,
+            filter_undo: editor::UndoHistory::default(),
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
@@ -818,6 +813,7 @@ impl App {
             filter: String::new(),
             selected: 0,
             cursor: 0,
+            filter_undo: editor::UndoHistory::default(),
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,

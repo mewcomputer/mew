@@ -162,11 +162,11 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         };
         let text = Text::from(Line::from(Span::styled(prompt, search_style)));
         f.render_widget(Paragraph::new(text), search_area);
-        // Move cursor to end of search query.
+        // Move cursor to the edited position in the search query.
         let query_cursor_x = input_area.x
             + 1
             + "reverse-i-search: ".len() as u16
-            + app.history_search_query.len() as u16;
+            + display_width(&app.history_search_query[..app.history_search_cursor]) as u16;
         f.set_cursor_position((query_cursor_x, search_y));
     }
 

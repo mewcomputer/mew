@@ -133,6 +133,7 @@ impl DesktopShell {
                     .rounded(px(7.))
                     .cursor_pointer()
                     .role(Role::Tab)
+                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                     .aria_selected(selected)
                     .aria_label(SharedString::from(format!("Conversation: {}", tab.title)))
                     .aria_keyshortcuts(format!("Command+{}", index + 1))
@@ -158,6 +159,7 @@ impl DesktopShell {
                             .rounded(px(4.))
                             .text_color(muted)
                             .role(Role::Button)
+                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                             .aria_label(SharedString::from(format!(
                                 "Close conversation: {}",
                                 tab.title
@@ -193,6 +195,7 @@ impl DesktopShell {
                     .rounded(px(6.))
                     .cursor_pointer()
                     .role(Role::Button)
+                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                     .aria_label("Toggle sessions sidebar")
                     .text_color(muted)
                     .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
@@ -264,6 +267,7 @@ impl DesktopShell {
                     .text_color(muted)
                     .cursor_pointer()
                     .role(Role::Button)
+                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                     .aria_label("Connection profile")
                     .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
                     .on_click(cx.listener(|shell, _, _, cx| {
@@ -285,6 +289,7 @@ impl DesktopShell {
                     .rounded(px(6.))
                     .cursor_pointer()
                     .role(Role::Button)
+                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                     .aria_label(if self.layout.workbench_collapsed {
                         "Show workbench"
                     } else {
@@ -319,6 +324,7 @@ impl DesktopShell {
                     .rounded(px(6.))
                     .cursor_pointer()
                     .role(Role::Button)
+                    .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                     .aria_label(if self.layout.terminal_collapsed {
                         "Show terminal"
                     } else {

@@ -5,8 +5,8 @@ use mew_client_core::{
 };
 use mew_message::{Message, Part, Role, ToolState};
 use mew_protocol::{
-    ClientKind, ClientMessage, FlaggedFileWire, GroupInfo, ModelInfo, PersonaInfo, SessionInfo,
-    SessionState, SessionUsageWire, Todo,
+    Attachment, ClientKind, ClientMessage, FlaggedFileWire, GroupInfo, ModelInfo, PersonaInfo,
+    SessionInfo, SessionState, SessionUsageWire, Todo,
 };
 use std::path::Path;
 
@@ -15,6 +15,7 @@ pub struct ConversationItem {
     pub session_id: String,
     pub title: String,
     pub cwd: Option<String>,
+    pub workspace_path: Option<String>,
     pub last_message_at: Option<i64>,
     pub state: SessionState,
     pub last_turn_failed: bool,
@@ -42,7 +43,10 @@ pub struct TranscriptItem {
 pub enum TranscriptPart {
     Text(String),
     Reasoning(String),
-    File(String),
+    File {
+        label: String,
+        attachment: Attachment,
+    },
     ToolCall {
         tool_name: String,
         call_id: String,
@@ -141,6 +145,7 @@ pub struct UiModel {
     pub connection: Option<ConnectionStatus>,
     pub conversations: Vec<ConversationItem>,
     pub groups: Vec<GroupInfo>,
+    pub projects: Vec<mew_protocol::ProjectInfo>,
     pub selected_session: Option<String>,
     pub transcript: Vec<TranscriptItem>,
     pub models: Vec<ModelInfo>,
@@ -170,6 +175,7 @@ impl Default for UiModel {
             connection: None,
             conversations: Vec::new(),
             groups: Vec::new(),
+            projects: Vec::new(),
             selected_session: None,
             transcript: Vec::new(),
             models: Vec::new(),
@@ -215,6 +221,7 @@ impl UiModel {
             .and_then(|session_id| state.session(session_id))
             .is_some_and(|session| session.running);
         self.models = state.models.clone();
+        self.projects = state.projects.clone();
         self.pending_actions = state
             .attached_session
             .as_deref()
@@ -440,6 +447,7 @@ impl From<&SessionInfo> for ConversationItem {
             session_id: session.session_id.clone(),
             title,
             cwd: session.cwd.clone(),
+            workspace_path: session.workspace_path.clone(),
             last_message_at: session.last_message_at,
             state: session.state,
             last_turn_failed: session.last_turn_failed,
@@ -470,7 +478,14 @@ impl TranscriptItem {
                 ),
                 Part::File(part) => {
                     let label = part.filename.clone().unwrap_or_else(|| part.url.clone());
-                    (Some(label.clone()), Some(TranscriptPart::File(label)))
+                    let attachment = Attachment {
+                        path: part.url.clone(),
+                        mime: (!part.mime.is_empty()).then_some(part.mime.clone()),
+                    };
+                    (
+                        Some(label.clone()),
+                        Some(TranscriptPart::File { label, attachment }),
+                    )
                 }
                 Part::ToolCall(part) => {
                     let (status, output, error, diff) = match &part.state {
@@ -553,7 +568,7 @@ mod tests {
     use super::*;
     use mew_client_core::{ActionKind, ConnectionStatus};
     use mew_message::{
-        Message, Part, PartBase, ReasoningPart, TextPart, Time, ToolCallPart, ToolState,
+        FilePart, Message, Part, PartBase, ReasoningPart, TextPart, Time, ToolCallPart, ToolState,
         ToolStateCompleted, ToolTime,
     };
     use mew_protocol::{GroupInfo, PersonaInfo, ServerMessage, SessionInfo, SessionState};
@@ -572,6 +587,7 @@ mod tests {
             summary: None,
             client_count: 0,
             cwd: Some("/tmp/mew-project".into()),
+            workspace_path: Some("/tmp/mew-project".into()),
             last_turn_failed: false,
             archived: false,
             pinned: false,
@@ -684,6 +700,16 @@ mod tests {
             session_id,
             role: Role::Assistant,
             parts: vec![
+                Part::File(FilePart {
+                    base: PartBase {
+                        id: Ulid::new(),
+                        message_id,
+                        session_id,
+                    },
+                    mime: "image/png".into(),
+                    filename: Some("screenshot.png".into()),
+                    url: "/tmp/screenshot.png".into(),
+                }),
                 Part::Reasoning(ReasoningPart {
                     base: PartBase {
                         id: Ulid::new(),
@@ -727,10 +753,17 @@ mod tests {
         model.sync_from_client(&state);
         assert!(matches!(
             &model.transcript[0].parts[0],
-            TranscriptPart::Reasoning(text) if text == "inspect the workspace"
+            TranscriptPart::File { label, attachment }
+                if label == "screenshot.png"
+                    && attachment.path == "/tmp/screenshot.png"
+                    && attachment.mime.as_deref() == Some("image/png")
         ));
         assert!(matches!(
             &model.transcript[0].parts[1],
+            TranscriptPart::Reasoning(text) if text == "inspect the workspace"
+        ));
+        assert!(matches!(
+            &model.transcript[0].parts[2],
             TranscriptPart::ToolCall {
                 tool_name,
                 status: ToolStatus::Completed,

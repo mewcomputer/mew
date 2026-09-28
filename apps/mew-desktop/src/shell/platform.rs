@@ -206,6 +206,7 @@ pub(crate) fn run() {
                 gpui::KeyBinding::new("cmd-w", CloseConversation, None),
                 gpui::KeyBinding::new("cmd-b", ToggleSidebar, None),
                 gpui::KeyBinding::new("cmd-j", ToggleTerminal, None),
+                gpui::KeyBinding::new("cmd-k", FocusSidebarSearch, None),
                 gpui::KeyBinding::new("escape", DismissPopovers, None),
                 gpui::KeyBinding::new("backspace", ComposerBackspace, Some("Composer")),
                 gpui::KeyBinding::new("delete", ComposerDelete, Some("Composer")),
@@ -234,6 +235,7 @@ pub(crate) fn run() {
                         traffic_light_position: Some(point(px(12.), px(10.))),
                     }),
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(gpui::size(px(720.), px(480.))),
                     ..Default::default()
                 },
                 move |window, cx| {

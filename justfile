@@ -175,6 +175,10 @@ desktop-build:
     cargo build --release -p mew-cef-host --bin mew-cef-host-helper --no-default-features
     {{justfile_directory()}}/scripts/package-desktop-native.sh
 
+# Build macOS desktop release assets; CLI/TUI use the independent workflow.
+desktop-package: desktop-build
+    {{justfile_directory()}}/scripts/package-desktop-release.sh
+
 # Build and install the native macOS app into /Applications.
 desktop-install: desktop-build
     #!/usr/bin/env bash

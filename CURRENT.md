@@ -1,3 +1,220 @@
+# 2026-09-12 — make desktop persona and model pickers usable
+
+Persona options now size to their wrapped content inside a bounded scroll area,
+so longer descriptions no longer clip the next option. The model picker adds a
+focused, IME-capable search field with case-insensitive matching across model
+IDs, providers, names, and descriptions, plus clear and empty-result states;
+choosing a model restores composer focus instead of leaving the hidden search
+field active.
+Picker wheel events stop at the overlay, keeping the conversation from scrolling
+behind it while the model list remains virtualized. Coverage includes model
+matching and updated picker sizing; the rebuilt debug bundle was exercised with
+persona selection, model filtering, clearing, empty search, and model-list wheel
+scrolling. `cargo test -p mew-desktop` (107), clippy, fmt, `just arch-check`, and
+`git diff --check` are clean.
+
+# 2026-09-12 — stabilize transcript prepends and add conversation scrolling
+
+Desktop history loading now splices newly fetched rows into the existing GPUI
+list instead of resetting it, shifts saved transcript anchors with prepended
+messages, and preserves the same visible message while older pages arrive. The
+conversation view also has a native-looking, accessible scrollbar backed by
+`ListState`, with track navigation, thumb dragging, bottom-follow restoration,
+and live updates during wheel scrolling. Coverage includes the prepend-row
+invariant and the full desktop test suite. `cargo test -p mew-desktop`, clippy,
+`just arch-check`, formatting, and `just desktop-dev` all pass; the rebuilt
+bundle was exercised visually with wheel scrolling, track clicks, and thumb
+dragging.
+
+# 2026-09-10 — rework the TUI goal system
+
+`/goal <text>` no longer sets the goal sight-unseen and no longer loses
+text on Enter. The Enter-with-autocomplete behavior was the bug behind
+"no active goal" replies: pressing Enter while the slash completion list
+was showing applied the completion (replacing `/goal fix the bug` with
+`/goal `) instead of submitting the typed text. Enter now always submits
+what's typed; Tab applies completions. `/goal <text>` opens a new
+GoalCompose modal — an editable objective using the shared readline
+editor (with "edited from: <original>" when changed, and a "will
+replace: <active goal>" warning when one exists), Enter to set, Esc to
+cancel; nothing reaches the daemon until Accept. A local goal view
+(`App.active_goal`) mirrors the daemon's state and renders a goal
+section in the sidebar (objective + status) and a 🎯 status-bar pill
+while a goal is in flight; it updates on set/pause/resume/clear/
+complete and when an agent `propose_goal` proposal is accepted. Agent
+side untouched. Coverage: 5 new tests — Enter submits multi-word slash
+args, compose edit→SetGoal, Esc/empty-Enter cancel, replacing-goal
+capture, and proposal-accept registering the active goal (reject leaves
+it). `cargo test -p mew-tui` (258 + integration), `cargo test -p mew`,
+clippy `-D warnings`, and fmt clean.
+
+# 2026-09-10 — undo and visible cursors in every TUI text field
+
+Follow-up to the shared readline editor. Undo is no longer
+chat-input-only: `editor::UndoHistory` (state snapshots with the chat
+input's 500 ms coalescing and 100-entry cap) backs the question
+freeform, plan feedback, history search query, settings buffer, and
+picker filter; `handle_key_with_undo` routes edits through it and binds
+Ctrl+Z / Ctrl+Y on every field, and the chat input itself now uses the
+same `UndoHistory` type (its three ad-hoc stack fields were replaced
+with one `undo_history` field, behavior unchanged). Cursor rendering
+now follows the edit position on all surfaces: the question freeform and
+history-search cursors point into the text (was always the end), the
+picker filter cursor measures display width instead of byte offset
+(fixes drift on multibyte filters), the settings buffer's `│` marker
+sits at the cursor instead of after the text, and the plan feedback
+editor replaced its end-of-text `▏` glyph with a terminal cursor placed
+through the same word-wrap the renderer uses. All cursor placement uses
+`set_cursor_position`, so golden frames are unaffected. Coverage: 3 new
+editor unit tests (coalescing, undo/redo round trip, ^Z/^Y routing) and
+a freeform ^Z/^Y key-event test; the App undo tests were migrated to the
+shared type's accessors. `cargo test -p mew-tui` (253 + integration),
+clippy `-D warnings`, and fmt clean.
+
+# 2026-09-10 — one readline editor for every TUI text field
+
+The chat input had a complete readline-style editor (^A/^E/^F/^B/^D/
+^K/^U/^W, Alt word moves, Home/End, undo) embedded in `App`, but every
+other text field was push/pop-only: the question overlay's freeform
+answer, plan feedback, history search query, the settings buffer, and
+the picker filter (the last had arrow cursor moves only). All of those
+now share one editing core, `crates/mew-tui/src/app/editor.rs`, which
+owns the edit operations (insert/backspace/delete, char + word cursor
+moves, line-aware Home/End, kill-to-end, clear) and the key router
+`handle_key`. `app/input.rs` now delegates to it, so the chat input and
+thin fields are driven by identical code and bindings; Enter/Esc/Tab/
+arrows stay surface-specific. Each surface gained a cursor field
+(freeform/feedback/history-search/settings), the picker's budget-row and
+model-picker-Right special cases were hoisted ahead of the shared
+router, and mutation still resets the picker selection as before. Undo
+(^Z/^Y) remains chat-input-only, and the small overlays don't draw their
+cursor glyph yet; both are follow-ups. Coverage: 9 unit tests for the
+editor ops + router, plus key-event tests for readline keys in the
+question freeform (^B/^U) and plan feedback (^A/^K). `cargo test -p
+mew-tui` (249 + integration), clippy `-D warnings`, and fmt clean.
+
+# 2026-09-10 — modal text editors stop swallowing editing/navigation keys
+
+When the "Type your own answer" row of a user question (multi-choice
+prompt) was selected, `handle_user_question_key` unconditionally treated
+j/k/h/l as vim navigation and digits 1–9 as row-jump shortcuts, so those
+keys couldn't be typed into the freeform answer. The handler now detects
+when the freeform row is selected and routes printable keys (including
+n/y) and backspace into the text while Enter/Esc (submit/cancel) and
+Tab/arrows (navigation back onto option rows) keep working. The plan
+approval card had the same class of bug in its feedback editor: letters
+already typed (a/r/s are gated on `!editing`/Ctrl), but Tab/Left/Right
+still cycled the Approve/Request-changes/Submit selection mid-edit,
+which could approve the plan or submit changes while dropping the typed
+feedback. Those are now inert while the feedback editor is open. Other
+text surfaces (chat input, `@` picker) were already safe: their
+shortcuts are modifier-gated or gated on an empty input. Coverage: four
+key-event-level regression tests in `mew-tui` (j/k/h/l/digits/n/y type
+into the question freeform, backspace + Enter submit, j/digit still
+navigate on option rows, and the plan feedback editor keeps its
+selection under Tab/Left/Right and types every shortcut letter).
+`cargo test -p mew-tui` (243), clippy `-D warnings`, and fmt clean.
+
+# 2026-09-10 — `mew daemon --status` introspection command
+
+`mew daemon --status` reports whether the daemon is running, its PID,
+build revision, socket/TCP endpoints, and uptime (exit 0 running / 1
+not). Build identity is the git short hash (`<hash>-dirty` when the
+tree had uncommitted changes), embedded by a new `crates/mew/build.rs`
+as `MEW_GIT_HASH` and exposed via `crate::version::git_rev()`. The
+daemon writes a `mew.status.json` status file next to the pidfile at
+startup (version, pid, socket, port, start time); `--status` uses the
+pidfile (or the status file's pid) for liveness and the status file for
+metadata, then compares the daemon build to the local binary's, printing
+a restart hint when they differ or when the daemon predates the current
+binary. `--stop` now removes the status file too. Custom `--pidfile` is
+respected on both sides. Coverage: status-file placement/round-trip,
+not-running (missing pidfile and dead pid), running with status file
+(version/endpoints/stale hint), and running without status file (unknown
+build + restart hint); verified live against a background fake daemon.
+Builds are identified by git hash rather than crate version for now.
+`cargo test -p mew`, clippy `-D warnings`, and fmt clean.
+
+# 2026-09-10 — identify OpenCode traffic with a stable conversation session
+
+`opencode-zen`/`opencode-go` (and any provider pointed at an `opencode.ai`
+base URL) now send a `User-Agent: mew/<version>` and a stable
+`x-opencode-session: <session ulid>` on every chat-completions and /models
+request, so the gateway can route and reuse prompt caches per conversation.
+The conversation id is the mew session id, threaded into the provider build
+path (`build_session_agent`, daemon model switcher, Auto/Auto+ classifier,
+subagent `MainModelResolver`, and the fallback-model builder); the header is
+scoped inside the OpenAI-compatible adapter, keyed off the base URL, so
+non-OpenCode endpoints are untouched. Coverage: adapter header unit tests for
+OpenCode vs non-OpenCode base URLs and the no-session case, plus the
+existing provider/daemon suites; also dropped a pre-existing needless
+`..Default::default()` in an adapter test struct literal. `cargo test -p
+mew-provider-openai`, `cargo test -p mew`, clippy `-D warnings`, and fmt
+clean.
+
+# 2026-08-29 — shared subagent base prompt
+
+Every subagent now gets its system prompt composed by the runner as the new
+shared `mew://system_prompts/subagent` base (base prompt + the subagent
+contract: exit_tool result channel, narration, progress updates, context
+budget) followed by the def body. The base renders for all defs, so custom
+`.mew/agents` subagents inherit it without opting in, and a def with
+`template: false` keeps a verbatim body while the wrapper still renders.
+Previously each builtin inlined its own drifting copy (plan-reviewer had no
+base at all); builtin bodies are now role-only. Added request capture to the
+runner's test provider plus composition/verbatim/empty-body coverage, a
+role-only invariant over builtin bodies, and an inventory entry. Docs updated
+in `docs/using-mew/subagents.md`. `cargo test --all`, clippy, fmt clean.
+
+# 2026-08-29 — expose skill descriptions to prompt templates
+
+`TemplateContext` now carries `available_skills` as name + description pairs
+(mirroring `available_subagents`), so templated personas, skills, and subagent
+bodies can render the polytoken-style "Configured skills" listing with
+descriptions. The existing `skills` names variable and `has_skill()` derive
+from the same list, and `Agent::set_skills` refreshes the shared template
+context instead of leaving the persona-apply-time snapshot stale. The
+`<available_skills>` XML block appended to the system prompt is unchanged.
+Coverage: object rendering, names derivation, persona-template behavior, and
+`set_skills` refresh. `cargo test --all` and `cargo clippy --all -- -D
+warnings` clean; docs table in `docs/using-mew/personas.md` updated (also
+documents the previously missing `available_subagents` row).
+# 2026-08-29 — widen native GPUI chat scroll target
+
+Let the native transcript list span the full central chat pane while keeping
+message rows centered inside a bounded readable column. Moved transcript
+padding into the list so its scroll hitbox includes the pane gutters, and kept
+the composer fixed below it. Added width-boundary coverage. `cargo test --all`,
+desktop clippy, architecture and theme checks, formatting, diff checks,
+desktop packaging, and the live release app scroll/layout pass are clean.
+
+# 2026-08-29 — polish native GPUI session rail
+
+Bounded the move-to-group choices with an internal scroll region, added a
+persisted 232–360 point rail width with a visible resize splitter, and gave
+the session toolbar compact visible `new` and `group` actions. Added state and
+width-boundary coverage. `cargo test --all`, desktop clippy, architecture and
+theme checks, formatting, diff checks, desktop packaging, and the live release
+app accessibility/screenshot pass are clean.
+
+# 2026-08-28 — improve native GPUI session rail
+
+Added session search with `cmd-k` focus, a no-results state, running/failed/
+needs-input status labels, top-level pinned sessions, persistent collapsed
+groups, keyboard navigation, selected accessibility state, separate row
+controls, and inline group-delete confirmation. Added config and row-model
+tests. `cargo test --all`, desktop clippy, architecture and theme checks,
+desktop packaging, and a live release-app search/clear smoke check pass.
+
+# 2026-08-28 — keep native GPUI sidebar visibility app-wide
+
+The native desktop already persists `shell.sidebar` in the shared `state.toml`
+file and restores it on launch. Session restoration now preserves that global
+sidebar preference while continuing to restore workbench and terminal layout
+per session. Added a regression test for the boundary. `cargo test -p
+mew-desktop` passes with 91 tests, and formatting, clippy, and diff checks are
+clean.
+
 # 2026-08-28 — remove completed feature plans
 
 Removed five completed or superseded plans: `notes/mew-tui-self-capture-plan.md`,
@@ -6043,3 +6260,250 @@ match.
   glyphs underneath were bleeding through; `Clear` resets the foreground first.
 - Added a one-row `background`-colored bottom hairline to the autocomplete so
   the list is visually separated from the input field below it.
+
+## 2026-08-29 — deep UX pass for native GPUI chat and workbench
+
+Added keyboard focus rings and tab stops across native shell controls, tooltips
+for the icon-only auxiliary rail, clear primary/secondary/destructive action
+hierarchy, expandable tool output and long diffs, and removed the duplicate
+session-toolbar new-conversation control. Retry now preserves file attachments
+from transcript history, markdown links open safely in the in-app browser, and
+transcript follow mode exposes a jump-to-latest control while retaining a
+semantic scroll anchor per session. The workbench now auto-collapses when the
+window cannot keep both minimum panel widths and the desktop window has a
+native minimum size. Added model, config, markdown, retry, and responsive
+behavior coverage. `cargo test --all`, all-target desktop/config/model clippy,
+architecture and theme checks, formatting, diff checks, desktop packaging,
+and a release-app accessibility/screenshot smoke pass are clean.
+
+## 2026-08-29 — defer transcript scroll persistence outside GPUI list callbacks
+
+Fixed a native desktop panic caused by querying `ListState` from its own scroll
+handler while GPUI held its internal mutable borrow. Scroll-state persistence is
+now deferred until after the callback returns. Added coverage for the
+follow-tail and scrolled-away boundaries. Verified the focused desktop test,
+desktop clippy, formatting, diff checks, and release desktop packaging.
+
+## 2026-09-11 — plan GPUI workspace-first sidebar cleanup
+
+Added `notes/gpui-workspace-sidebar-cleanup-plan.md`, an execution-ready plan
+for replacing the native desktop's session-group hierarchy with canonical
+daemon-owned workspace membership. The plan preserves existing group data,
+specifies workspace and task pinning, five-item progressive disclosure,
+relevance-first global search, stable anchored menus, local editor handoff,
+test-first implementation phases, visual QA states, and acceptance criteria.
+It builds on the project discovery and shared reducer work that already landed
+instead of duplicating it. Verified with `git diff --check`.
+
+## 2026-09-11 — implement workspace-first GPUI sidebar projection
+
+Added canonical daemon workspace identity resolution with longest-root matching,
+mirrored it into `SessionInfo` and `ConversationItem`, and exposed project
+metadata in `UiModel`. The native sidebar now renders workspace headers and
+groups tasks by workspace, keeps pinned/attention/running/selected tasks
+visible, caps normal recent tasks at five with `Show more`, expands search
+across archived matches, and supports workspace-scoped new-task actions. The
+relevant focused tests pass, `cargo check -p mew-desktop` passes, and
+`just desktop-dev` was used for a live screenshot plus collapse, show-more,
+search, and new-task interaction smoke pass.
+
+## 2026-09-11 — persist and sync workspace pins
+
+Added the daemon-owned `projects.json` sidecar and `PinProject` protocol
+mutation. Workspace pins are validated against the canonical project list,
+written atomically, and rebroadcast as `ProjectList` so connected clients
+converge. The GPUI workspace header now exposes an accessible pin/unpin control.
+Verified protocol roundtrip, sidecar persistence, formatting, diff checks,
+daemon/desktop clippy, and a live `just desktop-dev` smoke pass that pinned,
+observed reordering, and restored the test state.
+
+## 2026-09-11 — add local workspace open destinations
+
+Added a persisted desktop external-editor preference and a workspace split
+control with a remembered primary action plus a separate chevron menu. The
+menu detects available local destinations, groups editor choices separately
+from actions, supports Terminal and copy-path actions, and refuses local-path
+launches for remote daemon profiles. Launch arguments remain structured so
+workspace paths with spaces are preserved. Verified config and desktop focused
+tests, desktop check and clippy, and a live `just desktop-dev` smoke pass that
+restored Zed, opened the destination menu, selected the editor, and copied a
+workspace path.
+
+## 2026-09-11 — consolidate workspace actions into a kebab menu
+
+Simplified workspace headers to `folder name · kebab · new task`. Editor,
+terminal, copy-path, and pin actions now live in one anchored workspace options
+menu, removing the split open control from the row. Verified desktop check and
+focused destination tests, then exercised the compact header, menu sections,
+pin action, and copy-path interaction in `just desktop-dev`.
+
+## 2026-09-11 — make thread menus floating overlays
+
+Reworked per-thread overflow menus so they render as deferred absolute
+overlays instead of inline children that remeasure and push the session list.
+The existing rename, pin, archive, and group actions remain available, while
+selection and Escape dismiss the menu cleanly. Verified all 105 desktop tests,
+arch-check, diff checks, and a live `just desktop-dev` interaction showing the
+menu anchored below a thread without row reflow.
+
+## 2026-09-11 — keep desktop chat responsive with bounded history pages
+
+Preserved markdown and tool-output caches across client snapshots, virtualized
+tool diffs, fixed the user bubble width regression, and made the composer a
+focusable accessible text field. Session attach now loads the newest history
+page first; scrolling to the top requests older pages through a cursor, keeping
+large sessions out of a single oversized WebSocket frame. The shared protocol,
+daemon, TUI, mobile, bridge, and web client all accept the paged history shape.
+Verified focused Rust and TypeScript tests, the full desktop and TUI unit
+suites, clippy, arch-check, formatting, diff checks, and a fresh `just
+desktop-dev` visual smoke pass with composer typing and transcript scrolling.
+
+## 2026-09-12 — simplify the desktop composer controls
+
+Refreshed the GPUI composer around one compact model-and-effort control. The
+attachment action is now a quiet plus button, permission and persona remain
+available without competing with send, and the separate thinking trigger is
+gone. The model popover keeps search and virtualized results, adds an effort
+track with named snap points, and returns focus to the composer after a
+selection. Verified the desktop test suite, clippy, arch-check, formatting and
+diff checks, then used `just desktop-dev` to exercise model search, effort
+selection, focus return, and isolated picker scrolling over a populated
+transcript.
+
+## 2026-09-12 — make effort and picker positioning direct
+
+Made the effort control genuinely draggable with bounded pointer-to-stop
+mapping and release handling, while retaining keyboard and click access. Model
+rows now use smaller, single-line ellipsized text so long provider names cannot
+overlap descriptions or neighboring rows. The composer keeps the model trigger
+right-aligned, and the picker itself anchors by its right edge so changing the
+selected effort does not move the overlay. Verified drag changes from high to
+max and back to off in `just desktop-dev`, with the popup staying fixed.
+
+## 2026-09-12 — give the effort track a direct, themed motion pass
+
+Reworked the effort control to mirror the Codex treatment: a themed accent
+progress path, small accent stop markers, a white themed thumb with an accent
+center, and shared endpoints between the track and labels. Dragging now follows
+the pointer continuously, then eases the thumb and fill into the nearest named
+stop on release. The animation uses GPUI's reduced-motion-aware animation
+wrapper and all colors resolve through the active theme. Verified the rebuilt
+control visually by dragging high → max and max → off in `just desktop-dev`.
+
+## 2026-09-12 — keep outside clicks out of the effort drag
+
+The effort track now ignores mouse-up events unless a pointer drag is active.
+This keeps the optimistic selected stop separate from the live drag position,
+so clicking elsewhere after a completed drag cannot move the slider. Added a
+focused regression assertion and verified the desktop tests, clippy, formatting,
+and diff checks.
+
+## 2026-09-12 — align multi-stop effort geometry
+
+Widened the model picker and derived the effort track inset from the number of
+available stops, keeping the line, thumb, markers, and labels on one coordinate
+system as thinking levels grow beyond four. Added geometry assertions for the
+seven-stop case. Verified the full desktop tests, clippy, formatting, diff
+checks, and the rebuilt picker with a real drag plus an outside-click guard.
+
+## 2026-09-12 — keep effort options accessible after model switches
+
+Fixed a GPUI accessibility-tree panic when reopening models with a catalog
+provided `off` thinking variant. The picker already adds its own `Off` stop, so
+both entries previously generated the same accessibility id; effort options
+now use stable index-based ids. Added a regression test covering the duplicate
+case. Verified all desktop tests, clippy, formatting, diff checks, and a visual
+select/reopen pass for qwen3.8-max-preview with the effort picker open.
+
+## 2026-09-12 — center the effort thumb marker
+
+Centered the accent marker inside the effort thumb so it no longer renders as
+an offset dot at the thumb's top-left edge. Verified the full desktop tests,
+clippy, formatting, diff checks, and a fresh packaged visual pass with
+qwen3.8-max-preview selected.
+
+## 2026-09-12 — define separate desktop distribution
+
+Captured the packaging direction in
+`notes/mew-desktop-distribution-plan.md`: CLI/TUI artifacts stay independent,
+the native client gets architecture-specific macOS DMGs and archives with its
+daemon and CEF runtime bundled, and signing/notarization plus auto-updates are
+deferred until Apple developer credentials are available.
+
+## 2026-09-12 — package unsigned native desktop releases
+
+Added `just desktop-package` and a macOS release wrapper that stamps the
+workspace version into the app and helper plists, stages the bundled daemon,
+CEF runtime, and generated notices, emits architecture-qualified DMG and ZIP
+artifacts, and writes SHA256 checksums. `mew --version` now exposes the semver
+release identity while daemon diagnostics retain the git revision. The tag
+workflow publishes desktop assets separately from CLI/TUI tarballs, with
+signing and notarization omitted.
+Verified the arm64 release build, DMG mount/integrity, archive contents,
+checksums, packaged app launch, model selection, focused Rust tests, clippy,
+formatting, architecture checks, and shell syntax.
+
+## 2026-09-12 — align effort stop markers and labels
+
+Positioned each effort marker and its hit target from the same inset stop
+offset, then used centered label slots on that geometry instead of flex
+centers. The track, thumb, dots, labels, click targets, and drag mapping now
+share one measured coordinate system at every stop count. Added regression
+assertions for stop offsets and label slot widths.
+Verified the focused and full desktop tests, clippy, formatting, diff checks,
+and a rebuilt `just desktop-dev` visual pass with direct selection and thumb
+dragging across the deepseek-v4-pro Off/high/max picker.
+
+## 2026-09-12 — remove duplicate qwen Off variant
+
+Filtered catalog thinking variants that spell `off` (including padded or
+capitalized values) before the desktop picker adds its own `Off` stop. Qwen
+models now expose Off/low/medium/xhigh without a trailing duplicate, while
+the provider catalog still retains its explicit backend off parameters. Added
+a regression test for padded metadata. Verified 114 desktop tests, clippy,
+formatting, diff checks, and architecture checks. The rebuilt `just
+desktop-dev` launch hit the known macOS hiservices signal before the final
+process could be attached for an additional visual pass.
+
+## 2026-09-12 — reduce high-frequency scroll invalidation
+
+Stopped the transcript scroll handler from enqueueing a second full-shell
+notification on every wheel or trackpad tick; `ListState` already invalidates
+the containing view for its own virtualized repaint. Session-row hover controls
+now use GPUI group-hover styling, avoiding shell state updates as the pointer
+crosses rows. Sidebar rows also defer cloning the full workspace-group list
+until a session menu is actually open. Verified 114 desktop tests, clippy,
+formatting, diff checks, architecture checks, and rapid bidirectional scrolling
+in the rebuilt packaged app with the transcript scrollbar tracking correctly.
+
+## 2026-09-12 — measure and trim desktop frame work
+
+Added an opt-in GPUI frame probe behind `MEW_DESKTOP_FRAME_TRACE=1`. It reports
+60-frame draw average/p95/max, dirty-to-draw p95, invalidation counts, and
+writes the same batches to the system temp directory as
+`mew-desktop-frame-trace.log`. A baseline long-transcript sample measured about
+25 ms average draw time and 27–28 ms p95, making render cost rather than
+duplicate scroll notifications the next target. The browser pump now ignores
+duplicate address/title events so CEF metadata chatter cannot invalidate the
+whole shell repeatedly. The transcript registry is also cleared at the empty
+state boundary instead of on every non-empty center render.
+Verified 116 desktop tests, the full Rust workspace suite (including CLI,
+daemon, bridge, and integration tests), clippy, formatting, diff checks, and
+architecture checks. The final `just desktop-dev` visual launch still hit the
+known macOS hiservices signal-6 harness failure after prior packaged visual
+scroll checks remained stable.
+
+## 2026-09-12 — skip idle transcript selection bookkeeping
+
+Transcript inline spans now populate the selection registry only while a
+selection exists. Ordinary scrolling no longer clones and stores every visible
+span's text layout just to maintain an unused selection index. Verified 116
+desktop tests, clippy, formatting, and architecture checks.
+
+## 2026-09-12 — trim plain transcript span setup
+
+Plain markdown spans now skip empty highlight and code-font override setup
+before GPUI receives the text element. This keeps the hot path focused on the
+actual text layout work while preserving styled spans and selection behavior.
+Verified 116 desktop tests, clippy, formatting, diff checks, and architecture
+checks.

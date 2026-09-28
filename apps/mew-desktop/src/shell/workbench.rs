@@ -362,6 +362,7 @@ impl DesktopShell {
                             .rounded(px(6.))
                             .cursor_pointer()
                             .role(Role::Button)
+                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                             .aria_label("Navigate browser")
                             .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
                             .on_click(cx.listener(|shell, _, _, cx| {
@@ -378,6 +379,7 @@ impl DesktopShell {
                             .id("close-native-browser")
                             .cursor_pointer()
                             .role(Role::Button)
+                            .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                             .aria_label("Close browser")
                             .text_lg()
                             .on_click(cx.listener(|shell, _, _, cx| {
@@ -439,6 +441,7 @@ impl DesktopShell {
                                         .rounded(px(6.))
                                         .cursor_pointer()
                                         .role(Role::Button)
+                                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                         .aria_label("Retry browser")
                                         .bg(theme_rgb(&self.theme, "card"))
                                         .hover(|element| {
@@ -731,6 +734,7 @@ impl DesktopShell {
                 .pr(px(6.))
                 .cursor_pointer()
                 .role(Role::Button)
+                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                 .aria_label(SharedString::from(label))
                 .text_xs()
                 .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
@@ -787,7 +791,7 @@ impl DesktopShell {
                     let sidebar_width = if shell.layout.sidebar_collapsed {
                         SIDEBAR_COLLAPSED_WIDTH
                     } else {
-                        SIDEBAR_EXPANDED_WIDTH
+                        shell.sidebar_width
                     };
                     let width =
                         workbench_width_from_pointer(available_width, pointer_x, sidebar_width);
@@ -809,7 +813,7 @@ impl DesktopShell {
         let sidebar_width = if self.layout.sidebar_collapsed {
             SIDEBAR_COLLAPSED_WIDTH
         } else {
-            SIDEBAR_EXPANDED_WIDTH
+            self.sidebar_width
         };
         let expanded_workbench_width = self.workbench_width.min(workbench_max_width(
             f32::from(window.bounds().size.width),
@@ -895,6 +899,9 @@ impl DesktopShell {
         .into_iter()
         .map(|(view, icon, label)| {
             let selected = active_view == view;
+            let tooltip_text = SharedString::from(label);
+            let tooltip_background = theme_rgb(&self.theme, "panel.background");
+            let tooltip_foreground = theme_rgb(&self.theme, "text.body");
             div()
                 .id(format!("auxiliary-view-{}", label.to_lowercase()))
                 .flex()
@@ -907,6 +914,7 @@ impl DesktopShell {
                 .rounded(px(6.))
                 .cursor_pointer()
                 .role(Role::Tab)
+                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                 .aria_selected(selected)
                 .aria_label(SharedString::from(format!(
                     "{} auxiliary panel{}",
@@ -921,6 +929,14 @@ impl DesktopShell {
                     theme_rgb(&self.theme, "text.accent")
                 } else {
                     theme_rgb(&self.theme, "text.muted")
+                })
+                .tooltip(move |_, cx| {
+                    cx.new(|_| TooltipLabel {
+                        text: tooltip_text.clone(),
+                        background: tooltip_background,
+                        foreground: tooltip_foreground,
+                    })
+                    .into()
                 })
                 .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
                 .on_click(cx.listener(move |shell, _, _, cx| {
@@ -959,6 +975,7 @@ impl DesktopShell {
                         .rounded(px(10.))
                         .cursor_pointer()
                         .role(Role::Button)
+                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                         .aria_label("Show workbench")
                         .text_lg()
                         .text_color(theme_rgb(&self.theme, "text.muted"))
@@ -1017,6 +1034,7 @@ impl DesktopShell {
                                 .px(px(7.))
                                 .cursor_pointer()
                                 .role(Role::Button)
+                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                 .aria_label("Open browser")
                                 .text_sm()
                                 .on_click(cx.listener(|shell, _, _, cx| {
@@ -1050,6 +1068,7 @@ impl DesktopShell {
                                 .px(px(7.))
                                 .cursor_pointer()
                                 .role(Role::Button)
+                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                 .aria_expanded(self.layout.changes_expanded)
                                 .aria_label(SharedString::from(change_label.clone()))
                                 .border_b_1()
@@ -1123,6 +1142,7 @@ impl DesktopShell {
                                 .px(px(14.))
                                 .cursor_pointer()
                                 .role(Role::Button)
+                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                 .aria_expanded(self.layout.local_expanded)
                                 .aria_label(if self.layout.local_expanded {
                                     "Collapse local checkout"
@@ -1185,6 +1205,7 @@ impl DesktopShell {
                                 .px(px(7.))
                                 .cursor_pointer()
                                 .role(Role::Button)
+                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
                                 .aria_expanded(self.layout.activity_expanded)
                                 .aria_label(if self.layout.activity_expanded {
                                     "Collapse activity"

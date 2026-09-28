@@ -42,19 +42,29 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tungstenite::Message;
 
+const HISTORY_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
 pub mod browser;
 pub mod client;
 pub mod files;
 pub mod groups;
+pub mod projects;
 pub mod remote;
 pub mod session;
 pub mod terminal;
+mod workspace;
 
 #[cfg(feature = "iroh")]
 pub mod iroh_transport;
 
 pub use client::DaemonClient;
 pub use session::{AttachError, Session, SessionManager};
+
+pub(crate) fn workspace_roots() -> Vec<PathBuf> {
+    mew_config::load()
+        .map(|config| config.workspace.roots)
+        .unwrap_or_default()
+}
 
 /// Parameters passed to the agent-builder closure.
 pub struct AgentBuildParams {
@@ -101,6 +111,8 @@ pub struct DaemonServer {
     pub session_manager: Arc<SessionManager>,
     /// Session groups sidecar store (groups.json).
     pub groups_store: Arc<groups::GroupsStore>,
+    /// Workspace pin preferences (projects.json).
+    pub project_pins: Arc<projects::ProjectPinsStore>,
     /// Daemon-wide flag for auto-summary. Shared across all connections
     /// so the idle-summary task is spawned once, not per-connection.
     pub auto_summary_enabled: Arc<std::sync::atomic::AtomicBool>,
@@ -126,11 +138,15 @@ impl DaemonServer {
         switcher: Option<ModelSwitcher>,
         lister: Option<ModelLister>,
     ) -> Self {
+        let project_pins = Arc::new(projects::ProjectPinsStore::from_session_dir(
+            session_dir.clone(),
+        ));
         let session_manager = Arc::new(SessionManager::new(
             builder.clone(),
             session_dir.clone(),
             switcher,
             lister,
+            project_pins.clone(),
         ));
         let groups_state = {
             let path = session_dir.join("groups.json");
@@ -147,6 +163,7 @@ impl DaemonServer {
             thinking_setter: None,
             session_manager,
             groups_store,
+            project_pins,
             auto_summary_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
@@ -163,6 +180,7 @@ impl DaemonServer {
             session_dir,
             Some(switcher),
             Some(lister),
+            self.project_pins.clone(),
         ));
         self
     }
@@ -183,6 +201,7 @@ impl DaemonServer {
             thinking_setter: self.thinking_setter.clone(),
             session_manager: self.session_manager.clone(),
             groups_store: self.groups_store.clone(),
+            project_pins: self.project_pins.clone(),
             auto_summary_enabled: self.auto_summary_enabled.clone(),
         }
     }
@@ -340,6 +359,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::NewSession { .. }
                 | ClientMessage::NewSessionInGroup { .. }
                 | ClientMessage::AttachSession { .. }
+                | ClientMessage::LoadSessionHistory { .. }
                 | ClientMessage::ListSessions
                 | ClientMessage::DeleteSession { .. }
                 | ClientMessage::RenameSession { .. }
@@ -373,6 +393,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::ListPersonas
                 | ClientMessage::SwitchPersona { .. }
                 | ClientMessage::ListProjects
+                | ClientMessage::PinProject { .. }
                 | ClientMessage::RegenerateTitle { .. }
                 | ClientMessage::Ping
                 | ClientMessage::BrowserOpen { .. }
@@ -393,6 +414,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
         message,
         ClientMessage::RemoteHello { .. }
             | ClientMessage::AttachSession { .. }
+            | ClientMessage::LoadSessionHistory { .. }
             | ClientMessage::ListSessions
             | ClientMessage::ListProjects
             | ClientMessage::ListModels
@@ -417,6 +439,30 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::PlanApprovalResponse { .. }
                 | ClientMessage::YieldControl { .. }
         )
+}
+
+/// Select the newest messages before `before` without constructing a wire
+/// frame large enough to trip the WebSocket frame limit. The returned cursor
+/// is the index to pass for the next request.
+fn history_page(
+    messages: &[mew_message::Message],
+    before: usize,
+    limit: usize,
+) -> (Vec<mew_message::Message>, Option<usize>) {
+    let end = before.min(messages.len());
+    let limit = limit.max(1);
+    let mut start = end;
+    let mut bytes = 0usize;
+    while start > 0 && end - start < limit {
+        let message = &messages[start - 1];
+        let message_bytes = serde_json::to_vec(message).map_or(0, |encoded| encoded.len());
+        if start < end && bytes.saturating_add(message_bytes) > HISTORY_PAGE_MAX_BYTES {
+            break;
+        }
+        bytes = bytes.saturating_add(message_bytes);
+        start -= 1;
+    }
+    (messages[start..end].to_vec(), (start > 0).then_some(start))
 }
 
 async fn detach_connection_client(
@@ -730,8 +776,8 @@ where
             if matches!(
                 &client_msg,
                 ClientMessage::NewSession { client_kind, .. }
-                    | ClientMessage::NewSessionInGroup { client_kind, .. }
-                    | ClientMessage::AttachSession { client_kind, .. }
+                | ClientMessage::NewSessionInGroup { client_kind, .. }
+                | ClientMessage::AttachSession { client_kind, .. }
                     if *client_kind != ClientKind::Remote
             ) {
                 reply(ServerMessage::Error {
@@ -959,15 +1005,25 @@ where
                             variant: thinking_variant,
                         });
 
-                        // Always send the current message history on attach.
-                        // The client may be switching between sessions on the
-                        // same connection, so it needs the full history.
+                        // Send only the newest history page on attach. Older
+                        // pages are requested by the desktop as the user
+                        // scrolls toward the top of the transcript.
                         let messages = {
                             let agent = session.agent.lock().await;
                             let msgs = agent.messages.lock().await.clone();
                             msgs
                         };
-                        reply(ServerMessage::SessionHistory { messages });
+                        let (messages, next_cursor) = history_page(
+                            &messages,
+                            messages.len(),
+                            mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
+                        );
+                        reply(ServerMessage::SessionHistoryPage {
+                            session_id: session_id.clone(),
+                            messages,
+                            next_cursor,
+                            replace: true,
+                        });
 
                         // Replay current flagged-files set so the UI has it
                         // immediately after attach.
@@ -1029,6 +1085,40 @@ where
                         });
                     }
                 }
+            }
+            ClientMessage::LoadSessionHistory {
+                session_id,
+                before,
+                limit,
+            } => {
+                let Some(session) = attached_session.as_ref() else {
+                    reply(ServerMessage::Error {
+                        message: "no session attached".into(),
+                    });
+                    continue;
+                };
+                if session.id != session_id {
+                    reply(ServerMessage::Error {
+                        message: "history request does not match the attached session".into(),
+                    });
+                    continue;
+                }
+                let messages = {
+                    let agent = session.agent.lock().await;
+                    let messages = agent.messages.lock().await.clone();
+                    messages
+                };
+                let (messages, next_cursor) = history_page(
+                    &messages,
+                    before,
+                    limit.min(mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT),
+                );
+                reply(ServerMessage::SessionHistoryPage {
+                    session_id,
+                    messages,
+                    next_cursor,
+                    replace: false,
+                });
             }
             ClientMessage::ListSessions => {
                 let sessions = session_manager.list().await;
@@ -1346,6 +1436,28 @@ where
             ClientMessage::ListProjects => {
                 let projects = list_projects(&session_manager).await;
                 reply(ServerMessage::ProjectList { projects });
+            }
+            ClientMessage::PinProject { path, pinned } => {
+                let known = list_projects(&session_manager)
+                    .await
+                    .into_iter()
+                    .any(|project| project.path == path);
+                if !known {
+                    reply(ServerMessage::Error {
+                        message: format!("unknown workspace: {path}"),
+                    });
+                    continue;
+                }
+                if let Err(error) = session_manager.project_pins.set_pinned(path, pinned).await {
+                    reply(ServerMessage::Error {
+                        message: format!("failed to persist workspace pin: {error}"),
+                    });
+                    continue;
+                }
+                let projects = list_projects(&session_manager).await;
+                session_manager
+                    .broadcast_all(ServerMessage::ProjectList { projects })
+                    .await;
             }
             ClientMessage::ListFilesystemDir { path } => {
                 match crate::files::handle_list_filesystem_dir(path).await {
@@ -2548,22 +2660,25 @@ async fn list_projects(
     // Workspace roots are useful projects even before a session has been
     // created for them. Loading config here also keeps this query aligned with
     // the same layered config the agent builder uses.
-    if let Ok(config) = mew_config::load() {
-        for root in config.workspace.roots {
-            let canonical = std::fs::canonicalize(&root).unwrap_or(root.clone());
-            let display_name = canonical
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| canonical.to_string_lossy().to_string());
-            projects
-                .entry(canonical.clone())
-                .or_insert_with(|| mew_protocol::ProjectInfo {
-                    path: root.to_string_lossy().to_string(),
-                    display_name,
-                    session_count: 0,
-                    last_used_at: None,
-                });
-        }
+    let workspace_roots = workspace_roots();
+    for root in &workspace_roots {
+        let canonical =
+            crate::workspace::resolve_workspace_path(Some(root.to_string_lossy().as_ref()), &[])
+                .map(PathBuf::from)
+                .unwrap_or_else(|| root.clone());
+        let display_name = canonical
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| canonical.to_string_lossy().to_string());
+        projects
+            .entry(canonical.clone())
+            .or_insert_with(|| mew_protocol::ProjectInfo {
+                path: canonical.to_string_lossy().to_string(),
+                display_name,
+                session_count: 0,
+                last_used_at: None,
+                pinned: false,
+            });
     }
 
     // Walk session dirs and read meta.json for each.
@@ -2577,7 +2692,10 @@ async fn list_projects(
                 continue;
             };
             let path = PathBuf::from(cwd_str);
-            let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
+            let canonical =
+                crate::workspace::resolve_workspace_path(Some(cwd_str), &workspace_roots)
+                    .map(PathBuf::from)
+                    .unwrap_or(path.clone());
             let display_name = canonical
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -2590,6 +2708,7 @@ async fn list_projects(
                     display_name: display_name.clone(),
                     session_count: 0,
                     last_used_at: None,
+                    pinned: false,
                 });
             entry.session_count += 1;
             if let Some(ts) = last_used {
@@ -2600,6 +2719,9 @@ async fn list_projects(
 
     // Sort by last_used_at descending (None sorts last).
     let mut result: Vec<_> = projects.into_values().collect();
+    for project in &mut result {
+        project.pinned = session_manager.project_pins.is_pinned(&project.path).await;
+    }
     result.sort_by(|a, b| {
         b.last_used_at
             .unwrap_or(0)
@@ -3187,6 +3309,36 @@ async fn send_msg<S: AsyncRead + AsyncWrite + Unpin + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_message(created: i64) -> mew_message::Message {
+        mew_message::Message {
+            id: mew_message::MessageId::new(),
+            session_id: mew_message::SessionId::new(),
+            role: mew_message::Role::User,
+            parts: Vec::new(),
+            time: mew_message::Time {
+                created,
+                completed: None,
+            },
+            assistant: None,
+        }
+    }
+
+    #[test]
+    fn history_page_reads_backwards_and_returns_a_cursor() {
+        let messages = (0..5).map(test_message).collect::<Vec<_>>();
+        let (page, cursor) = history_page(&messages, messages.len(), 2);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].time.created, 3);
+        assert_eq!(page[1].time.created, 4);
+        assert_eq!(cursor, Some(3));
+
+        let (older, cursor) = history_page(&messages, cursor.unwrap(), 2);
+        assert_eq!(older.len(), 2);
+        assert_eq!(older[0].time.created, 1);
+        assert_eq!(older[1].time.created, 2);
+        assert_eq!(cursor, Some(1));
+    }
 
     #[test]
     fn test_socket_liveness_guard_rejects_live_socket() {

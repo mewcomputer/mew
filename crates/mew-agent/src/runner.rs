@@ -293,32 +293,45 @@ impl SubagentRunner for SimpleRunner {
             agent.max_concurrent_subagents = self.max_concurrent_subagents;
         }
 
-        // Set the subagent's body as the system prompt. If the def has
-        // `template: true`, render it through minijinja with the subagent's
-        // context (subagent_name, tools, model, etc).
-        if !def.body.is_empty() {
-            let body = if def.template {
-                let mut tool_names: Vec<String> = agent.tools.keys().cloned().collect();
-                tool_names.sort_unstable();
-                let ctx = mew_prompts::template::TemplateContext {
-                    subagent_name: def.name.clone(),
-                    model_id: agent.model_id.clone(),
-                    provider_id: agent.provider_id.clone(),
-                    session_id: session_id.to_string(),
-                    cwd: std::env::current_dir()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default(),
-                    current_date: mew_prompts::template::TemplateContext::today(),
-                    tools: tool_names,
-                    supports_vision: agent.supports_vision,
-                    skills: agent.skills.iter().map(|s| s.name.clone()).collect(),
-                    ..Default::default()
-                };
-                mew_prompts::template::render(&def.body, &ctx)
-            } else {
-                def.body.clone()
-            };
-            agent.set_system(body);
+        // Compose the system prompt: the shared subagent base (base prompt +
+        // subagent contract) always renders so every def inherits the
+        // exit_tool contract regardless of its own template flag; the def's
+        // body is appended and rendered only when `template: true`.
+        let mut tool_names: Vec<String> = agent.tools.keys().cloned().collect();
+        tool_names.sort_unstable();
+        let ctx = mew_prompts::template::TemplateContext {
+            subagent_name: def.name.clone(),
+            model_id: agent.model_id.clone(),
+            provider_id: agent.provider_id.clone(),
+            session_id: session_id.to_string(),
+            cwd: std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            current_date: mew_prompts::template::TemplateContext::today(),
+            tools: tool_names,
+            supports_vision: agent.supports_vision,
+            available_skills: mew_prompts::template::SkillInfo::from_skills(&agent.skills),
+            ..Default::default()
+        };
+        let body = if def.template {
+            mew_prompts::template::render(&def.body, &ctx)
+        } else {
+            def.body.clone()
+        };
+        let base = mew_prompts::vfs::read_builtin("system_prompts/subagent").unwrap_or("");
+        let mut system = if base.is_empty() {
+            String::new()
+        } else {
+            mew_prompts::template::render(base, &ctx)
+        };
+        if !body.is_empty() {
+            if !system.is_empty() {
+                system.push_str("\n\n");
+            }
+            system.push_str(&body);
+        }
+        if !system.is_empty() {
+            agent.set_system(system);
         }
 
         // Set max_turns if specified, else apply the built-in default.
@@ -625,13 +638,25 @@ mod tests {
     /// deterministically.
     struct ScriptedProvider {
         script: StdMutex<Vec<(Duration, Vec<mew_provider::ProviderEvent>)>>,
+        requests: StdMutex<Vec<mew_provider::Request>>,
     }
 
     impl ScriptedProvider {
         fn new(script: Vec<(Duration, Vec<mew_provider::ProviderEvent>)>) -> Self {
             Self {
                 script: StdMutex::new(script),
+                requests: StdMutex::new(Vec::new()),
             }
+        }
+
+        /// System prompts of every request made to this provider, in order.
+        fn captured_systems(&self) -> Vec<String> {
+            self.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|req| req.system.clone())
+                .collect()
         }
     }
 
@@ -641,7 +666,8 @@ mod tests {
             "scripted"
         }
 
-        async fn stream(&self, _req: mew_provider::Request) -> Result<EventStream, ProviderError> {
+        async fn stream(&self, req: mew_provider::Request) -> Result<EventStream, ProviderError> {
+            self.requests.lock().unwrap().push(req);
             // Atomically consume the script for this call. The first
             // `stream()` invocation gets the events; subsequent calls
             // (i.e. the agent's later turns) get an empty stream, so the
@@ -1083,6 +1109,131 @@ mod tests {
             }
             other => panic!("expected Complete, got {other:?}"),
         }
+    }
+
+    /// Every subagent system prompt is the shared subagent base (base prompt
+    /// + subagent contract) composed with the def's own body. The base always
+    /// renders through minijinja; the body honors the def's `template` flag.
+    #[tokio::test]
+    async fn test_system_prompt_composes_subagent_base_and_body() {
+        let script = vec![(Duration::from_millis(0), turn("done"))];
+        let mut def = make_def(Some(10), Some(60));
+        def.body = "ROLE_MARKER investigate the thing".into();
+        def.template = true;
+        let provider = Arc::new(ScriptedProvider::new(script));
+        let runner =
+            SimpleRunner::new(provider.clone(), vec![], Arc::new(mew_hooks::NopDispatcher));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let drain = tokio::spawn(async move { while let Some(_ev) = rx.recv().await {} });
+        runner
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "call_0".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
+                cancel,
+                model: None,
+                parent_depth: 0,
+            })
+            .await
+            .unwrap();
+        drain.abort();
+
+        let systems = provider.captured_systems();
+        assert!(!systems.is_empty(), "provider should have seen a request");
+        let system = &systems[0];
+        assert!(
+            system.contains("focused mew subagent named test-agent"),
+            "system prompt must include the rendered subagent base, got: {system}"
+        );
+        assert!(
+            system.contains("ROLE_MARKER investigate the thing"),
+            "system prompt must include the def body"
+        );
+        assert!(
+            !system.contains("{{ "),
+            "base must render, not stay raw template syntax"
+        );
+    }
+
+    /// A def with `template: false` keeps its body verbatim (template syntax
+    /// preserved), but the shared subagent base around it still renders.
+    #[tokio::test]
+    async fn test_template_false_body_verbatim_base_still_renders() {
+        let script = vec![(Duration::from_millis(0), turn("done"))];
+        let mut def = make_def(Some(10), Some(60));
+        def.body = "Raw {{ subagent_name }} instructions".into();
+        def.template = false;
+        let provider = Arc::new(ScriptedProvider::new(script));
+        let runner =
+            SimpleRunner::new(provider.clone(), vec![], Arc::new(mew_hooks::NopDispatcher));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let drain = tokio::spawn(async move { while let Some(_ev) = rx.recv().await {} });
+        runner
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "call_0".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
+                cancel,
+                model: None,
+                parent_depth: 0,
+            })
+            .await
+            .unwrap();
+        drain.abort();
+
+        let systems = provider.captured_systems();
+        let system = &systems[0];
+        assert!(
+            system.contains("Raw {{ subagent_name }} instructions"),
+            "non-templated body must stay verbatim, got: {system}"
+        );
+        assert!(
+            system.contains("focused mew subagent named test-agent"),
+            "shared subagent base must render even for non-templated defs"
+        );
+    }
+
+    /// A def with an empty body still gets the subagent base as its system
+    /// prompt: the exit_tool contract and base prompt are structural, not
+    /// something a body-less def should lose.
+    #[tokio::test]
+    async fn test_empty_body_still_gets_subagent_base() {
+        let script = vec![(Duration::from_millis(0), turn("done"))];
+        let def = make_def(Some(10), Some(60));
+        assert!(def.body.is_empty());
+        let provider = Arc::new(ScriptedProvider::new(script));
+        let runner =
+            SimpleRunner::new(provider.clone(), vec![], Arc::new(mew_hooks::NopDispatcher));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let drain = tokio::spawn(async move { while let Some(_ev) = rx.recv().await {} });
+        runner
+            .run(SubagentRunOptions {
+                def: &def,
+                prompt: "prompt".into(),
+                parent_call_id: "call_0".into(),
+                parent_session_id: SessionId::new(),
+                event_tx: tx,
+                cancel,
+                model: None,
+                parent_depth: 0,
+            })
+            .await
+            .unwrap();
+        drain.abort();
+
+        let systems = provider.captured_systems();
+        let system = &systems[0];
+        assert!(
+            system.contains("focused mew subagent named test-agent"),
+            "empty-bodied def must still get the subagent base, got: {system}"
+        );
     }
 
     /// The runner should forward every tool call as a `SubagentEvent::ToolStart`

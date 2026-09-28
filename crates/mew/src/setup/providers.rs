@@ -12,6 +12,7 @@ use tracing::warn;
 
 use mew_catalog::Catalog;
 use mew_config::{Config, ProviderConfig};
+use mew_message::SessionId;
 use mew_provider::Provider;
 use mew_provider_anthropic::Adapter as AnthropicAdapter;
 use mew_provider_openai::Adapter as OpenAIAdapter;
@@ -392,7 +393,14 @@ pub(crate) fn maybe_set_classifier_provider(
         let micro_model = pc.micro_model().to_string();
         if !micro_model.is_empty() {
             let (micro_pid, micro_mid) = resolve_model(cfg, cat, &router_id, Some(micro_model));
-            match build_provider(cfg, cat, &micro_pid, &micro_mid, raw) {
+            match build_provider(
+                cfg,
+                cat,
+                &micro_pid,
+                &micro_mid,
+                raw,
+                Some(agent.session_id),
+            ) {
                 Ok(provider) => {
                     agent.set_classifier_provider(provider, Some(micro_mid.clone()));
                     tracing::info!(
@@ -415,7 +423,7 @@ pub(crate) fn maybe_set_classifier_provider(
     // Legacy explicit classifier config.
     if let Some(ref provider_id) = cfg.permissions.classifier_provider {
         let model_id = cfg.permissions.classifier_model.as_deref().unwrap_or("");
-        match build_provider(cfg, cat, provider_id, model_id, raw) {
+        match build_provider(cfg, cat, provider_id, model_id, raw, Some(agent.session_id)) {
             Ok(provider) => {
                 agent.set_classifier_provider(provider, cfg.permissions.classifier_model.clone());
                 tracing::info!(
@@ -577,6 +585,9 @@ fn config_provider_for_catalog(cfg: &Config, catalog: &str) -> Option<String> {
 }
 
 /// Build a direct provider adapter from a concrete provider config.
+///
+/// `session_id` is the conversation's stable id. Only OpenCode endpoints
+/// consume it (as `x-opencode-session`); other adapters ignore it.
 pub(crate) fn build_direct_provider(
     cfg: &Config,
     cat: Option<&Catalog>,
@@ -584,6 +595,7 @@ pub(crate) fn build_direct_provider(
     pc: &ProviderConfig,
     model_override: &str,
     raw: bool,
+    session_id: Option<SessionId>,
 ) -> Result<Arc<dyn Provider>> {
     // Non-fatal: some providers (codex with OAuth) don't need an API key, so we
     // resolve lazily per shape arm. For API-key shapes (`openai`/`anthropic`)
@@ -627,6 +639,7 @@ pub(crate) fn build_direct_provider(
         "openai" => {
             let creds = creds?;
             let mut adapter = OpenAIAdapter::new(provider_id.to_string(), base_url, model, creds);
+            adapter.set_opencode_session(session_id.map(|s| s.to_string()));
             if raw {
                 adapter.set_dump(true);
             }
@@ -714,6 +727,7 @@ pub(crate) fn build_provider(
     provider_id: &str,
     model_override: &str,
     raw: bool,
+    session_id: Option<SessionId>,
 ) -> Result<Arc<dyn Provider>> {
     let pc = cfg
         .providers
@@ -749,7 +763,7 @@ pub(crate) fn build_provider(
         );
     }
 
-    build_direct_provider(cfg, cat, provider_id, &pc, model_override, raw)
+    build_direct_provider(cfg, cat, provider_id, &pc, model_override, raw, session_id)
 }
 
 /// Build a closure that resolves a `provider/model` string into a Provider.
@@ -764,6 +778,7 @@ pub(crate) fn make_provider_builder(
     cfg: Config,
     cat: Option<Catalog>,
     raw: bool,
+    session_id: Option<SessionId>,
 ) -> Box<dyn Fn(&str) -> Result<Arc<dyn Provider>, String> + Send + Sync> {
     Box::new(move |model_str: &str| {
         let (pid, mid) = if let Some(idx) = model_str.find('/') {
@@ -771,7 +786,7 @@ pub(crate) fn make_provider_builder(
         } else {
             (model_str, "")
         };
-        build_provider(&cfg, cat.as_ref(), pid, mid, raw).map_err(|e| e.to_string())
+        build_provider(&cfg, cat.as_ref(), pid, mid, raw, session_id).map_err(|e| e.to_string())
     })
 }
 
@@ -791,6 +806,9 @@ pub(crate) struct MainModelResolver {
     pub default_provider_id: String,
     pub router_provider_id: Option<String>,
     pub raw: bool,
+    /// Conversation id propagated to child providers so subagent traffic to
+    /// OpenCode carries the same `x-opencode-session` as the parent.
+    pub session_id: Option<SessionId>,
 }
 
 #[async_trait]
@@ -806,6 +824,7 @@ impl mew_subagents::ModelResolver for MainModelResolver {
             &provider_id,
             &model_id,
             self.raw,
+            self.session_id,
         )
         .map_err(|e| e.to_string())
     }
@@ -1261,6 +1280,7 @@ mod tests {
             default_provider_id: "default-prov".into(),
             router_provider_id,
             raw: false,
+            session_id: None,
         }
     }
 
@@ -1713,7 +1733,7 @@ mod tests {
             },
         );
 
-        let err = match build_provider(&cfg, None, "test-prov", "", false) {
+        let err = match build_provider(&cfg, None, "test-prov", "", false, None) {
             Ok(_) => panic!("build_provider should have failed for a missing credential"),
             Err(e) => e,
         };
@@ -1767,7 +1787,7 @@ mod tests {
             },
         );
 
-        let err = match build_provider(&cfg, None, "test-prov-anthropic", "", false) {
+        let err = match build_provider(&cfg, None, "test-prov-anthropic", "", false, None) {
             Ok(_) => panic!("build_provider should have failed for a missing credential"),
             Err(e) => e,
         };

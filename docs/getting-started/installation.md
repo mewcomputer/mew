@@ -7,6 +7,9 @@ mew is a terminal-based AI coding assistant. It runs on your machine and
 connects to LLM providers you configure. No data leaves your system except
 API calls to your chosen provider.
 
+The native GPUI desktop app is distributed separately from the CLI/TUI. The
+commands below install the `mew` CLI and its terminal UI only.
+
 ## macOS and Linux
 
 ### Homebrew
@@ -89,6 +92,27 @@ Or use the install recipe:
 ```sh
 just install
 ```
+
+### Native desktop app (macOS)
+
+The desktop app bundles the GPUI client, its daemon sidecar, and the CEF
+browser runtime. From a checkout on macOS, build and install it with:
+
+```sh
+just desktop-install
+open -a /Applications/mew.app
+```
+
+For a distributable `.dmg`, `.zip`, and `SHA256SUMS` file instead, run:
+
+```sh
+just desktop-package
+```
+
+The artifacts are written to `target/release/dist/`. The first public desktop
+artifacts are unsigned and are not notarized. macOS may block the first launch;
+right-click `mew.app`, choose **Open**, and confirm the prompt. Do not use the
+CLI Homebrew formula or install script to install the desktop app.
 
 For a system-wide install that survives across cargo toolchain updates:
 

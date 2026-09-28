@@ -1,5 +1,14 @@
 use super::*;
 
+pub(super) fn transcript_is_scrolled_away(
+    is_scrolled: bool,
+    visible_end: usize,
+    count: usize,
+    is_following_tail: bool,
+) -> bool {
+    is_scrolled && visible_end < count && !is_following_tail
+}
+
 impl DesktopShell {
     fn schedule_streaming_render(&mut self, cx: &mut Context<Self>) {
         if self.streaming_render_scheduled {
@@ -52,7 +61,24 @@ impl DesktopShell {
             tracing::warn!(%error, "desktop: could not load persisted layout");
             mew_config::State::default()
         });
-        let persisted_layout = ShellLayoutState::from_state(&persisted_state);
+        let mut persisted_layout = ShellLayoutState::from_state(&persisted_state);
+        let collapsed_groups = persisted_state
+            .desktop_collapsed_groups
+            .iter()
+            .cloned()
+            .collect();
+        let expanded_workspaces = BTreeSet::new();
+        let workspace_open_destinations = detect_workspace_open_destinations();
+        let sidebar_width = persisted_state
+            .desktop_sidebar_width
+            .unwrap_or(SIDEBAR_EXPANDED_WIDTH)
+            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        let window_width = f32::from(window.bounds().size.width);
+        if !persisted_layout.sidebar_collapsed
+            && !workbench_fits_window(window_width, sidebar_width)
+        {
+            persisted_layout.workbench_collapsed = true;
+        }
         let session_view_states = persisted_state
             .desktop_session_views
             .iter()
@@ -137,7 +163,12 @@ impl DesktopShell {
         let appearance_subscription = cx.observe_window_appearance(window, |shell, window, cx| {
             shell.reload_theme(window.appearance(), cx);
         });
-        let bounds_subscription = cx.observe_window_bounds(window, |shell, window, _cx| {
+        let bounds_subscription = cx.observe_window_bounds(window, |shell, window, cx| {
+            let changed = shell.update_window_width(f32::from(window.bounds().size.width));
+            if changed {
+                shell.persist_layout();
+                cx.notify();
+            }
             shell.persist_window_bounds(window);
         });
         let terminal_view = cx.new(TerminalView::new_remote);
@@ -151,6 +182,9 @@ impl DesktopShell {
         let composer_focus_handle = cx.focus_handle();
         let browser_url_focus_handle = cx.focus_handle();
         let rename_focus_handle = cx.focus_handle();
+        let sidebar_search_focus_handle = cx.focus_handle().tab_stop(true);
+        let model_picker_focus_handle = cx.focus_handle().tab_stop(true);
+        let sidebar_focus_handle = cx.focus_handle().tab_stop(true);
         let popover_focus_handle = cx.focus_handle();
         let composer_focus_subscription =
             cx.on_focus(&composer_focus_handle, window, |shell, _window, cx| {
@@ -184,6 +218,36 @@ impl DesktopShell {
                     }
                 }
             });
+        let transcript_list = gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(128.));
+        transcript_list.set_follow_mode(gpui::FollowMode::Tail);
+        let shell_ref = cx.entity().downgrade();
+        transcript_list.set_scroll_handler(move |event, _window, cx| {
+            let is_scrolled = event.is_scrolled;
+            let scrolled_away = transcript_is_scrolled_away(
+                is_scrolled,
+                event.visible_range.end,
+                event.count,
+                event.is_following_tail,
+            );
+            let reached_history_top =
+                is_scrolled && event.count > 0 && event.visible_range.start == 0;
+            let shell_ref = shell_ref.clone();
+            cx.defer(move |cx| {
+                let _ = shell_ref.update(cx, |shell, _cx| {
+                    // ListState already invalidates the containing view for the scroll repaint.
+                    // Keep this deferred work limited to state and history updates so a wheel
+                    // tick does not enqueue a second full-shell render.
+                    if shell.transcript_scrolled_away != scrolled_away {
+                        shell.transcript_scrolled_away = scrolled_away;
+                        shell.capture_session_view_state();
+                    }
+                    if reached_history_top {
+                        shell.request_older_history();
+                    }
+                });
+            });
+        });
+        let frame_probe = DesktopFrameProbe::from_env();
         Self {
             model,
             theme,
@@ -196,11 +260,36 @@ impl DesktopShell {
             layout: persisted_layout,
             sidebar_rows: Vec::new(),
             sidebar_list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(40.)),
-            collapsed_groups: BTreeSet::new(),
+            sidebar_width,
+            collapsed_groups,
+            expanded_workspaces,
+            workspace_open_menu: None,
+            workspace_open_destinations,
+            remembered_editor: persisted_state.desktop_external_editor,
+            sidebar_search: String::new(),
+            sidebar_search_focus_handle,
+            sidebar_focus_handle,
+            sidebar_keyboard_session: None,
+            sidebar_search_selection: 0..0,
+            sidebar_search_selection_reversed: false,
+            sidebar_search_marked_range: None,
+            model_picker_query: String::new(),
+            model_picker_focus_handle,
+            model_picker_selection: 0..0,
+            model_picker_selection_reversed: false,
+            model_picker_marked_range: None,
+            model_picker_filtered_indices: Vec::new(),
+            model_picker_rows: Vec::new(),
+            recent_models: persisted_state.recent_models,
+            thinking_effort_drag_index: None,
+            thinking_effort_drag_position: None,
+            thinking_effort_track_bounds: None,
+            thinking_effort_animation_id: 0,
+            thinking_effort_animation_from: None,
+            pending_group_deletion: None,
             session_view_states,
             session_menu_session: None,
             hovered_group: None,
-            hovered_session: None,
             drag_over_group: None,
             rename_session_id: None,
             rename_draft: String::new(),
@@ -212,11 +301,18 @@ impl DesktopShell {
             sidebar_animation_id: 0,
             workbench_animation_id: 0,
             terminal_animation_id: 0,
+            window_width,
             workbench_width: WORKBENCH_EXPANDED_WIDTH,
             auxiliary_view: AuxiliaryView::Changes,
-            transcript_list: gpui::ListState::new(0, gpui::ListAlignment::Bottom, px(128.)),
+            transcript_list,
+            transcript_scrolled_away: false,
+            transcript_scrollbar_grab_offset: None,
+            history_before: None,
+            history_loading: false,
+            pending_transcript_scroll_anchor: None,
             transcript_rows: Vec::new(),
             transcript_rows_append_only: false,
+            transcript_rows_prepend_count: None,
             markdown_cache: Vec::new(),
             tool_text_lists: RefCell::new(BTreeMap::new()),
             tool_text_cache: RefCell::new(BTreeMap::new()),
@@ -224,6 +320,7 @@ impl DesktopShell {
             transcript_selection: None,
             transcript_selection_anchor: None,
             transcript_is_selecting: false,
+            transcript_link_candidate: None,
             transcript_selected_text: None,
             review_diffs: Vec::new(),
             review_lines: Vec::new(),
@@ -249,7 +346,6 @@ impl DesktopShell {
             model_picker_bounds: None,
             persona_picker_bounds: None,
             permission_picker_bounds: None,
-            thinking_picker_bounds: None,
             slash_menu_dismissed: false,
             slash_menu_index: 0,
             mention_menu_dismissed: false,
@@ -275,7 +371,6 @@ impl DesktopShell {
             model_picker_open: false,
             persona_picker_open: false,
             permission_picker_open: false,
-            thinking_picker_open: false,
             terminal_font_picker_open: false,
             terminal_font_family,
             terminal_view,
@@ -306,6 +401,7 @@ impl DesktopShell {
             _appearance_subscription: appearance_subscription,
             _bounds_subscription: bounds_subscription,
             _supervisor: supervisor,
+            frame_probe,
         }
     }
 
@@ -551,6 +647,7 @@ impl DesktopShell {
         for message in [
             ClientMessage::Ping,
             ClientMessage::ListSessions,
+            ClientMessage::ListProjects,
             ClientMessage::ListModels,
         ] {
             let result = tokio::select! {

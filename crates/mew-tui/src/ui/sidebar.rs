@@ -25,6 +25,12 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // Session header: always on top.
     draw_session_header(&mut text, &mut visual_row, app, area.width);
 
+    // Persistent goal section renders only while a goal is set.
+    if app.active_goal.is_some() {
+        push_divider(&mut text, &mut visual_row, app, area.width);
+        draw_goal_section(&mut text, &mut visual_row, app, area.width);
+    }
+
     // Activity sections render only when they have visible content.
     if app.todos.iter().any(|t| app.todo_visible(t)) {
         push_divider(&mut text, &mut visual_row, app, area.width);
@@ -139,6 +145,45 @@ fn draw_session_header(text: &mut Text, visual_row: &mut u16, app: &mut App, wid
             Style::default().fg(app.theme.resolve("text.placeholder")),
         ),
     ]));
+    *visual_row += 1;
+}
+
+/// Persistent goal section: the active objective plus its status. Renders
+/// nothing when no goal is set, keeping the sidebar quiet.
+fn draw_goal_section(text: &mut Text, visual_row: &mut u16, app: &mut App, width: u16) {
+    let Some(goal) = app.active_goal.as_ref() else {
+        return;
+    };
+    app.sidebar_header_rows.push((*visual_row, "goal".into()));
+    text.push_line(Line::from(vec![
+        Span::styled("🎯", Style::default().fg(app.theme.resolve("text.accent"))),
+        Span::styled(
+            " Goal ",
+            Style::default()
+                .fg(app.theme.resolve("text.body"))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    *visual_row += 1;
+
+    let inner = width.saturating_sub(2) as usize;
+    for chunk in crate::ui::chat::wrap_text_to_width(&goal.objective, inner as u16) {
+        text.push_line(Line::from(vec![Span::styled(
+            format!("  {chunk}"),
+            Style::default().fg(app.theme.resolve("text.body")),
+        )]));
+        *visual_row += 1;
+    }
+
+    let (label, color) = match goal.status {
+        mew_agent::GoalStatus::Active => ("active", app.theme.resolve("text.success")),
+        mew_agent::GoalStatus::Paused => ("paused", app.theme.resolve("text.warning")),
+        mew_agent::GoalStatus::Complete => ("complete", app.theme.resolve("text.muted")),
+    };
+    text.push_line(Line::from(vec![Span::styled(
+        format!("  status: {label}"),
+        Style::default().fg(color),
+    )]));
     *visual_row += 1;
 }
 
@@ -566,6 +611,7 @@ mod tests {
             summary: Some("summarized turn".into()),
             client_count: 0,
             cwd: None,
+            workspace_path: None,
             last_turn_failed: false,
             archived: false,
             pinned: false,

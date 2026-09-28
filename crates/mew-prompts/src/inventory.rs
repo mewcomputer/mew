@@ -60,6 +60,13 @@ pub fn inventory() -> Vec<PromptSource> {
             preview: "<available_skills>\n  <skill>...</skill>\n</available_skills>",
         },
         PromptSource {
+            id: "subagent_base",
+            location: "mew_prompts::vfs (system_prompts/subagent)",
+            kind: PromptKind::System,
+            description: "Shared subagent system prompt: base prompt plus the subagent contract (exit_tool result channel, narration, progress, context budget).",
+            preview: "{{ transclude(\"mew://system_prompts/base\") }}\n\n## Subagent\n...",
+        },
+        PromptSource {
             id: "persona_body",
             location: "mew_prompts::persona",
             kind: PromptKind::System,
@@ -131,6 +138,13 @@ mod tests {
         assert!(inv
             .iter()
             .any(|p| p.id == "classifier_permission_decision" && p.kind == PromptKind::Classifier));
+    }
+
+    #[test]
+    fn test_inventory_includes_subagent_base() {
+        assert!(inventory()
+            .iter()
+            .any(|p| p.id == "subagent_base" && p.kind == PromptKind::System));
     }
 
     #[test]

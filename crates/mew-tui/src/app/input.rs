@@ -7,108 +7,55 @@ use super::*;
 
 impl App {
     pub fn push_undo(&mut self) {
-        let now = Instant::now();
-        let should_coalesce = self
-            .last_undo_push
-            .map(|t| now.duration_since(t) < Duration::from_millis(500))
-            .unwrap_or(false);
-        if !should_coalesce {
-            self.undo_stack.push((self.input.clone(), self.cursor));
-            if self.undo_stack.len() > 100 {
-                self.undo_stack.remove(0);
-            }
-        }
-        self.last_undo_push = Some(now);
-        // Any new mutation clears the redo stack.
-        self.redo_stack.clear();
+        self.undo_history.snapshot(&self.input, self.cursor);
     }
 
     pub fn undo(&mut self) {
-        if let Some((prev_input, prev_cursor)) = self.undo_stack.pop() {
-            self.redo_stack.push((self.input.clone(), self.cursor));
-            self.input = prev_input;
-            self.cursor = prev_cursor;
-            self.last_undo_push = None;
-        }
+        self.undo_history.undo(&mut self.input, &mut self.cursor);
     }
 
     pub fn redo(&mut self) {
-        if let Some((next_input, next_cursor)) = self.redo_stack.pop() {
-            self.undo_stack.push((self.input.clone(), self.cursor));
-            self.input = next_input;
-            self.cursor = next_cursor;
-            self.last_undo_push = None;
-        }
+        self.undo_history.redo(&mut self.input, &mut self.cursor);
     }
 
     pub fn insert_char(&mut self, c: char) {
         self.push_undo();
-        self.input.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
+        editor::insert(&mut self.input, &mut self.cursor, c);
     }
 
     pub fn insert_newline(&mut self) {
         self.push_undo();
-        self.input.insert(self.cursor, '\n');
-        self.cursor += 1;
+        editor::insert(&mut self.input, &mut self.cursor, '\n');
     }
 
     pub fn backspace(&mut self) {
         if self.cursor > 0 {
             self.push_undo();
-            let prev = self.input[..self.cursor]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.input.remove(prev);
-            self.cursor = prev;
+            editor::backspace(&mut self.input, &mut self.cursor);
         }
     }
 
     pub fn delete_char(&mut self) {
         if self.cursor < self.input.len() {
             self.push_undo();
-            self.input.remove(self.cursor);
+            editor::delete(&mut self.input, &mut self.cursor);
         }
     }
 
     pub fn cursor_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor = self.input[..self.cursor]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-        }
+        editor::cursor_left(&self.input, &mut self.cursor);
     }
 
     pub fn cursor_right(&mut self) {
-        if self.cursor < self.input.len() {
-            self.cursor = self.input[self.cursor..]
-                .chars()
-                .next()
-                .map(|c| self.cursor + c.len_utf8())
-                .unwrap_or(self.input.len());
-        }
+        editor::cursor_right(&self.input, &mut self.cursor);
     }
 
     pub fn cursor_home(&mut self) {
-        // Move to start of current line.
-        let before = &self.input[..self.cursor];
-        if let Some(ln_pos) = before.rfind('\n') {
-            self.cursor = ln_pos + 1;
-        } else {
-            self.cursor = 0;
-        }
+        editor::cursor_home(&self.input, &mut self.cursor);
     }
 
     pub fn cursor_end(&mut self) {
-        if let Some(ln_pos) = self.input[self.cursor..].find('\n') {
-            self.cursor += ln_pos;
-        } else {
-            self.cursor = self.input.len();
-        }
+        editor::cursor_end(&self.input, &mut self.cursor);
     }
 
     pub fn cursor_visual_up(&mut self, content_width: u16) -> bool {
@@ -182,57 +129,15 @@ impl App {
     }
 
     pub fn cursor_word_left(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
-        let before = &self.input[..self.cursor];
-        let chars: Vec<(usize, char)> = before.char_indices().collect();
-        if chars.len() < 2 {
-            self.cursor = 0;
-            return;
-        }
-
-        // Start from the character before cursor.
-        let mut i = chars.len() - 1;
-        let start_is_word = chars[i].1.is_alphanumeric();
-
-        // Skip word chars if we started on one, or skip non-word chars if we started on one.
-        while i > 0 && chars[i].1.is_alphanumeric() == start_is_word {
-            i -= 1;
-        }
-
-        // If we ended on a different kind, land on the boundary.
-        if chars[i].1.is_alphanumeric() != start_is_word {
-            self.cursor = chars[i + 1].0;
-        } else {
-            self.cursor = chars[i].0;
-        }
+        editor::cursor_word_left(&self.input, &mut self.cursor);
     }
 
     pub fn cursor_word_right(&mut self) {
-        if self.cursor >= self.input.len() {
-            return;
-        }
-        let after: Vec<(usize, char)> = self.input[self.cursor..].char_indices().collect();
-        if after.is_empty() {
-            return;
-        }
-
-        let start_is_word = after[0].1.is_alphanumeric();
-        let mut i = 0;
-
-        // Skip chars of the same kind.
-        while i + 1 < after.len() && after[i + 1].1.is_alphanumeric() == start_is_word {
-            i += 1;
-        }
-
-        self.cursor = self.cursor + after[i].0 + after[i].1.len_utf8();
+        editor::cursor_word_right(&self.input, &mut self.cursor);
     }
 
     pub fn delete_word_left(&mut self) {
-        let old_cursor = self.cursor;
-        self.cursor_word_left();
-        self.input.replace_range(self.cursor..old_cursor, "");
+        editor::delete_word_left(&mut self.input, &mut self.cursor);
     }
 
     pub fn submit_input(&mut self) -> Option<String> {

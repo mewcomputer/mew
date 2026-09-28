@@ -1,16 +1,33 @@
 use super::*;
 
+pub(super) fn replace_browser_event_value(current: &mut String, next: String) -> bool {
+    if *current == next {
+        return false;
+    }
+    *current = next;
+    true
+}
+
 impl DesktopShell {
     pub(super) fn new_conversation(&mut self, cx: &mut Context<Self>) {
-        self.begin_new_conversation(None, cx);
+        self.begin_new_conversation(None, None, cx);
     }
 
     pub(super) fn new_conversation_in_group(&mut self, group_id: String, cx: &mut Context<Self>) {
-        self.begin_new_conversation(Some(group_id), cx);
+        self.begin_new_conversation(None, Some(group_id), cx);
+    }
+
+    pub(super) fn new_conversation_in_workspace(
+        &mut self,
+        workspace_path: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.begin_new_conversation(Some(workspace_path), None, cx);
     }
 
     pub(super) fn begin_new_conversation(
         &mut self,
+        cwd: Option<String>,
         group_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -24,8 +41,8 @@ impl DesktopShell {
         self.pending_session_request = true;
         self.pending_session_target = None;
         let command = match group_id {
-            Some(group_id) => self.model.ui.new_conversation_in_group(None, group_id),
-            None => self.model.ui.new_conversation(None),
+            Some(group_id) => self.model.ui.new_conversation_in_group(cwd, group_id),
+            None => self.model.ui.new_conversation(cwd),
         };
         self.composer_selection = 0..0;
         self.composer_selection_reversed = false;
@@ -99,9 +116,16 @@ impl DesktopShell {
         self.tool_text_cache.borrow_mut().clear();
         self.transcript_rows.clear();
         self.transcript_list.reset(0);
+        self.transcript_rows_prepend_count = None;
+        self.history_before = None;
+        self.history_loading = false;
+        self.transcript_list.set_follow_mode(gpui::FollowMode::Tail);
+        self.transcript_scrolled_away = false;
+        self.pending_transcript_scroll_anchor = None;
         self.expanded_chat_parts.clear();
         self.transcript_selection = None;
         self.transcript_selection_anchor = None;
+        self.transcript_link_candidate = None;
         self.transcript_selected_text = None;
         self.transcript_is_selecting = false;
         self.clear_review();
@@ -235,15 +259,15 @@ impl DesktopShell {
                 BrowserEvent::AddressChanged { owner, url }
                     if owner.as_deref().is_none_or(|owner| owner == BROWSER_OWNER) =>
                 {
-                    self.browser_url = url;
-                    self.browser_error = None;
-                    changed = true;
+                    if replace_browser_event_value(&mut self.browser_url, url) {
+                        self.browser_error = None;
+                        changed = true;
+                    }
                 }
                 BrowserEvent::TitleChanged { owner, title, .. }
                     if owner.as_deref().is_none_or(|owner| owner == BROWSER_OWNER) =>
                 {
-                    self.browser_title = title;
-                    changed = true;
+                    changed |= replace_browser_event_value(&mut self.browser_title, title);
                 }
                 _ => {}
             }
@@ -299,6 +323,17 @@ impl DesktopShell {
         self.tool_text_cache.borrow_mut().clear();
         self.transcript_rows.clear();
         self.transcript_list.reset(0);
+        self.history_before = None;
+        self.history_loading = false;
+        self.transcript_scrollbar_grab_offset = None;
+        self.transcript_rows_prepend_count = None;
+        self.transcript_list
+            .set_follow_mode(if self.pending_transcript_scroll_anchor.is_some() {
+                gpui::FollowMode::Normal
+            } else {
+                gpui::FollowMode::Tail
+            });
+        self.transcript_scrolled_away = self.pending_transcript_scroll_anchor.is_some();
         self.expanded_chat_parts.clear();
         self.clear_review();
     }
@@ -378,6 +413,9 @@ impl DesktopShell {
             return;
         };
         self.layout.write_state(&mut state);
+        state.desktop_collapsed_groups = self.collapsed_groups.iter().cloned().collect();
+        state.desktop_sidebar_width = Some(self.sidebar_width);
+        state.desktop_external_editor = self.remembered_editor.clone();
         state.desktop_session_views = self
             .session_view_states
             .iter()
@@ -409,17 +447,62 @@ impl DesktopShell {
     pub(super) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.layout.sidebar_collapsed = !self.layout.sidebar_collapsed;
         self.sidebar_animation_id = self.sidebar_animation_id.wrapping_add(1);
+        self.collapse_workbench_if_needed();
         self.capture_session_view_state();
         self.persist_layout();
         cx.notify();
     }
 
+    pub(super) fn resize_sidebar(&mut self, pointer_x: f32, cx: &mut Context<Self>) {
+        let width = sidebar_width_from_pointer(pointer_x);
+        if (self.sidebar_width - width).abs() > 0.5 {
+            self.sidebar_width = width;
+            self.collapse_workbench_if_needed();
+            self.persist_layout();
+            cx.notify();
+        }
+    }
+
     pub(super) fn toggle_workbench(&mut self, cx: &mut Context<Self>) {
+        if self.layout.workbench_collapsed
+            && !workbench_fits_window(
+                self.window_width,
+                if self.layout.sidebar_collapsed {
+                    SIDEBAR_COLLAPSED_WIDTH
+                } else {
+                    self.sidebar_width
+                },
+            )
+        {
+            return;
+        }
         self.layout.workbench_collapsed = !self.layout.workbench_collapsed;
         self.workbench_animation_id = self.workbench_animation_id.wrapping_add(1);
         self.capture_session_view_state();
         self.persist_layout();
         cx.notify();
+    }
+
+    pub(super) fn update_window_width(&mut self, width: f32) -> bool {
+        let width_changed = (self.window_width - width).abs() > 0.5;
+        self.window_width = width;
+        width_changed || self.collapse_workbench_if_needed()
+    }
+
+    fn collapse_workbench_if_needed(&mut self) -> bool {
+        let sidebar_width = if self.layout.sidebar_collapsed {
+            SIDEBAR_COLLAPSED_WIDTH
+        } else {
+            self.sidebar_width
+        };
+        if self.layout.workbench_collapsed
+            || workbench_fits_window(self.window_width, sidebar_width)
+        {
+            return false;
+        }
+        self.layout.workbench_collapsed = true;
+        self.workbench_animation_id = self.workbench_animation_id.wrapping_add(1);
+        true
     }
 
     pub(super) fn toggle_terminal(&mut self, cx: &mut Context<Self>) {
@@ -479,15 +562,17 @@ impl DesktopShell {
         let was_open = self.model_picker_open
             || self.persona_picker_open
             || self.permission_picker_open
-            || self.thinking_picker_open
             || self.terminal_font_picker_open
-            || self.connection_picker_open;
+            || self.connection_picker_open
+            || self.session_menu_session.is_some()
+            || self.workspace_open_menu.is_some();
         self.model_picker_open = false;
         self.persona_picker_open = false;
         self.permission_picker_open = false;
-        self.thinking_picker_open = false;
         self.terminal_font_picker_open = false;
         self.connection_picker_open = false;
+        self.session_menu_session = None;
+        self.workspace_open_menu = None;
         was_open
     }
 
@@ -558,6 +643,21 @@ impl DesktopShell {
         self.dispatch_shell_command(ShellCommand::ToggleWorkbench, cx);
     }
 
+    pub(super) fn action_focus_sidebar_search(
+        &mut self,
+        _: &FocusSidebarSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.layout.sidebar_collapsed {
+            self.toggle_sidebar(cx);
+        }
+        let focus_handle = self.sidebar_search_focus_handle.clone();
+        window.defer(cx, move |window, cx| {
+            window.focus(&focus_handle, cx);
+        });
+    }
+
     pub(super) fn action_dismiss_popovers(
         &mut self,
         _: &DismissPopovers,
@@ -596,6 +696,7 @@ impl DesktopShell {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub(super) fn create_group(&mut self, cx: &mut Context<Self>) {
         let next_number = self.model.ui.groups.len() + 1;
         self.send_command(ClientMessage::CreateGroup {
@@ -606,9 +707,31 @@ impl DesktopShell {
     }
 
     pub(super) fn delete_group(&mut self, group_id: String, cx: &mut Context<Self>) {
+        self.collapsed_groups.remove(&group_id);
+        self.persist_layout();
         self.send_command(ClientMessage::DeleteGroup { group_id });
         self.session_menu_session = None;
         cx.notify();
+    }
+
+    pub(super) fn request_group_deletion(&mut self, group_id: String, cx: &mut Context<Self>) {
+        self.pending_group_deletion = Some(group_id);
+        self.session_menu_session = None;
+        cx.notify();
+    }
+
+    pub(super) fn cancel_group_deletion(&mut self, group_id: &str, cx: &mut Context<Self>) {
+        if self.pending_group_deletion.as_deref() == Some(group_id) {
+            self.pending_group_deletion = None;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn confirm_group_deletion(&mut self, group_id: String, cx: &mut Context<Self>) {
+        if self.pending_group_deletion.as_deref() == Some(group_id.as_str()) {
+            self.pending_group_deletion = None;
+            self.delete_group(group_id, cx);
+        }
     }
 
     pub(super) fn capture_session_view_state(&mut self) {
@@ -634,7 +757,24 @@ impl DesktopShell {
             browser_panel_open: self.browser_panel_open,
             browser_url: self.browser_url.clone(),
             browser_title: self.browser_title.clone(),
+            transcript_scroll_anchor: self.current_transcript_scroll_anchor(),
         }
+    }
+
+    pub(super) fn current_transcript_scroll_anchor(
+        &self,
+    ) -> Option<mew_config::DesktopTranscriptScrollAnchor> {
+        if !self.transcript_scrolled_away {
+            return None;
+        }
+        let offset = self.transcript_list.logical_scroll_top();
+        let row = self.transcript_rows.get(offset.item_ix)?;
+        Some(mew_config::DesktopTranscriptScrollAnchor {
+            message_index: row.message_index,
+            part_index: row.part_index,
+            block_index: row.block_index,
+            offset: f32::from(offset.offset_in_item),
+        })
     }
 
     fn ensure_session_view_state(&mut self, session_id: &str) {
@@ -651,10 +791,18 @@ impl DesktopShell {
             session_id,
             current_view_state,
         );
-        self.layout = view_state.layout;
+        restore_session_layout(&mut self.layout, view_state.layout);
         self.auxiliary_view = view_state.auxiliary_view;
         self.workbench_width = view_state.workbench_width;
         self.expanded_chat_parts = view_state.expanded_chat_parts;
+        self.pending_transcript_scroll_anchor = view_state.transcript_scroll_anchor;
+        self.transcript_scrolled_away = self.pending_transcript_scroll_anchor.is_some();
+        self.transcript_list
+            .set_follow_mode(if self.transcript_scrolled_away {
+                gpui::FollowMode::Normal
+            } else {
+                gpui::FollowMode::Tail
+            });
         self.browser_panel_open = view_state.browser_panel_open;
         self.browser_url = view_state.browser_url;
         self.browser_title = view_state.browser_title;
@@ -688,10 +836,13 @@ impl DesktopShell {
     }
 
     pub(super) fn rebuild_sidebar_rows(&mut self) {
-        self.sidebar_rows = build_sidebar_rows(
+        self.sidebar_rows = build_workspace_sidebar_rows(
             &self.model.ui.conversations,
-            &self.model.ui.groups,
+            &self.model.ui.projects,
             &self.collapsed_groups,
+            &self.expanded_workspaces,
+            &self.sidebar_search,
+            self.model.ui.selected_session.as_deref(),
         );
     }
 
@@ -700,20 +851,91 @@ impl DesktopShell {
             self.collapsed_groups.remove(&group_id);
         }
         self.rebuild_sidebar_rows();
+        self.persist_layout();
+        cx.notify();
+    }
+
+    pub(super) fn show_more_workspace(&mut self, workspace_path: String, cx: &mut Context<Self>) {
+        self.expanded_workspaces.insert(workspace_path);
+        self.rebuild_sidebar_rows();
+        self.persist_layout();
+        cx.notify();
+    }
+
+    pub(super) fn pin_workspace(
+        &mut self,
+        workspace_path: String,
+        pinned: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_command(ClientMessage::PinProject {
+            path: workspace_path,
+            pinned,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn toggle_workspace_open_menu(
+        &mut self,
+        workspace_path: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.workspace_open_menu.as_deref() == Some(workspace_path.as_str()) {
+            self.workspace_open_menu = None;
+        } else {
+            self.workspace_open_destinations = detect_workspace_open_destinations();
+            self.workspace_open_menu = Some(workspace_path);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn open_workspace_destination(
+        &mut self,
+        workspace_path: String,
+        destination: WorkspaceOpenDestination,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(
+            self.connection_profile.as_ref(),
+            Some(DesktopConnectionProfile::RemoteIroh { .. })
+        ) {
+            self.model.last_error =
+                Some("local workspace actions are unavailable for a remote daemon".into());
+            cx.notify();
+            return;
+        }
+        if matches!(destination, WorkspaceOpenDestination::CopyPath) {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(workspace_path));
+            self.workspace_open_menu = None;
+            cx.notify();
+            return;
+        }
+        let Some(command) = workspace_open_command(&destination, &workspace_path) else {
+            return;
+        };
+        match std::process::Command::new(&command.program)
+            .args(&command.args)
+            .spawn()
+        {
+            Ok(_) => {
+                if let WorkspaceOpenDestination::Application { id, .. } = destination {
+                    self.remembered_editor = Some(id);
+                    self.persist_layout();
+                }
+                self.workspace_open_menu = None;
+            }
+            Err(error) => {
+                self.model.last_error = Some(format!("could not open workspace: {error}"));
+            }
+        }
         cx.notify();
     }
 
     pub(super) fn toggle_session_menu(&mut self, session_id: String, cx: &mut Context<Self>) {
-        let row_index = self.sidebar_rows.iter().position(|row| {
-            matches!(row, SidebarRow::Session(conversation) if conversation.session_id == session_id)
-        });
         if self.session_menu_session.as_deref() == Some(session_id.as_str()) {
             self.session_menu_session = None;
         } else {
             self.session_menu_session = Some(session_id);
-        }
-        if let Some(row_index) = row_index {
-            self.sidebar_list.remeasure_items(row_index..row_index + 1);
         }
         cx.notify();
     }
@@ -821,6 +1043,196 @@ impl DesktopShell {
                 cx.stop_propagation();
             }
         }
+    }
+
+    pub(super) fn sidebar_search_key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = event.keystroke.key.as_str();
+        if key == "escape" {
+            self.clear_sidebar_search(cx);
+            window.focus(&self.composer_focus_handle, cx);
+            cx.stop_propagation();
+        } else if key == "a" && event.keystroke.modifiers.platform {
+            self.sidebar_search_selection = 0..self.sidebar_search.len();
+            self.sidebar_search_selection_reversed = false;
+            cx.notify();
+            cx.stop_propagation();
+        } else if key == "backspace" {
+            self.sidebar_search_backspace(window, cx);
+            cx.stop_propagation();
+        } else if key == "delete" {
+            self.sidebar_search_delete(window, cx);
+            cx.stop_propagation();
+        } else if key == "left" {
+            self.sidebar_search_move_left(cx);
+            cx.stop_propagation();
+        } else if key == "right" {
+            self.sidebar_search_move_right(cx);
+            cx.stop_propagation();
+        } else if key == "enter" {
+            if let Some(session_id) = self.sidebar_rows.iter().find_map(|row| match row {
+                SidebarRow::Session(conversation) => Some(conversation.session_id.clone()),
+                _ => None,
+            }) {
+                self.attach_session(session_id, cx);
+            }
+            cx.stop_propagation();
+        } else if key == "v" && event.keystroke.modifiers.platform {
+            if let Some(item) = cx.read_from_clipboard() {
+                if let Some(text) = item.text() {
+                    self.replace_sidebar_search_text(None, &text, cx);
+                }
+            }
+            cx.stop_propagation();
+        } else if !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+            && !event.keystroke.modifiers.alt
+        {
+            if let Some(text) = event.keystroke.key_char.as_deref() {
+                self.replace_sidebar_search_text(None, text, cx);
+                cx.stop_propagation();
+            }
+        }
+    }
+
+    pub(super) fn sidebar_search_mouse_down(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.sidebar_search_focus_handle, cx);
+        self.sidebar_search_selection = 0..self.sidebar_search.len();
+        self.sidebar_search_selection_reversed = false;
+        cx.notify();
+    }
+
+    pub(super) fn clear_sidebar_search(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_search.clear();
+        self.sidebar_search_selection = 0..0;
+        self.sidebar_search_selection_reversed = false;
+        self.sidebar_search_marked_range = None;
+        self.rebuild_sidebar_rows();
+        cx.notify();
+    }
+
+    pub(super) fn sidebar_search_cursor_offset(&self) -> usize {
+        if self.sidebar_search_selection_reversed {
+            self.sidebar_search_selection.start
+        } else {
+            self.sidebar_search_selection.end
+        }
+    }
+
+    fn sidebar_search_backspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_search_selection.is_empty() {
+            let cursor = self.sidebar_search_cursor_offset();
+            let start = previous_utf8_boundary(&self.sidebar_search, cursor);
+            if start == cursor {
+                window.play_system_bell();
+                return;
+            }
+            self.sidebar_search_selection = start..cursor;
+        }
+        self.replace_sidebar_search_text(None, "", cx);
+    }
+
+    fn sidebar_search_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_search_selection.is_empty() {
+            let cursor = self.sidebar_search_cursor_offset();
+            let end = next_utf8_boundary(&self.sidebar_search, cursor);
+            if end == cursor {
+                window.play_system_bell();
+                return;
+            }
+            self.sidebar_search_selection = cursor..end;
+        }
+        self.replace_sidebar_search_text(None, "", cx);
+    }
+
+    fn sidebar_search_move_left(&mut self, cx: &mut Context<Self>) {
+        let offset = if self.sidebar_search_selection.is_empty() {
+            previous_utf8_boundary(&self.sidebar_search, self.sidebar_search_cursor_offset())
+        } else {
+            self.sidebar_search_selection.start
+        };
+        self.sidebar_search_selection = offset..offset;
+        self.sidebar_search_selection_reversed = false;
+        cx.notify();
+    }
+
+    fn sidebar_search_move_right(&mut self, cx: &mut Context<Self>) {
+        let offset = if self.sidebar_search_selection.is_empty() {
+            next_utf8_boundary(&self.sidebar_search, self.sidebar_search_cursor_offset())
+        } else {
+            self.sidebar_search_selection.end
+        };
+        self.sidebar_search_selection = offset..offset;
+        self.sidebar_search_selection_reversed = false;
+        cx.notify();
+    }
+
+    pub(super) fn replace_sidebar_search_text(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        replacement: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.sidebar_search.clone();
+        let range = range_utf16
+            .as_ref()
+            .map(|range| {
+                byte_offset_for_utf16(&current, range.start)
+                    ..byte_offset_for_utf16(&current, range.end)
+            })
+            .or_else(|| self.sidebar_search_marked_range.clone())
+            .unwrap_or_else(|| self.sidebar_search_selection.clone());
+        let mut updated = current;
+        updated.replace_range(range.clone(), replacement);
+        let cursor = range.start + replacement.len();
+        self.sidebar_search_selection = cursor..cursor;
+        self.sidebar_search_selection_reversed = false;
+        self.sidebar_search_marked_range = None;
+        self.sidebar_search = updated;
+        self.rebuild_sidebar_rows();
+        cx.notify();
+    }
+
+    pub(super) fn replace_sidebar_search_and_mark(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        replacement: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self.sidebar_search.clone();
+        let range = range_utf16
+            .as_ref()
+            .map(|range| {
+                byte_offset_for_utf16(&current, range.start)
+                    ..byte_offset_for_utf16(&current, range.end)
+            })
+            .or_else(|| self.sidebar_search_marked_range.clone())
+            .unwrap_or_else(|| self.sidebar_search_selection.clone());
+        let mut updated = current;
+        updated.replace_range(range.clone(), replacement);
+        let replacement_end = range.start + replacement.len();
+        self.sidebar_search_marked_range =
+            (!replacement.is_empty()).then_some(range.start..replacement_end);
+        self.sidebar_search_selection = new_selected_range_utf16
+            .map(|new_range| {
+                let start = byte_offset_for_utf16(replacement, new_range.start);
+                let end = byte_offset_for_utf16(replacement, new_range.end);
+                range.start + start..range.start + end
+            })
+            .unwrap_or(replacement_end..replacement_end);
+        self.sidebar_search_selection_reversed = false;
+        self.sidebar_search = updated;
+        self.rebuild_sidebar_rows();
+        cx.notify();
     }
 
     pub(super) fn rename_mouse_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1081,6 +1493,7 @@ impl DesktopShell {
                     | ClientEvent::SessionMetaChanged { .. }
                     | ClientEvent::SessionReady { .. }
                     | ClientEvent::SessionHistoryLoaded { .. }
+                    | ClientEvent::SessionHistoryPageLoaded { .. }
             )
         }) {
             self.refresh_open_tab_titles();
@@ -1088,11 +1501,21 @@ impl DesktopShell {
         if let Some(target) = self.pending_session_target.as_deref() {
             self.model.ui.selected_session = Some(target.to_owned());
         }
+        if let Some(session_id) = events.iter().find_map(|event| match event {
+            ClientEvent::SessionHistoryPageLoaded { session_id, .. } => Some(session_id),
+            _ => None,
+        }) {
+            self.history_before = state
+                .session(session_id)
+                .and_then(|session| session.history_before);
+            self.history_loading = false;
+        }
         if events.iter().any(|event| {
             matches!(
                 event,
                 ClientEvent::SessionReady { .. }
                     | ClientEvent::SessionHistoryLoaded { .. }
+                    | ClientEvent::SessionHistoryPageLoaded { .. }
                     | ClientEvent::MessageChanged { .. }
                     | ClientEvent::FlaggedFilesChanged { .. }
                     | ClientEvent::SessionMetaChanged { .. }
@@ -1126,11 +1549,38 @@ impl DesktopShell {
         } else if self.model.session_is_ready()
             && events.iter().any(client_event_requires_transcript_snapshot)
         {
+            let history_prepend = events.iter().any(|event| {
+                matches!(
+                    event,
+                    ClientEvent::SessionHistoryPageLoaded { replace: false, .. }
+                )
+            });
+            let previous_transcript_len = self.model.ui.transcript.len();
             self.model.sync_client_transcript(state);
-            self.markdown_cache.clear();
-            self.tool_text_lists.borrow_mut().clear();
-            self.tool_text_cache.borrow_mut().clear();
-            self.sync_markdown_cache();
+            if history_prepend {
+                let added_messages = self
+                    .model
+                    .ui
+                    .transcript
+                    .len()
+                    .saturating_sub(previous_transcript_len);
+                self.prepare_for_history_prepend(added_messages);
+            }
+            // Keep render caches across snapshots. MessageChanged and action
+            // events often arrive with an otherwise identical transcript; the
+            // cache synchronizer compares each part's source and only rebuilds
+            // rows whose content actually changed. Session switches already
+            // clear these caches in `clear_pending_session_view`.
+            let markdown_changed = self.sync_markdown_cache();
+            if !markdown_changed
+                && events
+                    .iter()
+                    .any(client_event_requires_transcript_remeasure)
+                && !self.transcript_rows.is_empty()
+            {
+                self.transcript_list
+                    .remeasure_items(0..self.transcript_rows.len());
+            }
         }
         let session_list_changed = events
             .iter()
@@ -1177,10 +1627,11 @@ impl DesktopShell {
                 self.send_command(ClientMessage::SwitchModel { provider, model });
             }
         }
-        if let Some((provider, model)) = &self.awaiting_model_switch {
-            let switch_completed = state.current_provider.as_deref() == Some(provider)
-                && state.current_model.as_deref() == Some(model);
+        if let Some((provider, model)) = self.awaiting_model_switch.clone() {
+            let switch_completed = state.current_provider.as_deref() == Some(provider.as_str())
+                && state.current_model.as_deref() == Some(model.as_str());
             if switch_completed {
+                self.remember_recent_model(&provider, &model);
                 self.awaiting_model_switch = None;
             }
         }
@@ -1265,6 +1716,12 @@ fn open_tab_for_session(
     }
 }
 
+fn restore_session_layout(current: &mut ShellLayoutState, saved: ShellLayoutState) {
+    let sidebar_collapsed = current.sidebar_collapsed;
+    *current = saved;
+    current.sidebar_collapsed = sidebar_collapsed;
+}
+
 fn session_view_state_or_current(
     states: &mut BTreeMap<String, SessionViewState>,
     session_id: &str,
@@ -1299,6 +1756,7 @@ mod tests {
             session_id: "session-1".into(),
             title: "A real session".into(),
             cwd: None,
+            workspace_path: None,
             last_message_at: None,
             state: mew_protocol::SessionState::Idle,
             last_turn_failed: false,
@@ -1330,6 +1788,7 @@ mod tests {
             browser_panel_open: true,
             browser_url: "https://example.com".into(),
             browser_title: "Example".into(),
+            transcript_scroll_anchor: None,
         };
         let mut states = BTreeMap::new();
 
@@ -1337,6 +1796,24 @@ mod tests {
 
         assert_eq!(restored, current);
         assert_eq!(states.get("session-1"), Some(&current));
+    }
+
+    #[test]
+    fn restoring_session_view_state_keeps_global_sidebar_visibility() {
+        let mut current = ShellLayoutState {
+            sidebar_collapsed: true,
+            ..ShellLayoutState::default()
+        };
+        let saved = ShellLayoutState {
+            sidebar_collapsed: false,
+            workbench_collapsed: true,
+            ..ShellLayoutState::default()
+        };
+
+        restore_session_layout(&mut current, saved);
+
+        assert!(current.sidebar_collapsed);
+        assert!(current.workbench_collapsed);
     }
 
     #[test]

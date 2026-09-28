@@ -2,15 +2,22 @@ use super::*;
 
 impl Render for DesktopShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(frame_probe) = self.frame_probe.as_mut() {
+            frame_probe.record_root_render();
+            frame_probe.collect();
+        }
         self.ensure_browser_portal(window, cx);
         if self.model_picker_open
             || self.persona_picker_open
             || self.permission_picker_open
-            || self.thinking_picker_open
             || self.terminal_font_picker_open
             || self.connection_picker_open
         {
-            let focus_handle = self.popover_focus_handle.clone();
+            let focus_handle = if self.model_picker_open {
+                self.model_picker_focus_handle.clone()
+            } else {
+                self.popover_focus_handle.clone()
+            };
             if !focus_handle.is_focused(window) {
                 window.defer(cx, move |window, cx| {
                     window.focus(&focus_handle, cx);
@@ -44,6 +51,7 @@ impl Render for DesktopShell {
             .on_action(cx.listener(Self::action_toggle_sidebar))
             .on_action(cx.listener(Self::action_toggle_terminal))
             .on_action(cx.listener(Self::action_toggle_workbench))
+            .on_action(cx.listener(Self::action_focus_sidebar_search))
             .on_action(cx.listener(Self::action_dismiss_popovers))
             .child(self.render_topbar(cx))
             .child(if self.settings_open {

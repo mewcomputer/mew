@@ -13,6 +13,12 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_HISTORY_PAGE_LIMIT: usize = 24;
+
+fn default_history_page_limit() -> usize {
+    DEFAULT_HISTORY_PAGE_LIMIT
+}
+
 pub mod command_registry;
 
 pub use command_registry::{is_known, lookup, CommandDef, CommandLocus, BUILTIN_COMMANDS};
@@ -61,6 +67,17 @@ pub enum ClientMessage {
         /// What kind of client is connecting (TUI, Web, etc.).
         #[serde(default)]
         client_kind: ClientKind,
+    },
+
+    /// Load an older page of an attached session's history. `before` is the
+    /// zero-based message index immediately before the currently loaded page.
+    /// The daemon returns messages in chronological order, ending before this
+    /// cursor.
+    LoadSessionHistory {
+        session_id: String,
+        before: usize,
+        #[serde(default = "default_history_page_limit")]
+        limit: usize,
     },
 
     /// List all sessions known to the daemon (active + persisted idle).
@@ -257,6 +274,11 @@ pub enum ClientMessage {
     /// Does NOT require a session — used before creating one to populate a
     /// project picker. The daemon responds with `ServerMessage::ProjectList`.
     ListProjects,
+    /// Pin or unpin a canonical workspace in the daemon-owned project list.
+    PinProject {
+        path: String,
+        pinned: bool,
+    },
 
     /// Regenerate the session title from the conversation history.
     /// Useful when auto-title was disabled or the first message was a poor title source.
@@ -449,6 +471,9 @@ pub struct SessionInfo {
     /// Working directory for the session, if set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Canonical workspace identity used for client-side grouping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
     /// True if the last turn ended with an error.
     #[serde(default)]
     pub last_turn_failed: bool,
@@ -521,7 +546,7 @@ impl From<SessionUsageWire> for mew_session::SessionUsage {
 }
 
 /// A file attachment for a prompt.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     pub path: String,
     /// MIME type if known (e.g. "image/png").
@@ -752,10 +777,21 @@ pub enum ServerMessage {
         sessions: Vec<SessionInfo>,
     },
 
-    /// Full message history replay for a resumed session. Only sent to the
-    /// client that triggered the resume.
+    /// Legacy full message history replay for a resumed session. New clients
+    /// should handle `SessionHistoryPage` instead.
     SessionHistory {
         messages: Vec<mew_message::Message>,
+    },
+
+    /// A bounded history page for a resumed session. The first page replaces
+    /// the client's transcript with the newest messages; subsequent pages are
+    /// prepended as the user scrolls toward the top.
+    SessionHistoryPage {
+        session_id: String,
+        messages: Vec<mew_message::Message>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<usize>,
+        replace: bool,
     },
 
     // -- Model management --
@@ -996,7 +1032,7 @@ pub struct FlaggedFileWire {
 }
 
 /// A known project directory, returned by `ListProjects`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectInfo {
     /// Absolute path to the project directory.
     pub path: String,
@@ -1007,6 +1043,9 @@ pub struct ProjectInfo {
     /// Timestamp of the last activity in this project (epoch seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used_at: Option<i64>,
+    /// Whether this workspace is pinned in the daemon-owned sidebar order.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// Wire-format info about a persona, returned by `ListPersonas`.
@@ -1473,12 +1512,22 @@ mod tests {
         let decoded = round_trip(&msg);
         assert!(matches!(decoded, ClientMessage::ListProjects));
 
+        let pin = ClientMessage::PinProject {
+            path: "/home/user/myproject".into(),
+            pinned: true,
+        };
+        assert!(matches!(
+            round_trip(&pin),
+            ClientMessage::PinProject { pinned: true, .. }
+        ));
+
         let msg = ServerMessage::ProjectList {
             projects: vec![ProjectInfo {
                 path: "/home/user/myproject".to_string(),
                 display_name: "myproject".to_string(),
                 session_count: 3,
                 last_used_at: Some(1700000000),
+                pinned: true,
             }],
         };
         let decoded = round_trip(&msg);
@@ -1489,6 +1538,7 @@ mod tests {
                 assert_eq!(projects[0].display_name, "myproject");
                 assert_eq!(projects[0].session_count, 3);
                 assert_eq!(projects[0].last_used_at, Some(1700000000));
+                assert!(projects[0].pinned);
             }
             _ => panic!("expected ProjectList"),
         }
@@ -2718,6 +2768,7 @@ mod tests {
             summary: None,
             client_count: 2,
             cwd: None,
+            workspace_path: None,
             last_turn_failed: false,
             archived: false,
             pinned: false,
@@ -2753,6 +2804,7 @@ mod tests {
             summary: None,
             client_count: 0,
             cwd: None,
+            workspace_path: None,
             last_turn_failed: false,
             archived: false,
             pinned: false,
@@ -2819,6 +2871,7 @@ mod tests {
                 summary: None,
                 client_count: 1,
                 cwd: None,
+                workspace_path: None,
                 last_turn_failed: false,
                 archived: false,
                 pinned: false,
@@ -2840,6 +2893,7 @@ mod tests {
                 summary: None,
                 client_count: 0,
                 cwd: None,
+                workspace_path: None,
                 last_turn_failed: false,
                 archived: false,
                 pinned: false,
@@ -2956,6 +3010,41 @@ mod tests {
         match round_trip(&m) {
             ServerMessage::SessionHistory { messages } => {
                 assert!(messages.is_empty());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn session_history_page_roundtrip_preserves_cursor_and_mode() {
+        let message = mew_message::Message {
+            id: mew_message::MessageId::new(),
+            session_id: mew_message::SessionId::new(),
+            role: mew_message::Role::User,
+            parts: Vec::new(),
+            time: mew_message::Time {
+                created: 1,
+                completed: None,
+            },
+            assistant: None,
+        };
+        let decoded = round_trip(&ServerMessage::SessionHistoryPage {
+            session_id: "session-page".into(),
+            messages: vec![message],
+            next_cursor: Some(12),
+            replace: false,
+        });
+        match decoded {
+            ServerMessage::SessionHistoryPage {
+                session_id,
+                messages,
+                next_cursor,
+                replace,
+            } => {
+                assert_eq!(session_id, "session-page");
+                assert_eq!(messages.len(), 1);
+                assert_eq!(next_cursor, Some(12));
+                assert!(!replace);
             }
             _ => panic!("wrong variant"),
         }
@@ -3547,6 +3636,7 @@ mod tests {
                 summary: None,
                 client_count: 1,
                 cwd: Some("/tmp".into()),
+                workspace_path: Some("/tmp".into()),
                 last_turn_failed: false,
                 archived: false,
                 pinned: false,

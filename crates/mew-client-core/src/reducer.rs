@@ -37,6 +37,8 @@ pub struct ClientSession {
     pub last_sent_prompt: Option<String>,
     pub streaming_part_id: Option<PartId>,
     pub streaming_text: String,
+    /// Cursor for loading older messages from the session history.
+    pub history_before: Option<usize>,
 }
 
 impl ClientSession {
@@ -58,6 +60,7 @@ impl ClientSession {
             last_sent_prompt: None,
             streaming_part_id: None,
             streaming_text: String::new(),
+            history_before: None,
         }
     }
 
@@ -239,6 +242,10 @@ pub enum ClientEvent {
     FileTreeChanged,
     SessionHistoryLoaded {
         session_id: String,
+    },
+    SessionHistoryPageLoaded {
+        session_id: String,
+        replace: bool,
     },
     PermissionModeChanged {
         mode: String,
@@ -536,7 +543,28 @@ impl ClientState {
                 };
                 self.attached_session = Some(session_id.clone());
                 self.session_mut(&session_id).messages = messages;
+                self.session_mut(&session_id).history_before = None;
                 vec![ClientEvent::SessionHistoryLoaded { session_id }]
+            }
+            ServerMessage::SessionHistoryPage {
+                session_id,
+                messages,
+                next_cursor,
+                replace,
+            } => {
+                let session = self.session_mut(&session_id);
+                if replace {
+                    session.messages = messages;
+                } else {
+                    let mut all_messages = messages;
+                    all_messages.append(&mut session.messages);
+                    session.messages = all_messages;
+                }
+                session.history_before = next_cursor;
+                vec![ClientEvent::SessionHistoryPageLoaded {
+                    session_id,
+                    replace,
+                }]
             }
             ServerMessage::UserMessage { text } => {
                 let Some(session_id) = self.attached_session.clone() else {
@@ -1390,6 +1418,7 @@ mod tests {
             summary: Some("A session".into()),
             client_count: 0,
             cwd: None,
+            workspace_path: None,
             last_turn_failed: false,
             archived: false,
             pinned: false,
@@ -1599,6 +1628,7 @@ mod tests {
             summary: None,
             client_count: 0,
             cwd: None,
+            workspace_path: None,
             last_turn_failed: false,
             archived: false,
             pinned: false,
@@ -1668,6 +1698,7 @@ mod tests {
             display_name: "project".into(),
             session_count: 1,
             last_used_at: Some(1),
+            pinned: false,
         }];
         let events = state.apply_server_message(ServerMessage::ProjectList { projects });
         assert!(matches!(

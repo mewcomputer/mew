@@ -11,7 +11,7 @@ use mew_client_core::{
     TransportError,
 };
 use mew_protocol::{ClientMessage, ServerMessage};
-use tungstenite::{client::ClientRequestBuilder, Message};
+use tungstenite::{client::ClientRequestBuilder, protocol::WebSocketConfig, Message};
 
 pub const MEW_ALPN: &[u8] = b"mew/wire/0";
 
@@ -58,7 +58,11 @@ impl ClientTransport for IrohTransport {
             .open_bi()
             .await
             .map_err(|error| TransportError::Other(format!("open daemon stream: {error}")))?;
-        let mut socket = tokio_tungstenite::client_async(
+        let config = WebSocketConfig {
+            max_frame_size: None,
+            ..WebSocketConfig::default()
+        };
+        let mut socket = tokio_tungstenite::client_async_with_config(
             ClientRequestBuilder::new(
                 "ws://daemon.mew/"
                     .parse()
@@ -70,6 +74,7 @@ impl ClientTransport for IrohTransport {
             .with_header("Sec-WebSocket-Version", "13")
             .with_header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
             IrohStream::new(send, receive),
+            Some(config),
         )
         .await
         .map_err(|error| {

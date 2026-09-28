@@ -10,6 +10,7 @@ fn open_test_picker(app: &mut App, kind: &str, items: Vec<PickerItem>) {
         filter: String::new(),
         selected: 0,
         cursor: 0,
+        filter_undo: editor::UndoHistory::default(),
         scroll: 0,
         visible_items: PICKER_VISIBLE_ITEMS,
         hint: None,
@@ -682,6 +683,40 @@ fn test_single_question_picks_option_and_submits() {
     assert!(app.user_question.is_none());
     let answers = rx.try_recv().expect("answers sent");
     assert_eq!(answers, vec!["dev"]);
+}
+
+#[test]
+fn test_goal_proposal_accept_registers_active_goal() {
+    use mew_agent::{AgentEvent, GoalDecision};
+    let mut app = App::new();
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<GoalDecision>();
+    app.handle_agent_event(AgentEvent::GoalProposed {
+        call_id: "c1".into(),
+        objective: "ship 0.1.3".into(),
+        tx,
+    });
+    assert_eq!(app.mode, Mode::GoalProposal);
+    app.goal_proposal_confirm(); // selected = 0 = accept
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(matches!(rx.try_recv(), Ok(GoalDecision::Accepted)));
+    let goal = app.active_goal.as_ref().expect("goal registered");
+    assert_eq!(goal.objective, "ship 0.1.3");
+    assert_eq!(goal.status, mew_agent::GoalStatus::Active);
+
+    // Rejecting does not clobber the registered goal.
+    let (tx, mut rx) = tokio::sync::oneshot::channel::<GoalDecision>();
+    app.handle_agent_event(AgentEvent::GoalProposed {
+        call_id: "c2".into(),
+        objective: "no thanks".into(),
+        tx,
+    });
+    app.goal_proposal_toggle();
+    app.goal_proposal_confirm(); // selected = 1 = reject
+    assert!(matches!(rx.try_recv(), Ok(GoalDecision::Rejected)));
+    assert_eq!(
+        app.active_goal.as_ref().map(|g| g.objective.as_str()),
+        Some("ship 0.1.3")
+    );
 }
 
 fn open_plan_approval(app: &mut App) -> tokio::sync::oneshot::Receiver<mew_agent::PlanDecision> {
@@ -1588,7 +1623,7 @@ fn test_undo_redo_basic() {
     // Undo restores to empty (coalesced entry).
     app.undo();
     assert_eq!(app.input, "");
-    assert!(app.undo_stack.is_empty());
+    assert!(app.undo_history.undo_is_empty());
 
     // Redo restores "hello".
     app.redo();
@@ -1618,11 +1653,11 @@ fn test_redo_cleared_on_new_edit() {
     app.undo();
     app.undo();
     assert_eq!(app.input, "");
-    assert!(!app.redo_stack.is_empty());
+    assert!(!app.undo_history.redo_is_empty());
 
     // New edit clears redo stack.
     app.insert_char('z');
-    assert!(app.redo_stack.is_empty());
+    assert!(app.undo_history.redo_is_empty());
     assert_eq!(app.input, "z");
 }
 
@@ -1636,7 +1671,7 @@ fn test_undo_paste_single_entry() {
         app.cursor += c.len_utf8();
     }
     assert_eq!(app.input, "pasted");
-    assert_eq!(app.undo_stack.len(), 1); // single entry, not 6
+    assert_eq!(app.undo_history.undo_len(), 1); // single entry, not 6
 
     app.undo();
     assert_eq!(app.input, "");
@@ -2105,6 +2140,7 @@ fn test_session_list_syncs_active_change_stats() {
             summary: None,
             client_count: 1,
             cwd: None,
+            workspace_path: None,
             last_turn_failed: false,
             archived: false,
             pinned: false,
@@ -2138,6 +2174,7 @@ fn test_session_list_sorted_by_last_seen() {
             summary: None,
             client_count: 0,
             cwd: None,
+            workspace_path: None,
             last_turn_failed: false,
             archived: false,
             pinned: false,
@@ -2187,6 +2224,7 @@ fn test_session_list_seeds_active_context_tokens() {
         summary: None,
         client_count: 1,
         cwd: None,
+        workspace_path: None,
         last_turn_failed: false,
         archived: false,
         pinned: false,

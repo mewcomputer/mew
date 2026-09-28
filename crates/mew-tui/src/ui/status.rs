@@ -45,6 +45,25 @@ fn gap_segment(width: usize, tokens: &crate::theme::Theme) -> PillSegment {
     }
 }
 
+/// Truncate `s` to at most `max_cols` display columns, appending an ellipsis
+/// when it had to be cut. Cuts on char boundaries.
+fn truncate_pill(s: &str, max_cols: usize) -> String {
+    if super::display_width(s) <= max_cols {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut cols = 0usize;
+    for c in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if cols + cw > max_cols {
+            break;
+        }
+        cols += cw;
+        out.push(c);
+    }
+    format!("{out}…")
+}
+
 fn build_pills(app: &App, theme: &crate::theme::Theme) -> Vec<Pill> {
     let mut pills = Vec::new();
 
@@ -92,6 +111,26 @@ fn build_pills(app: &App, theme: &crate::theme::Theme) -> Vec<Pill> {
             fg: theme.resolve("pill.model.fg"),
             bg: theme.resolve("pill.model.bg"),
         });
+    }
+
+    // active goal — a 🎯 chip while a goal is in flight, mirroring the
+    // sidebar's goal section. Completed/cleared goals don't render a pill.
+    if let Some(ref goal) = app.active_goal {
+        if goal.status != mew_agent::GoalStatus::Complete {
+            let label = format!("🎯 {}", truncate_pill(&goal.objective, 28));
+            let (fg, bg) = match goal.status {
+                mew_agent::GoalStatus::Paused => (
+                    theme.resolve("pill.thinking.fg"),
+                    theme.resolve("pill.thinking.bg"),
+                ),
+                _ => (theme.resolve("pill.auto.fg"), theme.resolve("pill.auto.bg")),
+            };
+            pills.push(Pill {
+                text: label,
+                fg,
+                bg,
+            });
+        }
     }
 
     // thinking variant — appended after the model pill with a separator.

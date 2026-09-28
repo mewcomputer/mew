@@ -1166,6 +1166,7 @@ fn server_message_type(msg: &mew_protocol::ServerMessage) -> &'static str {
         mew_protocol::ServerMessage::JobUpdate { .. } => "JobUpdate",
         mew_protocol::ServerMessage::SessionList { .. } => "SessionList",
         mew_protocol::ServerMessage::SessionHistory { .. } => "SessionHistory",
+        mew_protocol::ServerMessage::SessionHistoryPage { .. } => "SessionHistoryPage",
         mew_protocol::ServerMessage::SessionTitleChanged { .. } => "SessionTitleChanged",
         mew_protocol::ServerMessage::SessionSummaryChanged { .. } => "SessionSummaryChanged",
         mew_protocol::ServerMessage::SessionAlert { .. } => "SessionAlert",

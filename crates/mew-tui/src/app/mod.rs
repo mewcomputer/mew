@@ -101,6 +101,11 @@ pub struct App {
     pub user_question: Option<UserQuestionState>,
     pub plan_approval: Option<PlanApprovalState>,
     pub goal_proposal: Option<GoalProposalState>,
+    /// The user's active goal (sidebar chip + status), mirroring the
+    /// daemon's authoritative state.
+    pub active_goal: Option<GoalView>,
+    /// A pending `/goal <text>` being edited before confirmation.
+    pub goal_compose: Option<GoalComposeState>,
     pub persona_switch_confirm: Option<PersonaSwitchConfirmState>,
     pub pending_persona_switch_apply: Option<String>,
     pub todos: Vec<mew_agent::Todo>,
@@ -229,10 +234,12 @@ pub struct App {
     /// long-finished todos without touching the agent-owned list.
     pub todo_done_at: std::collections::HashMap<usize, Instant>,
     pub background_jobs: Vec<BackgroundJobState>,
-    pub undo_stack: Vec<(String, usize)>,
-    pub redo_stack: Vec<(String, usize)>,
-    pub last_undo_push: Option<Instant>,
+    pub undo_history: editor::UndoHistory,
     pub history_search_query: String,
+    /// Cursor into `history_search_query`, shared with the editor module.
+    pub history_search_cursor: usize,
+    /// Undo history for the history search query.
+    pub history_search_undo: editor::UndoHistory,
     pub history_search_index: Option<usize>,
     pub history_search_saved: Option<(String, usize)>,
     pub pending_paste: Option<String>,
@@ -346,6 +353,7 @@ pub enum Mode {
     HistorySearch,
     PasteConfirm,
     GoalProposal,
+    GoalCompose,
 }
 
 /// A single item in the command palette.
@@ -373,6 +381,8 @@ pub struct PickerState {
     pub filter: String,
     pub selected: usize,
     pub cursor: usize,
+    /// Undo history for the filter field.
+    pub filter_undo: editor::UndoHistory,
     /// Vertical scroll offset in rendered display rows (each wrapped line
     /// counts as one row). Set by the draw pass, which also keeps the
     /// selected item's row span in view.
@@ -654,6 +664,10 @@ pub struct UserQuestionState {
     pub page: usize,
     pub selected: usize,
     pub freeform_text: String,
+    /// Cursor into `freeform_text`, shared with the editor module.
+    pub freeform_cursor: usize,
+    /// Undo history for the freeform answer.
+    pub freeform_undo: editor::UndoHistory,
     pub review: bool,
     pub review_selected: usize,
     pub tx: Option<tokio::sync::oneshot::Sender<Vec<String>>>,
@@ -668,6 +682,32 @@ pub struct GoalProposalState {
     /// 0 = accept, 1 = reject.
     pub selected: usize,
     pub tx: Option<tokio::sync::oneshot::Sender<mew_agent::GoalDecision>>,
+}
+
+/// The user's active goal as shown in the sidebar and status bar. The
+/// daemon owns the authoritative goal state; this is the TUI's last-known
+/// view, updated from goal commands and proposal confirmations.
+#[derive(Debug, Clone)]
+pub struct GoalView {
+    pub objective: String,
+    pub status: mew_agent::GoalStatus,
+}
+
+/// A user-initiated goal being composed in the `/goal` modal: the
+/// objective starts from the slash argument and can be edited before
+/// accepting.
+#[derive(Debug)]
+pub struct GoalComposeState {
+    /// The objective being edited.
+    pub title: String,
+    /// Cursor into `title`, shared with the editor module.
+    pub cursor: usize,
+    /// Undo history for the objective editor.
+    pub undo: editor::UndoHistory,
+    /// The text as typed after `/goal`, before any modal editing.
+    pub original: String,
+    /// The current active goal this one would replace, if any.
+    pub replacing: Option<String>,
 }
 
 /// A pending `handoff_plan` approval. Shown as a large centered modal with
@@ -685,6 +725,10 @@ pub struct PlanApprovalState {
     /// True while the user is typing feedback for the request-changes path.
     pub editing_feedback: bool,
     pub feedback: String,
+    /// Cursor into `feedback`, shared with the editor module.
+    pub feedback_cursor: usize,
+    /// Undo history for the feedback editor.
+    pub feedback_undo: editor::UndoHistory,
     pub tx: Option<tokio::sync::oneshot::Sender<mew_agent::PlanDecision>>,
 }
 
@@ -714,6 +758,8 @@ impl App {
             user_question: None,
             plan_approval: None,
             goal_proposal: None,
+            active_goal: None,
+            goal_compose: None,
             persona_switch_confirm: None,
             pending_persona_switch_apply: None,
             todos: Vec::new(),
@@ -805,10 +851,10 @@ impl App {
             sidebar_finished_ttl: 180,
             todo_done_at: std::collections::HashMap::new(),
             background_jobs: Vec::new(),
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            last_undo_push: None,
+            undo_history: editor::UndoHistory::default(),
             history_search_query: String::new(),
+            history_search_cursor: 0,
+            history_search_undo: editor::UndoHistory::default(),
             history_search_index: None,
             history_search_saved: None,
             pending_paste: None,
@@ -923,6 +969,26 @@ impl App {
                     self.messages.push(msg.clone());
                 }
                 self.auto_scroll = true;
+                self.pending_md_rerender = self.messages.last().map(|m| m.id);
+                self.mark_chat_dirty();
+            }
+            ServerMessage::SessionHistoryPage {
+                messages, replace, ..
+            } => {
+                if *replace {
+                    self.messages.clear();
+                }
+                if *replace {
+                    self.messages.extend(messages.iter().cloned());
+                } else {
+                    let mut page = messages.clone();
+                    page.append(&mut self.messages);
+                    self.messages = page;
+                }
+                self.md_stream = None;
+                self.md_state = mdstream::DocumentState::new();
+                self.md_render_cache.invalidate();
+                self.auto_scroll = *replace;
                 self.pending_md_rerender = self.messages.last().map(|m| m.id);
                 self.mark_chat_dirty();
             }
@@ -1095,6 +1161,7 @@ impl App {
             filter: String::new(),
             selected: 0,
             cursor: 0,
+            filter_undo: editor::UndoHistory::default(),
             scroll: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
@@ -2116,6 +2183,8 @@ impl App {
                     page: 0,
                     selected: 0,
                     freeform_text: String::new(),
+                    freeform_cursor: 0,
+                    freeform_undo: editor::UndoHistory::default(),
                     review: false,
                     review_selected: 0,
                     tx: Some(tx),
@@ -2138,6 +2207,8 @@ impl App {
                     selected: 0,
                     editing_feedback: false,
                     feedback: String::new(),
+                    feedback_cursor: 0,
+                    feedback_undo: editor::UndoHistory::default(),
                     tx: Some(tx),
                 });
             }
@@ -2484,7 +2555,7 @@ impl App {
                     .map(|q| q.options.len())
                     .unwrap_or(0);
                 if uq.selected == freeform_index {
-                    uq.freeform_text.push(c);
+                    editor::insert(&mut uq.freeform_text, &mut uq.freeform_cursor, c);
                 }
             }
         }
@@ -2501,7 +2572,7 @@ impl App {
                     .map(|q| q.options.len())
                     .unwrap_or(0);
                 if uq.selected == freeform_index {
-                    uq.freeform_text.pop();
+                    editor::backspace(&mut uq.freeform_text, &mut uq.freeform_cursor);
                 }
             }
         }
@@ -2534,13 +2605,16 @@ impl App {
                 let answer = if uq.selected < question.options.len() {
                     question.options[uq.selected].label.clone()
                 } else if !uq.freeform_text.is_empty() {
-                    std::mem::take(&mut uq.freeform_text)
+                    let answer = std::mem::take(&mut uq.freeform_text);
+                    uq.freeform_cursor = 0;
+                    answer
                 } else {
                     // Freeform row picked but no text entered — ignore.
                     return;
                 };
                 uq.answers[uq.page] = answer;
                 uq.freeform_text.clear();
+                uq.freeform_cursor = 0;
                 if uq.page + 1 < uq.questions.len() {
                     uq.page += 1;
                     uq.selected = 0;
@@ -2608,7 +2682,7 @@ impl App {
     pub fn plan_approval_type_char(&mut self, c: char) {
         if let Some(pa) = self.plan_approval.as_mut() {
             if pa.editing_feedback {
-                pa.feedback.push(c);
+                editor::insert(&mut pa.feedback, &mut pa.feedback_cursor, c);
             }
         }
     }
@@ -2616,7 +2690,7 @@ impl App {
     pub fn plan_approval_backspace(&mut self) {
         if let Some(pa) = self.plan_approval.as_mut() {
             if pa.editing_feedback {
-                pa.feedback.pop();
+                editor::backspace(&mut pa.feedback, &mut pa.feedback_cursor);
             }
         }
     }
@@ -2673,17 +2747,22 @@ impl App {
         }
     }
 
-    /// Confirm the goal proposal. Accept sends `GoalDecision::Accepted`;
-    /// reject sends `GoalDecision::Rejected`.
+    /// Confirm the goal proposal. Accept sends `GoalDecision::Accepted` and
+    /// registers the objective as the TUI's active goal; reject sends
+    /// `GoalDecision::Rejected`.
     pub fn goal_proposal_confirm(&mut self) {
         if let Some(gp) = self.goal_proposal.take() {
+            let accepted = gp.selected == 0;
             if let Some(tx) = gp.tx {
-                let decision = if gp.selected == 0 {
+                let decision = if accepted {
                     mew_agent::GoalDecision::Accepted
                 } else {
                     mew_agent::GoalDecision::Rejected
                 };
                 let _ = tx.send(decision);
+            }
+            if accepted {
+                self.set_active_goal(gp.objective);
             }
         }
         self.mode = Mode::Normal;
@@ -2694,6 +2773,48 @@ impl App {
     pub fn cancel_goal_proposal(&mut self) {
         self.goal_proposal = None;
         self.mode = Mode::Normal;
+    }
+
+    /// Record the active goal locally (sidebar chip + status bar).
+    pub fn set_active_goal(&mut self, objective: String) {
+        self.active_goal = Some(GoalView {
+            objective,
+            status: mew_agent::GoalStatus::Active,
+        });
+    }
+
+    /// Update the local view of the active goal's status. No-op when no
+    /// goal is tracked.
+    pub fn update_goal_status(&mut self, status: mew_agent::GoalStatus) {
+        if let Some(g) = self.active_goal.as_mut() {
+            g.status = status;
+        }
+    }
+
+    /// Drop the local view of the active goal.
+    pub fn clear_active_goal(&mut self) {
+        self.active_goal = None;
+    }
+
+    /// Open the `/goal` compose modal with the typed objective. If a goal is
+    /// already active, the modal warns that it will be replaced.
+    pub fn open_goal_compose(&mut self, text: String) {
+        self.goal_compose = Some(GoalComposeState {
+            title: text.clone(),
+            cursor: text.len(),
+            undo: editor::UndoHistory::default(),
+            original: text,
+            replacing: self.active_goal.as_ref().map(|g| g.objective.clone()),
+        });
+        self.mode = Mode::GoalCompose;
+    }
+
+    /// Close the compose modal without setting a goal.
+    pub fn close_goal_compose(&mut self) {
+        self.goal_compose = None;
+        if self.mode == Mode::GoalCompose {
+            self.mode = Mode::Normal;
+        }
     }
 }
 
@@ -2833,6 +2954,7 @@ pub fn parse_namespace_refs(text: &str) -> Vec<NamespaceRef> {
 #[cfg(test)]
 mod tests;
 
+pub mod editor;
 pub mod input;
 pub mod pickers;
 pub mod slash;

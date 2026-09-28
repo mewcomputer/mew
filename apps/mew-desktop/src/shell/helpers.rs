@@ -1,21 +1,161 @@
 use super::*;
 use unicode_segmentation::UnicodeSegmentation;
 
-pub(super) fn sidebar_transition_width(collapsed: bool, delta: f32) -> f32 {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum WorkspaceOpenDestination {
+    DefaultApp,
+    Terminal,
+    Application { id: String, label: String },
+    CopyPath,
+}
+
+impl WorkspaceOpenDestination {
+    pub(super) fn label(&self) -> &str {
+        match self {
+            Self::DefaultApp => "Default app",
+            Self::Terminal => "Open in Terminal",
+            Self::Application { label, .. } => label,
+            Self::CopyPath => "Copy path",
+        }
+    }
+
+    pub(super) fn application_id(&self) -> Option<&str> {
+        match self {
+            Self::Application { id, .. } => Some(id),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WorkspaceOpenCommand {
+    pub(super) program: String,
+    pub(super) args: Vec<String>,
+}
+
+pub(super) fn workspace_open_command(
+    destination: &WorkspaceOpenDestination,
+    path: &str,
+) -> Option<WorkspaceOpenCommand> {
+    if path.is_empty() {
+        return None;
+    }
+    let command = match destination {
+        WorkspaceOpenDestination::DefaultApp => WorkspaceOpenCommand {
+            program: platform_open_program().into(),
+            args: vec![path.into()],
+        },
+        WorkspaceOpenDestination::Terminal => WorkspaceOpenCommand {
+            program: platform_open_program().into(),
+            args: platform_open_application_args("Terminal", path),
+        },
+        WorkspaceOpenDestination::Application { id, .. } => WorkspaceOpenCommand {
+            program: platform_open_program().into(),
+            args: platform_open_application_args(id, path),
+        },
+        WorkspaceOpenDestination::CopyPath => return None,
+    };
+    Some(command)
+}
+
+pub(super) fn primary_workspace_destination(
+    remembered_editor: Option<&str>,
+    available: &[WorkspaceOpenDestination],
+) -> WorkspaceOpenDestination {
+    remembered_editor
+        .and_then(|id| {
+            available
+                .iter()
+                .find(|destination| destination.application_id() == Some(id))
+        })
+        .cloned()
+        .unwrap_or(WorkspaceOpenDestination::DefaultApp)
+}
+
+pub(super) fn detect_workspace_open_destinations() -> Vec<WorkspaceOpenDestination> {
+    let mut destinations = vec![
+        WorkspaceOpenDestination::DefaultApp,
+        WorkspaceOpenDestination::Terminal,
+    ];
+    for (id, label) in [
+        ("Zed", "Zed"),
+        ("Visual Studio Code", "Visual Studio Code"),
+        ("Cursor", "Cursor"),
+        ("Xcode", "Xcode"),
+        ("Android Studio", "Android Studio"),
+    ] {
+        if application_available(id) {
+            destinations.push(WorkspaceOpenDestination::Application {
+                id: id.into(),
+                label: label.into(),
+            });
+        }
+    }
+    destinations.push(WorkspaceOpenDestination::CopyPath);
+    destinations
+}
+
+#[cfg(target_os = "macos")]
+fn application_available(name: &str) -> bool {
+    std::process::Command::new("open")
+        .args(["-Ra", name])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn application_available(_name: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+const fn platform_open_program() -> &'static str {
+    "open"
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn platform_open_program() -> &'static str {
+    "xdg-open"
+}
+
+#[cfg(target_os = "macos")]
+fn platform_open_application_args(application: &str, path: &str) -> Vec<String> {
+    vec!["-a".into(), application.into(), path.into()]
+}
+
+#[cfg(not(target_os = "macos"))]
+fn platform_open_application_args(_application: &str, path: &str) -> Vec<String> {
+    vec![path.into()]
+}
+
+pub(super) trait DesktopFocusExt: gpui::InteractiveElement + Sized {
+    fn desktop_focus(self, color: gpui::Rgba) -> Self {
+        self.tab_index(0)
+            .focus_visible(move |style| style.border_1().border_color(color))
+    }
+}
+
+impl<T: gpui::InteractiveElement + Sized> DesktopFocusExt for T {}
+
+pub(super) fn sidebar_transition_width(collapsed: bool, delta: f32, expanded_width: f32) -> f32 {
     let (from, to) = if collapsed {
-        (SIDEBAR_EXPANDED_WIDTH, SIDEBAR_COLLAPSED_WIDTH)
+        (expanded_width, SIDEBAR_COLLAPSED_WIDTH)
     } else {
-        (SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_EXPANDED_WIDTH)
+        (SIDEBAR_COLLAPSED_WIDTH, expanded_width)
     };
     from + (to - from) * delta
 }
 
-pub(super) fn sidebar_transition_offset(collapsed: bool, delta: f32) -> f32 {
+pub(super) fn sidebar_transition_offset(collapsed: bool, delta: f32, expanded_width: f32) -> f32 {
     if collapsed {
-        -SIDEBAR_EXPANDED_WIDTH * delta
+        -expanded_width * delta
     } else {
-        -SIDEBAR_EXPANDED_WIDTH * (1. - delta)
+        -expanded_width * (1. - delta)
     }
+}
+
+pub(super) fn sidebar_width_from_pointer(pointer_x: f32) -> f32 {
+    (pointer_x - SHELL_GUTTER).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH)
 }
 
 pub(super) fn workbench_transition_width(collapsed: bool, delta: f32) -> f32 {
@@ -37,6 +177,10 @@ pub(super) fn workbench_transition_offset(collapsed: bool, delta: f32, expanded_
 
 pub(super) fn workbench_max_width(window_width: f32, sidebar_width: f32) -> f32 {
     (window_width - sidebar_width - CHAT_MIN_WIDTH).max(0.)
+}
+
+pub(super) fn workbench_fits_window(window_width: f32, sidebar_width: f32) -> bool {
+    window_width >= sidebar_width + CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH
 }
 
 pub(super) fn workbench_width_from_pointer(
@@ -208,20 +352,190 @@ pub(super) fn model_picker_list_height(option_count: usize) -> Pixels {
     px((option_count.clamp(1, 5) as f32 * 64.).min(320.))
 }
 
-pub(super) fn model_picker_height(option_count: usize) -> Pixels {
-    model_picker_list_height(option_count) + px(16.)
+pub(super) fn model_picker_height(option_count: usize, effort_option_count: usize) -> Pixels {
+    let effort_height = if effort_option_count > 0 { 72. } else { 0. };
+    model_picker_list_height(option_count) + px(52. + effort_height)
+}
+
+pub(super) fn recent_model_indices(
+    models: &[mew_protocol::ModelInfo],
+    recent_models: &[String],
+) -> Vec<usize> {
+    let mut indices = Vec::new();
+    let mut seen = BTreeSet::new();
+    for recent_model in recent_models {
+        let Some(index) = models.iter().position(|model| model.id == *recent_model) else {
+            continue;
+        };
+        if seen.insert(index) {
+            indices.push(index);
+            if indices.len() == RECENT_MODEL_LIMIT {
+                break;
+            }
+        }
+    }
+    indices
+}
+
+pub(super) fn build_model_picker_rows(
+    models: &[mew_protocol::ModelInfo],
+    recent_models: &[String],
+    query: &str,
+) -> (Vec<usize>, Vec<ModelPickerRow>) {
+    let filtered_indices = models
+        .iter()
+        .enumerate()
+        .filter(|(_, model)| {
+            model_matches_query(
+                &model.id,
+                &model.provider,
+                &model.model,
+                model.description.as_deref(),
+                query,
+            )
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    let mut selectable = Vec::with_capacity(filtered_indices.len());
+    let mut rows = Vec::with_capacity(filtered_indices.len() + 2);
+    if query.trim().is_empty() {
+        let recent_indices = recent_model_indices(models, recent_models);
+        if !recent_indices.is_empty() {
+            rows.push(ModelPickerRow::Header("Recent"));
+            for index in recent_indices {
+                rows.push(ModelPickerRow::Model {
+                    index,
+                    recent: true,
+                });
+                selectable.push(index);
+            }
+            rows.push(ModelPickerRow::Header("All Models"));
+        }
+    }
+    for index in filtered_indices {
+        rows.push(ModelPickerRow::Model {
+            index,
+            recent: false,
+        });
+        selectable.push(index);
+    }
+    (selectable, rows)
+}
+
+pub(super) fn push_recent_model(recent_models: &mut Vec<String>, model_id: &str) {
+    if model_id.is_empty() {
+        return;
+    }
+    recent_models.retain(|recent| recent != model_id);
+    recent_models.insert(0, model_id.to_owned());
+    recent_models.truncate(RECENT_MODEL_LIMIT);
+}
+
+pub(super) fn effort_index_for_pointer(
+    pointer_x: f32,
+    track_width: f32,
+    option_count: usize,
+) -> Option<usize> {
+    effort_position_for_pointer(pointer_x, track_width, option_count)
+        .and_then(|position| effort_index_for_position(position, option_count))
+}
+
+pub(super) fn thinking_effort_option_id(index: usize) -> String {
+    format!("model-picker-effort-option-{index}")
+}
+
+pub(super) fn effort_position_for_pointer(
+    pointer_x: f32,
+    track_width: f32,
+    option_count: usize,
+) -> Option<f32> {
+    if track_width <= 0. {
+        return None;
+    }
+    let inset = effort_track_inset(track_width, option_count);
+    let travel = effort_track_content_width(track_width, option_count);
+    Some(((pointer_x - inset) / travel.max(1.)).clamp(0., 1.))
+}
+
+pub(super) fn thinking_effort_drag_is_active(position: Option<f32>, has_active_drag: bool) -> bool {
+    has_active_drag && position.is_some()
+}
+
+pub(super) fn effort_track_inset(track_width: f32, option_count: usize) -> f32 {
+    if track_width <= 0. || option_count == 0 {
+        return 0.;
+    }
+    (track_width / (option_count as f32 * 2.)).min(EFFORT_TRACK_MAX_INSET)
+}
+
+pub(super) fn effort_track_content_width(track_width: f32, option_count: usize) -> f32 {
+    (track_width - effort_track_inset(track_width, option_count) * 2.).max(0.)
+}
+
+pub(super) fn effort_stop_offset(
+    index: usize,
+    track_width: f32,
+    option_count: usize,
+) -> Option<f32> {
+    (option_count > 0 && index < option_count && track_width > 0.).then(|| {
+        effort_track_inset(track_width, option_count)
+            + effort_position_for_index(index, option_count)
+                * effort_track_content_width(track_width, option_count)
+    })
+}
+
+pub(super) fn effort_stop_slot_width(track_width: f32, option_count: usize) -> f32 {
+    if track_width <= 0. {
+        return 0.;
+    }
+    if option_count <= 1 {
+        return track_width;
+    }
+    effort_track_content_width(track_width, option_count) / (option_count - 1) as f32
+}
+
+pub(super) fn effort_index_for_position(position: f32, option_count: usize) -> Option<usize> {
+    (option_count > 0)
+        .then(|| (position.clamp(0., 1.) * option_count.saturating_sub(1) as f32).round() as usize)
+}
+
+pub(super) fn effort_position_for_index(index: usize, option_count: usize) -> f32 {
+    if option_count <= 1 {
+        return 0.;
+    }
+    index.min(option_count - 1) as f32 / (option_count - 1) as f32
 }
 
 pub(super) fn persona_picker_list_height(option_count: usize) -> Pixels {
-    px((option_count.clamp(1, 5) as f32 * 64.).min(320.))
+    px((option_count.clamp(1, 5) as f32 * 88.).min(440.))
 }
 
 pub(super) fn persona_picker_height(option_count: usize) -> Pixels {
     persona_picker_list_height(option_count) + px(16.)
 }
 
+pub(super) fn model_matches_query(
+    id: &str,
+    provider: &str,
+    model: &str,
+    description: Option<&str>,
+    query: &str,
+) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty()
+        || id.to_lowercase().contains(&query)
+        || provider.to_lowercase().contains(&query)
+        || model.to_lowercase().contains(&query)
+        || description.is_some_and(|description| description.to_lowercase().contains(&query))
+}
+
 pub(super) fn should_animate_transcript_row(row_index: usize, row_count: usize) -> bool {
     row_count > 0 && row_index + 1 == row_count
+}
+
+pub(super) fn chat_content_column_width(available_width: f32) -> f32 {
+    available_width.clamp(0., CHAT_CONTENT_MAX_WIDTH)
 }
 
 /// Slash menu entries matching the current composer text. The menu is only
@@ -478,6 +792,7 @@ pub(super) fn thinking_variants_for_model(
             entry
                 .thinking_variants
                 .iter()
+                .filter(|variant| !variant.name.trim().eq_ignore_ascii_case("off"))
                 .map(|variant| variant.name.clone())
                 .collect()
         })
@@ -510,6 +825,26 @@ pub(super) fn picker_popup_position_in_window(
     };
 
     point(trigger_bounds.origin.x, px(y))
+}
+
+pub(super) fn picker_popup_position_in_window_right_aligned(
+    trigger_bounds: Bounds<Pixels>,
+    popup_width: Pixels,
+    popup_height: Pixels,
+    window_width: Pixels,
+    window_height: Pixels,
+    gap: Pixels,
+    margin: Pixels,
+) -> Point<Pixels> {
+    let y =
+        picker_popup_position_in_window(trigger_bounds, popup_height, window_height, gap, margin).y;
+    let trigger_right = f32::from(trigger_bounds.origin.x + trigger_bounds.size.width);
+    let popup_width = f32::from(popup_width);
+    let window_width = f32::from(window_width);
+    let margin = f32::from(margin);
+    let max_x = (window_width - popup_width - margin).max(margin);
+    let x = (trigger_right - popup_width).clamp(margin, max_x);
+    point(px(x), y)
 }
 
 pub(super) fn pending_actions_anchor(composer_bounds: Bounds<Pixels>) -> Point<Pixels> {
@@ -547,20 +882,220 @@ pub(super) fn selected_session_path(
         .map(display_session_path)
 }
 
+#[allow(dead_code)]
 pub(super) fn show_ungrouped_group(group_count: usize, session_count: usize) -> bool {
     group_count > 0 && session_count > 0
 }
 
-/// Builds the sidebar row model: toolbar, groups with their visible
-/// (non-archived) sessions, ungrouped sessions, and a collapsed-by-default
-/// "Archived" section so archived conversations stay reachable.
+pub(super) const SIDEBAR_RECENT_TASK_LIMIT: usize = 5;
+
+/// Build the workspace-first sidebar projection. This is intentionally pure:
+/// rendering and interaction code should consume rows, not repeat grouping or
+/// ranking rules.
+pub(super) fn build_workspace_sidebar_rows(
+    conversations: &[ConversationItem],
+    projects: &[mew_protocol::ProjectInfo],
+    collapsed_workspaces: &BTreeSet<String>,
+    expanded_workspaces: &BTreeSet<String>,
+    query: &str,
+    selected_session: Option<&str>,
+) -> Vec<SidebarRow> {
+    let query = query.trim().to_lowercase();
+    let searching = !query.is_empty();
+    let mut project_by_path = projects
+        .iter()
+        .map(|project| (project.path.clone(), project.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for conversation in conversations {
+        let Some(path) = conversation.workspace_path.as_ref() else {
+            continue;
+        };
+        project_by_path
+            .entry(path.clone())
+            .or_insert_with(|| mew_protocol::ProjectInfo {
+                path: path.clone(),
+                display_name: Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(path)
+                    .to_owned(),
+                session_count: 0,
+                last_used_at: None,
+                pinned: false,
+            });
+    }
+
+    let mut workspace_projects = project_by_path.into_values().collect::<Vec<_>>();
+    workspace_projects.sort_by(|a, b| {
+        b.pinned
+            .cmp(&a.pinned)
+            .then_with(|| b.last_used_at.cmp(&a.last_used_at))
+            .then_with(|| {
+                a.display_name
+                    .to_lowercase()
+                    .cmp(&b.display_name.to_lowercase())
+            })
+            .then_with(|| a.path.cmp(&b.path))
+    });
+
+    let mut rows = vec![SidebarRow::Toolbar];
+    let mut other = Vec::new();
+    for project in workspace_projects {
+        let mut sessions = conversations
+            .iter()
+            .filter(|conversation| {
+                conversation.workspace_path.as_deref() == Some(project.path.as_str())
+            })
+            .filter(|conversation| {
+                searching && project_matches_query(&project, &query)
+                    || conversation_matches_query(conversation, &query)
+            })
+            .filter(|conversation| searching || !conversation.archived)
+            .cloned()
+            .collect::<Vec<_>>();
+        sessions.sort_by(task_order);
+        if sessions.is_empty() && searching {
+            continue;
+        }
+        let total_count = sessions.len();
+        let collapsed = !searching && collapsed_workspaces.contains(&project.path);
+        rows.push(SidebarRow::Workspace {
+            path: project.path.clone(),
+            name: project.display_name.clone(),
+            pinned: project.pinned,
+            count: total_count,
+            collapsed,
+        });
+        if collapsed {
+            continue;
+        }
+        let (visible, hidden) = visible_tasks(
+            &sessions,
+            selected_session,
+            searching,
+            expanded_workspaces.contains(&project.path),
+        );
+        rows.extend(visible.into_iter().map(SidebarRow::Session));
+        if hidden > 0 && !searching {
+            rows.push(SidebarRow::ShowMore {
+                workspace_path: project.path,
+                count: hidden,
+            });
+        }
+    }
+
+    for conversation in conversations.iter().filter(|conversation| {
+        conversation.workspace_path.is_none()
+            && (searching && conversation_matches_query(conversation, &query)
+                || !searching && !conversation.archived)
+    }) {
+        other.push(conversation.clone());
+    }
+    other.sort_by(task_order);
+    if !other.is_empty() {
+        rows.push(SidebarRow::Workspace {
+            path: String::new(),
+            name: "Other".into(),
+            pinned: false,
+            count: other.len(),
+            collapsed: false,
+        });
+        let (visible, hidden) = visible_tasks(
+            &other,
+            selected_session,
+            searching,
+            expanded_workspaces.contains(""),
+        );
+        rows.extend(visible.into_iter().map(SidebarRow::Session));
+        if hidden > 0 && !searching {
+            rows.push(SidebarRow::ShowMore {
+                workspace_path: String::new(),
+                count: hidden,
+            });
+        }
+    }
+
+    if !searching {
+        let archived_count = conversations
+            .iter()
+            .filter(|conversation| conversation.archived)
+            .count();
+        if archived_count > 0 {
+            rows.push(SidebarRow::Archived {
+                count: archived_count,
+            });
+        }
+    }
+    rows
+}
+
+fn task_order(a: &ConversationItem, b: &ConversationItem) -> std::cmp::Ordering {
+    b.pinned
+        .cmp(&a.pinned)
+        .then_with(|| b.last_message_at.cmp(&a.last_message_at))
+        .then_with(|| a.session_id.cmp(&b.session_id))
+}
+
+fn visible_tasks(
+    sessions: &[ConversationItem],
+    selected_session: Option<&str>,
+    searching: bool,
+    expanded: bool,
+) -> (Vec<ConversationItem>, usize) {
+    if searching || expanded {
+        return (sessions.to_vec(), 0);
+    }
+    let mut visible = Vec::new();
+    for conversation in sessions {
+        let forced = conversation.pinned
+            || Some(conversation.session_id.as_str()) == selected_session
+            || conversation.needs_attention
+            || conversation.state == mew_protocol::SessionState::Running
+            || conversation.last_turn_failed;
+        if forced
+            || conversation.pinned
+            || visible
+                .iter()
+                .filter(|item: &&ConversationItem| !item.pinned)
+                .count()
+                < SIDEBAR_RECENT_TASK_LIMIT
+        {
+            visible.push(conversation.clone());
+        }
+    }
+    let visible_count = visible.len();
+    (visible, sessions.len().saturating_sub(visible_count))
+}
+
+fn project_matches_query(project: &mew_protocol::ProjectInfo, query: &str) -> bool {
+    project.display_name.to_lowercase().contains(query)
+        || project.path.to_lowercase().contains(query)
+}
+
+/// Builds the sidebar row model without a search filter.
+#[allow(dead_code)]
 pub(super) fn build_sidebar_rows(
     conversations: &[ConversationItem],
     groups: &[mew_protocol::GroupInfo],
     collapsed_groups: &BTreeSet<String>,
 ) -> Vec<SidebarRow> {
+    build_sidebar_rows_with_query(conversations, groups, collapsed_groups, "")
+}
+
+/// Builds the sidebar row model: pinned sessions, groups with their visible
+/// (non-archived) sessions, ungrouped sessions, and a collapsed-by-default
+/// "Archived" section so archived conversations stay reachable.
+#[allow(dead_code)]
+pub(super) fn build_sidebar_rows_with_query(
+    conversations: &[ConversationItem],
+    groups: &[mew_protocol::GroupInfo],
+    collapsed_groups: &BTreeSet<String>,
+    query: &str,
+) -> Vec<SidebarRow> {
     let mut rows = vec![SidebarRow::Toolbar];
     let mut grouped_session_ids = BTreeSet::new();
+    let query = query.trim().to_lowercase();
+    let searching = !query.is_empty();
     let mut conversations = conversations.to_vec();
     conversations.sort_by(|a, b| {
         b.last_message_at
@@ -568,12 +1103,42 @@ pub(super) fn build_sidebar_rows(
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
 
+    let pinned: Vec<_> = conversations
+        .iter()
+        .filter(|conversation| {
+            !conversation.archived
+                && conversation.pinned
+                && (!searching
+                    || query == "pinned"
+                    || conversation_matches_query(conversation, &query))
+        })
+        .cloned()
+        .collect();
+    if !pinned.is_empty() {
+        let collapsed = !searching && collapsed_groups.contains(PINNED_GROUP_ID);
+        rows.push(SidebarRow::Group {
+            id: PINNED_GROUP_ID.into(),
+            name: "Pinned".into(),
+            color: None,
+            count: pinned.len(),
+            collapsed,
+        });
+        if !collapsed {
+            rows.extend(pinned.into_iter().map(SidebarRow::Session));
+        }
+    }
+
     for group in groups {
+        let group_matches = searching && group.name.to_lowercase().contains(&query);
         let sessions: Vec<_> = conversations
             .iter()
             .filter(|conversation| {
                 !conversation.archived
+                    && !conversation.pinned
                     && conversation.group_id.as_deref() == Some(group.id.as_str())
+                    && (!searching
+                        || group_matches
+                        || conversation_matches_query(conversation, &query))
             })
             .cloned()
             .collect();
@@ -582,7 +1147,10 @@ pub(super) fn build_sidebar_rows(
                 .iter()
                 .map(|conversation| conversation.session_id.clone()),
         );
-        let collapsed = collapsed_groups.contains(&group.id);
+        if searching && sessions.is_empty() {
+            continue;
+        }
+        let collapsed = !searching && collapsed_groups.contains(&group.id);
         rows.push(SidebarRow::Group {
             id: group.id.clone(),
             name: group.name.clone(),
@@ -598,7 +1166,12 @@ pub(super) fn build_sidebar_rows(
     let ungrouped: Vec<_> = conversations
         .iter()
         .filter(|conversation| {
-            !conversation.archived && !grouped_session_ids.contains(&conversation.session_id)
+            !conversation.archived
+                && !conversation.pinned
+                && !grouped_session_ids.contains(&conversation.session_id)
+                && (!searching
+                    || query == "ungrouped"
+                    || conversation_matches_query(conversation, &query))
         })
         .cloned()
         .collect();
@@ -620,11 +1193,16 @@ pub(super) fn build_sidebar_rows(
 
     let archived: Vec<_> = conversations
         .iter()
-        .filter(|conversation| conversation.archived)
+        .filter(|conversation| {
+            conversation.archived
+                && (!searching
+                    || query == "archived"
+                    || conversation_matches_query(conversation, &query))
+        })
         .cloned()
         .collect();
     if !archived.is_empty() {
-        let collapsed = collapsed_groups.contains(ARCHIVED_GROUP_ID);
+        let collapsed = !searching && collapsed_groups.contains(ARCHIVED_GROUP_ID);
         rows.push(SidebarRow::Group {
             id: ARCHIVED_GROUP_ID.into(),
             name: "Archived".into(),
@@ -637,6 +1215,146 @@ pub(super) fn build_sidebar_rows(
         }
     }
     rows
+}
+
+fn conversation_matches_query(conversation: &ConversationItem, query: &str) -> bool {
+    conversation.title.to_lowercase().contains(query)
+        || conversation.session_id.to_lowercase().contains(query)
+        || conversation
+            .cwd
+            .as_deref()
+            .is_some_and(|cwd| cwd.to_lowercase().contains(query))
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    use mew_protocol::{ProjectInfo, SessionState};
+
+    fn task(id: usize, workspace_path: Option<&str>, pinned: bool) -> ConversationItem {
+        ConversationItem {
+            session_id: format!("session-{id}"),
+            title: format!("Task {id}"),
+            cwd: workspace_path.map(str::to_owned),
+            workspace_path: workspace_path.map(str::to_owned),
+            last_message_at: Some(id as i64),
+            state: SessionState::Idle,
+            last_turn_failed: false,
+            needs_attention: false,
+            archived: false,
+            pinned,
+            group_id: None,
+        }
+    }
+
+    fn project(path: &str, pinned: bool) -> ProjectInfo {
+        ProjectInfo {
+            path: path.into(),
+            display_name: path.rsplit('/').next().unwrap_or(path).into(),
+            session_count: 0,
+            last_used_at: None,
+            pinned,
+        }
+    }
+
+    #[test]
+    fn workspace_rows_cap_recent_tasks_but_keep_pinned_tasks() {
+        let mut tasks = (0..7)
+            .map(|id| task(id, Some("/work/app"), false))
+            .collect::<Vec<_>>();
+        tasks.push(task(99, Some("/work/app"), true));
+        let rows = build_workspace_sidebar_rows(
+            &tasks,
+            &[project("/work/app", false)],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            "",
+            None,
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Session(_)))
+                .count(),
+            6
+        );
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::ShowMore { workspace_path, count }
+                if workspace_path == "/work/app" && *count == 2
+        )));
+    }
+
+    #[test]
+    fn search_expands_workspace_and_includes_archived_matches() {
+        let mut archived = task(1, Some("/work/app"), false);
+        archived.archived = true;
+        let tasks = vec![archived, task(2, Some("/work/app"), false)];
+        let rows = build_workspace_sidebar_rows(
+            &tasks,
+            &[project("/work/app", false)],
+            &BTreeSet::from([String::from("/work/app")]),
+            &BTreeSet::new(),
+            "task 1",
+            None,
+        );
+        assert!(rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::Session(item) if item.session_id == "session-1")));
+        assert!(!rows
+            .iter()
+            .any(|row| matches!(row, SidebarRow::ShowMore { .. })));
+    }
+}
+
+#[cfg(test)]
+mod workspace_open_tests {
+    use super::*;
+
+    #[test]
+    fn remembered_editor_falls_back_when_unavailable() {
+        let available = vec![WorkspaceOpenDestination::DefaultApp];
+        assert_eq!(
+            primary_workspace_destination(Some("Zed"), &available),
+            WorkspaceOpenDestination::DefaultApp
+        );
+    }
+
+    #[test]
+    fn remembered_editor_becomes_primary_when_available() {
+        let available = vec![
+            WorkspaceOpenDestination::DefaultApp,
+            WorkspaceOpenDestination::Application {
+                id: "Zed".into(),
+                label: "Zed".into(),
+            },
+        ];
+        assert_eq!(
+            primary_workspace_destination(Some("Zed"), &available),
+            available[1]
+        );
+    }
+
+    #[test]
+    fn open_command_keeps_paths_as_distinct_arguments() {
+        let destination = WorkspaceOpenDestination::Application {
+            id: "Zed".into(),
+            label: "Zed".into(),
+        };
+        let command = workspace_open_command(&destination, "/tmp/my project").unwrap();
+        assert_eq!(
+            command.args.last().map(String::as_str),
+            Some("/tmp/my project")
+        );
+        assert!(!command.args.iter().any(|arg| arg.contains('"')));
+    }
+
+    #[test]
+    fn empty_workspace_has_no_external_command() {
+        assert_eq!(
+            workspace_open_command(&WorkspaceOpenDestination::DefaultApp, ""),
+            None
+        );
+    }
 }
 
 pub(super) fn display_path_from_home(path: &str, home: Option<&Path>) -> String {
@@ -673,6 +1391,7 @@ pub(super) fn compact_session_title(title: &str) -> String {
     }
 }
 
+#[cfg(test)]
 pub(super) fn latest_user_prompt(transcript: &[TranscriptItem]) -> Option<String> {
     transcript
         .iter()
@@ -680,6 +1399,37 @@ pub(super) fn latest_user_prompt(transcript: &[TranscriptItem]) -> Option<String
         .find(|item| item.role == TranscriptRole::User)
         .map(|item| item.text.trim().to_owned())
         .filter(|text| !text.is_empty())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RetryablePrompt {
+    pub(super) text: String,
+    pub(super) attachments: Vec<Attachment>,
+}
+
+pub(super) fn latest_user_submission(transcript: &[TranscriptItem]) -> Option<RetryablePrompt> {
+    transcript
+        .iter()
+        .rev()
+        .find(|item| item.role == TranscriptRole::User)
+        .and_then(|item| {
+            let text = item.text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let attachments = item
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    TranscriptPart::File { attachment, .. } => Some(attachment.clone()),
+                    _ => None,
+                })
+                .collect();
+            Some(RetryablePrompt {
+                text: text.to_owned(),
+                attachments,
+            })
+        })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -746,9 +1496,20 @@ pub(super) fn client_event_requires_transcript_snapshot(event: &ClientEvent) -> 
         event,
         ClientEvent::SessionReady { .. }
             | ClientEvent::SessionHistoryLoaded { .. }
+            | ClientEvent::SessionHistoryPageLoaded { .. }
             | ClientEvent::MessageChanged { .. }
             | ClientEvent::RequiredActionChanged { .. }
             | ClientEvent::RequestResolved { .. }
+    )
+}
+
+pub(super) fn client_event_requires_transcript_remeasure(event: &ClientEvent) -> bool {
+    matches!(
+        event,
+        ClientEvent::SessionReady { .. }
+            | ClientEvent::SessionHistoryLoaded { .. }
+            | ClientEvent::SessionHistoryPageLoaded { .. }
+            | ClientEvent::MessageChanged { .. }
     )
 }
 

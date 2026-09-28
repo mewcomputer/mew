@@ -1,8 +1,45 @@
 #[cfg(test)]
 mod shell_tests {
     use super::super::composer::composer_input_height;
+    use super::super::lifecycle::transcript_is_scrolled_away;
+    use super::super::session::replace_browser_event_value;
     use super::super::session_data::transcript_part_block_count;
     use super::super::*;
+
+    #[test]
+    fn frame_trace_percentile_uses_nearest_rank() {
+        let mut samples = [
+            Duration::from_millis(4),
+            Duration::from_millis(1),
+            Duration::from_millis(3),
+            Duration::from_millis(2),
+        ];
+
+        assert_eq!(
+            percentile_duration(&mut samples, 50),
+            Duration::from_millis(2)
+        );
+        assert_eq!(
+            percentile_duration(&mut samples, 95),
+            Duration::from_millis(4)
+        );
+        assert_eq!(percentile_duration(&mut [], 95), Duration::ZERO);
+    }
+
+    #[test]
+    fn browser_event_values_only_invalidate_when_changed() {
+        let mut value = "https://example.com".to_owned();
+        assert!(!replace_browser_event_value(
+            &mut value,
+            "https://example.com".to_owned()
+        ));
+        assert_eq!(value, "https://example.com");
+        assert!(replace_browser_event_value(
+            &mut value,
+            "https://example.org".to_owned()
+        ));
+        assert_eq!(value, "https://example.org");
+    }
 
     #[test]
     fn composer_offsets_round_trip_unicode() {
@@ -199,12 +236,217 @@ mod shell_tests {
     }
 
     #[test]
+    fn right_aligned_picker_stays_put_when_the_trigger_width_changes() {
+        let wide_trigger = Bounds::new(point(px(500.), px(300.)), gpui::size(px(120.), px(40.)));
+        let narrow_trigger = Bounds::new(point(px(560.), px(300.)), gpui::size(px(60.), px(40.)));
+        let wide_position = picker_popup_position_in_window_right_aligned(
+            wide_trigger,
+            px(300.),
+            px(160.),
+            px(1000.),
+            px(700.),
+            px(8.),
+            px(8.),
+        );
+        let narrow_position = picker_popup_position_in_window_right_aligned(
+            narrow_trigger,
+            px(300.),
+            px(160.),
+            px(1000.),
+            px(700.),
+            px(8.),
+            px(8.),
+        );
+        assert_eq!(wide_position, narrow_position);
+        assert_eq!(wide_position, point(px(320.), px(132.)));
+    }
+
+    #[test]
     fn picker_viewports_match_and_stay_bounded() {
         assert_eq!(model_picker_list_height(0), px(64.));
         assert_eq!(model_picker_list_height(5), px(320.));
         assert_eq!(model_picker_list_height(32), px(320.));
-        assert_eq!(model_picker_height(32), px(336.));
-        assert_eq!(model_picker_list_height(32), persona_picker_list_height(32));
+        assert_eq!(model_picker_height(32, 0), px(372.));
+        assert_eq!(model_picker_height(32, 3), px(444.));
+        assert_eq!(effort_index_for_pointer(0., 200., 3), Some(0));
+        assert_eq!(effort_index_for_pointer(100., 200., 3), Some(1));
+        assert_eq!(effort_index_for_pointer(200., 200., 3), Some(2));
+        assert_eq!(effort_index_for_pointer(80., 0., 3), None);
+        assert_eq!(effort_position_for_pointer(10., 200., 3), Some(0.));
+        assert_eq!(effort_position_for_pointer(33.333, 200., 3), Some(0.));
+        assert_eq!(effort_position_for_pointer(100., 200., 3), Some(0.5));
+        assert_eq!(effort_position_for_pointer(200., 200., 3), Some(1.));
+        assert!((effort_track_inset(200., 3) - 33.333_332).abs() < 0.001);
+        assert!((effort_track_inset(200., 7) - 14.285_714).abs() < 0.001);
+        assert!((effort_track_content_width(200., 7) - 171.428_57).abs() < 0.001);
+        assert!((effort_stop_offset(0, 200., 3).unwrap() - 33.333_332).abs() < 0.001);
+        assert!((effort_stop_offset(1, 200., 3).unwrap() - 100.).abs() < 0.001);
+        assert!((effort_stop_offset(2, 200., 3).unwrap() - 166.666_67).abs() < 0.001);
+        assert_eq!(effort_stop_offset(3, 200., 3), None);
+        assert_eq!(effort_stop_offset(0, 0., 3), None);
+        assert!((effort_stop_slot_width(200., 3) - 66.666_664).abs() < 0.001);
+        assert!((effort_stop_slot_width(200., 1) - 200.).abs() < 0.001);
+        assert_eq!(effort_stop_slot_width(0., 3), 0.);
+        assert_eq!(effort_position_for_index(0, 7), 0.);
+        assert_eq!(effort_position_for_index(3, 7), 0.5);
+        assert_eq!(effort_position_for_index(6, 7), 1.);
+        assert!(!thinking_effort_drag_is_active(None, true));
+        assert!(!thinking_effort_drag_is_active(Some(0.5), false));
+        assert!(thinking_effort_drag_is_active(Some(0.5), true));
+        assert_eq!(effort_index_for_position(0.5, 3), Some(1));
+        assert_eq!(effort_position_for_index(2, 3), 1.);
+        assert_eq!(persona_picker_list_height(2), px(176.));
+        assert_eq!(persona_picker_list_height(32), px(440.));
+    }
+
+    #[test]
+    fn model_picker_query_matches_ids_and_descriptions() {
+        assert!(model_matches_query(
+            "openai/gpt-5",
+            "openai",
+            "gpt-5",
+            Some("fast coding model"),
+            "coding"
+        ));
+        assert!(model_matches_query(
+            "anthropic/claude",
+            "anthropic",
+            "claude",
+            None,
+            "ANTHROPIC"
+        ));
+        assert!(!model_matches_query(
+            "openai/gpt-5",
+            "openai",
+            "gpt-5",
+            Some("fast coding model"),
+            "vision"
+        ));
+    }
+
+    #[test]
+    fn recent_model_indices_preserve_saved_order_and_ignore_unknown_duplicates() {
+        let models = vec![
+            mew_protocol::ModelInfo {
+                id: "openai/gpt-5".into(),
+                provider: "openai".into(),
+                model: "gpt-5".into(),
+                description: None,
+                thinking_variants: Vec::new(),
+                thinking_budget: None,
+                context_window: None,
+            },
+            mew_protocol::ModelInfo {
+                id: "anthropic/claude".into(),
+                provider: "anthropic".into(),
+                model: "claude".into(),
+                description: None,
+                thinking_variants: Vec::new(),
+                thinking_budget: None,
+                context_window: None,
+            },
+            mew_protocol::ModelInfo {
+                id: "z-ai/glm".into(),
+                provider: "z-ai".into(),
+                model: "glm".into(),
+                description: None,
+                thinking_variants: Vec::new(),
+                thinking_budget: None,
+                context_window: None,
+            },
+        ];
+        let recent = vec![
+            "missing/model".into(),
+            "anthropic/claude".into(),
+            "openai/gpt-5".into(),
+            "anthropic/claude".into(),
+            "z-ai/glm".into(),
+        ];
+
+        assert_eq!(recent_model_indices(&models, &recent), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn model_picker_rows_put_recent_models_before_all_models() {
+        let models = vec![
+            mew_protocol::ModelInfo {
+                id: "openai/gpt-5".into(),
+                provider: "openai".into(),
+                model: "gpt-5".into(),
+                description: None,
+                thinking_variants: Vec::new(),
+                thinking_budget: None,
+                context_window: None,
+            },
+            mew_protocol::ModelInfo {
+                id: "anthropic/claude".into(),
+                provider: "anthropic".into(),
+                model: "claude".into(),
+                description: None,
+                thinking_variants: Vec::new(),
+                thinking_budget: None,
+                context_window: None,
+            },
+        ];
+
+        let (selectable, rows) = build_model_picker_rows(&models, &["anthropic/claude".into()], "");
+
+        assert_eq!(
+            selectable,
+            vec![1, 0, 1],
+            "recent rows should be selected before the all-model rows"
+        );
+        assert_eq!(
+            rows,
+            vec![
+                ModelPickerRow::Header("Recent"),
+                ModelPickerRow::Model {
+                    index: 1,
+                    recent: true,
+                },
+                ModelPickerRow::Header("All Models"),
+                ModelPickerRow::Model {
+                    index: 0,
+                    recent: false,
+                },
+                ModelPickerRow::Model {
+                    index: 1,
+                    recent: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn model_picker_rows_hide_recent_section_while_searching() {
+        let models = vec![mew_protocol::ModelInfo {
+            id: "openai/gpt-5".into(),
+            provider: "openai".into(),
+            model: "gpt-5".into(),
+            description: None,
+            thinking_variants: Vec::new(),
+            thinking_budget: None,
+            context_window: None,
+        }];
+        let (selectable, rows) =
+            build_model_picker_rows(&models, &["openai/gpt-5".into()], "anthropic");
+
+        assert!(selectable.is_empty());
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn pushing_recent_model_moves_it_to_the_front_and_caps_the_list() {
+        let mut recent = ["a", "b", "c", "d", "e", "f"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        push_recent_model(&mut recent, "g");
+        assert_eq!(recent, ["g", "a", "b", "c", "d", "e"]);
+
+        push_recent_model(&mut recent, "c");
+        assert_eq!(recent, ["c", "g", "a", "b", "d", "e"]);
     }
 
     #[test]
@@ -213,6 +455,17 @@ mod shell_tests {
         assert!(should_animate_transcript_row(0, 1));
         assert!(!should_animate_transcript_row(0, 2));
         assert!(should_animate_transcript_row(1, 2));
+    }
+
+    #[test]
+    fn chat_content_column_stays_bounded_inside_a_wider_scroll_pane() {
+        assert_eq!(chat_content_column_width(0.), 0.);
+        assert_eq!(chat_content_column_width(420.), 420.);
+        assert_eq!(
+            chat_content_column_width(CHAT_CONTENT_MAX_WIDTH),
+            CHAT_CONTENT_MAX_WIDTH
+        );
+        assert_eq!(chat_content_column_width(1_200.), CHAT_CONTENT_MAX_WIDTH);
     }
 
     #[test]
@@ -239,6 +492,7 @@ mod shell_tests {
             session_id: "session-1".into(),
             title: "A session".into(),
             cwd: Some("/Users/natalie/code/mew".into()),
+            workspace_path: Some("/Users/natalie/code/mew".into()),
             last_message_at: None,
             state: mew_protocol::SessionState::Idle,
             last_turn_failed: false,
@@ -300,6 +554,27 @@ mod shell_tests {
     }
 
     #[test]
+    fn latest_user_submission_retains_file_attachments() {
+        let transcript = vec![TranscriptItem {
+            role: TranscriptRole::User,
+            text: "review this".into(),
+            parts: vec![TranscriptPart::File {
+                label: "screenshot.png".into(),
+                attachment: Attachment {
+                    path: "/tmp/screenshot.png".into(),
+                    mime: Some("image/png".into()),
+                },
+            }],
+        }];
+
+        let submission = latest_user_submission(&transcript).expect("submission should exist");
+
+        assert_eq!(submission.text, "review this");
+        assert_eq!(submission.attachments[0].path, "/tmp/screenshot.png");
+        assert_eq!(submission.attachments[0].mime.as_deref(), Some("image/png"));
+    }
+
+    #[test]
     fn transcript_attention_only_describes_the_active_turn() {
         assert_eq!(
             transcript_attention(true, true, false, false),
@@ -338,6 +613,17 @@ mod shell_tests {
             }
         ));
         assert!(client_event_requires_transcript_snapshot(
+            &ClientEvent::RequiredActionChanged {
+                session_id: "session".into(),
+                request_id: "request".into(),
+            }
+        ));
+        assert!(client_event_requires_transcript_remeasure(
+            &ClientEvent::MessageChanged {
+                session_id: "session".into(),
+            }
+        ));
+        assert!(!client_event_requires_transcript_remeasure(
             &ClientEvent::RequiredActionChanged {
                 session_id: "session".into(),
                 request_id: "request".into(),
@@ -401,6 +687,7 @@ mod shell_tests {
                     block: MarkdownBlock::Paragraph(InlineText {
                         text: "one".into(),
                         highlights: Vec::new(),
+                        links: Vec::new(),
                     }),
                     continuation: false,
                     syntax_highlights: Vec::new(),
@@ -506,27 +793,34 @@ mod shell_tests {
     #[test]
     fn sidebar_transition_reaches_both_panel_widths() {
         assert_eq!(SIDEBAR_COLLAPSED_WIDTH, 0.);
-        assert_eq!(sidebar_transition_width(true, 0.0), SIDEBAR_EXPANDED_WIDTH);
-        assert_eq!(sidebar_transition_width(true, 1.0), SIDEBAR_COLLAPSED_WIDTH);
+        assert_eq!(sidebar_transition_width(true, 0.0, 312.), 312.);
         assert_eq!(
-            sidebar_transition_width(false, 0.0),
+            sidebar_transition_width(true, 1.0, 312.),
             SIDEBAR_COLLAPSED_WIDTH
         );
-        assert_eq!(sidebar_transition_width(false, 1.0), SIDEBAR_EXPANDED_WIDTH);
+        assert_eq!(
+            sidebar_transition_width(false, 0.0, 312.),
+            SIDEBAR_COLLAPSED_WIDTH
+        );
+        assert_eq!(sidebar_transition_width(false, 1.0, 312.), 312.);
     }
 
     #[test]
     fn sidebar_transition_moves_the_surface_offscreen() {
-        assert_eq!(sidebar_transition_offset(true, 0.0), 0.);
+        assert_eq!(sidebar_transition_offset(true, 0.0, 312.), 0.);
+        assert_eq!(sidebar_transition_offset(true, 1.0, 312.), -312.);
+        assert_eq!(sidebar_transition_offset(false, 0.0, 312.), -312.);
+        assert_eq!(sidebar_transition_offset(false, 1.0, 312.), 0.);
+    }
+
+    #[test]
+    fn sidebar_width_stays_within_rail_bounds() {
+        assert_eq!(sidebar_width_from_pointer(SHELL_GUTTER), SIDEBAR_MIN_WIDTH);
         assert_eq!(
-            sidebar_transition_offset(true, 1.0),
-            -SIDEBAR_EXPANDED_WIDTH
+            sidebar_width_from_pointer(SHELL_GUTTER + SIDEBAR_MAX_WIDTH + 80.),
+            SIDEBAR_MAX_WIDTH
         );
-        assert_eq!(
-            sidebar_transition_offset(false, 0.0),
-            -SIDEBAR_EXPANDED_WIDTH
-        );
-        assert_eq!(sidebar_transition_offset(false, 1.0), 0.);
+        assert_eq!(sidebar_width_from_pointer(SHELL_GUTTER + 312.), 312.);
     }
 
     #[test]
@@ -589,6 +883,21 @@ mod shell_tests {
             workbench_width_from_pointer(720., 500., SIDEBAR_EXPANDED_WIDTH),
             36.
         );
+    }
+
+    #[test]
+    fn workbench_only_opens_when_the_chat_can_keep_its_minimum_width() {
+        assert!(!workbench_fits_window(720., SIDEBAR_EXPANDED_WIDTH));
+        assert!(workbench_fits_window(1_240., SIDEBAR_EXPANDED_WIDTH));
+        assert!(workbench_fits_window(720., SIDEBAR_COLLAPSED_WIDTH));
+    }
+
+    #[test]
+    fn transcript_scroll_state_only_marks_a_list_scrolled_away_when_needed() {
+        assert!(!transcript_is_scrolled_away(false, 0, 10, false));
+        assert!(!transcript_is_scrolled_away(true, 10, 10, false));
+        assert!(!transcript_is_scrolled_away(true, 4, 10, true));
+        assert!(transcript_is_scrolled_away(true, 4, 10, false));
     }
 
     #[test]
@@ -875,6 +1184,48 @@ mod shell_tests {
         assert!(thinking_variants_for_model(&models, Some("missing"), Some("glm-5")).is_empty());
     }
 
+    #[test]
+    fn thinking_variants_hide_catalog_off_entries() {
+        let models = vec![mew_protocol::ModelInfo {
+            id: "alibaba-token-plan/qwen3.8-max-preview".into(),
+            provider: "alibaba-token-plan".into(),
+            model: "qwen3.8-max-preview".into(),
+            description: None,
+            thinking_variants: vec![
+                mew_protocol::ThinkingVariantInfo { name: "low".into() },
+                mew_protocol::ThinkingVariantInfo {
+                    name: "medium".into(),
+                },
+                mew_protocol::ThinkingVariantInfo {
+                    name: "xhigh".into(),
+                },
+                mew_protocol::ThinkingVariantInfo {
+                    name: " off ".into(),
+                },
+            ],
+            thinking_budget: None,
+            context_window: None,
+        }];
+
+        assert_eq!(
+            thinking_variants_for_model(
+                &models,
+                Some("alibaba-token-plan"),
+                Some("qwen3.8-max-preview")
+            ),
+            vec!["low", "medium", "xhigh"]
+        );
+    }
+
+    #[test]
+    fn thinking_effort_option_ids_are_unique_when_catalog_has_off_variant() {
+        let ids = (0..5)
+            .map(thinking_effort_option_id)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(ids.len(), 5);
+    }
+
     fn conversation(session_id: &str, archived: bool, group_id: Option<&str>) -> ConversationItem {
         conversation_at(session_id, archived, group_id, None)
     }
@@ -889,6 +1240,7 @@ mod shell_tests {
             session_id: session_id.into(),
             title: format!("Session {session_id}"),
             cwd: Some("/tmp/project".into()),
+            workspace_path: Some("/tmp/project".into()),
             last_message_at,
             state: mew_protocol::SessionState::Idle,
             last_turn_failed: false,
@@ -1094,6 +1446,77 @@ mod shell_tests {
             session_ids,
             vec!["newer", "older", "tie-a", "tie-b", "unknown"]
         );
+    }
+
+    #[test]
+    fn sidebar_rows_keep_pinned_sessions_in_a_top_section() {
+        let mut pinned = conversation_at("pinned", false, Some("grp"), Some(10));
+        pinned.pinned = true;
+        let conversations = vec![
+            pinned,
+            conversation_at("regular", false, Some("grp"), Some(20)),
+        ];
+        let groups = vec![mew_protocol::GroupInfo {
+            id: "grp".into(),
+            name: "Project".into(),
+            color: None,
+            order: 0,
+        }];
+
+        let rows = build_sidebar_rows(&conversations, &groups, &BTreeSet::new());
+        let group_ids: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Group { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let session_ids: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Session(conversation) => Some(conversation.session_id.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(group_ids, vec![PINNED_GROUP_ID, "grp"]);
+        assert_eq!(session_ids, vec!["pinned", "regular"]);
+    }
+
+    #[test]
+    fn sidebar_search_filters_sessions_and_expands_matching_groups() {
+        let conversations = vec![
+            conversation("alpha", false, Some("grp")),
+            conversation("beta", false, Some("grp")),
+            conversation("gamma", false, None),
+        ];
+        let groups = vec![mew_protocol::GroupInfo {
+            id: "grp".into(),
+            name: "Project".into(),
+            color: None,
+            order: 0,
+        }];
+
+        let rows = build_sidebar_rows_with_query(
+            &conversations,
+            &groups,
+            &BTreeSet::from(["grp".to_owned()]),
+            "ALPHA",
+        );
+        let sessions: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Session(conversation) => Some(conversation.session_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let group = rows.iter().find_map(|row| match row {
+            SidebarRow::Group { id, collapsed, .. } if id == "grp" => Some(*collapsed),
+            _ => None,
+        });
+
+        assert_eq!(sessions, vec!["alpha"]);
+        assert_eq!(group, Some(false));
     }
 
     #[test]

@@ -8,9 +8,24 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "mew")]
 #[command(about = "A terminal agent harness")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_exposes_workspace_version() {
+        assert_eq!(
+            Cli::command().get_version(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+    }
 }
 
 #[derive(Subcommand)]
@@ -146,6 +161,14 @@ pub enum Commands {
         /// pidfile and sends SIGTERM. Exits 0 on success.
         #[arg(long)]
         stop: bool,
+
+        /// Print daemon status and exit: whether it is running, its PID,
+        /// the daemon's build revision (git hash), socket/port, and
+        /// uptime, plus the local binary's build revision so a stale
+        /// daemon is obvious. Reads the pidfile and the daemon's status
+        /// file. Exits 0 when a daemon is running, 1 otherwise.
+        #[arg(long)]
+        status: bool,
 
         /// Use the bundled `FakeProvider` instead of a real model.
         /// Responds to any prompt with a fixed streaming text. Intended

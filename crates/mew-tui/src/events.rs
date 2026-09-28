@@ -113,6 +113,7 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
         crate::app::Mode::UserQuestion => handle_user_question_key(app, key),
         crate::app::Mode::PlanApproval => handle_plan_approval_key(app, key),
         crate::app::Mode::GoalProposal => handle_goal_proposal_key(app, key),
+        crate::app::Mode::GoalCompose => handle_goal_compose_key(app, key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
         crate::app::Mode::PersonaSwitchConfirm => handle_persona_confirm_key(app, key),
         crate::app::Mode::Help => handle_help_key(app, key),
@@ -175,24 +176,22 @@ fn handle_history_search_key(app: &mut crate::app::App, key: KeyEvent) -> Option
         KeyCode::Down => {
             app.history_search_next();
         }
-        KeyCode::Char(c) => {
-            app.history_search_query.push(c);
-            // Reset to first match.
-            app.history_search_index = if app.history_search_matches().is_empty() {
-                None
-            } else {
-                Some(0)
-            };
-        }
-        KeyCode::Backspace => {
-            app.history_search_query.pop();
-            app.history_search_index = if app.history_search_matches().is_empty() {
-                None
-            } else {
-                Some(0)
-            };
-        }
         _ => {}
+    }
+    // Editing keys (chars, backspace, cursor + word moves, ^A/^E/^F/^B/
+    // ^D/^K/^U/^W, ^Z/^Y undo) route through the shared readline editor.
+    if crate::app::editor::handle_key_with_undo(
+        &mut app.history_search_query,
+        &mut app.history_search_cursor,
+        key,
+        &mut app.history_search_undo,
+    ) {
+        // Reset to first match on any edit.
+        app.history_search_index = if app.history_search_matches().is_empty() {
+            None
+        } else {
+            Some(0)
+        };
     }
     None
 }
@@ -661,6 +660,62 @@ fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Act
 }
 
 fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    // The "Type your own answer" row is a text input: while it is selected,
+    // printable keys and backspace reach the text instead of acting as
+    // navigation/jump shortcuts (this is what lets j/k/h/l and digits be
+    // typed). Enter/Esc still confirm/cancel, and Tab/arrows still move the
+    // highlight back onto the option rows.
+    let freeform_active = app.user_question.as_ref().is_some_and(|uq| {
+        !uq.review
+            && uq.selected
+                == uq
+                    .questions
+                    .get(uq.page)
+                    .map(|q| q.options.len())
+                    .unwrap_or(0)
+    });
+    if freeform_active {
+        return match key.code {
+            KeyCode::Enter => {
+                app.user_question_confirm();
+                None
+            }
+            KeyCode::Esc => {
+                app.cancel_user_question();
+                None
+            }
+            KeyCode::Tab => {
+                app.user_question_select_next();
+                None
+            }
+            KeyCode::BackTab => {
+                app.user_question_select_prev();
+                None
+            }
+            KeyCode::Down => {
+                app.user_question_select_next();
+                None
+            }
+            KeyCode::Up => {
+                app.user_question_select_prev();
+                None
+            }
+            _ => {
+                // All editing keys (chars, arrows, ^A/^E/^F/^B/^D/^K/^U/^W,
+                // word moves, ^Z/^Y undo) go through the shared readline editor.
+                if let Some(uq) = app.user_question.as_mut() {
+                    crate::app::editor::handle_key_with_undo(
+                        &mut uq.freeform_text,
+                        &mut uq.freeform_cursor,
+                        key,
+                        &mut uq.freeform_undo,
+                    );
+                }
+                None
+            }
+        };
+    }
+
     let on_review = app
         .user_question
         .as_ref()
@@ -765,8 +820,15 @@ fn handle_plan_approval_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
         }
         KeyCode::Enter => {
             if editing {
-                // Enter inserts a newline in the feedback editor.
-                app.plan_approval_type_char('\n');
+                // Enter inserts a newline at the cursor in the feedback editor.
+                if let Some(pa) = app.plan_approval.as_mut() {
+                    crate::app::editor::insert_with_undo(
+                        &mut pa.feedback,
+                        &mut pa.feedback_cursor,
+                        '\n',
+                        &mut pa.feedback_undo,
+                    );
+                }
             } else {
                 app.plan_approval_confirm();
             }
@@ -784,7 +846,10 @@ fn handle_plan_approval_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
             }
             None
         }
-        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+        // While the feedback editor is active these would cycle the
+        // Approve/Request-changes/Submit selection mid-edit and could
+        // approve the plan or submit changes, dropping the typed feedback.
+        KeyCode::Tab | KeyCode::Left | KeyCode::Right if !editing => {
             app.plan_approval_toggle();
             None
         }
@@ -818,12 +883,20 @@ fn handle_plan_approval_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
             app.plan_approval_confirm();
             None
         }
-        KeyCode::Backspace => {
-            app.plan_approval_backspace();
-            None
-        }
-        KeyCode::Char(c) if editing => {
-            app.plan_approval_type_char(c);
+        _ if editing => {
+            // Every other key while editing goes through the shared
+            // readline editor: chars, Backspace/Delete, arrow + word
+            // moves, ^A/^E/^F/^B/^D/^K/^U/^W, ^Z/^Y undo. Keys the editor
+            // doesn't own (Tab, PageUp/PageDown) fall through to the
+            // catch-all.
+            if let Some(pa) = app.plan_approval.as_mut() {
+                crate::app::editor::handle_key_with_undo(
+                    &mut pa.feedback,
+                    &mut pa.feedback_cursor,
+                    key,
+                    &mut pa.feedback_undo,
+                );
+            }
             None
         }
         _ => None,
@@ -859,6 +932,46 @@ fn handle_goal_proposal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
             None
         }
         _ => None,
+    }
+}
+
+fn handle_goal_compose_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Enter => {
+            let text = app
+                .goal_compose
+                .as_ref()
+                .map(|g| g.title.trim().to_string())
+                .unwrap_or_default();
+            if text.is_empty() {
+                // An empty objective is a cancel, not a goal.
+                app.close_goal_compose();
+                return None;
+            }
+            app.close_goal_compose();
+            Some(Action::SetGoal(text))
+        }
+        KeyCode::Esc => {
+            app.close_goal_compose();
+            None
+        }
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.close_goal_compose();
+            None
+        }
+        _ => {
+            // The objective is a text field: all editing keys route through
+            // the shared readline editor (incl. ^Z/^Y undo).
+            if let Some(g) = app.goal_compose.as_mut() {
+                crate::app::editor::handle_key_with_undo(
+                    &mut g.title,
+                    &mut g.cursor,
+                    key,
+                    &mut g.undo,
+                );
+            }
+            None
+        }
     }
 }
 
@@ -1000,16 +1113,10 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 app.insert_newline();
                 return None;
             }
-            // If slash autocomplete is showing, select the highlighted command.
-            if app.mode == crate::app::Mode::SlashCommand
-                && !app.filtered_slash_commands().is_empty()
-            {
-                app.apply_slash_completion();
-                if let Some(text) = app.submit_input() {
-                    return Some(Action::SlashCommand(text));
-                }
-                return None;
-            }
+            // Enter always submits what's typed; Tab applies the highlighted
+            // slash completion. Applying the completion on Enter used to
+            // replace the typed text with the bare command name, silently
+            // dropping arguments (e.g. `/goal fix the bug` → `/goal`).
             if let Some(text) = app.submit_input() {
                 if text.starts_with('/') {
                     return Some(Action::SlashCommand(text));
@@ -1540,92 +1647,87 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.picker_down();
             None
         }
-        KeyCode::Char(c) => {
-            // Digits on the budget row type into the draft instead of the
-            // filter; anything else keeps filtering.
-            if c.is_ascii_digit() {
-                if let Some(p) = app.picker.as_mut() {
-                    if budget_row_selected(p) {
-                        if let Some(b) = p.budget.as_mut() {
-                            b.type_digit(c);
+        _ => {
+            // Budget row (thinking-variant budget): digits and editing keys
+            // operate on the draft, not the filter.
+            if let Some(p) = app.picker.as_mut() {
+                if budget_row_selected(p) {
+                    let handled = match key.code {
+                        KeyCode::Char(c) if c.is_ascii_digit() => {
+                            if let Some(b) = p.budget.as_mut() {
+                                b.type_digit(c);
+                            }
+                            true
                         }
+                        KeyCode::Backspace => {
+                            if let Some(b) = p.budget.as_mut() {
+                                b.backspace();
+                            }
+                            true
+                        }
+                        KeyCode::Left => {
+                            if let Some(b) = p.budget.as_mut() {
+                                b.step(-b.info.step);
+                            }
+                            true
+                        }
+                        KeyCode::Right => {
+                            if let Some(b) = p.budget.as_mut() {
+                                b.step(b.info.step);
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+                    if handled {
                         return None;
                     }
                 }
             }
-            app.picker_insert(c);
-            None
-        }
-        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::META) => {
-            if let Some(ref mut p) = app.picker {
-                p.filter.clear();
-                p.cursor = 0;
-            }
-            None
-        }
-        KeyCode::Backspace => {
-            // Backspace on the budget row pops the typed draft instead of
-            // the filter.
-            if let Some(p) = app.picker.as_mut() {
-                if budget_row_selected(p) {
-                    if let Some(b) = p.budget.as_mut() {
-                        b.backspace();
-                    }
-                    return None;
-                }
-            }
-            app.picker_backspace();
-            None
-        }
-        KeyCode::Left => {
-            // Left/Right on the budget row step the draft by one step.
-            if let Some(p) = app.picker.as_mut() {
-                if budget_row_selected(p) {
-                    if let Some(b) = p.budget.as_mut() {
-                        b.step(-b.info.step);
-                    }
-                    return None;
-                }
-            }
-            app.picker_cursor_left();
-            None
-        }
-        KeyCode::Right => {
-            // Left/Right on the budget row step the draft by one step.
-            if let Some(p) = app.picker.as_mut() {
-                if budget_row_selected(p) {
-                    if let Some(b) = p.budget.as_mut() {
-                        b.step(b.info.step);
-                    }
-                    return None;
-                }
-            }
-            // In the model picker, Right opens the thinking variant picker
-            // when the filter is empty and the selected model has variants.
-            // The model picker item IDs are in "provider/model" format, but
-            // thinking_variants is keyed by the bare model id, so we strip
-            // the provider prefix before checking.
-            //
-            // We also fire a SwitchModel action so the agent's active model
-            // matches the one the variants are being selected for. Without
-            // this, set_thinking resolves against the *old* model and fails
-            // with "unknown thinking variant for model".
-            if let Some(ref picker) = app.picker {
-                if picker.kind == "model" && picker.filter.is_empty() {
-                    if let Some(selected) = picker.selected_item() {
-                        let bare_model = selected.id.rsplit('/').next().unwrap_or(&selected.id);
-                        if app.thinking_variants.contains_key(bare_model) {
-                            let id = selected.id.clone();
-                            app.open_thinking_variant_picker_for(Some(&id));
-                            return Some(Action::SwitchModel(id));
+            // Model picker: Right with an empty filter opens the thinking
+            // variant picker for the selected model. The item IDs are in
+            // "provider/model" format, but thinking_variants is keyed by the
+            // bare model id, so the provider prefix is stripped. The
+            // SwitchModel action keeps the agent's active model in sync with
+            // the variants being chosen.
+            if key.code == KeyCode::Right {
+                if let Some(ref picker) = app.picker {
+                    if picker.kind == "model" && picker.filter.is_empty() {
+                        if let Some(selected) = picker.selected_item() {
+                            let bare_model = selected.id.rsplit('/').next().unwrap_or(&selected.id);
+                            if app.thinking_variants.contains_key(bare_model) {
+                                let id = selected.id.clone();
+                                app.open_thinking_variant_picker_for(Some(&id));
+                                return Some(Action::SwitchModel(id));
+                            }
                         }
                     }
                 }
             }
-            app.picker_cursor_right();
+            // Everything else edits the filter through the shared readline
+            // editor (chars, backspace, cursor + word moves, ^A/^E/^F/^B/
+            // ^D/^K/^U/^W, ^Z/^Y undo). Mutations reset the selection like
+            // the previous insert/backspace arms did.
+            if let Some(p) = app.picker.as_mut() {
+                let before = p.filter.len();
+                if crate::app::editor::handle_key_with_undo(
+                    &mut p.filter,
+                    &mut p.cursor,
+                    key,
+                    &mut p.filter_undo,
+                ) {
+                    if p.filter.len() != before {
+                        if p.filter.len() > before {
+                            p.selected = 0;
+                        } else {
+                            p.selected = p.selected.min(p.filtered().len().saturating_sub(1));
+                        }
+                    }
+                    return None;
+                }
+            }
             None
         }
-        _ => None,
     }
 }
 
@@ -1644,6 +1746,8 @@ pub enum Action {
     Clear,
     /// Switch to a different model.
     SwitchModel(String),
+    /// Set the active goal to the given objective (from the `/goal` modal).
+    SetGoal(String),
     /// Insert an @mention path into the input.
     InsertAtMention(String),
     /// Insert a namespace reference (skill, model, or subagent) into the input.
@@ -1725,5 +1829,262 @@ mod tests {
             Some(Action::InsertNamespaceMention(ref kind, ref value))
                 if kind == "model" && value == "openai/gpt-4o"
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // User-question freeform input
+    // -----------------------------------------------------------------------
+
+    /// An app in UserQuestion mode with two options (+ freeform row 3).
+    fn question_app() -> (crate::app::App, tokio::sync::oneshot::Receiver<Vec<String>>) {
+        use mew_agent::{AgentEvent, AskUserQuestion, QuestionOption};
+        let mut app = crate::app::App::new();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Vec<String>>();
+        app.handle_agent_event(AgentEvent::AskUser {
+            call_id: "c1".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "branch?".into(),
+                options: vec![
+                    QuestionOption {
+                        label: "main".into(),
+                        description: "".into(),
+                    },
+                    QuestionOption {
+                        label: "dev".into(),
+                        description: "".into(),
+                    },
+                ],
+            }],
+            tx,
+        });
+        (app, rx)
+    }
+
+    fn char_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn user_question_freeform_accepts_navigation_letters_and_digits() {
+        let (mut app, _rx) = question_app();
+        // Row 3 is the implicit freeform row.
+        app.user_question_jump(3);
+        for c in ['j', 'k', 'h', 'l', '1', '9', 'a', 'n', 'y'] {
+            handle_key_event(&mut app, char_key(c));
+        }
+        let uq = app.user_question.as_ref().expect("question stored");
+        assert_eq!(uq.freeform_text, "jkhl19any");
+    }
+
+    #[test]
+    fn user_question_freeform_backspace_and_enter_submit() {
+        let (mut app, mut rx) = question_app();
+        app.user_question_jump(3);
+        handle_key_event(&mut app, char_key('h'));
+        handle_key_event(&mut app, char_key('i'));
+        handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        );
+        handle_key_event(&mut app, char_key('y'));
+        handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, crate::app::Mode::Normal);
+        assert_eq!(rx.try_recv().unwrap(), vec!["hy".to_string()]);
+    }
+
+    #[test]
+    fn user_question_freeform_supports_readline_editing_keys() {
+        let (mut app, _rx) = question_app();
+        app.user_question_jump(3);
+        for c in ['a', 'b'] {
+            handle_key_event(&mut app, char_key(c));
+        }
+        // ^B moves back one char, then typing inserts mid-text.
+        handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+        );
+        handle_key_event(&mut app, char_key('X'));
+        let uq = app.user_question.as_ref().expect("question stored");
+        assert_eq!(uq.freeform_text, "aXb");
+        assert_eq!(uq.freeform_cursor, 2);
+        // ^U clears the whole line.
+        handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        let uq = app.user_question.as_ref().expect("question stored");
+        assert!(uq.freeform_text.is_empty());
+        assert_eq!(uq.freeform_cursor, 0);
+    }
+
+    #[test]
+    fn user_question_freeform_undo_redo() {
+        let (mut app, _rx) = question_app();
+        app.user_question_jump(3);
+        for c in ['h', 'i'] {
+            handle_key_event(&mut app, char_key(c));
+        }
+        // ^Z undoes the coalesced typing, ^Y redoes it.
+        handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
+        );
+        let uq = app.user_question.as_ref().expect("question stored");
+        assert_eq!(uq.freeform_text, "");
+        handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+        );
+        let uq = app.user_question.as_ref().expect("question stored");
+        assert_eq!(uq.freeform_text, "hi");
+    }
+
+    #[test]
+    fn enter_submits_slash_input_with_args() {
+        // Regression: Enter always submits the typed slash text; the
+        // completion list must never replace it (Tab completes instead).
+        let mut app = crate::app::App::new();
+        app.input = "/goal fix the bug".into();
+        app.cursor = app.input.len();
+        app.mode = crate::app::Mode::SlashCommand;
+        let action = handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            action,
+            Some(Action::SlashCommand(ref t)) if t == "/goal fix the bug"
+        ));
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn goal_compose_accept_produces_set_goal_with_edited_objective() {
+        let mut app = crate::app::App::new();
+        app.open_goal_compose("fix the bug".into());
+        assert_eq!(app.mode, crate::app::Mode::GoalCompose);
+        // Edit through the shared readline editor, then accept.
+        handle_key_event(&mut app, char_key('s'));
+        let action = handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, Some(Action::SetGoal(ref t)) if t == "fix the bugs"));
+        assert_eq!(app.mode, crate::app::Mode::Normal);
+        assert!(app.goal_compose.is_none());
+    }
+
+    #[test]
+    fn goal_compose_esc_and_empty_enter_cancel() {
+        let mut app = crate::app::App::new();
+        app.open_goal_compose("ignore me".into());
+        assert!(
+            handle_key_event(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).is_none()
+        );
+        assert_eq!(app.mode, crate::app::Mode::Normal);
+        assert!(app.goal_compose.is_none());
+        assert!(app.active_goal.is_none());
+
+        // An objective that trims to empty is a cancel, not a goal.
+        app.open_goal_compose("   ".into());
+        assert!(
+            handle_key_event(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_none()
+        );
+        assert!(app.goal_compose.is_none());
+        assert!(app.active_goal.is_none());
+    }
+
+    #[test]
+    fn goal_compose_remembers_replacing_goal() {
+        let mut app = crate::app::App::new();
+        app.set_active_goal("old goal".into());
+        app.open_goal_compose("new goal".into());
+        let state = app.goal_compose.as_ref().expect("compose opened");
+        assert_eq!(state.replacing.as_deref(), Some("old goal"));
+    }
+
+    #[test]
+    fn plan_approval_feedback_supports_kill_to_end() {
+        let (mut app, _rx) = plan_app();
+        // "Request changes" opens the feedback editor.
+        handle_key_event(&mut app, char_key('r'));
+        for c in ['h', 'e', 'l', 'l', 'o', ' ', 'w'] {
+            handle_key_event(&mut app, char_key(c));
+        }
+        // ^A home, then ^K kills to the end.
+        handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        );
+        handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+        );
+        let pa = app.plan_approval.as_ref().unwrap();
+        assert_eq!(pa.feedback, "");
+        assert_eq!(pa.feedback_cursor, 0);
+    }
+
+    #[test]
+    fn user_question_off_freeform_keys_still_navigate() {
+        let (mut app, _rx) = question_app();
+        // On an option row, j/k still move the highlight and digits still
+        // jump; nothing is typed.
+        handle_key_event(&mut app, char_key('j'));
+        let uq = app.user_question.as_ref().expect("question stored");
+        assert_eq!(uq.selected, 1);
+        assert!(uq.freeform_text.is_empty());
+        handle_key_event(&mut app, char_key('3'));
+        let uq = app.user_question.as_ref().expect("question stored");
+        assert_eq!(uq.selected, 2);
+        assert!(uq.freeform_text.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan approval feedback editor
+    // -----------------------------------------------------------------------
+
+    /// An app in PlanApproval mode.
+    fn plan_app() -> (
+        crate::app::App,
+        tokio::sync::oneshot::Receiver<mew_agent::PlanDecision>,
+    ) {
+        use mew_agent::AgentEvent;
+        let mut app = crate::app::App::new();
+        let (tx, rx) = tokio::sync::oneshot::channel::<mew_agent::PlanDecision>();
+        app.handle_agent_event(AgentEvent::PlanApprovalRequest {
+            call_id: "c1".into(),
+            plan_path: "/repo/PLAN.md".into(),
+            plan_markdown: "# Goal\n\n1. do it".into(),
+            persona: "builder".into(),
+            tx,
+        });
+        (app, rx)
+    }
+
+    #[test]
+    fn plan_approval_feedback_editor_types_letters_and_keeps_selection() {
+        let (mut app, _rx) = plan_app();
+        // "Request changes" then confirm opens the feedback editor.
+        handle_key_event(&mut app, char_key('r'));
+        assert!(app.plan_approval.as_ref().unwrap().editing_feedback);
+        // Shortcut letters (a/r/s/n/...) type into the feedback instead of
+        // dispatching: verification that 'n' and friends are not captured.
+        for c in ['a', 'r', 's', 'n', 'j', 'y'] {
+            handle_key_event(&mut app, char_key(c));
+        }
+        let pa = app.plan_approval.as_ref().unwrap();
+        assert_eq!(pa.feedback, "arsnjy");
+        assert_eq!(pa.selected, 1, "selection must not drift while editing");
+
+        // Tab/Left/Right must not cycle the selection mid-edit (a cycle to
+        // Approve would submit the plan and drop the typed feedback).
+        handle_key_event(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        handle_key_event(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        handle_key_event(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let pa = app.plan_approval.as_ref().unwrap();
+        assert_eq!(pa.selected, 1);
+        assert_eq!(pa.feedback, "arsnjy");
+
+        // Esc leaves the editor; letters no longer append.
+        handle_key_event(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.plan_approval.as_ref().unwrap().editing_feedback);
+        handle_key_event(&mut app, char_key('x'));
+        assert_eq!(app.plan_approval.as_ref().unwrap().feedback, "arsnjy");
     }
 }

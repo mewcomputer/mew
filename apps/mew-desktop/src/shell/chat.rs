@@ -1,3 +1,4 @@
+use super::chat_render::{transcript_scrollbar_metrics, TranscriptScrollbarMetrics};
 use super::*;
 
 impl DesktopShell {
@@ -12,29 +13,42 @@ impl DesktopShell {
     ) -> gpui::AnyElement {
         let selection =
             self.transcript_selection_range(message_index, block_index, inline.text.len());
-        let highlights = self.inline_highlights(inline, selection);
+        let highlights = if inline.highlights.is_empty() && selection.is_none() {
+            Vec::new()
+        } else {
+            self.inline_highlights(inline, selection)
+        };
         let code_font_overrides = inline
             .highlights
             .iter()
             .filter(|highlight| highlight.style == InlineStyle::Code)
             .map(|highlight| (highlight.range.clone(), DEFAULT_FONT_FAMILY.into()));
         let code_font_overrides = code_font_overrides.collect::<Vec<_>>();
-        let text = gpui::StyledText::new(inline.text.clone())
-            .with_font_family_overrides(code_font_overrides)
-            .with_highlights(highlights);
+        let mut text = gpui::StyledText::new(inline.text.clone());
+        if !code_font_overrides.is_empty() {
+            text = text.with_font_family_overrides(code_font_overrides);
+        }
+        if !highlights.is_empty() {
+            text = text.with_highlights(highlights);
+        }
         // Keep the interaction layout tied to the actual element being
         // painted. A separately-created TextLayout is never measured by
         // GPUI, so querying it from a mouse or accessibility event panics.
         let down_layout = text.layout().clone();
         let down_text = inline.text.clone();
-        self.transcript_text_registry
-            .borrow_mut()
-            .push(TranscriptTextEntry {
-                message_index,
-                block_index,
-                text: inline.text.clone(),
-                layout: down_layout.clone(),
-            });
+        let down_links = inline.links.clone();
+        // The registry is only consulted while a transcript selection is active.
+        // Avoid rebuilding it for every visible markdown span during ordinary scrolling.
+        if self.transcript_selection.is_some() {
+            self.transcript_text_registry
+                .borrow_mut()
+                .push(TranscriptTextEntry {
+                    message_index,
+                    block_index,
+                    text: inline.text.clone(),
+                    layout: down_layout.clone(),
+                });
+        }
         let element = div()
             .id(format!(
                 "markdown-inline-container-{message_index}-{block_index}"
@@ -43,6 +57,9 @@ impl DesktopShell {
             .min_w_0()
             .whitespace_normal()
             .cursor(gpui::CursorStyle::IBeam)
+            .when(!inline.links.is_empty(), |element| {
+                element.cursor(gpui::CursorStyle::PointingHand)
+            })
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(move |shell, event, window, cx| {
@@ -51,6 +68,7 @@ impl DesktopShell {
                         block_index,
                         &down_text,
                         &down_layout,
+                        &down_links,
                         event,
                         window,
                         cx,
@@ -132,6 +150,7 @@ impl DesktopShell {
         block_index: usize,
         text: &str,
         layout: &gpui::TextLayout,
+        links: &[InlineLink],
         event: &gpui::MouseDownEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -142,9 +161,69 @@ impl DesktopShell {
             block_index,
             offset,
         };
+        self.transcript_link_candidate = links
+            .iter()
+            .find(|link| link.range.contains(&offset))
+            .map(|link| link.url.clone());
         self.transcript_selection_anchor = Some(point);
         self.update_transcript_selection(point);
         self.transcript_is_selecting = true;
+        cx.notify();
+    }
+
+    pub(super) fn transcript_scrollbar_mouse_down(
+        &mut self,
+        event: &gpui::MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(metrics) = transcript_scrollbar_metrics(&self.transcript_list) else {
+            return;
+        };
+        let viewport = self.transcript_list.viewport_bounds();
+        let pointer_y = f32::from(event.position.y) - f32::from(viewport.origin.y);
+        if !(0.0..=metrics.viewport_height).contains(&pointer_y) {
+            return;
+        }
+
+        let grab_offset = if (metrics.thumb_top..=metrics.thumb_top + metrics.thumb_height)
+            .contains(&pointer_y)
+        {
+            pointer_y - metrics.thumb_top
+        } else {
+            metrics.thumb_height / 2.
+        };
+        self.transcript_scrollbar_grab_offset = Some(grab_offset);
+        self.transcript_is_selecting = false;
+        self.transcript_link_candidate = None;
+        self.transcript_list.scrollbar_drag_started();
+        self.update_transcript_scrollbar(pointer_y, grab_offset, metrics, cx);
+    }
+
+    fn update_transcript_scrollbar(
+        &mut self,
+        pointer_y: f32,
+        grab_offset: f32,
+        metrics: TranscriptScrollbarMetrics,
+        cx: &mut Context<Self>,
+    ) {
+        let thumb_top = (pointer_y - grab_offset).clamp(0., metrics.travel);
+        let scroll_offset = if metrics.travel > 0. {
+            thumb_top / metrics.travel * metrics.max_offset
+        } else {
+            0.
+        };
+        self.transcript_list
+            .set_follow_mode(gpui::FollowMode::Normal);
+        self.transcript_list
+            .set_offset_from_scrollbar(point(px(0.), px(-scroll_offset)));
+        let at_end = scroll_offset >= (metrics.max_offset - 1.).max(0.);
+        if at_end {
+            self.transcript_list.set_follow_mode(gpui::FollowMode::Tail);
+            self.transcript_list.scroll_to_end();
+        }
+        self.transcript_scrolled_away = !at_end;
+        self.capture_session_view_state();
         cx.notify();
     }
 
@@ -154,6 +233,16 @@ impl DesktopShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(grab_offset) = self.transcript_scrollbar_grab_offset {
+            if event.dragging() {
+                if let Some(metrics) = transcript_scrollbar_metrics(&self.transcript_list) {
+                    let viewport = self.transcript_list.viewport_bounds();
+                    let pointer_y = f32::from(event.position.y) - f32::from(viewport.origin.y);
+                    self.update_transcript_scrollbar(pointer_y, grab_offset, metrics, cx);
+                }
+            }
+            return;
+        }
         if !self.transcript_is_selecting || !event.dragging() {
             return;
         }
@@ -182,6 +271,7 @@ impl DesktopShell {
         };
         drop(registry);
         if point != anchor {
+            self.transcript_link_candidate = None;
             self.update_transcript_selection(point);
         }
         cx.notify();
@@ -191,9 +281,18 @@ impl DesktopShell {
         &mut self,
         _event: &gpui::MouseUpEvent,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        if self.transcript_scrollbar_grab_offset.take().is_some() {
+            self.transcript_list.scrollbar_drag_ended();
+            self.capture_session_view_state();
+            cx.notify();
+            return;
+        }
         self.transcript_is_selecting = false;
+        if let Some(url) = self.transcript_link_candidate.take() {
+            self.open_transcript_link(url, cx);
+        }
     }
 
     fn transcript_selection_range(
@@ -645,14 +744,36 @@ impl DesktopShell {
         if self.model.ui.running || !self.model.session_is_ready() {
             return;
         }
-        let Some(text) = latest_user_prompt(&self.model.ui.transcript) else {
+        let Some(submission) = latest_user_submission(&self.model.ui.transcript) else {
             return;
         };
         self.send_command(ClientMessage::Prompt {
-            text,
-            attachments: Vec::new(),
+            text: submission.text,
+            attachments: submission.attachments,
         });
         cx.notify();
+    }
+
+    pub(super) fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
+        self.pending_transcript_scroll_anchor = None;
+        self.transcript_scrollbar_grab_offset = None;
+        self.transcript_scrolled_away = false;
+        self.transcript_list.set_follow_mode(gpui::FollowMode::Tail);
+        self.transcript_list.scroll_to_end();
+        self.capture_session_view_state();
+        self.persist_layout();
+        cx.notify();
+    }
+
+    pub(super) fn open_transcript_link(&mut self, url: String, cx: &mut Context<Self>) {
+        let Some(url) = normalize_browser_url(&url) else {
+            self.browser_error = Some("only http(s) links can open in the in-app browser".into());
+            cx.notify();
+            return;
+        };
+        self.browser_url = url;
+        self.open_browser_panel(cx);
+        self.navigate_browser_to(cx);
     }
 
     pub(super) fn composer_key_down(
@@ -801,7 +922,7 @@ impl DesktopShell {
             self.model_picker_open,
             self.persona_picker_open,
             self.permission_picker_open,
-            self.thinking_picker_open,
+            false,
             self.terminal_font_picker_open,
             self.connection_picker_open,
         ) {
