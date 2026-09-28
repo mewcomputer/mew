@@ -89,9 +89,8 @@ impl Provider for Adapter {
             ProviderError::Message("retry loop exited without response".to_string())
         })?;
         let dump = self.dump;
-        let use_responses_lite = self.use_responses_lite;
         tokio::spawn(async move {
-            Self::read_stream(dump, resp, tx, use_responses_lite).await;
+            Self::read_stream(dump, resp, tx).await;
         });
 
         Ok(Box::pin(rx))

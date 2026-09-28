@@ -11,8 +11,6 @@ use tokio::io::AsyncBufReadExt;
 
 /// Tracks per-item state during SSE streaming.
 struct StreamState {
-    /// Whether this is a responses-lite stream (affects reasoning handling).
-    use_responses_lite: bool,
     /// item_id → (PartId, text buffer)
     text_parts: std::collections::HashMap<String, TextPart>,
     /// item_id → (PartId, reasoning buffer)
@@ -31,7 +29,6 @@ struct StreamState {
 impl StreamState {
     fn new() -> Self {
         Self {
-            use_responses_lite: false,
             text_parts: std::collections::HashMap::new(),
             reasoning_parts: std::collections::HashMap::new(),
             reasoning_part_ids: std::collections::HashMap::new(),
@@ -99,7 +96,6 @@ impl Adapter {
         dump: bool,
         resp: reqwest::Response,
         mut tx: mpsc::Sender<ProviderEvent>,
-        use_responses_lite: bool,
     ) {
         let stream = resp
             .bytes_stream()
@@ -109,7 +105,6 @@ impl Adapter {
 
         let mut current_event = String::new();
         let mut state = StreamState::new();
-        state.use_responses_lite = use_responses_lite;
 
         loop {
             let line: String = match lines.next_line().await {
@@ -166,11 +161,11 @@ impl Adapter {
                     Self::handle_output_text_done(data, &mut tx, &mut state).await;
                 }
 
-                "response.reasoning_summary_text.delta" => {
+                "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                     Self::handle_reasoning_delta(data, &mut tx, &mut state).await;
                 }
 
-                "response.reasoning_summary_text.done" => {
+                "response.reasoning_summary_text.done" | "response.reasoning_text.done" => {
                     Self::handle_reasoning_done(data, &mut tx, &mut state).await;
                 }
 
@@ -284,27 +279,27 @@ impl Adapter {
                 .await;
             state.tool_calls.insert(event.item.id, acc);
         } else if event.item.typ == "reasoning" {
-            // For responses-lite, create the reasoning part now so we can
-            // attach encrypted_content from the later output_item.done event.
-            // For non-lite, reasoning summary text arrives via
-            // reasoning_summary_text events handled separately, and there's
-            // no encrypted_content to capture.
-            if state.use_responses_lite {
-                let mut part = new_reasoning_part();
-                // The API binds `encrypted_content` to the item id it issued,
-                // and rejects a replay under a different id. Keep the id so it
-                // can be echoed back verbatim.
-                part.provider_item_id = Some(event.item.id.clone());
-                state
-                    .reasoning_part_ids
-                    .insert(event.item.id.clone(), part.base.id);
-                let _ = tx
-                    .send(ProviderEvent::PartStart {
-                        part: Part::Reasoning(part.clone()),
-                    })
-                    .await;
-                state.reasoning_parts.insert(event.item.id, part);
-            }
+            // Create the reasoning part as soon as the item is announced so
+            // the summary/content deltas that follow have something to attach
+            // to. This applies to every model, not just Responses Lite: a
+            // non-lite reasoning item streams its text through the same
+            // `item_id`-keyed deltas, and without a part here they are dropped.
+            // The encrypted_content (lite only) is attached later from
+            // output_item.done.
+            let mut part = new_reasoning_part();
+            // The API binds `encrypted_content` to the item id it issued,
+            // and rejects a replay under a different id. Keep the id so it
+            // can be echoed back verbatim.
+            part.provider_item_id = Some(event.item.id.clone());
+            state
+                .reasoning_part_ids
+                .insert(event.item.id.clone(), part.base.id);
+            let _ = tx
+                .send(ProviderEvent::PartStart {
+                    part: Part::Reasoning(part.clone()),
+                })
+                .await;
+            state.reasoning_parts.insert(event.item.id, part);
         }
         // Message items are handled when their content
         // parts arrive (content_part.added).
@@ -1020,20 +1015,34 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_3\",\"status\
         let stream = adapter.stream(req).await.unwrap();
         let events: Vec<ProviderEvent> = stream.collect().await;
 
-        // The reasoning summary delta is NOT handled by
-        // content_part.added (that's only for output_text/reasoning_text).
-        // The reasoning comes via reasoning_summary events, which the
-        // adapter doesn't create a PartStart for (no content_part.added
-        // with type "output_text" or "reasoning_text"). So we expect
-        // only MessageEnd from response.completed.
-        //
-        // NOTE: This test documents the current behavior — reasoning
-        // summaries are not surfaced as Part::Reasoning because they
-        // arrive via reasoning_summary_text events, not content_part.added.
-        // The output_item.added for type="reasoning" is a no-op in our
-        // handler. This is acceptable for Phase 1 — reasoning summaries
-        // are a nice-to-have display feature, not critical for the agent
-        // loop.
+        // Reasoning items are surfaced for every model, not just Responses
+        // Lite: the part is created on output_item.added so the
+        // reasoning_summary_text deltas that follow have somewhere to land.
+        // The summary fixture above must therefore yield a Reasoning part
+        // carrying "Thinking...".
+        let has_part_start = events.iter().any(|e| {
+            matches!(
+                e,
+                ProviderEvent::PartStart {
+                    part: Part::Reasoning(_)
+                }
+            )
+        });
+        assert!(has_part_start, "expected PartStart for the reasoning item");
+
+        let summary_text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::PartDelta {
+                    field: "text",
+                    delta,
+                    ..
+                } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(summary_text, "Thinking...");
+
         let has_msg_end = events.iter().any(|e| {
             matches!(
                 e,
@@ -1044,6 +1053,83 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_3\",\"status\
             )
         });
         assert!(has_msg_end);
+    }
+
+    #[tokio::test]
+    async fn test_stream_reasoning_raw_content_delta_routes_to_the_part() {
+        // `response.reasoning_text.delta` carries a model's raw reasoning text
+        // (its `content`, as opposed to its `summary`). It uses the same
+        // item_id-keyed shape as the summary deltas, so it must land on the
+        // reasoning part and be shown like any other trace text.
+        let server = MockServer::start().await;
+
+        let sse_body = "\
+event: response.output_item.added\n\
+data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_9\",\"type\":\"reasoning\",\"status\":\"in_progress\"}}\n\
+\n\
+event: response.reasoning_text.delta\n\
+data: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"rs_9\",\"output_index\":0,\"content_index\":0,\"delta\":\"raw detail\"}\n\
+\n\
+event: response.reasoning_text.done\n\
+data: {\"type\":\"response.reasoning_text.done\",\"item_id\":\"rs_9\",\"output_index\":0,\"content_index\":0,\"text\":\"raw detail\"}\n\
+\n\
+event: response.output_item.done\n\
+data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_9\",\"type\":\"reasoning\",\"encrypted_content\":\"ENC_BLOB_RAW\"}}\n\
+\n\
+event: response.completed\n\
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_r\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\
+\n";
+
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let adapter = Adapter::new(
+            "test".to_string(),
+            server.uri() + "/v1",
+            "gpt-5.6-luna".to_string(),
+            "test-key".to_string(),
+        )
+        .with_responses_lite(true);
+
+        let req = Request {
+            model: "gpt-5.6-luna".to_string(),
+            messages: vec![make_message(Role::User, "hi")],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: http::HeaderMap::new(),
+            ..Default::default()
+        };
+
+        let events: Vec<ProviderEvent> = adapter.stream(req).await.unwrap().collect().await;
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::PartDelta {
+                    field: "text",
+                    delta,
+                    ..
+                } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "raw detail", "raw reasoning text must reach the part");
+
+        let encrypted_ok = events.iter().any(|e| {
+            matches!(
+                e,
+                ProviderEvent::PartDelta { field: "encrypted_content", delta, .. }
+                    if delta == "ENC_BLOB_RAW"
+            )
+        });
+        assert!(encrypted_ok, "encrypted_content must still be captured");
     }
 
     #[tokio::test]

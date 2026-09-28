@@ -1,3 +1,20 @@
+# 2026-09-28 — Responses: surface raw reasoning text and non-lite summaries
+
+mew only created a reasoning part for Responses Lite models, so a non-lite
+reasoning item's `reasoning_summary_text` deltas found no part to attach to and
+were dropped. The part is now created on `output_item.added` for every model,
+and `response.reasoning_text.delta`/`.done` (the model's raw `content`, as
+opposed to its `summary`) route to the same handlers as the summary deltas.
+`StreamState.use_responses_lite` became write-only and was removed.
+
+Whichever of summary/content arrives is shown; mew's message model has a single
+`text` field, so both arriving would concatenate. (Codex has separate
+`summary`/`content` and shows the summary unless `show_raw_agent_reasoning` is
+set, but its SSE processor does handle both event families.)
+
+Verified `cargo test --all` (101 suites), `cargo clippy --all -- -D warnings`,
+and `cargo fmt --all --check`.
+
 # 2026-09-28 — TUI: hide encrypted traces, label them as traces
 
 Responses Lite reasoning arrives as opaque `encrypted_content` with no readable
