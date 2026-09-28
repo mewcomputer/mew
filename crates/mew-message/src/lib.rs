@@ -154,6 +154,14 @@ pub struct ReasoningPart {
     /// subsequent turns so the model retains its reasoning context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypted_content: Option<String>,
+    /// The provider's own identifier for this reasoning item (the OpenAI
+    /// Responses API's `rs_...` id). The API binds `encrypted_content` to the
+    /// id it was issued under and rejects a replay whose id differs
+    /// ("Encrypted content item_id did not match the target item id"), so the
+    /// original id must be carried back verbatim. `None` for providers that
+    /// have no such id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -501,6 +509,7 @@ mod tests {
             text: "let me think...".into(),
             signature: Some("sig123".into()),
             encrypted_content: None,
+            provider_item_id: None,
         });
         roundtrip("reasoning with sig", &p);
     }
@@ -514,6 +523,7 @@ mod tests {
             text: "thinking".into(),
             signature: None,
             encrypted_content: None,
+            provider_item_id: None,
         });
         roundtrip("reasoning no sig", &p);
     }
@@ -696,6 +706,7 @@ mod tests {
                     text: "need to read the file".into(),
                     signature: Some("sig_xyz".into()),
                     encrypted_content: None,
+                    provider_item_id: None,
                 }),
                 Part::Text(TextPart {
                     base: base(sid, mid),

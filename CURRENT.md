@@ -1,3 +1,49 @@
+# 2026-09-28 — TUI: hide encrypted traces, label them as traces
+
+Responses Lite reasoning arrives as opaque `encrypted_content` with no readable
+summary (the replayed item carried `"summary": []`), so the TUI rendered a
+"thinking · 0 lines" header that expanded to nothing. Reasoning parts with no
+text are now skipped entirely; a trace that *does* carry a readable summary is
+still rendered in full. The collapsed header count is relabelled from
+"N lines" to "1 trace"/"N traces".
+
+Verified the four new render tests plus `cargo test --all` (101 suites),
+`cargo clippy --all -- -D warnings`, and `cargo fmt --all --check`. The five
+golden frames are unchanged: the reasoning golden renders the expanded header,
+which carries no count.
+
+# 2026-09-28 — ratatui-mdstream: panic on unclosed bold/strikethrough
+
+`parse_inline` scanned for `**`/`__`/`~~` with `while end + 1 < bytes.len()`,
+which stops at `end == len - 1`. When the closing marker was absent and the
+string ended in a multi-byte character, `&text[start..end]` panicked with
+"byte index N is not a char boundary" (hit mid-stream: model output ending in
+an em-dash, CJK, or emoji right after an unclosed marker). Even when it did not
+panic it dropped the final byte of the text.
+
+Both scans now use a shared `find_marker` helper that returns the marker's
+index when present and `None` otherwise; an unclosed marker styles the
+remainder of the string, matching how the italic branch already behaved.
+Regression tests cover unclosed bold with ASCII, em-dash, CJK, and emoji
+tails, plus unclosed strikethrough.
+
+Verified `cargo test --all` (101 suites), `cargo clippy --all -- -D warnings`,
+and `cargo fmt --all --check`.
+
+# 2026-09-28 — Codex/Responses: replay reasoning under its original item id
+
+Replaying a reasoning item with `encrypted_content` failed with "Encrypted
+content item_id did not match the target item id": the wire builder fabricated
+a fresh `rs_<ulid>` for the item `id`, but the API binds the encrypted blob to
+the id it issued it under. `ReasoningPart` gains `provider_item_id`, populated
+from `response.output_item.added` during streaming and echoed verbatim by the
+request builder. When it is absent (parts persisted before this change, or
+providers without an item id) the `id` field is omitted rather than invented,
+matching Codex, whose `ResponseItem::Reasoning.id` is optional.
+
+Verified `cargo test --all` (101 suites), `cargo clippy --all -- -D warnings`,
+and `cargo fmt --all --check`. Not verified against the live Codex backend.
+
 # 2026-09-28 — split mew-provider-responses into modules
 
 `lib.rs` had grown to 2,967 lines, over half of it tests. Split into:

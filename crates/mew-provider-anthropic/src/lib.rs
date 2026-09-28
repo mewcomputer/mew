@@ -991,6 +991,7 @@ fn new_reasoning_part() -> ReasoningPart {
         text: String::new(),
         signature: None,
         encrypted_content: None,
+        provider_item_id: None,
     }
 }
 
@@ -1073,6 +1074,7 @@ mod tests {
                     text: "Thinking...".to_string(),
                     signature: Some("sig123".to_string()),
                     encrypted_content: None,
+                    provider_item_id: None,
                 }),
                 Part::Text(TextPart {
                     base: PartBase {
@@ -1161,6 +1163,7 @@ mod tests {
                     text: String::new(),
                     signature: None,
                     encrypted_content: Some("opaque_redacted_data_blob".to_string()),
+                    provider_item_id: None,
                 }),
                 Part::Text(TextPart {
                     base: PartBase {

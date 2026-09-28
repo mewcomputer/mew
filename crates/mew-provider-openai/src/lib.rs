@@ -940,6 +940,7 @@ fn new_reasoning_part() -> ReasoningPart {
         text: String::new(),
         signature: None,
         encrypted_content: None,
+        provider_item_id: None,
     }
 }
 

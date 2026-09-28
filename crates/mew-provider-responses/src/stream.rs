@@ -290,7 +290,11 @@ impl Adapter {
             // reasoning_summary_text events handled separately, and there's
             // no encrypted_content to capture.
             if state.use_responses_lite {
-                let part = new_reasoning_part();
+                let mut part = new_reasoning_part();
+                // The API binds `encrypted_content` to the item id it issued,
+                // and rejects a replay under a different id. Keep the id so it
+                // can be echoed back verbatim.
+                part.provider_item_id = Some(event.item.id.clone());
                 state
                     .reasoning_part_ids
                     .insert(event.item.id.clone(), part.base.id);
@@ -722,6 +726,7 @@ fn new_reasoning_part() -> ReasoningPart {
         text: String::new(),
         signature: None,
         encrypted_content: None,
+        provider_item_id: None,
     }
 }
 

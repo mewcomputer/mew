@@ -719,6 +719,7 @@ mod tests {
                     text: "inspect the workspace".into(),
                     signature: None,
                     encrypted_content: None,
+                    provider_item_id: None,
                 }),
                 Part::ToolCall(ToolCallPart {
                     base: PartBase {

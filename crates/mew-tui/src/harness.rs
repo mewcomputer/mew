@@ -333,6 +333,7 @@ impl LocalBackend {
                 text: text.to_string(),
                 signature: None,
                 encrypted_content: None,
+                provider_item_id: None,
             }),
         }));
         self.agent(AgentEvent::Provider(ProviderEvent::PartEnd { part_id }));

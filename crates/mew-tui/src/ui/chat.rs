@@ -666,47 +666,60 @@ pub(crate) fn build_chat_lines(
                     message_had_content = true;
                 }
                 Part::Reasoning(rp) => {
-                    let line_count = rp.text.lines().count();
-                    let is_expanded = app.reasoning_expanded.contains(&rp.base.id);
-                    let dur_text = app.reasoning_elapsed.get(&rp.base.id).map(|d| {
-                        let secs = d.as_secs_f64();
-                        if secs < 0.1 {
-                            format!("{}ms", d.as_millis())
+                    // Encrypted reasoning (OpenAI Responses Lite) arrives as
+                    // opaque `encrypted_content` only — there is no readable
+                    // trace to show, so skip the block entirely rather than
+                    // rendering an empty "thinking" header.
+                    if !rp.text.trim().is_empty() {
+                        let trace_count = rp.text.lines().count();
+                        let is_expanded = app.reasoning_expanded.contains(&rp.base.id);
+                        let dur_text = app.reasoning_elapsed.get(&rp.base.id).map(|d| {
+                            let secs = d.as_secs_f64();
+                            if secs < 0.1 {
+                                format!("{}ms", d.as_millis())
+                            } else {
+                                format!("{:.1}s", secs)
+                            }
+                        });
+                        let header = if is_expanded {
+                            "\u{25bc} thinking  [click or Ctrl-T to collapse]".to_string()
+                        } else if let Some(dur) = dur_text {
+                            format!(
+                                "\u{25b8} thought for {} \u{00b7} {}",
+                                dur,
+                                trace_label(trace_count)
+                            )
                         } else {
-                            format!("{:.1}s", secs)
-                        }
-                    });
-                    let header = if is_expanded {
-                        "\u{25bc} thinking  [click or Ctrl-T to collapse]".to_string()
-                    } else if let Some(dur) = dur_text {
-                        format!("\u{25b8} thought for {} \u{00b7} {} lines", dur, line_count)
-                    } else {
-                        format!("\u{25b8} thinking \u{00b7} {} lines", line_count)
-                    };
-                    // Record the visual row of this header so mouse clicks
-                    // can map back to this reasoning block.
-                    app.reasoning_header_rows
-                        .push((rp.base.id, sel_ctx.visual_row));
-                    sel_ctx.push_line(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(header, Style::default().fg(app.theme.resolve("text.muted"))),
-                    ]));
-                    if is_expanded {
-                        // Pre-wrap reasoning text to `md_width` so each line
-                        // is one visual row (same rationale as user text).
-                        for src_line in rp.text.lines() {
-                            for chunk in wrap_text_to_width(src_line, md_width) {
-                                sel_ctx.push_line(Line::from(vec![
-                                    Span::raw("  "),
-                                    Span::styled(
-                                        chunk,
-                                        Style::default().fg(app.theme.resolve("text.muted")),
-                                    ),
-                                ]));
+                            format!("\u{25b8} thinking \u{00b7} {}", trace_label(trace_count))
+                        };
+                        // Record the visual row of this header so mouse clicks
+                        // can map back to this reasoning block.
+                        app.reasoning_header_rows
+                            .push((rp.base.id, sel_ctx.visual_row));
+                        sel_ctx.push_line(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                header,
+                                Style::default().fg(app.theme.resolve("text.muted")),
+                            ),
+                        ]));
+                        if is_expanded {
+                            // Pre-wrap reasoning text to `md_width` so each line
+                            // is one visual row (same rationale as user text).
+                            for src_line in rp.text.lines() {
+                                for chunk in wrap_text_to_width(src_line, md_width) {
+                                    sel_ctx.push_line(Line::from(vec![
+                                        Span::raw("  "),
+                                        Span::styled(
+                                            chunk,
+                                            Style::default().fg(app.theme.resolve("text.muted")),
+                                        ),
+                                    ]));
+                                }
                             }
                         }
+                        message_had_content = true;
                     }
-                    message_had_content = true;
                 }
                 // ToolCall parts are handled by the batching logic above.
                 Part::ToolCall(_) => unreachable!(),
@@ -753,6 +766,15 @@ pub(crate) fn build_chat_lines(
     #[allow(clippy::drop_non_drop)]
     drop(sel_ctx);
     crate::app::BuiltChat { lines, chat_rows }
+}
+
+/// Pluralised label for the number of visible reasoning lines.
+fn trace_label(count: usize) -> String {
+    if count == 1 {
+        "1 trace".to_string()
+    } else {
+        format!("{count} traces")
+    }
 }
 
 fn render_single_tool_call(
@@ -1656,6 +1678,7 @@ mod tests {
                     text: "first thought".to_string(),
                     signature: None,
                     encrypted_content: None,
+                    provider_item_id: None,
                 }),
                 Part::Reasoning(ReasoningPart {
                     base: mew_message::PartBase {
@@ -1666,6 +1689,7 @@ mod tests {
                     text: "second thought".to_string(),
                     signature: None,
                     encrypted_content: None,
+                    provider_item_id: None,
                 }),
             ],
             time: mew_message::Time {

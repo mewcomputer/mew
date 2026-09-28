@@ -6,6 +6,25 @@ use crate::theme::Theme;
 /// A styled text run produced by the inline parser.
 pub type StyledRun = (String, Style);
 
+/// Byte index of the first `marker` (a two-byte ASCII sequence) at or after
+/// `from`, or `None` when it does not occur.
+///
+/// Both marker bytes are ASCII and UTF-8 continuation bytes are never ASCII,
+/// so a returned index is always a char boundary and slicing there is safe.
+/// This is why an unclosed marker must be handled by the caller rather than by
+/// scanning to the end of the buffer: the final byte may sit inside a
+/// multi-byte character.
+fn find_marker(bytes: &[u8], from: usize, marker: &[u8; 2]) -> Option<usize> {
+    let mut i = from;
+    while i + 1 < bytes.len() {
+        if bytes[i] == marker[0] && bytes[i + 1] == marker[1] {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Parse inline markdown syntax into styled runs.
 ///
 /// Handles: `**bold**`, `*italic*`, `` `code` ``, `[text](url)`, `~~strike~~`.
@@ -41,13 +60,17 @@ pub fn parse_inline(text: &str, theme: &Theme) -> Vec<StyledRun> {
                 runs.push((std::mem::take(&mut current), current_style));
             }
             let start = i + 2;
-            let mut end = start;
-            while end + 1 < bytes.len() && !(bytes[end] == b'~' && bytes[end + 1] == b'~') {
-                end += 1;
+            match find_marker(bytes, start, b"~~") {
+                Some(end) => {
+                    runs.push((text[start..end].to_string(), theme.strikethrough));
+                    i = end + 2;
+                }
+                // No closing marker (normal mid-stream): style the remainder.
+                None => {
+                    runs.push((text[start..].to_string(), theme.strikethrough));
+                    i = bytes.len();
+                }
             }
-            let strike_text = &text[start..end];
-            runs.push((strike_text.to_string(), theme.strikethrough));
-            i = end + 2;
             continue;
         }
 
@@ -56,19 +79,22 @@ pub fn parse_inline(text: &str, theme: &Theme) -> Vec<StyledRun> {
         let is_bold_underscore = i + 1 < bytes.len() && bytes[i] == b'_' && bytes[i + 1] == b'_';
 
         if is_bold_star || is_bold_underscore {
-            let marker_len = 2;
             if !current.is_empty() {
                 runs.push((std::mem::take(&mut current), current_style));
             }
-            let start = i + marker_len;
-            let mut end = start;
+            let start = i + 2;
             let close = if is_bold_star { b"**" } else { b"__" };
-            while end + 1 < bytes.len() && !(bytes[end] == close[0] && bytes[end + 1] == close[1]) {
-                end += 1;
+            match find_marker(bytes, start, close) {
+                Some(end) => {
+                    runs.push((text[start..end].to_string(), theme.strong));
+                    i = end + 2;
+                }
+                // No closing marker (normal mid-stream): style the remainder.
+                None => {
+                    runs.push((text[start..].to_string(), theme.strong));
+                    i = bytes.len();
+                }
             }
-            let bold_text = &text[start..end];
-            runs.push((bold_text.to_string(), theme.strong));
-            i = end + 2;
             continue;
         }
 
@@ -258,5 +284,43 @@ mod tests {
         assert_eq!(runs[1].0, "here");
         assert_eq!(runs[1].1, theme.link_text);
         assert_eq!(runs[2].0, " (http://x.com)");
+    }
+
+    #[test]
+    fn test_bold_unclosed_keeps_final_char() {
+        // An unclosed marker is normal while streaming. The scan used to stop
+        // one byte short of the end, silently dropping the last character.
+        let theme = theme();
+        let runs = parse_inline("**bold", &theme);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].0, "bold");
+        assert_eq!(runs[0].1, theme.strong);
+    }
+
+    #[test]
+    fn test_bold_unclosed_multibyte_tail_does_not_panic() {
+        // Regression: the stopping index landed inside the trailing multi-byte
+        // character, panicking on `&text[start..end]` with
+        // "byte index N is not a char boundary".
+        let theme = theme();
+        let runs = parse_inline("**bold \u{2014}", &theme);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].0, "bold \u{2014}");
+        assert_eq!(runs[0].1, theme.strong);
+
+        // Same for CJK and emoji tails.
+        for text in ["**\u{4f60}\u{597d}", "**\u{1f600}"] {
+            let runs = parse_inline(text, &theme);
+            assert_eq!(runs[0].0, &text[2..]);
+        }
+    }
+
+    #[test]
+    fn test_strikethrough_unclosed_multibyte_tail_does_not_panic() {
+        let theme = theme();
+        let runs = parse_inline("~~strike \u{2014}", &theme);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].0, "strike \u{2014}");
+        assert_eq!(runs[0].1, theme.strikethrough);
     }
 }

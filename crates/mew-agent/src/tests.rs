@@ -716,6 +716,7 @@ fn test_apply_delta_reasoning() {
             text: "think".into(),
             signature: None,
             encrypted_content: None,
+            provider_item_id: None,
         })],
         time: Time {
             created: 0,
@@ -2743,6 +2744,7 @@ fn long_reasoning_then_tool_call_script(
             text: reasoning_text,
             signature: None,
             encrypted_content: None,
+            provider_item_id: None,
         }),
     }];
     events.push(mew_provider::ProviderEvent::PartEnd { part_id });

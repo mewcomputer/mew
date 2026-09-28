@@ -386,18 +386,28 @@ impl Adapter {
                             // emit it, carrying the captured summary text when
                             // present. `encrypted_content` carries the reasoning
                             // itself, so an empty summary is still valid.
+                            //
+                            // `encrypted_content` is bound to the item id the
+                            // API issued it under; replaying it under any other
+                            // id fails with "Encrypted content item_id did not
+                            // match the target item id". Echo the stored id, and
+                            // omit the field entirely when unknown rather than
+                            // inventing one.
                             if let Some(ref encrypted) = rp.encrypted_content {
                                 let summary = if rp.text.is_empty() {
                                     json!([])
                                 } else {
                                     json!([{ "type": "summary_text", "text": rp.text }])
                                 };
-                                input.push(json!({
+                                let mut item = json!({
                                     "type": "reasoning",
-                                    "id": format!("rs_{}", ulid::Ulid::new()),
                                     "summary": summary,
                                     "encrypted_content": encrypted,
-                                }));
+                                });
+                                if let Some(ref id) = rp.provider_item_id {
+                                    item["id"] = json!(id);
+                                }
+                                input.push(item);
                             }
                         }
                         _ => {}
@@ -1016,6 +1026,7 @@ mod tests {
             text: "Thinking about this...".to_string(),
             signature: None,
             encrypted_content: Some("ENC_BLOB_456".to_string()),
+            provider_item_id: None,
         };
 
         let assistant_msg = Message {
@@ -1078,6 +1089,88 @@ mod tests {
         );
     }
 
+    /// Build a request from a single reasoning part (with encrypted_content)
+    /// and return the emitted `reasoning` input item.
+    async fn build_reasoning_input_item(provider_item_id: Option<&str>) -> serde_json::Value {
+        use mew_message::PartBase;
+        let adapter = Adapter::new(
+            "test".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "gpt-5.6-luna".to_string(),
+            "test-key".to_string(),
+        )
+        .with_responses_lite(true);
+
+        let reasoning_part = ReasoningPart {
+            base: PartBase {
+                id: ulid::Ulid::new(),
+                message_id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+            },
+            text: "Thinking...".to_string(),
+            signature: None,
+            encrypted_content: Some("ENC_BLOB".to_string()),
+            provider_item_id: provider_item_id.map(str::to_string),
+        };
+
+        let assistant_msg = Message {
+            id: ulid::Ulid::new(),
+            session_id: ulid::Ulid::new(),
+            role: Role::Assistant,
+            parts: vec![Part::Reasoning(reasoning_part)],
+            time: mew_message::Time {
+                created: 0,
+                completed: Some(0),
+            },
+            assistant: None,
+        };
+
+        let req = Request {
+            model: "gpt-5.6-luna".to_string(),
+            messages: vec![assistant_msg],
+            tools: vec![],
+            system: String::new(),
+            reasoning: None,
+            params: None,
+            headers: http::HeaderMap::new(),
+            ..Default::default()
+        };
+
+        let body = adapter.build_request_body(&req).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        v["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i.get("type").and_then(|t| t.as_str()) == Some("reasoning"))
+            .expect("reasoning item")
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_reasoning_echoes_provider_item_id() {
+        // `encrypted_content` is bound to the item id the API issued it under;
+        // replaying it under a different id fails with "Encrypted content
+        // item_id did not match the target item id". The stored id must be
+        // echoed verbatim, never replaced by a fresh one.
+        let item = build_reasoning_input_item(Some("rs_abc123")).await;
+        assert_eq!(
+            item["id"], "rs_abc123",
+            "the provider's reasoning item id must be echoed, not regenerated"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_wire_message_reasoning_omits_unknown_item_id() {
+        // Parts persisted before the id was captured (or from providers with
+        // no item id) must omit `id` rather than inventing one.
+        let item = build_reasoning_input_item(None).await;
+        assert!(
+            item.get("id").is_none(),
+            "no id should be fabricated when the provider id is unknown"
+        );
+    }
+
     #[tokio::test]
     async fn test_build_wire_message_reasoning_empty_summary_still_present() {
         // A reasoning part with encrypted_content but no captured summary text
@@ -1100,6 +1193,7 @@ mod tests {
             text: String::new(),
             signature: None,
             encrypted_content: Some("ENC_BLOB_789".to_string()),
+            provider_item_id: None,
         };
 
         let assistant_msg = Message {
@@ -1157,6 +1251,7 @@ mod tests {
             text: "Thinking...".to_string(),
             signature: None,
             encrypted_content: None,
+            provider_item_id: None,
         };
 
         let assistant_msg = Message {

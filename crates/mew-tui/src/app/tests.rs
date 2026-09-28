@@ -3253,3 +3253,106 @@ fn test_environment_toggle_first_press_expands() {
     app.toggle_sidebar_section("environment");
     assert_eq!(app.sidebar_collapsed.get("environment"), Some(&true));
 }
+
+#[test]
+fn test_reasoning_without_text_is_not_rendered() {
+    // Responses Lite reasoning arrives as opaque `encrypted_content` with no
+    // readable summary (`"summary": []`). There is nothing to show, so the
+    // block is skipped entirely rather than rendering an empty "thinking"
+    // header (which used to read "0 lines" / "1 lines").
+    use mew_message::{PartBase, ReasoningPart};
+
+    let mut h = crate::harness::Harness::new(80, 24);
+    let part_id = ulid::Ulid::new();
+    h.agent(AgentEvent::Provider(ProviderEvent::PartStart {
+        part: Part::Reasoning(ReasoningPart {
+            base: PartBase {
+                id: part_id,
+                message_id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+            },
+            text: String::new(),
+            signature: None,
+            encrypted_content: Some("gAAAAABopaque".into()),
+            provider_item_id: Some("rs_1".into()),
+        }),
+    }));
+    h.agent(AgentEvent::Provider(ProviderEvent::PartEnd { part_id }));
+
+    let rendered = h.render();
+    assert!(
+        !rendered.contains("thinking"),
+        "encrypted-only trace must not render a header:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("trace"),
+        "encrypted-only trace must not render a count:\n{rendered}"
+    );
+}
+
+#[test]
+fn test_reasoning_header_labels_a_single_trace() {
+    // Streaming auto-expands the block; collapse it to see the count header.
+    let mut h = crate::harness::Harness::new(80, 24);
+    h.say_reasoning("one line of thought");
+    h.render(); // populates reasoning_header_rows for the toggle
+    h.app.toggle_reasoning_expanded();
+    let rendered = h.render();
+    assert!(
+        rendered.contains("1 trace"),
+        "expected a singular trace label:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("1 lines"),
+        "the old unpluralised label must be gone:\n{rendered}"
+    );
+}
+
+#[test]
+fn test_reasoning_header_pluralises_traces() {
+    let mut h = crate::harness::Harness::new(80, 24);
+    h.say_reasoning("first\nsecond\nthird");
+    h.render();
+    h.app.toggle_reasoning_expanded();
+    let rendered = h.render();
+    assert!(
+        rendered.contains("3 traces"),
+        "expected the plural form:\n{rendered}"
+    );
+}
+
+#[test]
+fn test_reasoning_summary_with_encrypted_content_is_rendered() {
+    // A trace can arrive both encrypted *and* with a readable summary
+    // (`"summary": [{...}]`). The ciphertext is opaque, but the summary is
+    // not, so the block must still render and show it.
+    use mew_message::{PartBase, ReasoningPart};
+
+    let mut h = crate::harness::Harness::new(80, 24);
+    let part_id = ulid::Ulid::new();
+    h.agent(AgentEvent::Provider(ProviderEvent::PartStart {
+        part: Part::Reasoning(ReasoningPart {
+            base: PartBase {
+                id: part_id,
+                message_id: ulid::Ulid::new(),
+                session_id: ulid::Ulid::new(),
+            },
+            text: "checking the date".into(),
+            signature: None,
+            encrypted_content: Some("gAAAAABopaque".into()),
+            provider_item_id: Some("rs_2".into()),
+        }),
+    }));
+    h.agent(AgentEvent::Provider(ProviderEvent::PartEnd { part_id }));
+
+    // PartStart expands the block, so the summary text is visible too.
+    let rendered = h.render();
+    assert!(
+        rendered.contains("thinking"),
+        "a trace with a summary must render a header:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("checking the date"),
+        "the summary text must be visible:\n{rendered}"
+    );
+}
