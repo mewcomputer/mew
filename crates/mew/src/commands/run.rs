@@ -16,7 +16,7 @@ use mew_message::{Part, PartId};
 use mew_session::Writer as SessionWriter;
 
 use crate::setup::agent::{build_session_agent, wire_subagents};
-use crate::setup::providers::{load_catalog, resolve_model, resolve_reasoning};
+use crate::setup::providers::{build_provider, load_catalog, resolve_model, resolve_reasoning};
 
 /// Resolve the initial permission mode from CLI flags. Precedence:
 /// `-D` (Dangerous) > `--auto-plus` (Auto+) > `-A` (Auto) >
@@ -99,11 +99,15 @@ pub(crate) async fn build_and_run(
     let cwd = std::env::current_dir().unwrap_or_default();
     let discovered = mew_ext_broker::discover_extensions(&cwd);
 
+    let provider =
+        build_provider(cfg, cat, &provider_id, &model_id, raw, None).context("build provider")?;
+
     // Build the full session agent (provider, tools, personas, skills,
     // subagents, context files, pricing, etc.) via the shared builder.
     let mut agent = build_session_agent(
         cfg,
         cat,
+        provider,
         &provider_id,
         &model_id,
         raw,

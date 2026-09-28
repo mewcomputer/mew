@@ -39,10 +39,47 @@
 //!   alibaba-token-plan-cn), "deepseek", "z-ai", "umans",
 //!   "opencode" (any opencode-*). Falls back to exact provider ID match.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 
 use minijinja::context;
 use minijinja::value::Value as MjValue;
+
+thread_local! {
+    /// Active transclusion trace. `Some` while `record_transclusions` runs on
+    /// this thread; each `transclude` call appends the resource it inlines.
+    static TRANSCLUDED: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+/// Run `f`, recording every built-in VFS resource inlined through
+/// `transclude` (nested transclusions included). Returns `f`'s value and the
+/// resource paths in first-seen order, with `mew://` prefixes stripped.
+///
+/// The trace is thread-local, so `f`'s renders must run on the calling thread.
+pub fn record_transclusions<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    /// Restores the previous trace state even if `f` panics.
+    struct Restore(Option<Vec<String>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TRANSCLUDED.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+
+    let previous = TRANSCLUDED.with(|slot| slot.borrow_mut().replace(Vec::new()));
+    let _restore = Restore(previous);
+
+    let value = f();
+    let recorded = TRANSCLUDED
+        .with(|slot| slot.borrow_mut().take())
+        .unwrap_or_default();
+
+    let mut seen = HashSet::new();
+    let ordered = recorded
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .collect();
+    (value, ordered)
+}
 
 /// Context for rendering prompt templates.
 ///
@@ -213,6 +250,11 @@ pub fn render(body: &str, ctx: &TemplateContext) -> String {
             if content.is_empty() {
                 return String::new();
             }
+            TRANSCLUDED.with(|slot| {
+                if let Some(record) = slot.borrow_mut().as_mut() {
+                    record.push(stripped.to_string());
+                }
+            });
             state
                 .env()
                 .render_str(content, transclude_ctx.clone())
@@ -429,7 +471,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_render_available_skills_objects() {
         let c = TemplateContext {
             available_skills: vec![
@@ -584,5 +625,48 @@ mod tests {
         let body = "Team: {{ project_vars.team }}. Channel: {{ project_vars.channel }}.";
         let result = render(body, &c);
         assert_eq!(result, "Team: platform. Channel: #eng-platform.");
+    }
+
+    #[test]
+    fn test_record_transclusions_captures_resolved_vfs_paths() {
+        let body = crate::vfs::read_builtin("system_prompts/base").unwrap();
+        let (rendered, paths) = record_transclusions(|| render(body, &ctx()));
+
+        assert!(!rendered.is_empty());
+        // Only the conditional branch actually taken (openai, for the deepseek
+        // ctx) is recorded; the untaken variants are not.
+        assert_eq!(
+            paths.first().map(String::as_str),
+            Some("system_prompts/base_openai")
+        );
+        assert_eq!(
+            paths,
+            vec![
+                "system_prompts/base_openai".to_string(),
+                "system_prompts/_builtin_file_tool_preference".to_string(),
+                "system_prompts/_shell_file_edit_mandate".to_string(),
+                "system_prompts/_shell_monitor_preference".to_string(),
+                "system_prompts/_tool_library".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_record_transclusions_dedupes_repeats() {
+        let body = "{{ transclude(\"mew://system_prompts/_tool_library\") }}{{ transclude(\"system_prompts/_tool_library\") }}";
+        let (_rendered, paths) = record_transclusions(|| render(body, &ctx()));
+        assert_eq!(
+            paths,
+            vec!["system_prompts/_tool_library".to_string()],
+            "repeated transcludes of one resource record once"
+        );
+    }
+
+    #[test]
+    fn test_record_transclusions_ignores_missing_paths() {
+        let body = "[{{ transclude(\"mew://nope/missing\") }}]";
+        let (rendered, paths) = record_transclusions(|| render(body, &ctx()));
+        assert_eq!(rendered, "[]");
+        assert!(paths.is_empty(), "unresolved paths are not recorded");
     }
 }

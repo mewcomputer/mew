@@ -235,7 +235,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// Debug tools: permission simulator, VFS inspector.
+    /// Debug tools: permission simulator, VFS inspector, context viewer.
     Debug {
         #[command(subcommand)]
         command: DebugCommands,
@@ -392,6 +392,19 @@ pub enum DebugCommands {
     Cache {
         #[command(subcommand)]
         command: CacheCommands,
+    },
+    /// Show the context sources that feed the system prompt.
+    ///
+    /// Without flags, prints a tree of every source in use: the global
+    /// `AGENTS.md`/`CLAUDE.md`, then `AGENTS.md`/`CLAUDE.md`, `.mew/AGENTS.md`,
+    /// and `.mew/wiki.md` from the git root down to the working directory, plus
+    /// the built-in VFS resources (`mew://...`) pulled in by templates.
+    Context {
+        /// Print the fully assembled system prompt (base scaffold + context
+        /// files + skills) exactly as the model receives it, instead of the
+        /// source tree. Suitable for piping to a pager or file.
+        #[arg(long)]
+        full: bool,
     },
 }
 

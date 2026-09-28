@@ -95,9 +95,18 @@ pub(crate) async fn build_daemon_server(
                 .session_id
                 .strip_prefix("sess_")
                 .and_then(|s| ulid::Ulid::from_string(s).ok());
+            let provider = crate::setup::providers::build_provider(
+                &cfg,
+                cat.as_ref(),
+                &provider_id,
+                &model_id,
+                raw,
+                session_id,
+            )?;
             let mut agent = crate::setup::agent::build_session_agent(
                 &cfg,
                 cat.as_ref(),
+                provider,
                 &provider_id,
                 &model_id,
                 raw,

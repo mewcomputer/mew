@@ -143,3 +143,36 @@ This means:
 If your context file is large, consider moving detailed procedures into
 [skills](/docs/using-mew/skills/) that the agent loads on demand instead of
 embedding everything in the system prompt.
+
+## Inspecting loaded context
+
+`mew debug context` prints a tree of every source that will be injected, so you
+can confirm what the agent actually sees. File-system context files appear under
+their paths; built-in VFS resources pulled in by templates (`transclude`) appear
+under `mew://`:
+
+```text
+$ mew debug context
+├── mew://
+│   └── system_prompts
+│       ├── _builtin_file_tool_preference
+│       ├── _shell_file_edit_mandate
+│       ├── _shell_monitor_preference
+│       ├── _tool_library
+│       └── base_openai
+└── ~
+    ├── .claude/CLAUDE.md
+    └── code/my-app/AGENTS.md
+```
+
+The VFS list is resolved, not scanned: only the branches actually taken are
+shown (for example a single provider-specific `base_*` variant), and nested
+transclusions are followed. Add `--full` to print the fully assembled system
+prompt instead: the base scaffold, every context file, and the skills listing,
+in the exact order the model receives them. Diagnostics go to stderr, so the
+output is safe to pipe or redirect:
+
+```bash
+mew debug context --full > context.txt
+mew debug context --full | less
+```

@@ -1,3 +1,34 @@
+# 2026-09-27 — add `mew debug context` to inspect the assembled context
+
+`mew debug context` prints a tree of every source feeding the system prompt:
+filesystem context files (global `AGENTS.md`/`CLAUDE.md`, then per-directory
+`AGENTS.md`/`CLAUDE.md`, `.mew/AGENTS.md`, `.mew/wiki.md`) plus the built-in VFS
+resources (`mew://...`) inlined by templates, grouped under a `mew://` node.
+`--full` prints the fully assembled system prompt — base scaffold, context
+blocks, and skills listing — via a shared snapshot helper that builds a real
+session agent with a `FakeProvider`, so no credentials or network are needed.
+
+Template resolution is real, not scanned: `mew-prompts` gained a thread-local
+`record_transclusions` recorder that the `transclude` function feeds, so the VFS
+list reflects only the branches actually taken (a single provider-specific
+`base_*` variant) and follows nested transclusions. `build_system_prompt_snapshot`
+returns `(prompt, vfs_resources)`, so the tree and `--full` are two views of the
+same resolve.
+
+Making `build_session_agent` take an injected provider (instead of building one
+itself) let the debug path reuse the exact production wiring without a provider.
+Also routed non-TUI tracing to stderr so `--full` and other command stdout stay
+clean for piping; the daemon already did this, the CLI path was using the
+default stdout writer. Removed a duplicate `#[test]` attribute in
+`mew-prompts::template` that clippy rejected under `-D warnings`.
+
+Tests cover tree grouping, chain collapsing, `~` abbreviation, the VFS subtree,
+combined files+VFS, the empty case, transclusion recording (taken branch,
+dedupe, missing paths), and an end-to-end snapshot assertion. `cargo test -p mew`
+(152) and `-p mew-prompts` (61), `cargo clippy --all -- -D warnings`, `cargo fmt`,
+and `just arch-check` are clean; both `mew debug context` and `--full` were
+exercised against this repo.
+
 # 2026-09-12 — make desktop persona and model pickers usable
 
 Persona options now size to their wrapped content inside a bounded scroll area,

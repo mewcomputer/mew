@@ -220,7 +220,12 @@ async fn async_main(cli: Cli, daemonized: bool) -> Result<()> {
                 .with_writer(std::sync::Mutex::new(file))
                 .init();
         } else {
-            tracing_subscriber::fmt().init();
+            // Diagnostics belong on stderr so stdout stays pure program
+            // output for commands that pipe (`mew debug context --full`,
+            // `mew config show`, ...). Mirrors the daemon's writer choice.
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .init();
         }
     }
 

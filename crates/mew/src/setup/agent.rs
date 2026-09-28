@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use mew_agent::{Agent, PromptCacheRetention};
 use mew_catalog::Catalog;
@@ -64,8 +64,7 @@ use mew_tools::tools::write_plan::WritePlan;
 use mew_tools::SecretSet;
 
 use crate::setup::providers::{
-    build_provider, find_router_provider, make_provider_builder, maybe_set_classifier_provider,
-    MainModelResolver,
+    find_router_provider, make_provider_builder, maybe_set_classifier_provider, MainModelResolver,
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -493,6 +492,7 @@ pub(crate) fn wire_subagents(
 pub(crate) fn build_session_agent(
     cfg: &Config,
     cat: Option<&Catalog>,
+    provider: Arc<dyn mew_provider::Provider>,
     provider_id: &str,
     model_id: &str,
     raw: bool,
@@ -505,8 +505,6 @@ pub(crate) fn build_session_agent(
     todos_path: Option<std::path::PathBuf>,
     discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
 ) -> Result<Agent> {
-    let provider = build_provider(cfg, cat, provider_id, model_id, raw, session_id)
-        .context("build provider")?;
     let cwd = session_cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     // Collect [provides] paths from discovered extensions.
@@ -711,6 +709,48 @@ pub(crate) fn build_session_agent(
     }
 
     Ok(agent)
+}
+
+/// Assemble the system prompt for a fresh session rooted at `cwd` without
+/// running a turn, along with every built-in VFS resource inlined through
+/// `transclude` while assembling it (nested transclusions included).
+///
+/// Used by `mew debug context`. Builds a real session agent (tools, personas,
+/// skills, subagents, context files) but injects a `FakeProvider`: the
+/// assembled prompt does not depend on the provider instance, and the fake
+/// adapter keeps the command free of credential and network requirements.
+pub(crate) fn build_system_prompt_snapshot(
+    cfg: &Config,
+    cat: Option<&Catalog>,
+    provider_id: &str,
+    model_id: &str,
+    cwd: &std::path::Path,
+) -> Result<(String, Vec<String>)> {
+    let discovered = mew_ext_broker::discover_extensions(cwd);
+    let (agent, vfs) = mew_prompts::template::record_transclusions(|| {
+        let provider: Arc<dyn mew_provider::Provider> =
+            Arc::new(mew_provider_fake::FakeProvider::new(
+                mew_provider_fake::FakeProvider::text_response(""),
+            ));
+        build_session_agent(
+            cfg,
+            cat,
+            provider,
+            provider_id,
+            model_id,
+            false,
+            mew_hooks::PermissionMode::Standard,
+            None,
+            None,
+            Some(cwd.to_path_buf()),
+            false,
+            Arc::new(mew_hooks::NopDispatcher),
+            None,
+            &discovered,
+        )
+    });
+    let agent = agent?;
+    Ok((agent.system, vfs))
 }
 
 #[cfg(test)]
@@ -1065,5 +1105,40 @@ mod tests {
             0,
             "backward-compat: no spurious reprompt"
         );
+    }
+
+    #[test]
+    fn snapshot_includes_project_context_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "SNAPSHOT_MARKER project rules",
+        )
+        .unwrap();
+
+        let cfg = Config::default();
+        let (system, vfs) =
+            build_system_prompt_snapshot(&cfg, None, "opencode-zen", "fake-model", dir.path())
+                .expect("assemble snapshot");
+
+        assert!(
+            system.contains("SNAPSHOT_MARKER project rules"),
+            "assembled prompt must inline the project context file; got:\n{system}"
+        );
+        let expected = format!(
+            "<context source=\"{}\">",
+            dir.path().join("AGENTS.md").display()
+        );
+        assert!(
+            system.contains(&expected),
+            "context file must be wrapped with its source path ({expected}); got:\n{system}"
+        );
+        // The base scaffold's VFS resources are resolved for the configured
+        // provider shape (opencode-zen is openai-shaped).
+        assert!(
+            vfs.contains(&"system_prompts/base_openai".to_string()),
+            "resolved VFS resources must include the taken base variant; got {vfs:?}"
+        );
+        assert!(vfs.contains(&"system_prompts/_tool_library".to_string()));
     }
 }
