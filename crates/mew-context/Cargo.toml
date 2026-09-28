@@ -9,7 +9,7 @@ license.workspace = true
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-directories = { workspace = true }
+etcetera = { workspace = true }
 serde = { workspace = true }
 serde_yaml = "0.9"
 

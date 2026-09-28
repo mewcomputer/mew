@@ -26,6 +26,11 @@ collecting `AGENTS.md` and `CLAUDE.md` files. All found files are loaded.
 If multiple files exist along the path (e.g. one in a subdirectory and
 one at the root), they all get loaded and concatenated.
 
+A global context file is loaded before the project files:
+`$MEW_CONFIG_DIR/AGENTS.md` (default `~/.config/mew/AGENTS.md`), falling back to
+`~/.claude/CLAUDE.md` when no mew-global file is present. `mew debug context`
+shows which one was picked.
+
 ## What to put in a context file
 
 ### Essential

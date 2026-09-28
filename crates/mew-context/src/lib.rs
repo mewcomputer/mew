@@ -37,25 +37,16 @@ impl Loader {
     /// Precedence (per directory): `AGENTS.md` preferred, `CLAUDE.md` as fallback.
     /// Only one file is loaded per directory level.
     ///
-    /// Global: `~/.config/mew/AGENTS.md` first, then `~/.claude/CLAUDE.md` as fallback.
+    /// Global: `$MEW_CONFIG_DIR` or `~/.config/mew/AGENTS.md` first, then
+    /// `~/.claude/CLAUDE.md` as fallback.
     ///
     /// Files are returned from most-general to most-specific.
     pub fn load(&self) -> Result<Vec<File>, ContextError> {
         let mut files = Vec::new();
 
         // Global config: AGENTS.md preferred, CLAUDE.md fallback.
-        if let Some(cfg_dir) = config_dir() {
-            let p = cfg_dir.join("AGENTS.md");
-            if let Some(f) = try_read(&p) {
-                trace!(?p, "loaded global AGENTS.md");
-                files.push(f);
-            } else if let Some(home) = home_dir() {
-                let cc = home.join(".claude").join("CLAUDE.md");
-                if let Some(f) = try_read(&cc) {
-                    trace!(?cc, "loaded global CLAUDE.md (fallback)");
-                    files.push(f);
-                }
-            }
+        if let Some(f) = load_global(config_dir().as_deref(), home_dir().as_deref()) {
+            files.push(f);
         }
 
         // Determine root: git worktree root or home.
@@ -96,6 +87,29 @@ impl Loader {
         debug!(count = files.len(), "loaded context files");
         Ok(files)
     }
+}
+
+/// Load the global context file: `<config_dir>/AGENTS.md`, falling back to
+/// `~/.claude/CLAUDE.md` when no mew-global file exists. Returns `None` when
+/// neither is present.
+fn load_global(config_dir: Option<&Path>, home: Option<&Path>) -> Option<File> {
+    let cfg_dir = config_dir?;
+
+    let agents = cfg_dir.join("AGENTS.md");
+    if let Some(f) = try_read(&agents) {
+        trace!(path = ?agents, "loaded global AGENTS.md");
+        return Some(f);
+    }
+
+    if let Some(home) = home {
+        let claude = home.join(".claude").join("CLAUDE.md");
+        if let Some(f) = try_read(&claude) {
+            trace!(path = ?claude, "loaded global CLAUDE.md (fallback)");
+            return Some(f);
+        }
+    }
+
+    None
 }
 
 fn try_read(path: &Path) -> Option<File> {
@@ -216,8 +230,39 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// The mew config directory: `$MEW_CONFIG_DIR` when set, otherwise the
+/// platform config location (`$XDG_CONFIG_HOME/mew` or `~/.config/mew` on
+/// Unix). Returns `None` if no base directory can be determined.
+///
+/// Mirrors `mew_config::config_dir` so the global `AGENTS.md` is read from
+/// the same place the rest of mew keeps its config.
 fn config_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("computer", "mew", "mew").map(|d| d.config_dir().to_path_buf())
+    config_dir_with(std::env::var_os("MEW_CONFIG_DIR").map(PathBuf::from))
+}
+
+/// Pure core of [`config_dir`]: `override_dir` stands in for `$MEW_CONFIG_DIR`.
+/// Kept separate so the resolution can be tested without mutating the process
+/// environment.
+fn config_dir_with(override_dir: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(dir) = override_dir {
+        return Some(dir);
+    }
+    default_config_dir()
+}
+
+/// The platform config directory when no override is set.
+fn default_config_dir() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use etcetera::base_strategy::{BaseStrategy, Xdg};
+        Xdg::new().ok().map(|xdg| xdg.config_dir().join("mew"))
+    }
+    #[cfg(not(unix))]
+    {
+        etcetera::choose_base_strategy()
+            .ok()
+            .map(|strategy| strategy.config_dir().join("mew"))
+    }
 }
 
 fn find_git_root(dir: &Path) -> Result<PathBuf, ContextError> {
@@ -327,6 +372,7 @@ pub fn load_project_vars(cwd: &Path) -> std::collections::HashMap<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn test_paths_between() {
         let root = PathBuf::from("/home/user/project");
@@ -493,7 +539,7 @@ mod tests {
         let files = loader.load().unwrap();
         let agents = files
             .iter()
-            .find(|f| f.path.ends_with("AGENTS.md"))
+            .find(|f| f.path.starts_with(dir.path()) && f.path.ends_with("AGENTS.md"))
             .expect("AGENTS.md found");
         assert!(agents.content.contains("Project rules."));
         assert!(agents.content.contains("Use 4 spaces."));
@@ -511,7 +557,7 @@ mod tests {
         let files = loader.load().unwrap();
         let agents = files
             .iter()
-            .find(|f| f.path.ends_with("AGENTS.md"))
+            .find(|f| f.path.starts_with(dir.path()) && f.path.ends_with("AGENTS.md"))
             .expect("AGENTS.md found");
         assert!(agents.content.contains("Be concise."));
     }
@@ -526,7 +572,7 @@ mod tests {
         let files = loader.load().unwrap();
         let agents = files
             .iter()
-            .find(|f| f.path.ends_with("AGENTS.md"))
+            .find(|f| f.path.starts_with(dir.path()) && f.path.ends_with("AGENTS.md"))
             .expect("AGENTS.md found");
         // The @include line should be left as-is, not inlined.
         assert!(agents.content.contains("@../secret.txt"));
@@ -546,7 +592,7 @@ mod tests {
         let files = loader.load().unwrap();
         let agents = files
             .iter()
-            .find(|f| f.path.ends_with("AGENTS.md"))
+            .find(|f| f.path.starts_with(dir.path()) && f.path.ends_with("AGENTS.md"))
             .expect("AGENTS.md found");
         assert!(agents.content.contains("@nonexistent.md"));
         assert!(agents.content.contains("End."));
@@ -562,7 +608,7 @@ mod tests {
         let files = loader.load().unwrap();
         let agents = files
             .iter()
-            .find(|f| f.path.ends_with("AGENTS.md"))
+            .find(|f| f.path.starts_with(dir.path()) && f.path.ends_with("AGENTS.md"))
             .expect("AGENTS.md found");
         assert_eq!(agents.content, content);
     }
@@ -662,9 +708,62 @@ mod tests {
         let files = loader.load().unwrap();
         let agents = files
             .iter()
-            .find(|f| f.path.ends_with("AGENTS.md"))
+            .find(|f| f.path.starts_with(dir.path()) && f.path.ends_with("AGENTS.md"))
             .expect("AGENTS.md found");
         assert!(agents.template);
         assert!(agents.content.contains("{{ project_vars.name }}"));
+    }
+
+    #[test]
+    fn test_config_dir_honours_override() {
+        assert_eq!(
+            config_dir_with(Some(PathBuf::from("/custom/mew"))),
+            Some(PathBuf::from("/custom/mew"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_default_config_dir_uses_xdg_location() {
+        // Must match `mew_config::config_dir`; a macOS `~/Library/...` path
+        // here silently drops the documented `~/.config/mew/AGENTS.md`.
+        let home = std::env::var_os("HOME").expect("HOME should be set");
+        let expected = match std::env::var_os("XDG_CONFIG_HOME") {
+            Some(xdg) => PathBuf::from(xdg).join("mew"),
+            None => PathBuf::from(home).join(".config/mew"),
+        };
+        assert_eq!(default_config_dir(), Some(expected));
+    }
+
+    #[test]
+    fn test_load_global_prefers_config_dir_agents_md() {
+        let cfg = tempfile::tempdir().unwrap();
+        std::fs::write(cfg.path().join("AGENTS.md"), "FROM_CONFIG_DIR").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        std::fs::write(home.path().join(".claude").join("CLAUDE.md"), "FROM_CLAUDE").unwrap();
+
+        let file = load_global(Some(cfg.path()), Some(home.path())).expect("global file");
+        assert_eq!(file.path, cfg.path().join("AGENTS.md"));
+        assert_eq!(file.content, "FROM_CONFIG_DIR");
+    }
+
+    #[test]
+    fn test_load_global_falls_back_to_claude_md() {
+        let cfg = tempfile::tempdir().unwrap(); // no AGENTS.md
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".claude")).unwrap();
+        std::fs::write(home.path().join(".claude").join("CLAUDE.md"), "FROM_CLAUDE").unwrap();
+
+        let file = load_global(Some(cfg.path()), Some(home.path())).expect("global file");
+        assert_eq!(file.content, "FROM_CLAUDE");
+    }
+
+    #[test]
+    fn test_load_global_none_without_any_file() {
+        let cfg = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        assert!(load_global(None, Some(home.path())).is_none());
+        assert!(load_global(Some(cfg.path()), Some(home.path())).is_none());
     }
 }

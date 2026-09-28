@@ -1,3 +1,35 @@
+# 2026-09-27 — fix where the global AGENTS.md is read from
+
+`mew-context` resolved the global context directory with
+`directories::ProjectDirs`, which on macOS is
+`~/Library/Application Support/computer.mew.mew`. The rest of mew (and
+`mew-config/src/paths.rs`, which says all crates should share its helpers) uses
+XDG `~/.config/mew`. So the documented `~/.config/mew/AGENTS.md` was silently
+ignored on macOS, `MEW_CONFIG_DIR` had no effect on context, and the
+`~/.claude/CLAUDE.md` fallback masked it. Found while reviewing `mew debug
+context` output.
+
+`mew-context::config_dir` now mirrors `mew_config::config_dir`: `MEW_CONFIG_DIR`
+override, else `$XDG_CONFIG_HOME/mew` (or `~/.config/mew`) on Unix, else the
+platform strategy. Dropped the now-unused `directories` dependency and added
+`etcetera`.
+
+Resolution and global loading were split into pure helpers (`config_dir_with`,
+`default_config_dir`, `load_global(config_dir, home)`) so they can be tested
+without mutating process env. That mattered: an earlier env-mutating test proved
+flaky because it made a global `AGENTS.md` appear mid-run, and several existing
+loader tests matched `find(|f| f.path.ends_with("AGENTS.md"))`, which then
+resolved to the global file. Those tests are now scoped to their temp dir —
+required anyway, since a developer who creates `~/.config/mew/AGENTS.md` would
+otherwise hit the same failure. Tests cover the override, the XDG default, the
+global-file precedence and `.claude` fallback; verified end-to-end that
+`MEW_CONFIG_DIR=<dir> mew debug context` lists `<dir>/AGENTS.md` and that the
+default case is unchanged where `~/.config/mew/AGENTS.md` does not exist.
+`cargo test -p mew-context` (30, stable across 12 runs) passes with and without
+a global `AGENTS.md`; `-p mew-prompts` (61), `-p mew` (152),
+`cargo clippy --all -- -D warnings`, `cargo fmt`, `just arch-check`, and
+`just deps` are clean.
+
 # 2026-09-27 — add `mew debug context` to inspect the assembled context
 
 `mew debug context` prints a tree of every source feeding the system prompt:
