@@ -1051,3 +1051,97 @@ switch/unload/resume. After these behaviors hold, build the project/task shell,
 daemon-backed review, and shared human/agent browser slice identified above.
 Keep the useful engine and tools while replacing duplicated state plumbing in
 small verified changes. A complete engine rewrite is not justified by this audit.
+
+# 2026-10-03 — Native-first session reliability triage
+
+Prioritize the macOS native application and its Rust daemon/client dependencies.
+Treat native mobile build/binding compatibility as a required compatibility gate,
+and make only the TUI/web changes required by shared-contract changes in this
+batch. Broader frontend parity and visual redesign remain queued. This entry is
+triage, not an implementation record.
+
+## First batch: reliable native sessions
+
+1. **Remove the automatic handoff workflow.** Proposed scope is handoff_plan,
+   its blocking plan approval, and the deferred automatic persona switch shared
+   with switch_persona. Keep explicit persona selection and plan files. The user
+   was asked to clarify whether switch_persona or personas should remain; that
+   removal boundary is provisional until answered. Update built-in planner,
+   builder, plan-reviewer, write_plan/edit_plan guidance and tool allowlists along
+   with implementation. Do not add a replacement handoff primitive. Verification:
+   planning can finish without waiting on a handoff approval, manual selection
+   still works, and older history containing removed tool names remains readable.
+   Retire native/wire consumers together, accounting for old running daemons and
+   regenerating UniFFI bindings rather than editing generated Swift manually.
+
+2. **Separate task lifetime from the open conversation.** Keep executing and
+   waiting-for-input sessions alive while their daemon is alive; unload only
+   eligible idle sessions. Switching or losing a viewer must not cancel work.
+   Preserve explicit cancel/delete behavior. This does not promise that work
+   survives quitting an app-owned daemon. Verification: start in A, switch to B
+   beyond 30 seconds, return to A and observe the same live task; include a
+   pending question, disconnect/reconnect, explicit cancellation, and idle unload.
+
+3. **Make whole-run state authoritative in native clients.** Synchronize the
+   attached session's running state with daemon activity and initial attach
+   hydration rather than provider MessageEnd. Native composer, sidebar and mobile
+   progress must agree during tool continuations, errors, and cancellation. Add
+   desktop completion/failure feedback so work completed while viewing B remains
+   discoverable. Verification: a multi-message tool turn never offers Send early;
+   attach mid-run reports busy immediately; failures and disconnects release the
+   composer and surface an actionable error.
+
+4. **Recover pending input on attach.** Retain request payloads as well as response
+   channels, hydrate the current actionable state, and resolve requests by stable
+   IDs across clients and cancellation. Once handoff is removed, do this for the
+   remaining permissions, questions, and goal approvals. Verification: reconnect
+   while blocked, answer from another client exactly once, and cancel without
+   leaving an actionable stale card. Any minimal TUI/web resolution fixes belong
+   with this contract change; unrelated presentation work does not.
+
+5. **Use the selected project throughout execution.** Thread session cwd through
+   shell, ToolCtx, prompts, discovery, subagents and permission/workspace defaults.
+   Verify with two real temporary repositories and a daemon launched in A while
+   executing a native task in B. Relative reads/writes, shell pwd, loaded context,
+   and child tasks must consistently refer to B.
+
+## Second batch: operational state and compatibility
+
+6. **Persist and apply session policy completely.** Restore model/provider,
+   thinking, explicit persona, permission mode and todos after idle unload or
+   daemon restart. Apply model identity, pricing and unpinned child providers
+   together; a failed persona pin must report failure without claiming success.
+   Verification: switch settings, create dependent todos, unload/reload, then
+   inspect actual next top-level and child requests and operate on retained IDs.
+
+7. **Close native compatibility gaps.** Native and iOS build/binding checks gate
+   every earlier shared-contract change. Handle remaining subagent/goal events;
+   isolate state by daemon and
+   session; recover failed sends; implement usable older-history retrieval. Use
+   canonical daemon traces to check native core/mobile projections. Before
+   removing wire cases, exercise native app versus independently running older
+   daemon and choose an explicit supported-version policy, with a visible
+   incompatibility result rather than a silent missing feature. Avoid introducing
+   a broad capability-negotiation framework without a concrete need.
+
+## Next: native browser and review, then broader parity
+
+After the first batch passes, fix the native browser endpoint/ready handshake,
+task/page ownership and message-pump lifetime. Verify that hiding the panel or
+switching conversations preserves the correct page, and that human and agent
+operate on the same tab. Native navigation/focus and visual performance require
+an unlocked Mac. Address review freshness and host provenance before expanding
+review controls: same-count edits must refresh, and remote changes must come from
+their daemon workspace rather than a coincidentally matching local path.
+
+Queue full MCP/plugin/extension startup integration, web tool-identity/history/
+command fixes, general TUI subscription/pagination work, and larger project/task
+navigation redesign after these reliability gates. They remain tracked defects;
+native-first narrows order rather than discarding them. Do not rewrite the shell
+or engine as part of this triage.
+
+Verified ordering and removal dependencies against tool registration, handoff and
+switch_persona execution, built-in persona/subagent prompts, native action
+consumers, daemon detach/attach, client-core activity handling, native version
+handling, and mobile compatibility projection. Worktree was clean before this
+append-only journal update; no product source changes or new test results.
