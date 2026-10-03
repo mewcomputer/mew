@@ -231,8 +231,7 @@ impl Session {
         (asks + goals) as u32
     }
 
-    /// Drop all pending oneshot senders. Call when the last client detaches
-    /// mid-turn so the agent loop unblocks.
+    /// Drop pending oneshot senders when the user cancels a turn.
     pub async fn drain_pending(&self) {
         let mut perms = self.pending_permissions.lock().await;
         perms.clear();
@@ -375,6 +374,35 @@ impl SessionManager {
     pub async fn remove(&self, session_id: &str) {
         self.active.lock().await.remove(session_id);
         self.loading.lock().await.remove(session_id);
+    }
+
+    /// Unload an unused runtime, or stop reaping if it was replaced or reattached.
+    /// A connection that looked up the session but has not registered yet, or a
+    /// queued/running operation, owns another strong reference. Check ownership
+    /// under the active-map lock so lookup and unloading cannot race.
+    pub(crate) async fn unload_detached(&self, session: &Arc<Session>) -> bool {
+        let mut active = self.active.lock().await;
+        if !active
+            .get(&session.id)
+            .is_some_and(|current| Arc::ptr_eq(current, session))
+        {
+            return true;
+        }
+        let clients = session.clients.lock().await;
+        if !clients.is_empty() {
+            return true;
+        }
+        // The manager and this reaper are the only expected owners of an idle
+        // runtime. Other reapers hold weak references while sleeping.
+        if Arc::strong_count(session) > 2
+            || *session.is_running.lock().await
+            || session.current_turn_cancel.lock().await.is_some()
+        {
+            return false;
+        }
+        active.remove(&session.id);
+        // Keep the resume lock: an attach may already be waiting on it.
+        true
     }
 
     /// List active and idle top-level sessions.

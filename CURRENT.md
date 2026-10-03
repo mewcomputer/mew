@@ -1183,3 +1183,21 @@ Concurrent native builds exhausted disk space. Removed only ignored, disposable
 target/debug/incremental caches, preserved all source and build evidence, and
 resumed checks with incremental compilation disabled. Native visual/focus QA
 still requires an unlocked Mac. Next work is active-session lifetime.
+
+# 2026-10-03 — Preserve active sessions without viewers
+
+Conversation switches and final socket disconnects no longer cancel a task after
+30 seconds. Idle reaping holds a weak reference and retries while a running or
+queued operation owns the runtime. Unloading checks the exact active instance
+and ownership under the manager lock, so a delayed attach cannot receive an
+orphaned runtime and an old reaper cannot remove a newly loaded session.
+Explicit cancellation remains effective; unused completed sessions still unload
+and resume their persisted history. The per-session resume lock survives idle
+unloading to prevent overlapping loaders.
+
+Real duplex WebSocket regressions reproduced four failures before the fix:
+switch-away cancellation, final-viewer cancellation, delayed-attach orphaning,
+and stale-reaper eviction. All five lifetime tests now pass, including idle
+workspace watcher shutdown, reattachment, explicit cancellation, and unloading
+after cancellation. Full daemon checks passed: 27 unit, 6 command, 23 end-to-end,
+5 lifetime and 6 session-management tests. Next work is authoritative run state.

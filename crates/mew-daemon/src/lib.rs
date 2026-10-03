@@ -475,16 +475,17 @@ async fn detach_connection_client(
         return;
     }
 
-    let session_id = session.id.clone();
-    let session_clone = session.clone();
+    let session = Arc::downgrade(&session);
     let manager = session_manager.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        if session_clone.client_count().await == 0 {
-            if session_clone.current_turn_cancel.lock().await.is_some() {
-                session_clone.cancel_turn().await;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let Some(session) = session.upgrade() else {
+                break;
+            };
+            if manager.unload_detached(&session).await {
+                break;
             }
-            manager.remove(&session_id).await;
         }
     });
 }
