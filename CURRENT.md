@@ -853,3 +853,30 @@ Entries before 2026-09-10, newest first. Bodies dropped in the
 - 2026-07-13 — tui-capture: animate spinner in daemon-mode recordings
 - 2026-07-12 — Context Window Inspector: Steps 7, 8, 9
 - 2026-01-21 — hidden `mew funfact` easter egg
+
+# 2026-09-29 — TUI: deduplicate model picker search results
+
+Model picker search hid section headers but kept both the Recent shortcut and
+the full-list entry. Non-empty model searches now deduplicate matching rows by
+full model ID. Empty searches retain both browsing sections, and identical model
+names under different providers remain separate choices.
+
+Verified the regression failed with two rows before the fix, then passed with
+`cargo test -p mew-tui --lib` (266 tests). Added coverage for label and
+case-insensitive description searches, distinct providers, and clearing search.
+`cargo fmt --all -- --check` and `git diff --check` pass.
+
+# 2026-10-03 — TUI: keep queued prompts behind the full daemon turn
+
+Daemon prompt streams now close when their attached session reports Idle, after
+all provider and tool events have drained. The TUI keeps its busy state until
+that stream closes, including errors and cancellation shutdown. Queued prompts
+and unknown slash commands use the same submission path; Up-Up prioritizes a
+queued prompt after cancellation finishes. Disconnects report an error and close
+both current and subsequent prompt streams.
+
+Verified `cargo test -p mew-daemon --lib` (26 tests), `cargo test -p mew-tui --lib`
+(271 tests), and `cargo test -p mew --bin mew dispatch_table_tests` (22 tests).
+Scoped clippy for all targets in `mew-daemon`, `mew-tui`, and `mew` passes with
+warnings denied, as do formatting, architecture, generated-theme, and diff
+checks. Loopback socket tests require execution outside the filesystem sandbox.

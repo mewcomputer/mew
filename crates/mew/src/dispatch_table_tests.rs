@@ -1044,3 +1044,86 @@ async fn test_cancel_keeps_streaming_until_turn_ends() {
     assert!(!app.streaming, "turn end should clear streaming");
     assert!(!app.cancelling, "turn end should clear cancelling");
 }
+
+#[tokio::test]
+async fn test_submit_queues_until_full_turn_finishes() {
+    let mut app = mew_tui::App::new();
+    app.daemon_mode = true;
+    app.streaming = true;
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+
+    // Hidden reasoning can have no visible parts at all.
+    runtime::handle_action(&mut cx, Action::Submit("first".into())).await;
+    cx.app.handle_agent_event(AgentEvent::Provider(
+        mew_provider::ProviderEvent::MessageEnd {
+            finish: mew_message::Finish::Stop,
+            usage: mew_message::Tokens::default(),
+            cost: 0.0,
+        },
+    ));
+    runtime::handle_action(&mut cx, Action::Submit("second".into())).await;
+    runtime::handle_action(&mut cx, Action::SlashCommand("/unknown".into())).await;
+    assert_eq!(cx.app.queued_messages, vec!["first", "second", "/unknown"]);
+    assert!(cx.target.calls.is_empty());
+    assert!(cx.app.messages().is_empty());
+    assert!(!cx.app.pending_queued_send);
+
+    cx.app.finish_turn();
+    assert!(cx.app.pending_queued_send);
+    let first = cx.app.pop_queued_message().unwrap();
+    runtime::handle_action(&mut cx, Action::Submit(first)).await;
+    assert_eq!(cx.target.calls, vec!["prompt"]);
+    assert!(cx.app.streaming);
+    assert_eq!(cx.app.queued_messages, vec!["second", "/unknown"]);
+}
+
+#[tokio::test]
+async fn test_send_queued_now_waits_for_cancellation_shutdown() {
+    let mut app = mew_tui::App::new();
+    app.daemon_mode = true;
+    app.streaming = true;
+    app.queued_messages = vec!["later".into()];
+    let mut target = RecordingTarget::new();
+    let mut should_break = false;
+    let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+        active_persona: None,
+    }));
+    let (event_loop, _event_rx) = mew_tui::EventLoop::new();
+    let mut cx = runtime::Ctx {
+        app: &mut app,
+        target: &mut target,
+        event_loop: &event_loop,
+        should_break: &mut should_break,
+        cat: None,
+        loaded_personas: &[],
+        plugin_info: &plugin_info,
+    };
+    runtime::handle_action(&mut cx, Action::SendQueuedNow("next".into())).await;
+    assert_eq!(cx.target.calls, vec!["cancel"]);
+    assert!(cx.app.streaming);
+    assert!(cx.app.cancelling);
+    assert_eq!(cx.app.queued_messages, vec!["next", "later"]);
+    cx.app
+        .handle_agent_event(AgentEvent::Error("aborted".into()));
+    runtime::handle_action(&mut cx, Action::Submit("also later".into())).await;
+    assert_eq!(cx.target.calls, vec!["cancel"]);
+    cx.app.finish_turn();
+    let next = cx.app.pop_queued_message().unwrap();
+    runtime::handle_action(&mut cx, Action::Submit(next)).await;
+    assert_eq!(cx.target.calls, vec!["cancel", "prompt"]);
+    assert_eq!(cx.app.queued_messages, vec!["later", "also later"]);
+}

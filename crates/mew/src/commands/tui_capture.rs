@@ -388,6 +388,10 @@ impl DaemonBackend {
                             break;
                         }
                     }
+                    Ok(mew_tui::Event::TurnFinished) => {
+                        self.app.finish_turn();
+                        had_event = true;
+                    }
                     Ok(mew_tui::Event::Tick) => {
                         self.app.tick();
                         self.app.clear_expired_alerts();
@@ -471,6 +475,7 @@ impl DaemonBackend {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 mew_tui::Event::Agent(ev) => self.app.handle_agent_event(ev),
+                mew_tui::Event::TurnFinished => self.app.finish_turn(),
                 mew_tui::Event::Tick => {
                     self.app.tick();
                     self.app.clear_expired_alerts();

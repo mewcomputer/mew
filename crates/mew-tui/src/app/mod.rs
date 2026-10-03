@@ -113,6 +113,7 @@ pub struct App {
     pub history: Vec<String>,
     pub history_index: Option<usize>,
     pub history_draft: Option<String>,
+    /// A full turn is in flight, including hidden reasoning and tool execution.
     pub streaming: bool,
     pub spinner_frame: usize,
     spinner_sub_tick: u8,
@@ -142,9 +143,9 @@ pub struct App {
     /// Recently used models (most recent first), capped at 6.
     /// Loaded from persisted state and updated on model switch.
     pub recent_models: Vec<String>,
-    /// Messages queued while a turn is streaming. Each is sent (oldest first)
+    /// Messages queued while a turn is in flight. Each is sent (oldest first)
     /// when the current turn finishes. Up-Up cancels the current turn and
-    /// sends the oldest immediately.
+    /// sends the oldest as soon as cancellation finishes.
     pub queued_messages: Vec<String>,
     /// Tracks Up-Up detection for sending queued messages immediately.
     /// Holds the count and the timestamp of the first press; resets after 15s.
@@ -477,6 +478,7 @@ impl PickerState {
             return self.items.iter().filter(|i| !i.header).collect();
         }
         let f = self.filter.to_lowercase();
+        let mut seen_models = std::collections::HashSet::new();
         self.items
             .iter()
             .filter(|i| {
@@ -484,7 +486,11 @@ impl PickerState {
                 if i.header {
                     return f.is_empty();
                 }
-                i.label.to_lowercase().contains(&f) || i.description.to_lowercase().contains(&f)
+                let matches = i.label.to_lowercase().contains(&f)
+                    || i.description.to_lowercase().contains(&f);
+                // Recent shortcuts duplicate full-list entries only while browsing.
+                matches
+                    && (self.kind != "model" || f.is_empty() || seen_models.insert(i.id.as_str()))
             })
             .collect()
     }
@@ -2002,6 +2008,18 @@ impl App {
         });
     }
 
+    /// Release the input queue only after the full turn has shut down.
+    pub fn finish_turn(&mut self) {
+        self.streaming = false;
+        self.cancelling = false;
+        self.esc_cancel_pending = None;
+        self.ctrl_c_quit_pending = None;
+        self.retry_status = None;
+        self.record_reasoning_elapsed(false);
+        self.pending_queued_send = !self.queued_messages.is_empty();
+        self.mark_chat_dirty();
+    }
+
     /// Process an agent event and update state.
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
@@ -2111,20 +2129,11 @@ impl App {
                 if let Some(msg) = self.messages.last() {
                     self.pending_md_rerender = Some(msg.id);
                 }
-                // Invalidate cache so next render re-highlights from scratch.
-                // ToolUse means the agent is still working - it will execute tools
-                // and request another stream. Stay in streaming mode.
-                if finish != mew_message::Finish::ToolUse {
-                    self.streaming = false;
-                    self.cancelling = false;
-                    self.esc_cancel_pending = None;
-                    self.ctrl_c_quit_pending = None;
-                    self.retry_status = None;
-                    // If there are queued messages, signal the main loop to
-                    // send the oldest one as a new turn.
-                    if !self.queued_messages.is_empty() {
-                        self.pending_queued_send = true;
-                    }
+                // In daemon mode, a provider response can end before tool
+                // execution or goal continuation. The turn stream owns busy
+                // state; MessageEnd only finalizes this response's rendering.
+                if !self.daemon_mode && finish != mew_message::Finish::ToolUse {
+                    self.finish_turn();
                 }
                 // The latest request's prompt size is the current context
                 // occupancy; snapshot it so the reading tracks growth and
@@ -2151,11 +2160,9 @@ impl App {
                 ));
             }
             AgentEvent::Provider(ProviderEvent::Error(err)) => {
-                self.streaming = false;
-                self.cancelling = false;
-                self.esc_cancel_pending = None;
-                self.ctrl_c_quit_pending = None;
-                self.retry_status = None;
+                if !self.daemon_mode {
+                    self.finish_turn();
+                }
                 self.push_synthetic_message(format!("Provider error: {}", err.message));
             }
             AgentEvent::PermissionRequest { call, tx } => {
@@ -2321,10 +2328,9 @@ impl App {
                 self.mark_chat_dirty();
             }
             AgentEvent::Error(msg) => {
-                self.streaming = false;
-                self.cancelling = false;
-                self.esc_cancel_pending = None;
-                self.ctrl_c_quit_pending = None;
+                if !self.daemon_mode {
+                    self.finish_turn();
+                }
                 self.push_synthetic_message(format!("Error: {}", msg));
             }
             AgentEvent::SubagentStart {

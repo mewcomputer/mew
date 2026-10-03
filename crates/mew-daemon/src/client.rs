@@ -44,9 +44,9 @@ struct ClientState {
     pending_plan_approvals: Mutex<HashMap<String, oneshot::Receiver<PlanDecision>>>,
     /// `request_id → receiver` for goal-proposal decisions.
     pending_goal_proposals: Mutex<HashMap<String, oneshot::Receiver<GoalDecision>>>,
-    /// The current event sender (set by `prompt()`, cleared when the
-    /// receiver is dropped). The background reader uses this to forward
-    /// translated AgentEvents.
+    /// The current event sender, set by `prompt()` and closed when the
+    /// attached session reports Idle or the connection closes. The reader
+    /// forwards all turn events before closing it.
     event_tx: Mutex<Option<mpsc::Sender<AgentEvent>>>,
     /// Persistent notification channel — always alive, unlike `event_tx`
     /// which is prompt-scoped. Session-management `ServerMessage`s
@@ -92,7 +92,7 @@ impl DaemonClient {
         let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<String>(64);
 
         // Forward outgoing JSON to the WebSocket.
-        tokio::spawn(async move {
+        let outgoing_task = tokio::spawn(async move {
             while let Some(json) = outgoing_rx.recv().await {
                 if ws_tx.send(Message::Text(json)).await.is_err() {
                     break;
@@ -141,7 +141,12 @@ impl DaemonClient {
                 // capture the session ID for later use, and still push the
                 // message to notify_tx so callers can read model/provider.
                 if let ServerMessage::SessionReady { ref session_id, .. } = server_msg {
-                    *state_clone.session_id.lock().await = Some(session_id.clone());
+                    let mut current_session = state_clone.session_id.lock().await;
+                    if current_session.as_ref() != Some(session_id) {
+                        *state_clone.event_tx.lock().await = None;
+                    }
+                    *current_session = Some(session_id.clone());
+                    drop(current_session);
                     let _ = state_clone.notify_tx.send(server_msg.clone()).await;
                     continue;
                 }
@@ -160,9 +165,16 @@ impl DaemonClient {
                             break;
                         }
                     }
-                } else {
+                } else if !events.is_empty() {
                     warn!("daemon client: event without active prompt");
                 }
+            }
+            outgoing_task.abort();
+            let _ = outgoing_task.await;
+            if let Some(tx) = state_clone.event_tx.lock().await.take() {
+                let _ = tx
+                    .send(AgentEvent::Error("daemon connection closed".into()))
+                    .await;
             }
         });
 
@@ -207,6 +219,12 @@ impl DaemonClient {
         attachments: Vec<mew_protocol::Attachment>,
     ) -> mpsc::Receiver<AgentEvent> {
         let (event_tx, event_rx) = mpsc::channel(256);
+        if self.state.session_id.lock().await.is_none() {
+            let _ = event_tx
+                .send(AgentEvent::Error("no daemon session attached".into()))
+                .await;
+            return event_rx;
+        }
 
         // Set the event sender so the background reader forwards events.
         *self.state.event_tx.lock().await = Some(event_tx);
@@ -214,7 +232,13 @@ impl DaemonClient {
         // Send the prompt message.
         let msg = ClientMessage::Prompt { text, attachments };
         let json = mew_protocol::encode_json(&msg).unwrap_or_default();
-        let _ = self.state.ws_out.send(json).await;
+        if self.state.ws_out.send(json).await.is_err() {
+            if let Some(tx) = self.state.event_tx.lock().await.take() {
+                let _ = tx
+                    .send(AgentEvent::Error("daemon connection closed".into()))
+                    .await;
+            }
+        }
 
         event_rx
     }
@@ -773,6 +797,22 @@ async fn translate_server_message(
             ]
         }
 
+        ServerMessage::SessionActivityChanged {
+            session_id,
+            activity,
+        } => {
+            // Idle is emitted only after the agent's full event stream drains,
+            // including tools and continuations. Closing this prompt-scoped
+            // channel lets the TUI finish after its buffered events, in order.
+            if *activity == mew_protocol::SessionState::Idle
+                && state.session_id.lock().await.as_ref() == Some(session_id)
+            {
+                *state.event_tx.lock().await = None;
+            }
+            let _ = state.notify_tx.send(msg.clone()).await;
+            Vec::new()
+        }
+
         ServerMessage::ModelList { .. }
         | ServerMessage::ModelSwitched { .. }
         | ServerMessage::RequestResolved { .. }
@@ -782,7 +822,6 @@ async fn translate_server_message(
         | ServerMessage::ClientAttached { .. }
         | ServerMessage::ClientDetached { .. }
         | ServerMessage::ControlYielded { .. }
-        | ServerMessage::SessionActivityChanged { .. }
         | ServerMessage::SessionStatsChanged { .. }
         | ServerMessage::GroupList { .. }
         | ServerMessage::GroupsChanged { .. }
@@ -902,4 +941,132 @@ fn wire_to_provider_event(
         },
         ProviderEventWire::Error(e) => ProviderEvent::Error(e.clone()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn prompt_stream_closes_only_when_attached_turn_is_idle() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (finish_tx, finish_rx) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let ready = ServerMessage::SessionReady {
+                    session_id: "active".into(),
+                    cwd: None,
+                    provider: Some("codex".into()),
+                    model: Some("test".into()),
+                    permission_mode: None,
+                };
+                ws.send(Message::Text(mew_protocol::encode_json(&ready).unwrap()))
+                    .await
+                    .unwrap();
+                ws.next().await.unwrap().unwrap(); // Prompt
+                for msg in [
+                    ServerMessage::Provider {
+                        event: mew_message::ProviderEventWire::MessageEnd {
+                            finish: mew_message::Finish::Stop,
+                            usage: mew_message::Tokens::default(),
+                            cost: 0.0,
+                            manifest: None,
+                        },
+                    },
+                    ServerMessage::ToolStart {
+                        call_id: "tool".into(),
+                    },
+                    ServerMessage::SessionActivityChanged {
+                        session_id: "other".into(),
+                        activity: mew_protocol::SessionState::Idle,
+                    },
+                ] {
+                    ws.send(Message::Text(mew_protocol::encode_json(&msg).unwrap()))
+                        .await
+                        .unwrap();
+                }
+                finish_rx.await.unwrap();
+                let idle = ServerMessage::SessionActivityChanged {
+                    session_id: "active".into(),
+                    activity: mew_protocol::SessionState::Idle,
+                };
+                ws.send(Message::Text(mew_protocol::encode_json(&idle).unwrap()))
+                    .await
+                    .unwrap();
+                // Wait for the test to close the connection so websocket closure
+                // cannot accidentally stand in for the Idle notification.
+                while ws.next().await.is_some() {}
+            });
+            let (client, mut notifications) = DaemonClient::connect(&format!("ws://{addr}"))
+                .await
+                .unwrap();
+            assert!(matches!(
+                notifications.recv().await,
+                Some(ServerMessage::SessionReady { .. })
+            ));
+            let mut events = client.prompt("hello".into(), Vec::new()).await;
+            assert!(matches!(
+                events.recv().await,
+                Some(AgentEvent::Provider(ProviderEvent::MessageEnd { .. }))
+            ));
+            assert!(matches!(
+                events.recv().await,
+                Some(AgentEvent::ToolStart { .. })
+            ));
+            assert!(matches!(
+                notifications.recv().await,
+                Some(ServerMessage::SessionActivityChanged { .. })
+            ));
+            assert!(matches!(
+                events.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            finish_tx.send(()).unwrap();
+            assert!(events.recv().await.is_none());
+            server.abort();
+        })
+        .await
+        .expect("prompt stream did not finish");
+    }
+
+    #[tokio::test]
+    async fn disconnected_prompt_stream_reports_error_and_closes() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let ready = ServerMessage::SessionReady {
+                    session_id: "active".into(),
+                    cwd: None,
+                    provider: None,
+                    model: None,
+                    permission_mode: None,
+                };
+                ws.send(Message::Text(mew_protocol::encode_json(&ready).unwrap()))
+                    .await
+                    .unwrap();
+                ws.next().await.unwrap().unwrap();
+                ws.close(None).await.unwrap();
+            });
+            let (client, mut notifications) = DaemonClient::connect(&format!("ws://{addr}"))
+                .await
+                .unwrap();
+            notifications.recv().await.unwrap();
+            let mut events = client.prompt("hello".into(), Vec::new()).await;
+            assert!(matches!(events.recv().await, Some(AgentEvent::Error(_))));
+            assert!(events.recv().await.is_none());
+            // A queued follow-up must also terminate if the connection is gone.
+            let mut events = client.prompt("next".into(), Vec::new()).await;
+            assert!(matches!(events.recv().await, Some(AgentEvent::Error(_))));
+            assert!(events.recv().await.is_none());
+            server.await.unwrap();
+        })
+        .await
+        .expect("disconnected prompt stream did not finish");
+    }
 }

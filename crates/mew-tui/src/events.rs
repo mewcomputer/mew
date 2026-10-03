@@ -15,6 +15,8 @@ pub enum Event {
     Input(CrosstermEvent),
     /// An agent event.
     Agent(mew_agent::AgentEvent),
+    /// The full turn's event stream has closed, after all buffered events.
+    TurnFinished,
     /// A tick for rendering.
     Tick,
     /// Application should quit.
@@ -81,9 +83,10 @@ impl EventLoop {
         tokio::spawn(async move {
             while let Some(event) = agent_rx.recv().await {
                 if tx.send(Event::Agent(event)).await.is_err() {
-                    break;
+                    return;
                 }
             }
+            let _ = tx.send(Event::TurnFinished).await;
         });
     }
 }
@@ -1814,6 +1817,20 @@ pub enum Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn turn_finished_follows_all_buffered_agent_events() {
+        let (event_loop, mut rx) = EventLoop::new();
+        let (tx, agent_rx) = mpsc::channel(8);
+        event_loop.forward_agent_events(agent_rx);
+        tx.send(mew_agent::AgentEvent::Error("aborted".into()))
+            .await
+            .unwrap();
+        assert!(matches!(rx.recv().await, Some(Event::Agent(_))));
+        assert!(rx.try_recv().is_err());
+        drop(tx);
+        assert!(matches!(rx.recv().await, Some(Event::TurnFinished)));
+    }
 
     #[test]
     fn test_at_mention_action_file() {

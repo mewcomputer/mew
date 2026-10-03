@@ -133,28 +133,9 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
             }
             mew_tui::Event::Agent(agent_event) => {
                 app.handle_agent_event(agent_event);
-                // After processing agent events, check if a turn just finished
-                // and there are queued messages to send.
-                if app.pending_queued_send {
-                    app.pending_queued_send = false;
-                    if let Some(text) = app.pop_queued_message() {
-                        let mut target = crate::runtime::daemon::DaemonTarget::new(client.clone());
-                        let mut cx = crate::runtime::Ctx {
-                            app: &mut app,
-                            target: &mut target,
-                            event_loop: &event_loop,
-                            should_break: &mut should_break,
-                            cat: None,
-                            loaded_personas: &[],
-                            plugin_info: &plugin_info,
-                        };
-                        crate::runtime::handle_action(
-                            &mut cx,
-                            mew_tui::events::Action::Submit(text),
-                        )
-                        .await;
-                    }
-                }
+            }
+            mew_tui::Event::TurnFinished => {
+                app.finish_turn();
             }
             mew_tui::Event::Quit => should_break = true,
             mew_tui::Event::Tick => {
@@ -203,6 +184,9 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
                     if app.streaming && agent_drain_count >= STREAMING_DRAIN_LIMIT {
                         break 'drain;
                     }
+                }
+                mew_tui::Event::TurnFinished => {
+                    app.finish_turn();
                 }
                 mew_tui::Event::Tick => {
                     app.tick();

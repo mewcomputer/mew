@@ -59,8 +59,7 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             // Keep `streaming` true until the turn actually ends (the turn is
             // still winding down). This is the turn-alive guard: submits in
             // this window are queued instead of racing the daemon's
-            // "turn in progress" window. The ending MessageEnd/Error event
-            // clears `cancelling` + `streaming`.
+            // "turn in progress" window. TurnFinished clears both flags.
             cx.app.cancelling = true;
             Flow::Continue
         }
@@ -149,11 +148,16 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             Flow::Continue
         }
         Action::SendQueuedNow(text) => {
-            // Cancel the current turn, then submit the queued message.
-            cx.target.cancel().await;
-            cx.app.streaming = false;
-            cx.app.cancelling = false;
-            handle_submit(cx, text).await;
+            if cx.app.streaming {
+                // Prioritize this message, but wait for cancellation to finish
+                // before opening another turn's event stream.
+                cx.app.queued_messages.insert(0, text);
+                cx.app.mark_chat_dirty();
+                cx.target.cancel().await;
+                cx.app.cancelling = true;
+            } else {
+                handle_submit(cx, text).await;
+            }
             Flow::Continue
         }
         Action::GuideQueued(text) => {
@@ -249,8 +253,8 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
 async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String) {
     if cx.app.streaming {
         // Queue the message instead of rejecting it. It will be sent
-        // automatically when the current turn finishes, or immediately
-        // if the user presses Up-Up.
+        // automatically when the current turn finishes. Up-Up requests
+        // cancellation and prioritizes it as the next turn.
         if !text.trim().is_empty() {
             cx.app.queued_messages.push(text);
             cx.app.mark_chat_dirty();
@@ -328,25 +332,8 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
     let result = cx.app.handle_slash(&text);
     match result {
         SlashResult::Continue => {
-            // Unknown slash command — fall through to the model as a normal prompt.
-            // This matches the enum doc comment ("fall through to the model").
-            if cx.app.streaming {
-                cx.app.set_alert("wait for the current response to finish");
-                return Flow::Continue;
-            }
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let (enriched, display, attachments) = process_mentions(
-                &text,
-                &cwd,
-                &mut cx.app.context_files,
-                &cx.app.skill_catalog,
-                &cx.app.subagent_catalog,
-            )
-            .await;
-            cx.app.push_user(display, attachments.clone());
-            cx.app.streaming = true;
-            let rx = cx.target.prompt(enriched, attachments);
-            cx.event_loop.forward_agent_events(rx);
+            // Unknown commands are normal prompts, including queue behavior.
+            handle_submit(cx, text).await;
             Flow::Continue
         }
         SlashResult::Quit => {

@@ -1982,8 +1982,35 @@ fn test_picker_filtered_hides_headers() {
     let filtered = picker.filtered();
     // No headers in filtered results.
     assert!(!filtered.iter().any(|i| i.header));
-    // Both kimi/k3 entries should match the filter.
-    assert_eq!(filtered.len(), 2);
+    // The recent shortcut and full-list entry represent one model.
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].id, "kimi/k3");
+}
+
+#[test]
+fn test_model_picker_search_preserves_distinct_provider_models() {
+    let mut app = App::new();
+    app.models = vec![
+        ("codex/gpt-6.1-sol".into(), "sol model".into()),
+        ("openai/gpt-6.1-sol".into(), "sol model".into()),
+    ];
+    app.recent_models = vec!["codex/gpt-6.1-sol".into()];
+    app.open_model_picker();
+
+    let picker = app.picker.as_mut().unwrap();
+    for query in ["6.1", "SOL MODEL"] {
+        picker.filter = query.into();
+        let ids: Vec<&str> = picker
+            .filtered()
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["codex/gpt-6.1-sol", "openai/gpt-6.1-sol"]);
+    }
+
+    // Clearing search restores both the Recent and All Models sections.
+    picker.filter.clear();
+    assert_eq!(picker.filtered().len(), 5);
 }
 
 #[test]
@@ -3355,4 +3382,81 @@ fn test_reasoning_summary_with_encrypted_content_is_rendered() {
         rendered.contains("checking the date"),
         "the summary text must be visible:\n{rendered}"
     );
+}
+
+#[test]
+fn daemon_message_end_keeps_turn_busy() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.streaming = true;
+    app.queued_messages = vec!["next".into()];
+
+    // Responses tool calls report Stop; the agent can still execute tools
+    // or continue after a text-only response.
+    for finish in [mew_message::Finish::Stop, mew_message::Finish::ToolUse] {
+        app.handle_agent_event(mew_agent::AgentEvent::Provider(
+            mew_provider::ProviderEvent::MessageEnd {
+                finish,
+                usage: mew_message::Tokens::default(),
+                cost: 0.0,
+            },
+        ));
+        assert!(app.streaming);
+        assert!(!app.pending_queued_send);
+    }
+}
+
+#[test]
+fn daemon_error_waits_for_turn_shutdown() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.streaming = true;
+    app.cancelling = true;
+    app.handle_agent_event(mew_agent::AgentEvent::Error("aborted".into()));
+    assert!(app.streaming);
+    assert!(app.cancelling);
+}
+
+#[test]
+fn finishing_turn_releases_queue_and_clears_busy_state() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.streaming = true;
+    app.cancelling = true;
+    app.retry_status = Some("retrying".into());
+    app.esc_cancel_pending = Some(std::time::Instant::now());
+    app.ctrl_c_quit_pending = Some(std::time::Instant::now());
+    app.queued_messages = vec!["first".into(), "second".into()];
+
+    // No visible provider parts are required to keep the turn busy or end it.
+    app.finish_turn();
+    assert!(!app.streaming);
+    assert!(!app.cancelling);
+    assert!(app.retry_status.is_none());
+    assert!(app.esc_cancel_pending.is_none());
+    assert!(app.ctrl_c_quit_pending.is_none());
+    assert!(app.pending_queued_send);
+    assert_eq!(app.pop_queued_message().as_deref(), Some("first"));
+    assert_eq!(app.pop_queued_message().as_deref(), Some("second"));
+    app.finish_turn();
+    assert!(!app.pending_queued_send);
+}
+
+#[test]
+fn daemon_provider_error_keeps_turn_busy() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.streaming = true;
+    app.queued_messages = vec!["next".into()];
+    app.handle_agent_event(mew_agent::AgentEvent::Provider(
+        mew_provider::ProviderEvent::Error(mew_message::MessageError {
+            kind: mew_message::ErrorKind::ProviderApi,
+            message: "failed".into(),
+        }),
+    ));
+    assert!(app.streaming);
+    assert!(!app.pending_queued_send);
+    app.finish_turn();
+    assert!(!app.streaming);
+    assert!(app.pending_queued_send);
 }
