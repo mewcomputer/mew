@@ -880,3 +880,35 @@ Verified `cargo test -p mew-daemon --lib` (26 tests), `cargo test -p mew-tui --l
 Scoped clippy for all targets in `mew-daemon`, `mew-tui`, and `mew` passes with
 warnings denied, as do formatting, architecture, generated-theme, and diff
 checks. Loopback socket tests require execution outside the filesystem sandbox.
+
+# 2026-10-03 — Desktop: task-flow and browser UX assessment
+
+Completed a source-based assessment of the native desktop task flow and browser,
+with independent task-flow and browser assessments and current official OpenAI
+documentation for projects, browser interaction, and local review. The requested
+priority is projects, conversations, progress, review, and follow-ups.
+
+The highest-impact gaps are whole-run lifecycle state in client-core, incomplete
+per-session operational cwd, dropped completion alerts, active-run submission
+without guidance, and review data loaded locally against HEAD with count-based
+cache invalidation. Preserve the existing workspace grouping, session view state,
+agent runtime, and protocol while addressing those boundaries.
+
+Browser automation selects the native CEF endpoint only when the separate
+MEW_BROWSER_CDP_PORT variable is configured. The shell restores conversation URLs
+into one global page, and hides the browser by stopping its message pump. A
+focused browser redesign needs explicit ready endpoints and task/page ownership,
+runtime lifetime independent of panel visibility, navigation state and recovery,
+and coordinated native focus/overlay visibility.
+
+Recommended proof slice: start a task in a second project, keep status accurate
+through a long tool call, send guidance, switch away and receive completion,
+review fresh changes, and let human and agent use the same page while it is
+hidden. Evaluate native browser composition and performance on that slice before
+choosing a shell replacement. Source inspection does not justify a full rewrite.
+
+Verified findings against the desktop, client-core, daemon, agent builder, browser
+tools, and CEF implementation. Live macOS inspection remains blocked by the locked
+Mac; visual scores and performance conclusions are deferred. No product code was
+changed by this assessment. Existing TUI changes were verified and committed
+separately as d8fd27a.
