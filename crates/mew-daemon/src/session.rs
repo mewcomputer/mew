@@ -64,6 +64,7 @@ pub struct Session {
     /// The single agent for this session. Cloned for each turn; mutated in
     /// place for model switches.
     pub agent: Mutex<Agent>,
+    pub browser_access: mew_tools::browser::BrowserAccess,
     /// Ensures only one turn or model switch runs at a time.
     pub turn_lock: Mutex<()>,
     /// Broadcast targets: (client_id, sender, kind) per attached client.
@@ -126,6 +127,7 @@ impl Session {
     ) -> Self {
         Self {
             id,
+            browser_access: agent.browser_access.clone(),
             agent: Mutex::new(agent),
             turn_lock: Mutex::new(()),
             clients: Mutex::new(Vec::new()),
@@ -166,51 +168,24 @@ impl Session {
         ulid::Ulid::new().to_string()
     }
 
-    /// Attach a client sender. Returns (client_id, was_first_client,
-    /// browser_capability_activated).
+    /// Attach a client sender. Returns (client_id, was_first_client).
     pub async fn attach_client(
         &self,
         sender: mpsc::UnboundedSender<ServerMessage>,
         client_kind: mew_protocol::ClientKind,
-    ) -> (u64, bool, bool) {
+    ) -> (u64, bool) {
         let mut clients = self.clients.lock().await;
         let was_first = clients.is_empty();
-        let had_browser = clients
-            .iter()
-            .any(|(_, _, kind)| *kind == mew_protocol::ClientKind::Desktop);
         let client_id = self.next_id();
         clients.push((client_id, sender, client_kind));
-        drop(clients);
-        self.set_browser_enabled().await;
-        (
-            client_id,
-            was_first,
-            !had_browser && client_kind == mew_protocol::ClientKind::Desktop,
-        )
+        (client_id, was_first)
     }
 
     /// Detach a client by id. Returns true if this was the last client.
     pub async fn detach_client(&self, client_id: u64) -> bool {
         let mut clients = self.clients.lock().await;
         clients.retain(|(id, _, _)| *id != client_id);
-        let was_last = clients.is_empty();
-        drop(clients);
-        self.set_browser_enabled().await;
-        was_last
-    }
-
-    async fn set_browser_enabled(&self) {
-        let enabled = self
-            .clients
-            .lock()
-            .await
-            .iter()
-            .any(|(_, _, kind)| *kind == mew_protocol::ClientKind::Desktop);
-        self.agent.lock().await.set_browser_enabled(enabled);
-    }
-
-    pub async fn browser_enabled(&self) -> bool {
-        self.agent.lock().await.browser_enabled
+        clients.is_empty()
     }
 
     pub async fn client_count(&self) -> usize {
@@ -307,11 +282,7 @@ impl SessionManager {
     }
 
     /// Create a brand-new session.
-    pub async fn create(
-        &self,
-        cwd: Option<PathBuf>,
-        client_kind: mew_protocol::ClientKind,
-    ) -> Result<Arc<Session>> {
+    pub async fn create(&self, cwd: Option<PathBuf>) -> Result<Arc<Session>> {
         let session_id = format!("sess_{}", ulid::Ulid::new());
         let writer = mew_session::Writer::open_at(&self.session_dir, &session_id)
             .await
@@ -320,7 +291,6 @@ impl SessionManager {
             session_id: session_id.clone(),
             writer,
             cwd,
-            browser_enabled: client_kind == mew_protocol::ClientKind::Desktop,
             policy: None,
         })?;
         load_todos(&agent).await?;
@@ -388,7 +358,6 @@ impl SessionManager {
             session_id: session_id.to_string(),
             writer,
             cwd,
-            browser_enabled: false,
             policy,
         })
         .context("build agent for resume")
@@ -421,7 +390,9 @@ impl SessionManager {
 
     /// Remove a session from active memory.
     pub async fn remove(&self, session_id: &str) {
-        self.active.lock().await.remove(session_id);
+        if let Some(session) = self.active.lock().await.remove(session_id) {
+            session.browser_access.clear();
+        }
         self.loading.lock().await.remove(session_id);
     }
 

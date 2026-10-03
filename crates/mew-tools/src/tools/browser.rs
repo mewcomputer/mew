@@ -1,10 +1,10 @@
 //! Explicit browser tools available only to the native desktop host.
 
+use crate::browser::BrowserAction;
 use crate::{Sensitivity, Tool, ToolCtx, ToolError, ToolOutput};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::process::Command;
 
 const NAMES: &[&str] = &[
     "browser_open",
@@ -85,71 +85,46 @@ impl Tool for BrowserTool {
     }
 
     async fn execute(&self, ctx: ToolCtx, input: Value) -> Result<ToolOutput, ToolError> {
-        if !ctx.browser_enabled {
+        if !ctx.browser_access.is_available() {
             return Err(ToolError::Execution(
                 "in-app browser is unavailable; attach this session in the mew desktop app".into(),
             ));
         }
 
-        let mut args = vec!["--session".to_string(), format!("mew-{}", ctx.session_id)];
-        if let Ok(port) = std::env::var("MEW_BROWSER_CDP_PORT") {
-            args = vec!["--cdp".into(), port];
-        }
-        let mut screenshot_path: Option<std::path::PathBuf> = None;
-        match self.name {
-            "browser_open" => args.extend(["open".into(), string_arg(&input, "url")?]),
-            "browser_snapshot" => args.extend(["snapshot".into(), "--json".into()]),
-            "browser_screenshot" => {
-                let path = std::env::temp_dir().join(format!("mew-tool-{}.png", ulid::Ulid::new()));
-                screenshot_path = Some(path.clone());
-                args.extend(["screenshot".into(), path.to_string_lossy().into_owned()]);
-                if input
+        let action = match self.name {
+            "browser_open" => BrowserAction::Open(string_arg(&input, "url")?),
+            "browser_snapshot" => BrowserAction::Snapshot,
+            "browser_screenshot" => BrowserAction::Screenshot {
+                annotate: input
                     .get("annotate")
                     .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    args.push("--annotate".into());
-                }
-            }
-            "browser_click" => args.extend(["click".into(), string_arg(&input, "selector")?]),
-            "browser_fill" => args.extend([
-                "fill".into(),
-                string_arg(&input, "selector")?,
-                string_arg(&input, "text")?,
-            ]),
-            "browser_press" => args.extend(["press".into(), string_arg(&input, "key")?]),
-            "browser_close" => args.push("close".into()),
+                    .unwrap_or(false),
+            },
+            "browser_click" => BrowserAction::Click(string_arg(&input, "selector")?),
+            "browser_fill" => BrowserAction::Fill {
+                selector: string_arg(&input, "selector")?,
+                text: string_arg(&input, "text")?,
+            },
+            "browser_press" => BrowserAction::Press(string_arg(&input, "key")?),
+            "browser_close" => BrowserAction::Close,
             _ => return Err(ToolError::InvalidInput("unknown browser tool".into())),
-        }
-
-        let output = Command::new("agent-browser")
-            .args(&args)
-            .output()
+        };
+        let result = ctx
+            .browser_access
+            .execute(action, None, &ctx.cancel)
             .await
-            .map_err(|e| ToolError::Execution(format!("run agent-browser: {e}")))?;
-        if !output.status.success() {
-            return Err(ToolError::Execution(
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            ));
-        }
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if let Some(path) = screenshot_path {
-            let bytes = tokio::fs::read(&path)
-                .await
-                .map_err(|e| ToolError::Execution(format!("read browser screenshot: {e}")))?;
-            let _ = tokio::fs::remove_file(path).await;
+            .map_err(ToolError::Execution)?;
+        if let Some(bytes) = result.screenshot {
             return Ok(ToolOutput {
                 output: "untrusted browser screenshot".into(),
                 metadata: Some(serde_json::json!({
                     "mime": "image/png",
-                    "data": base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        bytes,
-                    ),
+                    "data": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
                 })),
                 ..Default::default()
             });
         }
+        let text = result.output;
         Ok(ToolOutput {
             output: format!("untrusted browser content:\n{text}"),
             ..Default::default()

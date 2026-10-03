@@ -524,7 +524,6 @@ pub(crate) fn build_session_agent(
     writer: Option<SessionWriter>,
     session_id: Option<SessionId>,
     session_cwd: Option<std::path::PathBuf>,
-    browser_enabled: bool,
     dispatcher: Arc<dyn Dispatcher>,
     todos_path: Option<std::path::PathBuf>,
     discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
@@ -578,7 +577,6 @@ pub(crate) fn build_session_agent(
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
     agent.cwd = cwd.clone();
     agent.subagent_registry_path = subagent_registry_path;
-    agent.set_browser_enabled(browser_enabled);
     agent.set_model_info(model_id, provider_id);
     apply_model_metadata(&mut agent, cat, model_id);
     agent.template_ctx = template_ctx;
@@ -660,7 +658,7 @@ fn rebuild_session_system(agent: &mut Agent, ctx_files: &[mew_context::File]) {
         let mut tool_names: Vec<String> = agent
             .tools
             .keys()
-            .filter(|name| agent.browser_enabled || !name.starts_with("browser_"))
+            .filter(|name| agent.browser_access.is_available() || !name.starts_with("browser_"))
             .cloned()
             .collect();
         tool_names.sort_unstable();
@@ -750,7 +748,6 @@ pub(crate) fn build_system_prompt_snapshot(
             None,
             None,
             Some(cwd.to_path_buf()),
-            false,
             Arc::new(mew_hooks::NopDispatcher),
             None,
             &discovered,

@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire revision required by native clients. Increment for incompatible changes.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub const DEFAULT_HISTORY_PAGE_LIMIT: usize = 24;
 
@@ -237,6 +237,10 @@ pub enum ClientMessage {
     GitStatus {
         session_id: String,
     },
+    ReadSessionDiff {
+        session_id: String,
+        request_id: String,
+    },
     WatchWorkspace {
         session_id: String,
         enabled: bool,
@@ -287,7 +291,19 @@ pub enum ClientMessage {
     Ping,
 
     // -- Browser --
-    /// Navigate the browser session to an HTTP(S) URL.
+    /// Register a ready local native page for this conversation.
+    RegisterBrowserPage {
+        session_id: String,
+        page_instance: String,
+        cdp_endpoint: String,
+        target_id: String,
+    },
+    /// Revoke this connection's matching page generation.
+    UnregisterBrowserPage {
+        session_id: String,
+        page_instance: String,
+    },
+    /// Navigate the attached session's registered browser page.
     BrowserOpen {
         url: String,
         /// Frontend-owned tab identity, echoed by browser responses.
@@ -870,7 +886,19 @@ pub enum ServerMessage {
     GitStatusResult {
         entries: Vec<GitEntry>,
     },
+    SessionDiff {
+        session_id: String,
+        request_id: String,
+        files: Vec<mew_diff::FileDiff>,
+    },
+    SessionDiffError {
+        session_id: String,
+        request_id: String,
+        message: String,
+    },
     FsChanged {
+        #[serde(default)]
+        session_id: String,
         paths: Vec<String>,
     },
 
@@ -958,6 +986,11 @@ pub enum ServerMessage {
         title: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_id: Option<String>,
+    },
+    BrowserPageRegistration {
+        session_id: String,
+        page_instance: String,
+        error: Option<String>,
     },
     BrowserScreenshot {
         data: String,
@@ -3011,6 +3044,37 @@ mod tests {
     }
 
     #[test]
+    fn browser_page_registration_preserves_session_and_generation() {
+        let request = ClientMessage::RegisterBrowserPage {
+            session_id: "session-a".into(),
+            page_instance: "page-a".into(),
+            cdp_endpoint: "http://127.0.0.1:9223".into(),
+            target_id: "target-a".into(),
+        };
+        assert_eq!(
+            encode_json(&round_trip(&request)).unwrap(),
+            encode_json(&request).unwrap()
+        );
+        let remove = ClientMessage::UnregisterBrowserPage {
+            session_id: "session-a".into(),
+            page_instance: "page-a".into(),
+        };
+        assert_eq!(
+            encode_json(&round_trip(&remove)).unwrap(),
+            encode_json(&remove).unwrap()
+        );
+        let response = ServerMessage::BrowserPageRegistration {
+            session_id: "session-a".into(),
+            page_instance: "page-a".into(),
+            error: Some("unsupported CLI".into()),
+        };
+        assert_eq!(
+            encode_json(&round_trip(&response)).unwrap(),
+            encode_json(&response).unwrap()
+        );
+    }
+
+    #[test]
     fn browser_messages_remain_compatible_without_tab_identity() {
         let request: ClientMessage = decode_json(r#"{"type":"browser_close"}"#).unwrap();
         assert!(matches!(
@@ -3705,6 +3769,55 @@ mod tests {
             variants.len(),
             "duplicate type tags in DaemonMessage: {:?}",
             tags
+        );
+    }
+}
+
+#[cfg(test)]
+mod review_wire_tests {
+    use super::*;
+
+    #[test]
+    fn review_requests_and_responses_roundtrip_session_request_and_file_content() {
+        let command = ClientMessage::ReadSessionDiff {
+            session_id: "remote".into(),
+            request_id: "fresh".into(),
+        };
+        let encoded = encode_json(&command).unwrap();
+        assert!(
+            matches!(decode_json::<ClientMessage>(&encoded).unwrap(), ClientMessage::ReadSessionDiff { session_id, request_id } if session_id == "remote" && request_id == "fresh")
+        );
+        for message in [
+            ServerMessage::SessionDiff {
+                session_id: "remote".into(),
+                request_id: "fresh".into(),
+                files: vec![mew_diff::FileDiff::binary("generated.bin", None)],
+            },
+            ServerMessage::SessionDiffError {
+                session_id: "remote".into(),
+                request_id: "failed".into(),
+                message: "repository missing".into(),
+            },
+            ServerMessage::FsChanged {
+                session_id: "remote".into(),
+                paths: vec!["external-edit.txt".into()],
+            },
+        ] {
+            let encoded = encode_json(&message).unwrap();
+            let decoded: ServerMessage = decode_json(&encoded).unwrap();
+            assert_eq!(
+                serde_json::to_value(decoded).unwrap(),
+                serde_json::to_value(message).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_workspace_changes_decode_without_claiming_a_session_origin() {
+        let message: ServerMessage =
+            decode_json(r#"{"type":"fs_changed","paths":["old.txt"]}"#).unwrap();
+        assert!(
+            matches!(message, ServerMessage::FsChanged { session_id, paths } if session_id.is_empty() && paths == ["old.txt"])
         );
     }
 }

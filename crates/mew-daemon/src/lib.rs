@@ -45,7 +45,14 @@ use tungstenite::Message;
 
 const HISTORY_PAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
+struct BrowserRegistration {
+    page_instance: String,
+    session: Arc<session::Session>,
+}
+
 pub mod browser;
+#[cfg(test)]
+mod browser_tests;
 pub mod client;
 pub mod files;
 pub mod groups;
@@ -72,7 +79,6 @@ pub struct AgentBuildParams {
     pub session_id: String,
     pub writer: mew_session::Writer,
     pub cwd: Option<std::path::PathBuf>,
-    pub browser_enabled: bool,
     /// Complete saved runtime choices; None uses startup defaults for legacy sessions.
     pub policy: Option<mew_session::SessionPolicy>,
 }
@@ -389,6 +395,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::ListFilesystemDir { .. }
                 | ClientMessage::ReadFilePreview { .. }
                 | ClientMessage::GitStatus { .. }
+                | ClientMessage::ReadSessionDiff { .. }
                 | ClientMessage::WatchWorkspace { .. }
                 | ClientMessage::OpenPath { .. }
                 | ClientMessage::UnflagFile { .. }
@@ -425,6 +432,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
             | ClientMessage::ListFilesystemDir { .. }
             | ClientMessage::ReadFilePreview { .. }
             | ClientMessage::GitStatus { .. }
+            | ClientMessage::ReadSessionDiff { .. }
             | ClientMessage::WatchWorkspace { .. }
     );
     if observe {
@@ -519,16 +527,45 @@ async fn watch_workspace(session: Arc<Session>, root: PathBuf, cancel: Cancellat
                 let changed = changed_workspace_paths(&previous, &next);
                 previous = next;
                 if !changed.is_empty() {
-                    session.broadcast(ServerMessage::FsChanged { paths: changed }).await;
+                    session.broadcast(ServerMessage::FsChanged { session_id: session.id.clone(), paths: changed }).await;
                 }
             }
         }
     }
 }
 
-fn workspace_snapshot(
-    root: &std::path::Path,
-) -> std::collections::HashMap<String, (u64, u32, u64)> {
+struct ReviewResponseBudget(usize);
+
+impl std::io::Write for ReviewResponseBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.0 {
+            return Err(std::io::Error::other("review response exceeds size limit"));
+        }
+        self.0 -= bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum WorkspaceStamp {
+    File(u64, u32, u64),
+    Head(Vec<u8>),
+}
+
+fn workspace_file_stamp(metadata: &std::fs::Metadata) -> WorkspaceStamp {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    WorkspaceStamp::File(modified.as_secs(), modified.subsec_nanos(), metadata.len())
+}
+
+fn workspace_snapshot(root: &std::path::Path) -> std::collections::HashMap<String, WorkspaceStamp> {
     let mut snapshot = std::collections::HashMap::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
@@ -538,38 +575,58 @@ fn workspace_snapshot(
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if path.is_dir() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
                 if matches!(name.as_str(), ".git" | "target" | "node_modules" | ".venv") {
                     continue;
                 }
                 pending.push(path);
                 continue;
             }
-            let Ok(metadata) = entry.metadata() else {
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .unwrap_or_default();
             let relative = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
-            snapshot.insert(
-                relative,
-                (modified.as_secs(), modified.subsec_nanos(), metadata.len()),
-            );
+            snapshot.insert(relative, workspace_file_stamp(&metadata));
+        }
+    }
+    // Git resolves symbolic/packed refs and linked worktrees without walking
+    // repository objects. A commit can change review's base without rewriting
+    // any workspace file; index-only operations also need to invalidate review.
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(root)
+        .output()
+    {
+        if output.status.success() {
+            snapshot.insert(".git/HEAD".into(), WorkspaceStamp::Head(output.stdout));
+        }
+    }
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
+        .current_dir(root)
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(path) = std::str::from_utf8(&output.stdout) {
+                if let Ok(metadata) = std::fs::metadata(path.strip_suffix('\n').unwrap_or(path)) {
+                    snapshot.insert(".git/index".into(), workspace_file_stamp(&metadata));
+                }
+            }
         }
     }
     snapshot
 }
 
 fn changed_workspace_paths(
-    previous: &std::collections::HashMap<String, (u64, u32, u64)>,
-    next: &std::collections::HashMap<String, (u64, u32, u64)>,
+    previous: &std::collections::HashMap<String, WorkspaceStamp>,
+    next: &std::collections::HashMap<String, WorkspaceStamp>,
 ) -> Vec<String> {
     let mut changed = previous
         .keys()
@@ -672,6 +729,12 @@ where
         mpsc::UnboundedReceiver<ServerMessage>,
     ) = mpsc::unbounded_channel();
     let mut attached_session: Option<Arc<Session>> = None;
+    let browser_owner = ulid::Ulid::new().to_string();
+    let connection_lifetime = CancellationToken::new();
+    let mut confirmed_desktop_sessions = std::collections::HashSet::new();
+    let browser_pages = Arc::new(std::sync::Mutex::new(
+        HashMap::<String, BrowserRegistration>::new(),
+    ));
     let mut client_id: Option<u64> = None;
     let mut terminal: Option<terminal::TerminalHandle> = None;
     let mut workspace_watch: Option<CancellationToken> = None;
@@ -722,6 +785,25 @@ where
             }
         };
 
+        if remote_scope.is_some() || remote_authorizer.is_some() || legacy_iroh {
+            if let ClientMessage::RegisterBrowserPage {
+                session_id,
+                page_instance,
+                ..
+            }
+            | ClientMessage::UnregisterBrowserPage {
+                session_id,
+                page_instance,
+            } = &client_msg
+            {
+                reply(ServerMessage::BrowserPageRegistration {
+                    session_id: session_id.clone(),
+                    page_instance: page_instance.clone(),
+                    error: Some("remote connections cannot register a local browser page".into()),
+                });
+                continue;
+            }
+        }
         if remote_scope.is_some() || remote_authorizer.is_some() {
             if !remote_ready {
                 match &client_msg {
@@ -860,7 +942,7 @@ where
                         continue;
                     }
                 }
-                match session_manager.create(cwd.clone(), client_kind).await {
+                match session_manager.create(cwd.clone()).await {
                     Ok(session) => {
                         if let Some(group_id) = requested_group_id.as_deref() {
                             let dir = session_manager.session_dir.clone();
@@ -895,10 +977,17 @@ where
                             previous_terminal.close();
                         }
                         let actions = session.pending_action_lock.lock().await;
-                        let (cid, was_first, _) =
+                        let (cid, was_first) =
                             session.attach_client(client_tx.clone(), client_kind).await;
                         client_id = Some(cid);
                         attached_session = Some(session.clone());
+                        if client_kind == ClientKind::Desktop
+                            && !legacy_iroh
+                            && remote_scope.is_none()
+                            && remote_authorizer.is_none()
+                        {
+                            confirmed_desktop_sessions.insert(session.id.clone());
+                        }
                         let session_id = session.id.clone();
                         let (model, provider, permission_mode) = {
                             let agent = session.agent.lock().await;
@@ -989,11 +1078,18 @@ where
                             previous_terminal.close();
                         }
                         let actions = session.pending_action_lock.lock().await;
-                        let (cid, was_first, _) =
+                        let (cid, was_first) =
                             session.attach_client(client_tx.clone(), client_kind).await;
                         let existing_clients = session.client_presence_except(cid).await;
                         client_id = Some(cid);
                         attached_session = Some(session.clone());
+                        if client_kind == ClientKind::Desktop
+                            && !legacy_iroh
+                            && remote_scope.is_none()
+                            && remote_authorizer.is_none()
+                        {
+                            confirmed_desktop_sessions.insert(session.id.clone());
+                        }
 
                         let (model, provider, permission_mode) = {
                             let agent = session.agent.lock().await;
@@ -1181,6 +1277,11 @@ where
                 reply(ServerMessage::GroupList { groups });
             }
             ClientMessage::DeleteSession { session_id } => {
+                confirmed_desktop_sessions.remove(&session_id);
+                browser_pages
+                    .lock()
+                    .expect("browser registrations lock")
+                    .remove(&session_id);
                 // Remove from active sessions if present.
                 session_manager.remove(&session_id).await;
                 // Delete from disk.
@@ -2061,6 +2162,54 @@ where
                     }),
                 }
             }
+            ClientMessage::ReadSessionDiff {
+                session_id,
+                request_id,
+            } => {
+                let Some(root) = session_manager.session_cwd(&session_id).await else {
+                    reply(ServerMessage::SessionDiffError {
+                        session_id,
+                        request_id,
+                        message: "session has no workspace".into(),
+                    });
+                    continue;
+                };
+                let client_tx = client_tx.clone();
+                tokio::spawn(async move {
+                    let result =
+                        tokio::task::spawn_blocking(move || mew_diff::load_session_diffs(&root))
+                            .await;
+                    let message = match result {
+                        Ok(Ok(files)) => ServerMessage::SessionDiff {
+                            session_id,
+                            request_id,
+                            files,
+                        },
+                        Ok(Err(error)) => ServerMessage::SessionDiffError {
+                            session_id,
+                            request_id,
+                            message: error.to_string(),
+                        },
+                        Err(error) => ServerMessage::SessionDiffError {
+                            session_id,
+                            request_id,
+                            message: format!("could not load review: {error}"),
+                        },
+                    };
+                    let message = match &message {
+                        ServerMessage::SessionDiff { session_id, request_id, .. }
+                            if serde_json::to_writer(&mut ReviewResponseBudget(HISTORY_PAGE_MAX_BYTES), &message).is_err() => {
+                            ServerMessage::SessionDiffError {
+                                session_id: session_id.clone(),
+                                request_id: request_id.clone(),
+                                message: "workspace changes exceed the review response size limit (8 MiB)".into(),
+                            }
+                        }
+                        _ => message,
+                    };
+                    let _ = client_tx.send(message);
+                });
+            }
             ClientMessage::WatchWorkspace {
                 session_id,
                 enabled,
@@ -2093,202 +2242,135 @@ where
             }
 
             // -- Browser --
-            ClientMessage::BrowserOpen { url, tab_id } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before opening a browser".into(),
-                        tab_id,
-                    });
-                    continue;
-                };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
-                    });
-                    continue;
-                }
-                match crate::browser::open(&session.id, &url).await {
-                    Ok((url, title, _)) => reply(ServerMessage::BrowserState {
-                        open: true,
-                        url: Some(url),
-                        title: Some(title),
-                        tab_id,
-                    }),
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser open: {e}"),
-                        tab_id,
-                    }),
-                }
-            }
-            ClientMessage::BrowserSnapshot { tab_id } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before using the browser".into(),
-                        tab_id,
-                    });
-                    continue;
-                };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
-                    });
-                    continue;
-                }
-                match crate::browser::snapshot(&session.id).await {
-                    Ok((snapshot, url, title)) => reply(ServerMessage::BrowserSnapshot {
-                        snapshot,
-                        url,
-                        title,
-                        tab_id,
-                    }),
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser snapshot: {e}"),
-                        tab_id,
-                    }),
-                }
-            }
-            ClientMessage::BrowserScreenshot { annotate, tab_id } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before using the browser".into(),
-                        tab_id,
-                    });
-                    continue;
-                };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
-                    });
-                    continue;
-                }
-                match crate::browser::screenshot(&session.id, annotate).await {
-                    Ok((data, url)) => {
-                        reply(ServerMessage::BrowserScreenshot { data, url, tab_id })
-                    }
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser screenshot: {e}"),
-                        tab_id,
-                    }),
-                }
-            }
-            ClientMessage::BrowserClick { selector, tab_id } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before using the browser".into(),
-                        tab_id,
-                    });
-                    continue;
-                };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
-                    });
-                    continue;
-                }
-                match crate::browser::click(&session.id, &selector).await {
-                    Ok((url, title, _)) => reply(ServerMessage::BrowserState {
-                        open: true,
-                        url: Some(url),
-                        title: Some(title),
-                        tab_id,
-                    }),
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser click: {e}"),
-                        tab_id,
-                    }),
-                }
-            }
-            ClientMessage::BrowserFill {
-                selector,
-                text,
-                tab_id,
+            ClientMessage::RegisterBrowserPage {
+                session_id,
+                page_instance,
+                cdp_endpoint,
+                target_id,
             } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before using the browser".into(),
-                        tab_id,
+                if !confirmed_desktop_sessions.contains(&session_id)
+                    || legacy_iroh
+                    || remote_scope.is_some()
+                    || remote_authorizer.is_some()
+                {
+                    reply(ServerMessage::BrowserPageRegistration {
+                        session_id,
+                        page_instance,
+                        error: Some(
+                            "browser registration requires a confirmed local desktop session"
+                                .into(),
+                        ),
                     });
                     continue;
+                }
+                let session = match session_manager.attach(&session_id).await {
+                    Ok(session) => session,
+                    Err(error) => {
+                        confirmed_desktop_sessions.remove(&session_id);
+                        browser_pages
+                            .lock()
+                            .expect("browser registrations lock")
+                            .remove(&session_id);
+                        reply(ServerMessage::BrowserPageRegistration {
+                            session_id,
+                            page_instance,
+                            error: Some(format!("browser session is unavailable: {error}")),
+                        });
+                        continue;
+                    }
                 };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
+                let preparation = session.browser_access.register(
+                    &browser_owner,
+                    mew_tools::browser::BrowserTarget {
+                        page_instance: page_instance.clone(),
+                        cdp_endpoint,
+                        target_id,
+                    },
+                );
+                if session
+                    .browser_access
+                    .is_registered(&browser_owner, &page_instance)
+                {
+                    browser_pages
+                        .lock()
+                        .expect("browser registrations lock")
+                        .insert(
+                            session_id.clone(),
+                            BrowserRegistration {
+                                page_instance: page_instance.clone(),
+                                session: session.clone(),
+                            },
+                        );
+                }
+                let lifetime = connection_lifetime.clone();
+                let client_tx = client_tx.clone();
+                let pages = browser_pages.clone();
+                let access = session.browser_access.clone();
+                let owner = browser_owner.clone();
+                tokio::spawn(async move {
+                    let result = tokio::select! {
+                        biased;
+                        _ = lifetime.cancelled() => Err("desktop connection closed".to_owned()),
+                        result = preparation => result,
+                    };
+                    if result.is_err() {
+                        let mut pages = pages.lock().expect("browser registrations lock");
+                        if pages
+                            .get(&session_id)
+                            .is_some_and(|registered| registered.page_instance == page_instance)
+                            && !access.is_registered(&owner, &page_instance)
+                        {
+                            pages.remove(&session_id);
+                        }
+                    }
+                    let _ = client_tx.send(ServerMessage::BrowserPageRegistration {
+                        session_id,
+                        page_instance,
+                        error: result.err(),
                     });
-                    continue;
-                }
-                match crate::browser::fill(&session.id, &selector, &text).await {
-                    Ok((url, title, _)) => reply(ServerMessage::BrowserState {
-                        open: true,
-                        url: Some(url),
-                        title: Some(title),
-                        tab_id,
-                    }),
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser fill: {e}"),
-                        tab_id,
-                    }),
-                }
+                });
             }
-            ClientMessage::BrowserPress { key, tab_id } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before using the browser".into(),
-                        tab_id,
-                    });
-                    continue;
-                };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
-                    });
-                    continue;
+            ClientMessage::UnregisterBrowserPage {
+                session_id,
+                page_instance,
+            } => {
+                let mut pages = browser_pages.lock().expect("browser registrations lock");
+                let removed = pages
+                    .get(&session_id)
+                    .is_some_and(|registered| registered.page_instance == page_instance);
+                if removed {
+                    let registered = pages
+                        .remove(&session_id)
+                        .expect("matching browser registration");
+                    registered
+                        .session
+                        .browser_access
+                        .revoke(&browser_owner, &page_instance);
                 }
-                match crate::browser::press(&session.id, &key).await {
-                    Ok((url, title, _)) => reply(ServerMessage::BrowserState {
-                        open: true,
-                        url: Some(url),
-                        title: Some(title),
-                        tab_id,
-                    }),
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser press: {e}"),
-                        tab_id,
-                    }),
-                }
+                reply(ServerMessage::BrowserPageRegistration {
+                    session_id,
+                    page_instance,
+                    error: (!removed)
+                        .then(|| "browser page generation is no longer registered".into()),
+                });
             }
-            ClientMessage::BrowserClose { tab_id } => {
-                let Some(session) = attached_session.as_ref() else {
-                    reply(ServerMessage::BrowserError {
-                        message: "attach a session before using the browser".into(),
-                        tab_id,
-                    });
-                    continue;
-                };
-                if !session.browser_enabled().await {
-                    reply(ServerMessage::BrowserError {
-                        message: "in-app browser is available only in the mew desktop app".into(),
-                        tab_id,
-                    });
-                    continue;
-                }
-                match crate::browser::close(&session.id).await {
-                    Ok(()) => reply(ServerMessage::BrowserState {
-                        open: false,
-                        url: None,
-                        title: None,
-                        tab_id,
-                    }),
-                    Err(e) => reply(ServerMessage::BrowserError {
-                        message: format!("browser close: {e}"),
-                        tab_id,
-                    }),
-                }
+            request @ (ClientMessage::BrowserOpen { .. }
+            | ClientMessage::BrowserSnapshot { .. }
+            | ClientMessage::BrowserScreenshot { .. }
+            | ClientMessage::BrowserClick { .. }
+            | ClientMessage::BrowserFill { .. }
+            | ClientMessage::BrowserPress { .. }
+            | ClientMessage::BrowserClose { .. }) => {
+                let access = attached_session
+                    .as_ref()
+                    .map(|session| session.browser_access.clone())
+                    .unwrap_or_default();
+                let client_tx = client_tx.clone();
+                let lifetime = connection_lifetime.clone();
+                let response = crate::browser::respond(&access, request, &lifetime);
+                tokio::spawn(async move {
+                    let _ = client_tx.send(response.await);
+                });
             }
             ClientMessage::OpenPath { session_id, path } => {
                 match crate::files::handle_open_path(&session_manager, &session_id, &path).await {
@@ -2455,6 +2537,15 @@ where
                 });
             }
         }
+    }
+    connection_lifetime.cancel();
+    for registered in browser_pages
+        .lock()
+        .expect("browser registrations lock")
+        .drain()
+        .map(|(_, registered)| registered)
+    {
+        registered.session.browser_access.disconnect(&browser_owner);
     }
     if let Some(watch) = workspace_watch.take() {
         watch.cancel();
@@ -3425,6 +3516,9 @@ async fn send_msg<S: AsyncRead + AsyncWrite + Unpin + Send>(
 mod request_tests;
 
 #[cfg(test)]
+mod review_tests;
+
+#[cfg(test)]
 mod policy_tests;
 
 #[cfg(test)]
@@ -3585,6 +3679,34 @@ mod tests {
                 accepted: true,
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_snapshot_tracks_symlinks_without_reading_their_targets() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("external-directory");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("outside.txt"), "private").unwrap();
+        let link = workspace.path().join("linked-directory");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let previous = workspace_snapshot(workspace.path());
+        assert!(previous.contains_key("linked-directory"));
+        assert!(!previous.contains_key("linked-directory/outside.txt"));
+
+        std::fs::write(target.join("outside.txt"), "changed outside").unwrap();
+        assert!(
+            changed_workspace_paths(&previous, &workspace_snapshot(workspace.path())).is_empty()
+        );
+
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        assert_eq!(
+            changed_workspace_paths(&previous, &workspace_snapshot(workspace.path())),
+            vec!["linked-directory"]
+        );
     }
 
     #[test]

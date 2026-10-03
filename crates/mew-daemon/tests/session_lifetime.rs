@@ -363,7 +363,7 @@ async fn session_lookup_protects_attachment_before_client_registration() {
         "client lookup must not return an orphaned runtime"
     );
     let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    let (client_id, _, _) = attaching.attach_client(sender, ClientKind::Desktop).await;
+    let (client_id, _) = attaching.attach_client(sender, ClientKind::Desktop).await;
     assert_eq!(attaching.client_count().await, 1);
     attaching.detach_client(client_id).await;
     drop(attaching);

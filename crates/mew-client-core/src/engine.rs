@@ -181,6 +181,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn previous_native_schema_cannot_activate_a_client() {
+        let transport = InMemoryTransport::default();
+        transport.push_server_message(ServerMessage::Pong {
+            version: "previous-native".into(),
+            protocol_version: 1,
+        });
+        let error = ClientEngine::connect(&transport)
+            .await
+            .err()
+            .expect("previous native schema must be rejected");
+        assert!(error.to_string().contains("protocol"));
+        assert!(matches!(
+            transport.sent_messages().as_slice(),
+            [ClientMessage::Ping]
+        ));
+    }
+
+    #[tokio::test]
     async fn headless_engine_handles_prompt_stream_and_required_action() {
         let transport = InMemoryTransport::default();
         transport.push_server_message(ServerMessage::Pong {

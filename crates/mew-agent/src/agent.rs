@@ -258,8 +258,8 @@ pub struct Agent {
     /// `denied_tool_names`); `Some(set)` = only tools whose name is in the
     /// set are sent to the provider.
     pub active_tool_names: Option<HashSet<String>>,
-    /// Capability gate for the desktop-only browser tools.
-    pub browser_enabled: bool,
+    /// Native page registration shared by every clone of this session's agent.
+    pub browser_access: mew_tools::browser::BrowserAccess,
     /// Active persona's tool denylist. Always applied, even when
     /// `active_tool_names` is `None` (so "all tools except X" works).
     /// Empty by default.
@@ -436,7 +436,7 @@ impl Agent {
             active_thinking_variant: None,
             persona_prompt: None,
             active_tool_names: None,
-            browser_enabled: false,
+            browser_access: Default::default(),
             denied_tool_names: HashSet::new(),
             skill_filter: Arc::new(tokio::sync::RwLock::new(None)),
             template_ctx: Arc::new(tokio::sync::RwLock::new(None)),
@@ -730,10 +730,6 @@ impl Agent {
             .lock()
             .expect("prompt cache state poisoned")
             .retention()
-    }
-
-    pub fn set_browser_enabled(&mut self, enabled: bool) {
-        self.browser_enabled = enabled;
     }
 
     /// Append a persisted system-level session notice. This is conversation

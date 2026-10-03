@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 mew-message = { workspace = true }
+mew-diff = { workspace = true }
 mew-protocol = { workspace = true }
 mew-session = { workspace = true }
 serde = { workspace = true }

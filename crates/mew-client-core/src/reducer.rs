@@ -238,6 +238,19 @@ pub enum ClientEvent {
         session_id: String,
     },
     FileTreeChanged,
+    WorkspaceChanged {
+        session_id: String,
+    },
+    SessionDiff {
+        session_id: String,
+        request_id: String,
+        files: Vec<mew_diff::FileDiff>,
+    },
+    SessionDiffError {
+        session_id: String,
+        request_id: String,
+        message: String,
+    },
     SessionHistoryLoaded {
         session_id: String,
     },
@@ -309,6 +322,11 @@ pub enum ClientEvent {
     BrowserError {
         message: String,
         tab_id: Option<String>,
+    },
+    BrowserPageRegistration {
+        session_id: String,
+        page_instance: String,
+        error: Option<String>,
     },
     Error(String),
 }
@@ -929,6 +947,17 @@ impl ClientState {
                 self.browser.error = Some(message.clone());
                 vec![ClientEvent::BrowserError { message, tab_id }]
             }
+            ServerMessage::BrowserPageRegistration {
+                session_id,
+                page_instance,
+                error,
+            } => {
+                vec![ClientEvent::BrowserPageRegistration {
+                    session_id,
+                    page_instance,
+                    error,
+                }]
+            }
             ServerMessage::TerminalOpened { terminal_id } => {
                 vec![ClientEvent::TerminalOpened { terminal_id }]
             }
@@ -959,9 +988,31 @@ impl ClientState {
                 self.dir_listing = entries;
                 vec![ClientEvent::FileTreeChanged]
             }
-            // The daemon pushes this after a WatchWorkspace subscription; the
-            // client is expected to re-request a `ListDir`, like the web UI.
-            ServerMessage::FsChanged { .. } => vec![ClientEvent::FileTreeChanged],
+            ServerMessage::FsChanged { session_id, .. } => {
+                vec![ClientEvent::WorkspaceChanged { session_id }]
+            }
+            ServerMessage::SessionDiff {
+                session_id,
+                request_id,
+                files,
+            } => {
+                vec![ClientEvent::SessionDiff {
+                    session_id,
+                    request_id,
+                    files,
+                }]
+            }
+            ServerMessage::SessionDiffError {
+                session_id,
+                request_id,
+                message,
+            } => {
+                vec![ClientEvent::SessionDiffError {
+                    session_id,
+                    request_id,
+                    message,
+                }]
+            }
             ServerMessage::ErrorEvent { message } => {
                 if let Some(session_id) = &self.attached_session {
                     self.session_turn_outcomes.insert(
@@ -1800,6 +1851,21 @@ mod tests {
     }
 
     #[test]
+    fn background_browser_registration_keeps_its_exact_origin() {
+        let mut state = ClientState::default();
+        state.browser.error = Some("selected page error".into());
+        let events = state.apply_server_message(ServerMessage::BrowserPageRegistration {
+            session_id: "background-a".into(),
+            page_instance: "page-a".into(),
+            error: Some("incompatible CLI".into()),
+        });
+        assert!(
+            matches!(events.as_slice(), [ClientEvent::BrowserPageRegistration { session_id, page_instance, error }] if session_id == "background-a" && page_instance == "page-a" && error.as_deref() == Some("incompatible CLI"))
+        );
+        assert_eq!(state.browser.error.as_deref(), Some("selected page error"));
+    }
+
+    #[test]
     fn subagent_lifecycle_is_tracked_per_session() {
         let mut state = ClientState::default();
         session_ready(&mut state);
@@ -2091,7 +2157,7 @@ mod tests {
     }
 
     #[test]
-    fn dir_listing_and_fs_changed_emit_file_tree_events() {
+    fn dir_listing_and_workspace_changes_preserve_separate_origins() {
         let mut state = ClientState::default();
 
         let events = state.apply_server_message(ServerMessage::DirListing {
@@ -2110,8 +2176,52 @@ mod tests {
         assert_eq!(state.dir_listing[0].name, "main.rs");
 
         let events = state.apply_server_message(ServerMessage::FsChanged {
+            session_id: "other-session".into(),
             paths: vec!["src/main.rs".into()],
         });
-        assert!(matches!(events.as_slice(), [ClientEvent::FileTreeChanged]));
+        assert!(
+            matches!(events.as_slice(), [ClientEvent::WorkspaceChanged { session_id }] if session_id == "other-session")
+        );
+        assert_eq!(state.dir_listing_session_id.as_deref(), Some("sess-1"));
+    }
+
+    #[test]
+    fn review_responses_preserve_payload_and_origin_without_creating_session_state() {
+        let mut state = ClientState::default();
+        let files = serde_json::from_value(serde_json::json!([{
+            "path": "remote.txt", "old_path": null, "status": "Modified",
+            "hunks": [{ "old_start": 1, "old_count": 1, "new_start": 1, "new_count": 1,
+                "lines": [{ "kind": "Addition", "old_line": null, "new_line": 1, "text": "daemon content" }] }],
+            "added": 1, "removed": 0
+        }])).unwrap();
+        let message = ServerMessage::SessionDiff {
+            session_id: "remote-session".into(),
+            request_id: "review-1".into(),
+            files,
+        };
+        let encoded = serde_json::to_value(&message).unwrap();
+        let events = state.apply_server_message(message);
+        let [ClientEvent::SessionDiff {
+            session_id,
+            request_id,
+            files,
+        }] = events.as_slice()
+        else {
+            panic!("review payload missing");
+        };
+        assert_eq!(session_id, "remote-session");
+        assert_eq!(request_id, "review-1");
+        assert_eq!(serde_json::to_value(files).unwrap(), encoded["files"]);
+        assert!(state.sessions.is_empty());
+
+        let events = state.apply_server_message(ServerMessage::SessionDiffError {
+            session_id: "remote-session".into(),
+            request_id: "review-2".into(),
+            message: "cannot read repository".into(),
+        });
+        assert!(
+            matches!(events.as_slice(), [ClientEvent::SessionDiffError { session_id, request_id, message }] if session_id == "remote-session" && request_id == "review-2" && message == "cannot read repository")
+        );
+        assert!(state.sessions.is_empty());
     }
 }

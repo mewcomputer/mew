@@ -17,6 +17,28 @@ use mew_tools::{Sensitivity, Tool, ToolCtx};
 use crate::Agent;
 use crate::AgentEvent;
 
+#[test]
+fn agent_clones_share_pending_browser_registration_and_revocation() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(Vec::new())),
+        Arc::new(NopDispatcher),
+        None,
+        Vec::new(),
+        None,
+    );
+    let preparation = agent.browser_access.register(
+        "desktop",
+        mew_tools::browser::BrowserTarget {
+            page_instance: "page-a".into(),
+            cdp_endpoint: "http://127.0.0.1:9223".into(),
+            target_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+        },
+    );
+    assert!(agent.clone().browser_access.revoke("desktop", "page-a"));
+    assert!(!agent.browser_access.is_available());
+    drop(preparation);
+}
+
 // ------------------------------------------------------------------
 // Fakes
 // ------------------------------------------------------------------

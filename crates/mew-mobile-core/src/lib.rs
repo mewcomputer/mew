@@ -290,7 +290,7 @@ impl QueuedCommand {
 }
 
 impl DaemonConnection {
-    fn send(&self, message: ClientMessage) -> Result<(), mpsc::error::SendError<QueuedCommand>> {
+    fn send(&self, message: ClientMessage) -> bool {
         let session_scoped = matches!(
             &message,
             ClientMessage::Cancel
@@ -315,21 +315,19 @@ impl DaemonConnection {
                 || session_id.is_none()
                 || session_id != *self.state.requested_session.lock().unwrap()
             {
-                return Err(mpsc::error::SendError(QueuedCommand {
-                    message,
-                    session_id,
-                    generation: None,
-                }));
+                return false;
             }
             (session_id, Some(generation))
         } else {
             (None, None)
         };
-        self.tx.send(QueuedCommand {
-            message,
-            session_id,
-            generation,
-        })
+        self.tx
+            .send(QueuedCommand {
+                message,
+                session_id,
+                generation,
+            })
+            .is_ok()
     }
 }
 
@@ -708,7 +706,7 @@ impl MobileCore {
         let Some(conn) = conns.get(&id.node_id) else {
             return false;
         };
-        conn.send(ClientMessage::SlashCommand { command }).is_ok()
+        conn.send(ClientMessage::SlashCommand { command })
     }
 
     /// Set the thinking variant for the active session.
@@ -1952,6 +1950,9 @@ fn translate_message(
         | ServerMessage::FilePreview { .. }
         | ServerMessage::FilesystemDirListing { .. }
         | ServerMessage::GitStatusResult { .. }
+        | ServerMessage::SessionDiff { .. }
+        | ServerMessage::SessionDiffError { .. }
+        | ServerMessage::BrowserPageRegistration { .. }
         | ServerMessage::FsChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }
         | ServerMessage::FlaggedFilesChanged { .. }
@@ -2747,20 +2748,27 @@ mod tests {
 
     #[tokio::test]
     async fn protocol_handshake_accepts_current_daemon_after_remote_ready() {
-        let pong =
-            protocol_handshake_result(r#"{"type":"pong","version":"test","protocol_version":1}"#)
-                .await
-                .unwrap();
+        let current = mew_protocol::encode_json(&ServerMessage::Pong {
+            version: "test".into(),
+            protocol_version: mew_protocol::PROTOCOL_VERSION,
+        })
+        .unwrap();
+        let pong = protocol_handshake_result(&current).await.unwrap();
         assert!(matches!(pong, ServerMessage::Pong { .. }));
     }
 
     #[tokio::test]
-    async fn protocol_handshake_rejects_legacy_and_future_daemons() {
+    async fn protocol_handshake_rejects_incompatible_daemons() {
         for pong in [
-            r#"{"type":"pong","version":"legacy"}"#,
-            r#"{"type":"pong","version":"future","protocol_version":2}"#,
+            r#"{"type":"pong","version":"legacy"}"#.to_owned(),
+            r#"{"type":"pong","version":"previous-native","protocol_version":1}"#.to_owned(),
+            mew_protocol::encode_json(&ServerMessage::Pong {
+                version: "future".into(),
+                protocol_version: mew_protocol::PROTOCOL_VERSION + 1,
+            })
+            .unwrap(),
         ] {
-            let error = protocol_handshake_result(pong).await.unwrap_err();
+            let error = protocol_handshake_result(&pong).await.unwrap_err();
             assert!(error.to_string().contains("protocol"));
             assert!(error.to_string().contains("daemon"));
         }

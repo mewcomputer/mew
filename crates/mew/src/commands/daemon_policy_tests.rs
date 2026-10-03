@@ -65,7 +65,6 @@ async fn params(root: &Path, policy: Option<SessionPolicy>) -> mew_daemon::Agent
             .unwrap(),
         session_id: id,
         cwd: Some(root.to_path_buf()),
-        browser_enabled: false,
         policy,
     }
 }
@@ -298,10 +297,7 @@ async fn fake_builder_and_manager_restore_policy_and_todos_from_actual_storage()
     );
     let session = server
         .session_manager
-        .create(
-            Some(directory.path().to_path_buf()),
-            mew_protocol::ClientKind::Unknown,
-        )
+        .create(Some(directory.path().to_path_buf()))
         .await
         .unwrap();
     let id = session.id.clone();

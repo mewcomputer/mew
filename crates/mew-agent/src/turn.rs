@@ -186,7 +186,8 @@ impl Agent {
                 .values()
                 .filter(|t| {
                     let name = t.name();
-                    let browser_allowed = !name.starts_with("browser_") || self.browser_enabled;
+                    let browser_allowed =
+                        !name.starts_with("browser_") || self.browser_access.is_available();
                     let allowed = self
                         .active_tool_names
                         .as_ref()

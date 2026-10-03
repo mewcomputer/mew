@@ -67,7 +67,7 @@ async fn publish(
     event: AgentEvent,
 ) -> Vec<ServerMessage> {
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    let (client_id, _, _) = session.attach_client(sender, ClientKind::Unknown).await;
+    let (client_id, _) = session.attach_client(sender, ClientKind::Unknown).await;
     for message in translate_event(event, session, &server.session_manager).await {
         session.broadcast(message).await;
     }
@@ -102,11 +102,7 @@ fn hook_call() -> mew_hooks::ToolCall {
 async fn attach_recovers_each_required_action_and_original_response_channel() {
     let directory = tempfile::tempdir().unwrap();
     let server = test_server(directory.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let mut requests = Vec::new();
     let mut permission_receivers = Vec::new();
     for kind in 0..3 {
@@ -247,11 +243,7 @@ async fn attach_recovers_each_required_action_and_original_response_channel() {
 async fn wrong_kind_and_duplicate_responses_do_not_resolve_pending_actions() {
     let directory = tempfile::tempdir().unwrap();
     let server = test_server(directory.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let (tx, rx) = oneshot::channel();
     let messages = publish(
         &server,
@@ -325,11 +317,7 @@ async fn wrong_kind_and_duplicate_responses_do_not_resolve_pending_actions() {
 async fn cancellation_dismisses_pending_cards_and_replay_has_no_stale_request() {
     let directory = tempfile::tempdir().unwrap();
     let server = test_server(directory.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let mut socket = connect(&server).await;
     send(
         &mut socket,
@@ -412,11 +400,7 @@ async fn cancellation_dismisses_pending_cards_and_replay_has_no_stale_request() 
 async fn closed_request_channels_are_not_published_or_replayed() {
     let directory = tempfile::tempdir().unwrap();
     let server = test_server(directory.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let (tx, rx) = oneshot::channel();
     drop(rx);
     let messages = publish(
@@ -450,11 +434,7 @@ async fn closed_request_channels_are_not_published_or_replayed() {
 async fn buffered_requests_from_a_cancelled_turn_are_not_republished() {
     let directory = tempfile::tempdir().unwrap();
     let server = test_server(directory.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let token = CancellationToken::new();
     *session.current_turn_cancel.lock().await = Some(token.clone());
     session.cancel_turn().await;

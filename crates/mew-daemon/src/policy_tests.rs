@@ -102,11 +102,7 @@ async fn next_setting(
 async fn effective_policy_and_todos_survive_runtime_reload() {
     let root = tempfile::tempdir().unwrap();
     let server = policy_server(root.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let id = session.id.clone();
     let mut socket = connect(&server).await;
     send(
@@ -195,11 +191,7 @@ async fn effective_policy_and_todos_survive_runtime_reload() {
 async fn failed_persona_pin_keeps_current_model_persona_and_skill_filter() {
     let root = tempfile::tempdir().unwrap();
     let server = policy_server(root.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let mut socket = connect(&server).await;
     send(
         &mut socket,
@@ -233,11 +225,7 @@ async fn failed_persona_pin_keeps_current_model_persona_and_skill_filter() {
 async fn failed_policy_write_does_not_apply_permission_mode() {
     let root = tempfile::tempdir().unwrap();
     let server = policy_server(root.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let mut socket = connect(&server).await;
     send(
         &mut socket,
@@ -274,11 +262,7 @@ async fn failed_policy_write_does_not_apply_permission_mode() {
 async fn malformed_policy_prevents_silent_resume_with_defaults() {
     let root = tempfile::tempdir().unwrap();
     let server = policy_server(root.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let id = session.id.clone();
     server.session_manager.remove(&id).await;
     tokio::fs::write(root.path().join(&id).join("policy.json"), b"{invalid")
@@ -294,11 +278,7 @@ async fn malformed_policy_prevents_silent_resume_with_defaults() {
 async fn concurrent_model_and_mode_updates_preserve_both_effective_choices() {
     let root = tempfile::tempdir().unwrap();
     let server = policy_server(root.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let mut socket = connect(&server).await;
     send(
         &mut socket,
@@ -338,11 +318,7 @@ async fn concurrent_model_and_mode_updates_preserve_both_effective_choices() {
 async fn thinking_changes_reach_other_attached_viewers() {
     let root = tempfile::tempdir().unwrap();
     let server = policy_server(root.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let mut first = connect(&server).await;
     let mut second = connect(&server).await;
     for socket in [&mut first, &mut second] {
@@ -388,11 +364,7 @@ async fn failed_model_policy_write_restores_owned_and_shared_prompt_state() {
         }),
         Arc::new(Vec::new),
     );
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let before_filter = session.agent.lock().await.skill_filter.read().await.clone();
     let mut socket = connect(&server).await;
     send(
@@ -433,11 +405,7 @@ async fn failed_model_policy_write_restores_owned_and_shared_prompt_state() {
 async fn invalid_persisted_todos_fail_resume_visibly() {
     let root = tempfile::tempdir().unwrap();
     let server = policy_server(root.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let id = session.id.clone();
     server.session_manager.remove(&id).await;
     tokio::fs::write(root.path().join(&id).join("todos.json"), b"{invalid")
@@ -453,11 +421,7 @@ async fn invalid_persisted_todos_fail_resume_visibly() {
 async fn idle_session_list_reports_saved_effective_model_and_provider() {
     let root = tempfile::tempdir().unwrap();
     let server = policy_server(root.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let id = session.id.clone();
     {
         let agent = session.agent.lock().await;
@@ -500,11 +464,7 @@ async fn idle_session_list_reports_saved_effective_model_and_provider() {
 async fn explicit_default_persona_clears_runtime_and_survives_reload() {
     let root = tempfile::tempdir().unwrap();
     let server = policy_server(root.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let id = session.id.clone();
     let mut socket = connect(&server).await;
     send(
@@ -550,11 +510,7 @@ async fn explicit_default_persona_clears_runtime_and_survives_reload() {
 async fn bare_persona_pin_inherits_the_current_provider() {
     let root = tempfile::tempdir().unwrap();
     let server = policy_server(root.path().to_path_buf());
-    let session = server
-        .session_manager
-        .create(None, ClientKind::Unknown)
-        .await
-        .unwrap();
+    let session = server.session_manager.create(None).await.unwrap();
     let mut socket = connect(&server).await;
     send(
         &mut socket,

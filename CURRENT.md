@@ -1342,3 +1342,36 @@ Verified 16 real-repository/model tests and strict all-target mew-diff clippy.
 Regressions first reproduced aggregate loading past its budget, dense newline
 allocation and unbounded git output, then passed with bounded loading. No new
 review UI is claimed by this prerequisite chunk.
+
+# 2026-10-03 — Native browser leases and daemon review contract
+
+Replaced the daemon's process-wide browser flag with a shared, revocable page
+lease for each session. Only a confirmed local desktop connection can register
+its explicit CDP endpoint, target and page generation. Registration becomes
+available after binding; replacement, failed preparation, unregister, session
+deletion and disconnect release the lease and retained runtime. Queued commands
+keep their original generation and cannot move to another page.
+
+Both browser wire commands and agent tools use the same runner. It requires
+agent-browser 0.34 or newer, pins the exact target, preserves snapshot references,
+and passes navigation/interaction data through the CLI's JSON batch input.
+Literal flags remain literal page data. Close targets the actual CDP page;
+cancelled processes and screenshot files are cleaned up. Named CLI connections
+are disconnected on release and have an idle timeout for abrupt daemon exit.
+
+Protocol revision 2 includes browser registration and identified session-diff
+requests/responses together. Review reads the requested daemon workspace and
+replies only to its requester; oversized/error responses retain both IDs.
+Workspace change events retain session origin and observe HEAD/index changes,
+including linked worktrees and external commits without a file rewrite. Previous
+native protocol revisions are rejected before session commands. Extension wire
+revision remains 1.
+
+Verified real Chrome and daemon WebSocket fixtures, all seven browser actions,
+reserved input text, same-URL page isolation, reference retention, replacement,
+cancellation and weak runtime release. Final daemon/iroh integration gate passed
+104 tests, with the manual browser fixture separately executed. Native core 41,
+protocol 115, local transport and supervisor compatibility gates passed. Matching
+mobile archives/bindings and all 31 iOS tests passed; SDK 23 and web UI 123 tests
+and both builds passed. Scoped strict clippy, formatting, architecture and theme
+checks passed. Native surface/UI integration follows as its own chunk.

@@ -198,7 +198,6 @@ fn build_daemon_server_with_config(
                 Some(params.writer),
                 session_id,
                 Some(cwd),
-                params.browser_enabled,
                 Arc::new(mew_hooks::NopDispatcher),
                 todos_path,
                 &[],

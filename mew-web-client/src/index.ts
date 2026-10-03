@@ -525,7 +525,7 @@ export type ServerMessage =
       language?: string;
     }
   | { type: "git_status_result"; entries: GitEntry[] }
-  | { type: "fs_changed"; paths: string[] }
+  | { type: "fs_changed"; session_id?: string; paths: string[] }
   | {
       type: "session_usage_changed";
       session_id: string;

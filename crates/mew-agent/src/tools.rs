@@ -555,7 +555,7 @@ impl Agent {
                     secrets: self.secrets.clone(),
                     shell_session: self.shell_session.clone(),
                     snapshot_store: self.snapshot_store.clone(),
-                    browser_enabled: self.browser_enabled,
+                    browser_access: self.browser_access.clone(),
                     supports_vision: self.supports_vision,
                 }),
                 tc.call_id.clone(),

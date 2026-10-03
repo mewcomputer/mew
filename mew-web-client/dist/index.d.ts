@@ -657,6 +657,7 @@ export type ServerMessage = {
     entries: GitEntry[];
 } | {
     type: "fs_changed";
+    session_id?: string;
     paths: string[];
 } | {
     type: "session_usage_changed";

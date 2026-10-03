@@ -842,7 +842,8 @@ async fn translate_server_message(
             Vec::new()
         }
 
-        ServerMessage::ModelList { .. }
+        ServerMessage::BrowserPageRegistration { .. }
+        | ServerMessage::ModelList { .. }
         | ServerMessage::ModelSwitched { .. }
         | ServerMessage::RequestResolved { .. }
         | ServerMessage::SessionCleared
@@ -857,6 +858,8 @@ async fn translate_server_message(
         | ServerMessage::DirListing { .. }
         | ServerMessage::FilePreview { .. }
         | ServerMessage::GitStatusResult { .. }
+        | ServerMessage::SessionDiff { .. }
+        | ServerMessage::SessionDiffError { .. }
         | ServerMessage::FsChanged { .. }
         | ServerMessage::SessionUsageChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }
