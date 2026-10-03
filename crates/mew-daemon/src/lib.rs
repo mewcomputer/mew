@@ -811,6 +811,11 @@ where
         };
 
         match client_msg {
+            ClientMessage::RemoteHello { .. } if legacy_iroh => {
+                reply(ServerMessage::RemoteReady {
+                    scope: RemoteScope::Control,
+                });
+            }
             ClientMessage::RemoteHello { .. } => {
                 reply(ServerMessage::Error {
                     message: "remote authentication is only available over iroh".into(),
@@ -915,13 +920,23 @@ where
                                     .await;
                             }
                         }
+                        let running = session.is_running.lock().await;
                         reply(ServerMessage::SessionReady {
-                            session_id,
+                            session_id: session_id.clone(),
                             cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
                             model,
                             provider,
                             permission_mode,
                         });
+                        reply(ServerMessage::SessionActivityChanged {
+                            session_id,
+                            activity: if *running {
+                                SessionState::Running
+                            } else {
+                                SessionState::Idle
+                            },
+                        });
+                        drop(running);
                         // Report the new session's active thinking variant so
                         // the frontend renders the pill immediately.
                         reply(ServerMessage::ThinkingVariantChanged {
@@ -990,6 +1005,7 @@ where
                             .session_cwd(&session_id)
                             .await
                             .map(|path| path.to_string_lossy().into_owned());
+                        let running = session.is_running.lock().await;
                         reply(ServerMessage::SessionReady {
                             session_id: session_id.clone(),
                             cwd,
@@ -997,6 +1013,15 @@ where
                             provider,
                             permission_mode,
                         });
+                        reply(ServerMessage::SessionActivityChanged {
+                            session_id: session_id.clone(),
+                            activity: if *running {
+                                SessionState::Running
+                            } else {
+                                SessionState::Idle
+                            },
+                        });
+                        drop(running);
                         // Report the session's current thinking variant so the
                         // frontend renders the pill immediately on attach instead
                         // of showing "no thinking" until the user toggles it.

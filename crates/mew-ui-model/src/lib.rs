@@ -215,19 +215,8 @@ impl UiModel {
         self.current_persona = state.current_persona.clone();
         self.personas = state.personas.clone();
         self.permission_mode = state.permission_mode.clone();
-        self.running = state
-            .attached_session
-            .as_deref()
-            .and_then(|session_id| state.session(session_id))
-            .is_some_and(|session| session.running);
         self.models = state.models.clone();
         self.projects = state.projects.clone();
-        self.pending_actions = state
-            .attached_session
-            .as_deref()
-            .and_then(|session_id| state.session(session_id))
-            .map(|session| session.pending_actions.clone())
-            .unwrap_or_default();
         self.browser = state.browser.clone();
         self.presence = state.presence.clone();
         self.control_yielded_by = state.control_yielded_by;
@@ -238,11 +227,18 @@ impl UiModel {
             .as_deref()
             .and_then(|session_id| state.session(session_id))
         {
+            self.running = session.running;
+            self.pending_actions = session.pending_actions.clone();
             self.subagents = session.subagents.clone();
             self.todos = session.todos.iter().map(ActivityTodo::from).collect();
             self.usage = state.usage(&session.session_id).map(UsageSummary::from);
             self.flagged_files = session.flagged_files.clone();
-        } else {
+        } else if state.attached_session.is_none()
+            || self.selected_session != state.attached_session
+        {
+            self.running = false;
+            self.pending_actions.clear();
+            self.clear_activity();
             self.flagged_files.clear();
         }
         self.conversations = state
@@ -1036,6 +1032,30 @@ mod tests {
         assert!(model.subagents.is_empty());
         assert!(model.todos.is_empty());
         assert!(model.usage.is_none());
+    }
+
+    #[test]
+    fn metadata_updates_preserve_the_attached_run_and_required_actions() {
+        let mut state = ClientState::default();
+        state.attached_session = Some(SESSION_ID.into());
+        let session = state.session_mut(SESSION_ID);
+        session.running = true;
+        session.pending_actions.push(PendingAction {
+            request_id: "permission-1".into(),
+            kind: ActionKind::WorkspacePermission {
+                path: "/project".into(),
+            },
+        });
+        let mut model = UiModel::default();
+        model.sync_client_metadata(&state.ui_snapshot());
+        model.sync_client_metadata(&state.ui_metadata_snapshot());
+        assert!(model.running);
+        assert_eq!(model.pending_actions.len(), 1);
+
+        state.attached_session = Some("another-session".into());
+        model.sync_client_metadata(&state.ui_metadata_snapshot());
+        assert!(!model.running);
+        assert!(model.pending_actions.is_empty());
     }
 
     #[test]

@@ -110,6 +110,29 @@ where
 }
 
 #[tokio::test]
+async fn local_transport_rejects_remote_hello() {
+    let addr = spawn_daemon_tcp().await;
+    let mut ws = connect_tcp(addr).await;
+    send(
+        &mut ws,
+        ClientMessage::RemoteHello {
+            token: None,
+            device_name: "local client".into(),
+        },
+    )
+    .await;
+    let messages = recv_until(&mut ws, |message| {
+        matches!(message, ServerMessage::Error { .. })
+    })
+    .await;
+    assert!(matches!(
+        messages.last(),
+        Some(ServerMessage::Error { message })
+            if message == "remote authentication is only available over iroh"
+    ));
+}
+
+#[tokio::test]
 async fn tcp_listener_serves_session_ready() {
     let addr = spawn_daemon_tcp().await;
     let mut ws = connect_tcp(addr).await;

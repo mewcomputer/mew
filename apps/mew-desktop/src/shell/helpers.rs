@@ -1498,6 +1498,7 @@ pub(super) fn client_event_requires_transcript_snapshot(event: &ClientEvent) -> 
             | ClientEvent::SessionHistoryLoaded { .. }
             | ClientEvent::SessionHistoryPageLoaded { .. }
             | ClientEvent::MessageChanged { .. }
+            | ClientEvent::ProviderMessageEnded { .. }
             | ClientEvent::RequiredActionChanged { .. }
             | ClientEvent::RequestResolved { .. }
     )
@@ -1518,7 +1519,9 @@ pub(super) fn client_event_requires_transcript_remeasure(event: &ClientEvent) ->
 pub(super) fn client_event_requires_session_snapshot(event: &ClientEvent) -> bool {
     matches!(
         event,
-        ClientEvent::SubagentsChanged { .. }
+        ClientEvent::SessionActivityChanged { .. }
+            | ClientEvent::ProviderMessageEnded { .. }
+            | ClientEvent::SubagentsChanged { .. }
             | ClientEvent::TodosChanged { .. }
             | ClientEvent::UsageChanged { .. }
             | ClientEvent::FlaggedFilesChanged { .. }

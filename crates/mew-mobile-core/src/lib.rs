@@ -1149,9 +1149,7 @@ fn translate_message(
         .apply_server_message(msg.clone());
     conn_state.push_shared_events(shared_events);
 
-    // Provider events use the shared session as the source of truth. Sync the
-    // mobile projection before the compatibility match so its legacy helper
-    // observes an already-reduced event instead of applying it twice.
+    // Project the canonical reduction before reading per-message metadata.
     if matches!(msg, ServerMessage::Provider { .. }) {
         sync_mobile_session_from_client_state(conn_state);
     }
@@ -1313,23 +1311,33 @@ fn translate_message(
             }
         }
 
+        ServerMessage::SessionActivityChanged {
+            session_id,
+            activity,
+        } => {
+            sync_mobile_session_from_client_state(conn_state);
+            events.push(CoreEvent::SessionActivityChanged {
+                daemon: d,
+                session_id: session_id.clone(),
+                running: *activity == mew_protocol::SessionState::Running,
+            });
+        }
+
         ServerMessage::Provider { event } => {
             let mut ss_lock = conn_state.session_state.lock().unwrap();
             if let Some(ss) = ss_lock.as_mut() {
                 match event {
-                    ProviderEventWire::PartStart { part } => {
-                        ss.apply_provider_event(event);
-                        if let Part::Text(tp) = part {
-                            events.push(CoreEvent::TextDelta {
-                                daemon: d,
-                                session_id: ss.session_id.clone(),
-                                part_id: tp.base.id.to_string(),
-                                delta: tp.text.clone(),
-                            });
-                        }
+                    ProviderEventWire::PartStart {
+                        part: Part::Text(tp),
+                    } => {
+                        events.push(CoreEvent::TextDelta {
+                            daemon: d,
+                            session_id: ss.session_id.clone(),
+                            part_id: tp.base.id.to_string(),
+                            delta: tp.text.clone(),
+                        });
                     }
                     ProviderEventWire::PartDelta { part_id, delta, .. } => {
-                        ss.apply_provider_event(event);
                         events.push(CoreEvent::TextDelta {
                             daemon: d,
                             session_id: ss.session_id.clone(),
@@ -1338,7 +1346,6 @@ fn translate_message(
                         });
                     }
                     ProviderEventWire::PartEnd { part_id } => {
-                        ss.apply_provider_event(event);
                         events.push(CoreEvent::PartUpdated {
                             daemon: d,
                             session_id: ss.session_id.clone(),
@@ -1353,10 +1360,9 @@ fn translate_message(
                         finish,
                         ..
                     } => {
-                        ss.apply_provider_event(event);
                         let failed = *finish == mew_message::Finish::Error;
                         let manifest = ss.last_manifest.take();
-                        events.push(CoreEvent::TurnEnded {
+                        events.push(CoreEvent::ProviderMessageEnded {
                             daemon: d,
                             session_id: ss.session_id.clone(),
                             input_tokens: usage.input as u64,
@@ -1366,9 +1372,7 @@ fn translate_message(
                             manifest,
                         });
                     }
-                    _ => {
-                        ss.apply_provider_event(event);
-                    }
+                    _ => {}
                 }
             }
         }
@@ -1836,7 +1840,6 @@ fn translate_message(
         | ServerMessage::ClientDetached { .. }
         | ServerMessage::ControlYielded { .. }
         | ServerMessage::SessionSummaryChanged { .. }
-        | ServerMessage::SessionActivityChanged { .. }
         | ServerMessage::SessionStatsChanged { .. }
         | ServerMessage::SessionUsageChanged { .. }
         | ServerMessage::GroupList { .. }
@@ -1952,6 +1955,151 @@ fn rand_jitter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mobile_provider_projection_reduces_each_frame_once() {
+        let conn = Arc::new(ConnState::new());
+        let daemon = "node-abc".to_owned();
+        let mut prompt = None;
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: id.into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        let message_id = ulid::Ulid::new();
+        let part_id = ulid::Ulid::new();
+        translate_message(
+            &ServerMessage::Provider {
+                event: ProviderEventWire::PartStart {
+                    part: Part::Text(mew_message::TextPart {
+                        base: mew_message::PartBase {
+                            id: part_id,
+                            message_id,
+                            session_id: ulid::Ulid::from_string(id).unwrap(),
+                        },
+                        text: String::new(),
+                        synthetic: false,
+                    }),
+                },
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        translate_message(
+            &ServerMessage::Provider {
+                event: ProviderEventWire::PartDelta {
+                    part_id,
+                    field: "text".into(),
+                    delta: "hello".into(),
+                },
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        {
+            let guard = conn.session_state.lock().unwrap();
+            let session = guard.as_ref().unwrap();
+            assert_eq!(session.messages[0].parts.len(), 1);
+            assert_eq!(session.messages[0].parts[0].text.as_deref(), Some("hello"));
+        }
+        translate_message(
+            &ServerMessage::Provider {
+                event: ProviderEventWire::MessageEnd {
+                    finish: mew_message::Finish::ToolUse,
+                    usage: mew_message::Tokens {
+                        input: 7,
+                        output: 2,
+                        ..Default::default()
+                    },
+                    cost: 0.01,
+                    manifest: None,
+                },
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        let guard = conn.session_state.lock().unwrap();
+        let session = guard.as_ref().unwrap();
+        assert_eq!(session.messages[0].parts.len(), 1);
+        assert_eq!(session.messages[0].parts[0].text.as_deref(), Some("hello"));
+        assert_eq!(session.input_tokens, 7);
+        assert_eq!(session.turns, 1);
+    }
+
+    #[test]
+    fn mobile_activity_controls_busy_state_across_provider_completion() {
+        let conn = Arc::new(ConnState::new());
+        let daemon = "node-abc".to_owned();
+        let mut prompt = None;
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: id.into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: id.into(),
+                activity: mew_protocol::SessionState::Running,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        assert!(conn.session_state.lock().unwrap().as_ref().unwrap().running);
+        translate_message(
+            &ServerMessage::Provider {
+                event: ProviderEventWire::MessageEnd {
+                    finish: mew_message::Finish::ToolUse,
+                    usage: Default::default(),
+                    cost: 0.0,
+                    manifest: None,
+                },
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        assert!(conn.session_state.lock().unwrap().as_ref().unwrap().running);
+        translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: "background".into(),
+                activity: mew_protocol::SessionState::Active,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        assert!(conn.session_state.lock().unwrap().as_ref().unwrap().running);
+        translate_message(
+            &ServerMessage::SessionActivityChanged {
+                session_id: id.into(),
+                activity: mew_protocol::SessionState::Active,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        assert!(!conn.session_state.lock().unwrap().as_ref().unwrap().running);
+    }
 
     async fn protocol_handshake_result(pong: &str) -> anyhow::Result<ServerMessage> {
         let (client, server) = tokio::io::duplex(4096);

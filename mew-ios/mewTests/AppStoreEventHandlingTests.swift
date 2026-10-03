@@ -19,6 +19,61 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store.selectedSessionId = "sess-1"
     }
 
+    func testProviderCompletionKeepsRunBusyUntilDaemonActivityEnds() {
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true))
+        store.handleEvent(.providerMessageEnded(daemon: "daemon-1", sessionId: "sess-1",
+            inputTokens: 7, outputTokens: 2, cost: 0.01, failed: false, manifest: nil))
+        XCTAssertTrue(store.isStreaming)
+        store.streamingText = "last provider response"
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: false))
+        XCTAssertFalse(store.isStreaming)
+        XCTAssertTrue(store.streamingText.isEmpty)
+    }
+
+    func testOtherSessionsAndDaemonsCannotEndTheSelectedRun() {
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-2", sessionId: "sess-1", running: false))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-2", running: false))
+        store.handleEvent(.providerMessageEnded(daemon: "daemon-2", sessionId: "sess-1",
+            inputTokens: 7, outputTokens: 2, cost: 0.01, failed: true, manifest: nil))
+        XCTAssertTrue(store.isStreaming)
+        XCTAssertNotEqual(store.lastTurnFailed["sess-1"], true)
+    }
+
+    func testPromptWaitsForAuthoritativeActivityAndLateTextCannotRestartRun() {
+        store.sendPrompt("hello")
+        XCTAssertFalse(store.isStreaming)
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true))
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: false))
+        store.handleEvent(.textDelta(daemon: "daemon-1", sessionId: "sess-1", partId: "late", delta: "late text"))
+        XCTAssertFalse(store.isStreaming)
+    }
+
+    func testOtherSessionsAndDaemonsCannotChangeStreamingText() {
+        store.handleEvent(.textDelta(daemon: "daemon-1", sessionId: "sess-1", partId: "own", delta: "own text"))
+        store.handleEvent(.textDelta(daemon: "daemon-2", sessionId: "sess-1", partId: "other", delta: "wrong daemon"))
+        store.handleEvent(.textDelta(daemon: "daemon-1", sessionId: "sess-2", partId: "other", delta: "wrong session"))
+        XCTAssertEqual(store.streamingText, "own text")
+        XCTAssertEqual(store.streamingPartId, "own")
+    }
+
+    func testSnapshotOnlyRestoresRunningForTheSelectedSession() {
+        let other = SessionInfo(sessionId: "sess-2", title: "Other", messages: [],
+            running: false, usageCost: 0, pendingPermissions: 0, pendingQuestions: 0,
+            inputTokens: 0, outputTokens: 0, turns: 0, todos: [])
+        let selected = SessionInfo(sessionId: "sess-1", title: "Selected", messages: [],
+            running: true, usageCost: 0, pendingPermissions: 0, pendingQuestions: 0,
+            inputTokens: 0, outputTokens: 0, turns: 0, todos: [])
+        mock.snapshotResult = DaemonSnapshot(sessions: [other, selected], attachedSession: "sess-1",
+            pendingPermissions: [], pendingAskUser: [], models: [], daemonVersion: nil,
+            permissionMode: nil, currentModel: nil, currentProvider: nil, thinkingVariant: nil,
+            currentPersona: nil, availablePersonas: [])
+        store.handleEvent(.sessionReloaded(daemon: "daemon-2", sessionId: "sess-1"))
+        XCTAssertFalse(store.isStreaming)
+        store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
+        XCTAssertTrue(store.isStreaming)
+    }
+
     func testGoalProposalPreservesIdentityAndRespondsOnOriginatingDaemon() {
         store.handleEvent(.goalProposed(daemon: "daemon-1", sessionId: "sess-1",
             requestId: "goal-1", callId: "call-1", objective: "finish the feature"))
@@ -136,10 +191,10 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertEqual(store.todos["sess-1"]?[0].status, "done")
     }
 
-    // MARK: - AC.5: TurnEnded captures usage
+    // MARK: - AC.5: ProviderMessageEnded captures usage
 
-    func testTurnEndedCapturesUsage() {
-        store.handleEvent(.turnEnded(
+    func testProviderMessageEndedCapturesUsage() {
+        store.handleEvent(.providerMessageEnded(
             daemon: "daemon-1", sessionId: "sess-1",
             inputTokens: 500, outputTokens: 200,
             cost: 0.0123, failed: false, manifest: nil
@@ -152,8 +207,8 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertEqual(usage?.turns, 1) // first turn (no snapshot)
     }
 
-    func testTurnEndedSetsFailedFlag() {
-        store.handleEvent(.turnEnded(
+    func testProviderMessageEndedSetsFailedFlag() {
+        store.handleEvent(.providerMessageEnded(
             daemon: "daemon-1", sessionId: "sess-1",
             inputTokens: 0, outputTokens: 0,
             cost: 0.0, failed: true, manifest: nil

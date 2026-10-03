@@ -300,10 +300,6 @@ final class AppStore: ObservableObject {
 
     func sendPrompt(_ text: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
-        // Optimistically enter the streaming state so the "working" indicator
-        // (typing dots) shows immediately, before the first token arrives.
-        // Cleared on turnEnded.
-        isStreaming = true
         if let sessionId = selectedSessionId {
             lastPrompt[sessionId] = text
         }
@@ -317,7 +313,6 @@ final class AppStore: ObservableObject {
         guard let sessionId = selectedSessionId,
               let prompt = lastPrompt[sessionId],
               !prompt.isEmpty else { return }
-        isStreaming = true
         lastTurnFailed[sessionId] = false
         core.prompt(id: daemonId, text: prompt)
     }
@@ -441,7 +436,7 @@ final class AppStore: ObservableObject {
             sessionLists[daemon] = sessions
             // Seed per-session turn-failure state from the rail summaries so
             // the ChatView retry banner is correct on fresh attach (before any
-            // turnEnded event fires for this session).
+            // providerMessageEnded event fires for this session).
             for session in sessions {
                 lastTurnFailed[session.sessionId] = session.lastTurnFailed
             }
@@ -463,6 +458,16 @@ final class AppStore: ObservableObject {
             objectWillChange.send()
 
         case .sessionReloaded(let daemon, let sessionId):
+            guard selectedDaemonId?.nodeId == daemon else { return }
+            // A newly created session becomes selected before its snapshot is applied.
+            if pendingNewSessionDaemon == daemon {
+                pendingNewSessionDaemon = nil
+                selectedSessionId = sessionId
+                path.append(.chat(daemonNodeId: daemon, sessionId: sessionId))
+            } else if selectedSessionId == nil {
+                selectedSessionId = sessionId
+            }
+            guard selectedSessionId == sessionId else { return }
             // Pull snapshot after reload
             if let snap = core?.snapshot(id: DaemonId(nodeId: daemon)) {
                 applySnapshot(snap)
@@ -474,16 +479,8 @@ final class AppStore: ObservableObject {
             if autoTitle { setAutoTitle(enabled: true) }
             let autoSummary = UserDefaults.standard.bool(forKey: "autoSummary_\(sessionId)")
             if autoSummary { setAutoSummary(enabled: true) }
-            // If we just created this session via "new chat", navigate into it.
-            if pendingNewSessionDaemon == daemon {
-                pendingNewSessionDaemon = nil
-                selectedSessionId = sessionId
-                path.append(.chat(daemonNodeId: daemon, sessionId: sessionId))
-            } else if selectedSessionId == nil {
-                selectedSessionId = sessionId
-            }
-
-        case .textDelta(_, _, let partId, let delta):
+        case .textDelta(let daemon, let sessionId, let partId, let delta):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             if streamingPartId == partId {
                 streamingText += delta
             } else {
@@ -491,12 +488,21 @@ final class AppStore: ObservableObject {
                 streamingText = delta
             }
 
-        case .partUpdated(_, _, let partId, _, _):
+        case .partUpdated(let daemon, let sessionId, let partId, _, _):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             // Update the message part in place
             updatePartInMessages(partId: partId)
 
-        case .turnEnded(let daemon, let sessionId, let inputTokens, let outputTokens, let cost, let failed, _):
-            isStreaming = false
+        case .sessionActivityChanged(let daemon, let sessionId, let running):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
+            isStreaming = running
+            if !running {
+                streamingPartId = nil
+                streamingText = ""
+            }
+
+        case .providerMessageEnded(let daemon, let sessionId, let inputTokens, let outputTokens, let cost, let failed, _):
+            guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             streamingPartId = nil
             streamingText = ""
             if let sessionId = selectedSessionId {
@@ -621,8 +627,9 @@ final class AppStore: ObservableObject {
     // MARK: - Helpers
 
     private func applySnapshot(_ snap: DaemonSnapshot) {
-        if let session = snap.sessions.first {
+        if let session = snap.sessions.first(where: { $0.sessionId == selectedSessionId }) {
             messages = session.messages
+            isStreaming = session.running
             // Seed usage + todos from snapshot
             if let sessionId = session.sessionId.isEmpty ? nil : Optional(session.sessionId) {
                 sessionUsage[sessionId] = SessionUsage(
@@ -689,7 +696,7 @@ struct AlertItem: Identifiable, Equatable {
 
 // MARK: - Session usage
 
-/// Usage stats for a session, assembled from TurnEnded events + SessionInfo.
+/// Usage stats for a session, assembled from provider messages and SessionInfo.
 struct SessionUsage: Equatable {
     var inputTokens: UInt64
     var outputTokens: UInt64

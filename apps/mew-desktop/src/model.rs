@@ -130,6 +130,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn composer_stays_busy_between_provider_messages_until_daemon_activity_ends() {
+        use mew_message::{Finish, ProviderEventWire};
+        use mew_protocol::{ServerMessage, SessionState};
+
+        let mut client = ClientState::default();
+        client.apply_server_message(ServerMessage::SessionReady {
+            session_id: "session-1".into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        });
+        let mut model = ShellModel::starting(None);
+        client.apply_server_message(ServerMessage::SessionActivityChanged {
+            session_id: "session-1".into(),
+            activity: SessionState::Running,
+        });
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(model.ui.running);
+
+        client.apply_server_message(ServerMessage::Provider {
+            event: ProviderEventWire::MessageEnd {
+                finish: Finish::ToolUse,
+                usage: Default::default(),
+                cost: 0.0,
+                manifest: None,
+            },
+        });
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(model.ui.running);
+
+        client.apply_server_message(ServerMessage::SessionActivityChanged {
+            session_id: "session-1".into(),
+            activity: SessionState::Active,
+        });
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(!model.ui.running);
+    }
+
+    #[test]
     fn shell_model_tracks_connection_and_session_attachment() {
         let mut model = ShellModel::starting(Some("ws://127.0.0.1:25566".into()));
         model.apply_events(&[

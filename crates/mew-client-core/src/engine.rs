@@ -272,7 +272,7 @@ mod tests {
         let events = engine.receive().await.unwrap();
         assert!(matches!(
             events.as_slice(),
-            [ClientEvent::TurnEnded {
+            [ClientEvent::ProviderMessageEnded {
                 input_tokens: 3,
                 output_tokens: 2,
                 ..

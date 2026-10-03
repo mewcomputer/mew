@@ -1201,3 +1201,29 @@ and stale-reaper eviction. All five lifetime tests now pass, including idle
 workspace watcher shutdown, reattachment, explicit cancellation, and unloading
 after cancellation. Full daemon checks passed: 27 unit, 6 command, 23 end-to-end,
 5 lifetime and 6 session-management tests. Next work is authoritative run state.
+
+# 2026-10-03 — Make native task activity authoritative
+
+The daemon replays Running/Idle immediately after SessionReady and holds its
+state lock until both replies are queued. Native projections now use session
+activity for task lifetime. Provider starts and message ends only describe a
+model response; token usage and manifests still update without ending the task.
+Mobile no longer applies provider events twice. Desktop metadata-only snapshots
+preserve the current task and required actions when the attachment is unchanged.
+Swift ignores background text/part/activity events for other daemon/session
+identities and restores running state from the matching snapshot.
+
+Real compatibility tests uncovered a trusted legacy iroh peer rejecting modern
+RemoteHello. Already allowlisted peers now receive RemoteReady; local TCP hello
+still fails, untrusted peers remain rejected and legacy desktop capabilities
+remain denied. No trust or capability restriction was removed.
+
+Red regressions reproduced provider-boundary completion, doubled mobile usage,
+metadata-only run clearing, missing attach activity and trusted-peer handshake
+failure. Passed shared core 36, mobile 29, UI model 12, actual native model-source
+8, daemon end-to-end 23, lifetime 6, iroh 2, TCP 7 and real mobile iroh 2 tests.
+Normal macOS cargo check and scoped clippy pass. Swift parses and bindings were
+regenerated from matching host metadata. Final device/simulator archives and
+application tests will run after the remaining mobile recovery changes; those
+results are not claimed here. Canonical generated Swift retains generator
+whitespace. Next work is required-action recovery.

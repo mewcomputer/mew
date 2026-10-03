@@ -633,6 +633,28 @@ mod shell_tests {
 
     #[test]
     fn activity_events_request_full_session_snapshots() {
+        assert!(client_event_requires_transcript_snapshot(
+            &ClientEvent::ProviderMessageEnded {
+                session_id: "session".into(),
+                cost: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+            }
+        ));
+        assert!(client_event_requires_session_snapshot(
+            &ClientEvent::SessionActivityChanged {
+                session_id: "session".into(),
+                running: true,
+            }
+        ));
+        assert!(client_event_requires_session_snapshot(
+            &ClientEvent::ProviderMessageEnded {
+                session_id: "session".into(),
+                cost: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+            }
+        ));
         assert!(client_event_requires_session_snapshot(
             &ClientEvent::SubagentsChanged {
                 session_id: "session".into(),

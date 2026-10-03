@@ -190,9 +190,11 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
     // Send a prompt.
     core.prompt(daemon_id.clone(), "hello from M1 test".into());
 
-    // Wait for TurnEnded (the fake provider streams "hello from mobile core M1").
-    wait_for_event(&events, 15, |e| matches!(e, CoreEvent::TurnEnded { .. }));
-    println!("✓ Received TurnEnded (streaming complete)");
+    // Wait for ProviderMessageEnded (the fake provider streams "hello from mobile core M1").
+    wait_for_event(&events, 15, |e| {
+        matches!(e, CoreEvent::ProviderMessageEnded { .. })
+    });
+    println!("✓ Received ProviderMessageEnded (streaming complete)");
 
     // Verify we got TextDelta events (streaming text).
     let delta_count = count_events(&events, |e| matches!(e, CoreEvent::TextDelta { .. }));
@@ -252,7 +254,9 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
         let has_reloaded = evs
             .iter()
             .any(|e| matches!(e, CoreEvent::SessionReloaded { .. }));
-        let has_turn_ended = evs.iter().any(|e| matches!(e, CoreEvent::TurnEnded { .. }));
+        let has_turn_ended = evs
+            .iter()
+            .any(|e| matches!(e, CoreEvent::ProviderMessageEnded { .. }));
         (
             total,
             has_connected,
@@ -265,7 +269,7 @@ async fn mobile_core_emits_events_through_listener() -> Result<()> {
         has_connected && has_version && has_reloaded && has_turn_ended,
         "expected all key events"
     );
-    println!("✓ All key events present: Connected, Version, Reloaded, TurnEnded");
+    println!("✓ All key events present: Connected, Version, Reloaded, ProviderMessageEnded");
     println!("✓ Total events: {total}");
 
     println!("\n✓✓✓ M1 integration test complete: events verified through listener");
@@ -428,8 +432,10 @@ async fn b1_b6_feature_parity_tests() -> Result<()> {
 
     // ── AC.5: Usage fields in snapshot after a turn ──
     h.core.prompt(h.daemon_id.clone(), "hello".into());
-    wait_for_event(&h.events, 15, |e| matches!(e, CoreEvent::TurnEnded { .. }));
-    println!("✓ AC.5: Received TurnEnded");
+    wait_for_event(&h.events, 15, |e| {
+        matches!(e, CoreEvent::ProviderMessageEnded { .. })
+    });
+    println!("✓ AC.5: Received ProviderMessageEnded");
     {
         let snapshot = h
             .core

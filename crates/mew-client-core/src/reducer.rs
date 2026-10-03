@@ -89,12 +89,12 @@ impl ClientSession {
                 ClientEvent::TextDelta { part_id, delta, .. } => {
                     Some(SessionEvent::TextDelta { part_id, delta })
                 }
-                ClientEvent::TurnEnded {
+                ClientEvent::ProviderMessageEnded {
                     cost,
                     input_tokens,
                     output_tokens,
                     ..
-                } => Some(SessionEvent::TurnEnded {
+                } => Some(SessionEvent::ProviderMessageEnded {
                     cost,
                     input_tokens,
                     output_tokens,
@@ -139,7 +139,7 @@ pub enum SessionEvent {
         part_id: PartId,
         delta: String,
     },
-    TurnEnded {
+    ProviderMessageEnded {
         cost: f64,
         input_tokens: u32,
         output_tokens: u32,
@@ -213,6 +213,10 @@ pub enum ClientEvent {
         session_id: String,
     },
     SessionListChanged,
+    SessionActivityChanged {
+        session_id: String,
+        running: bool,
+    },
     ProjectListChanged,
     GroupsChanged,
     SessionMetaChanged {
@@ -257,7 +261,7 @@ pub enum ClientEvent {
         call_id: String,
         chunk: String,
     },
-    TurnEnded {
+    ProviderMessageEnded {
         session_id: String,
         cost: f64,
         input_tokens: u32,
@@ -470,7 +474,20 @@ impl ClientState {
                 {
                     session.state = activity;
                 }
-                vec![ClientEvent::SessionListChanged]
+                let running = activity == mew_protocol::SessionState::Running;
+                let session = self.session_mut(&session_id);
+                session.running = running;
+                if !running {
+                    session.streaming_part_id = None;
+                    session.streaming_text.clear();
+                }
+                vec![
+                    ClientEvent::SessionListChanged,
+                    ClientEvent::SessionActivityChanged {
+                        session_id,
+                        running,
+                    },
+                ]
             }
             ServerMessage::SessionStatsChanged {
                 session_id,
@@ -929,7 +946,6 @@ impl ClientState {
         let session = self.session_mut(&session_id);
         match event {
             ProviderEventWire::PartStart { part } => {
-                session.running = true;
                 let part_id = part.id();
                 match &part {
                     Part::Text(part) => {
@@ -1011,7 +1027,6 @@ impl ClientState {
                 finish,
                 manifest,
             } => {
-                session.running = false;
                 session.streaming_part_id = None;
                 session.streaming_text.clear();
                 session.usage.input_tokens += usage.input as u64;
@@ -1038,7 +1053,7 @@ impl ClientState {
                     assistant.finish = Some(finish);
                     assistant.manifest = manifest;
                 }
-                vec![ClientEvent::TurnEnded {
+                vec![ClientEvent::ProviderMessageEnded {
                     session_id,
                     cost,
                     input_tokens: usage.input,
@@ -1080,6 +1095,125 @@ mod tests {
             provider: Some("fake".into()),
             permission_mode: Some("standard".into()),
         });
+    }
+
+    fn activity(state: &mut ClientState, session_id: &str, running: bool) {
+        state.apply_server_message(ServerMessage::SessionActivityChanged {
+            session_id: session_id.into(),
+            activity: if running {
+                mew_protocol::SessionState::Running
+            } else {
+                mew_protocol::SessionState::Active
+            },
+        });
+    }
+
+    fn provider_message_end(state: &mut ClientState, finish: Finish) {
+        state.apply_server_message(ServerMessage::Provider {
+            event: ProviderEventWire::MessageEnd {
+                finish,
+                usage: Tokens {
+                    input: 7,
+                    output: 2,
+                    reasoning: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                },
+                cost: 0.01,
+                manifest: None,
+            },
+        });
+    }
+
+    #[test]
+    fn provider_message_boundaries_do_not_change_run_state() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        let id = state.attached_session.clone().unwrap();
+        let message_id = Ulid::new();
+        state.apply_server_message(ServerMessage::Provider {
+            event: ProviderEventWire::PartStart {
+                part: Part::Text(TextPart {
+                    base: PartBase {
+                        id: Ulid::new(),
+                        message_id,
+                        session_id: Ulid::from_string(&id).unwrap(),
+                    },
+                    text: "late provider data".into(),
+                    synthetic: false,
+                }),
+            },
+        });
+        assert!(
+            !state.session(&id).unwrap().running,
+            "only daemon activity starts a run"
+        );
+        activity(&mut state, &id, true);
+        provider_message_end(&mut state, Finish::ToolUse);
+        assert!(
+            state.session(&id).unwrap().running,
+            "provider completion leaves tools busy"
+        );
+        state.apply_server_message(ServerMessage::AskUserRequest {
+            request_id: "question".into(),
+            call_id: "ask".into(),
+            questions: vec![],
+        });
+        assert!(
+            state.session(&id).unwrap().running,
+            "waiting for input is part of the run"
+        );
+        provider_message_end(&mut state, Finish::Stop);
+        assert!(
+            state.session(&id).unwrap().running,
+            "final provider completion still awaits daemon shutdown"
+        );
+        assert_eq!(state.session(&id).unwrap().usage.input_tokens, 14);
+        activity(&mut state, &id, false);
+        assert!(!state.session(&id).unwrap().running);
+    }
+
+    #[test]
+    fn attaching_replays_run_state_without_provider_events() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        let id = state.attached_session.clone().unwrap();
+        state.apply_server_message(ServerMessage::SessionHistoryPage {
+            session_id: id.clone(),
+            messages: vec![],
+            next_cursor: None,
+            replace: true,
+        });
+        activity(&mut state, &id, true);
+        assert!(state.session(&id).unwrap().running);
+        activity(&mut state, &id, false);
+        assert!(!state.session(&id).unwrap().running);
+    }
+
+    #[test]
+    fn failed_provider_and_cancel_completion_wait_for_daemon_activity() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        let id = state.attached_session.clone().unwrap();
+        activity(&mut state, &id, true);
+        provider_message_end(&mut state, Finish::Error);
+        assert!(state.session(&id).unwrap().running);
+        activity(&mut state, &id, false);
+        assert!(!state.session(&id).unwrap().running);
+        provider_message_end(&mut state, Finish::Stop);
+        assert!(!state.session(&id).unwrap().running);
+    }
+
+    #[test]
+    fn background_activity_does_not_change_the_attached_run() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        let attached = state.attached_session.clone().unwrap();
+        activity(&mut state, &attached, true);
+        activity(&mut state, "background", true);
+        activity(&mut state, "background", false);
+        assert!(state.session(&attached).unwrap().running);
+        assert!(!state.session("background").unwrap().running);
     }
 
     #[test]

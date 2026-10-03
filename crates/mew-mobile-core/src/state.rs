@@ -217,7 +217,7 @@ pub struct SessionState {
     pub current_persona: Option<String>,
     pub available_personas: Vec<crate::events::PersonaInfo>,
     /// Last turn manifest extracted from MessageEnd. Used by lib.rs
-    /// to populate CoreEvent::TurnEnded.
+    /// to populate CoreEvent::ProviderMessageEnded.
     pub last_manifest: Option<MobileTurnManifest>,
 }
 
@@ -260,8 +260,6 @@ impl SessionState {
         use mew_message::{Part, ProviderEventWire};
         match event {
             ProviderEventWire::PartStart { part } => {
-                // A new part means a turn is in progress.
-                self.running = true;
                 let (part_id, msg_part) = match part {
                     Part::Text(tp) => {
                         let id = tp.base.id.to_string();
@@ -369,7 +367,6 @@ impl SessionState {
                 manifest,
                 ..
             } => {
-                self.running = false;
                 self.usage_cost += cost;
                 self.input_tokens += usage.input as u64;
                 self.output_tokens += usage.output as u64;
@@ -471,7 +468,7 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
                 tool_time_start: None,
                 tool_time_end: None,
                 tool_sensitivity: None,
-            })
+            });
         }
         mew_message::Part::Reasoning(part) => {
             return Some(MessagePart {
@@ -487,7 +484,7 @@ fn to_mobile_part(part: &mew_message::Part) -> Option<MessagePart> {
                 tool_time_start: None,
                 tool_time_end: None,
                 tool_sensitivity: None,
-            })
+            });
         }
         mew_message::Part::ToolCall(part) => part,
         _ => return None,

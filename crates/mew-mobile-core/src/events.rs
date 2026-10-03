@@ -60,8 +60,15 @@ pub enum CoreEvent {
         state: Option<String>,
     },
 
-    /// A turn ended (MessageEnd received).
-    TurnEnded {
+    /// The daemon's activity state for a session changed.
+    SessionActivityChanged {
+        daemon: String,
+        session_id: String,
+        running: bool,
+    },
+
+    /// One provider message ended; tools or further messages may still follow.
+    ProviderMessageEnded {
         daemon: String,
         session_id: String,
         input_tokens: u64,

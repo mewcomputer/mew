@@ -418,3 +418,78 @@ async fn stale_reaper_cannot_remove_a_reloaded_session_with_the_same_id() {
     drop(existing);
     close(socket, task).await;
 }
+
+#[tokio::test]
+async fn session_ready_is_followed_by_authoritative_activity_for_new_running_and_cancelled_tasks() {
+    let (_directory, server) = daemon(true);
+    let (mut first, first_task) = connect(&server).await;
+    let session_id = new_session(&mut first, None).await;
+    assert!(
+        matches!(
+            receive(&mut first, |_| true).await,
+            ServerMessage::SessionActivityChanged { session_id: id, activity: SessionState::Idle } if id == session_id
+        ),
+        "new session must report its idle state immediately after SessionReady"
+    );
+    prompt(&mut first).await;
+    receive(&mut first, |message| {
+        matches!(message, ServerMessage::AskUserRequest { .. })
+    })
+    .await;
+
+    let (mut second, second_task) = connect(&server).await;
+    send(
+        &mut second,
+        ClientMessage::AttachSession {
+            session_id: session_id.clone(),
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    receive(&mut second, |message| {
+        matches!(message, ServerMessage::SessionReady { .. })
+    })
+    .await;
+    assert!(
+        matches!(
+            receive(&mut second, |_| true).await,
+            ServerMessage::SessionActivityChanged { session_id: id, activity: SessionState::Running } if id == session_id
+        ),
+        "attach must remain running while a tool waits for user input"
+    );
+    send(&mut second, ClientMessage::Cancel).await;
+    receive(&mut second, |message| {
+        matches!(
+            message,
+            ServerMessage::SessionActivityChanged {
+                activity: SessionState::Idle,
+                ..
+            }
+        )
+    })
+    .await;
+    close(first, first_task).await;
+    new_session(&mut second, None).await;
+    barrier(&mut second).await;
+
+    send(
+        &mut second,
+        ClientMessage::AttachSession {
+            session_id: session_id.clone(),
+            client_kind: ClientKind::Desktop,
+        },
+    )
+    .await;
+    receive(&mut second, |message| {
+        matches!(message, ServerMessage::SessionReady { .. })
+    })
+    .await;
+    assert!(
+        matches!(
+            receive(&mut second, |_| true).await,
+            ServerMessage::SessionActivityChanged { session_id: id, activity: SessionState::Idle } if id == session_id
+        ),
+        "cancelled task must report idle on reattach"
+    );
+    close(second, second_task).await;
+}
