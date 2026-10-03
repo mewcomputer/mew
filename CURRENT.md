@@ -1324,3 +1324,21 @@ The three independent code review lenses found the submission race now fixed and
 redundant history work now removed; no other required findings remain.
 Next work is native browser ownership/readiness/pumping and daemon-backed fresh
 review. Actual CEF focus, bounds and rendering still require an unlocked Mac.
+
+# 2026-10-03 — Fresh daemon workspace diff loading
+
+Added a serializable diff model and fresh git workspace reader for daemon-owned
+review. The reader captures one HEAD baseline, includes untracked files, follows
+rename sources, and handles nested workspace paths, literal pathspec characters,
+symlinks and gitlinks. Repository/object failures stay visible instead of looking
+like an empty or added-file diff.
+
+File reads and git stdout are bounded at 8 MiB. A shared 32 MiB work budget stops
+large collections and bounds line/hunk allocation before computing diffs; the
+wire response has its own smaller limit in the following native schema chunk.
+The former path-list loader remains while the existing native caller is migrated.
+
+Verified 16 real-repository/model tests and strict all-target mew-diff clippy.
+Regressions first reproduced aggregate loading past its budget, dense newline
+allocation and unbounded git output, then passed with bounded loading. No new
+review UI is claimed by this prerequisite chunk.
