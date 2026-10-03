@@ -875,13 +875,7 @@ impl Element for ComposerElement {
         let content = shell.text_input_value(self.target).to_owned();
         let display_text = if content.is_empty() {
             match self.target {
-                TextInputTarget::Composer => {
-                    if shell.plan_feedback_request.is_some() {
-                        "Plan feedback… (Enter to send, Esc to cancel)".to_owned()
-                    } else {
-                        "Do anything…".to_owned()
-                    }
-                }
+                TextInputTarget::Composer => "Do anything…".to_owned(),
                 TextInputTarget::SidebarSearch => "Search sessions…".to_owned(),
                 TextInputTarget::ModelSearch => "Filter models…".to_owned(),
                 _ => String::new(),

@@ -155,21 +155,19 @@ impl DesktopSupervisor {
 
         let address = allocate_local_address(self.config.local_port)?;
         let url = websocket_url(address);
-        if probe_daemon(&url).is_ok() {
+        if let Ok(stream) = TcpStream::connect_timeout(&address, PROBE_TIMEOUT) {
+            probe_daemon_connection(&url, stream).with_context(|| {
+                format!(
+                    "daemon address {address} is already in use; restart or update the daemon \
+                 before connecting; no second daemon was launched"
+                )
+            })?;
             let endpoint = DaemonEndpoint {
                 websocket_url: url,
                 mode: DaemonMode::LocalExisting,
             };
             self.endpoint = Some(endpoint.clone());
             return Ok(endpoint);
-        }
-
-        if TcpStream::connect_timeout(&address, PROBE_TIMEOUT).is_ok() {
-            bail!(
-                "daemon address {address} is already in use, but it is not a mew daemon; "
-                    .to_string()
-                    + "set MEW_DESKTOP_DAEMON_URL to attach explicitly or stop the process"
-            );
         }
 
         let binary =
@@ -251,26 +249,30 @@ fn spawn_daemon(
     let mut child = command
         .spawn()
         .with_context(|| format!("spawn configured daemon {}", binary.display()))?;
-    if wait_for_daemon(address, startup_timeout) {
-        return Ok(child);
+    match wait_for_daemon(address, startup_timeout) {
+        Ok(()) => Ok(child),
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(error.context(format!(
+                "configured daemon {} did not become compatible at {address}; restart or update the daemon",
+                binary.display()
+            )))
+        }
     }
-    let _ = child.kill();
-    let _ = child.wait();
-    bail!(
-        "configured daemon {} did not bind {address}",
-        binary.display()
-    )
 }
 
-fn wait_for_daemon(address: SocketAddr, timeout: Duration) -> bool {
+fn wait_for_daemon(address: SocketAddr, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
+    let mut last_error = None;
     while Instant::now() < deadline {
-        if probe_daemon(&websocket_url(address)).is_ok() {
-            return true;
+        match probe_daemon(&websocket_url(address)) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
         }
         std::thread::sleep(POLL_INTERVAL);
     }
-    false
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("daemon startup timed out")))
 }
 
 fn probe_daemon(url: &str) -> Result<()> {
@@ -278,6 +280,10 @@ fn probe_daemon(url: &str) -> Result<()> {
     let address = websocket_address(url)?;
     let stream = TcpStream::connect_timeout(&address, PROBE_TIMEOUT)
         .with_context(|| format!("connect to daemon at {url}"))?;
+    probe_daemon_connection(url, stream)
+}
+
+fn probe_daemon_connection(url: &str, stream: TcpStream) -> Result<()> {
     stream.set_read_timeout(Some(PROBE_TIMEOUT))?;
     stream.set_write_timeout(Some(PROBE_TIMEOUT))?;
     let (mut socket, _) = client(url, stream).context("complete daemon websocket handshake")?;
@@ -288,9 +294,20 @@ fn probe_daemon(url: &str) -> Result<()> {
     let Message::Text(text) = response else {
         bail!("daemon health check returned a non-text response");
     };
-    let value: serde_json::Value = serde_json::from_str(text.as_ref())?;
-    if value.get("type").and_then(serde_json::Value::as_str) != Some("pong") {
-        bail!("daemon health check returned an unexpected response");
+    match mew_protocol::decode_json(text.as_ref()).context("invalid daemon protocol handshake")? {
+        mew_protocol::ServerMessage::Pong {
+            protocol_version,
+            version,
+        } => {
+            if protocol_version != mew_protocol::PROTOCOL_VERSION {
+                bail!(
+                    "incompatible daemon protocol {protocol_version} (daemon {version}); \
+                     this app requires {}; restart or update the daemon and app",
+                    mew_protocol::PROTOCOL_VERSION
+                );
+            }
+        }
+        _ => bail!("daemon protocol health check returned an unexpected response"),
     }
     Ok(())
 }
@@ -348,6 +365,85 @@ fn close_inherited_descriptors(command: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_legacy_daemon_is_rejected_without_launching_a_second_process() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            assert_eq!(
+                socket.read().unwrap().into_text().unwrap(),
+                r#"{"type":"ping"}"#
+            );
+            socket
+                .send(Message::Text(r#"{"type":"pong","version":"0.2.0"}"#.into()))
+                .unwrap();
+            finish_rx.recv().unwrap();
+        });
+        let mut supervisor = DesktopSupervisor::new(SupervisorConfig {
+            local_port: address.port(),
+            daemon_binary: Some(PathBuf::from("/missing/daemon")),
+            ..SupervisorConfig::default()
+        });
+
+        let result = supervisor.connect_or_launch();
+        finish_tx.send(()).unwrap();
+        server.join().unwrap();
+
+        let error = result.expect_err("legacy daemon must be rejected");
+        assert!(format!("{error:#}").contains("protocol"));
+        assert!(format!("{error:#}").contains("restart"));
+        assert!(supervisor.endpoint().is_none());
+        assert!(supervisor.child.is_none());
+    }
+
+    #[test]
+    fn daemon_probe_requires_a_well_formed_current_revision() {
+        for (response, compatible) in [
+            (
+                format!(
+                    r#"{{"type":"pong","version":"test","protocol_version":{}}}"#,
+                    mew_protocol::PROTOCOL_VERSION
+                ),
+                true,
+            ),
+            (
+                format!(
+                    r#"{{"type":"pong","version":"future","protocol_version":{}}}"#,
+                    mew_protocol::PROTOCOL_VERSION + 1
+                ),
+                false,
+            ),
+            (
+                r#"{"type":"pong","version":"broken","protocol_version":"1"}"#.to_string(),
+                false,
+            ),
+            (r#"{"type":"pong"}"#.to_string(), false),
+        ] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut socket = tungstenite::accept(stream).unwrap();
+                assert_eq!(
+                    socket.read().unwrap().into_text().unwrap(),
+                    r#"{"type":"ping"}"#
+                );
+                socket.send(Message::Text(response)).unwrap();
+            });
+
+            let result = probe_daemon(&websocket_url(address));
+
+            assert_eq!(result.is_ok(), compatible);
+            if let Err(error) = result {
+                assert!(format!("{error:#}").contains("protocol"));
+            }
+            server.join().unwrap();
+        }
+    }
 
     #[test]
     fn explicit_websocket_endpoint_is_attach_only() {

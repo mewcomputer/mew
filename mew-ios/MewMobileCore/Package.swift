@@ -24,7 +24,11 @@ let package = Package(
             name: "MewMobileCore",
             dependencies: ["mew_mobile_coreFFI"],
             path: "Sources/MewMobileCore",
-            exclude: ["mew_mobile_coreFFI.h", "mew_mobile_coreFFI.modulemap"]
+            exclude: ["mew_mobile_coreFFI.h", "mew_mobile_coreFFI.modulemap"],
+            linkerSettings: [
+                .linkedLibrary("z"),
+                .linkedLibrary("iconv"),
+            ]
         ),
     ]
 )

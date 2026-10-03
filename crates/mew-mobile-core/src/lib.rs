@@ -516,25 +516,6 @@ impl MobileCore {
         }
     }
 
-    /// Respond to a plan-approval request. `approved = false` with optional
-    /// `feedback` requests changes.
-    pub fn respond_plan_approval(
-        &self,
-        id: DaemonId,
-        request_id: String,
-        approved: bool,
-        feedback: Option<String>,
-    ) {
-        let conns = self.connections.lock().unwrap();
-        if let Some(conn) = conns.get(&id.node_id) {
-            let _ = conn.tx.send(ClientMessage::PlanApprovalResponse {
-                request_id,
-                approved,
-                feedback,
-            });
-        }
-    }
-
     /// Respond to a goal proposal from the agent (`propose_goal`).
     pub fn respond_to_goal(&self, id: DaemonId, request_id: String, accepted: bool) {
         let conns = self.connections.lock().unwrap();
@@ -780,6 +761,42 @@ fn set_shared_connection_status(
     conn_state.push_shared_event(event);
 }
 
+/// Verify compatibility before announcing a connection or attaching a session.
+async fn verify_daemon_protocol<S>(
+    ws: &mut tokio_tungstenite::WebSocketStream<S>,
+) -> anyhow::Result<ServerMessage>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    tokio::time::timeout(Duration::from_secs(10), async {
+        ws.send(Message::Text(mew_protocol::encode_json(&ClientMessage::Ping)?)).await?;
+        loop {
+            let frame = ws.next().await.context("daemon closed during protocol handshake")??;
+            match frame {
+                Message::Text(text) => {
+                    let message = mew_protocol::decode_json::<ServerMessage>(&text)
+                        .context("invalid daemon protocol handshake")?;
+                    match &message {
+                        ServerMessage::Pong { protocol_version, .. } => {
+                            anyhow::ensure!(
+                                *protocol_version == mew_protocol::PROTOCOL_VERSION,
+                                "incompatible daemon protocol version {protocol_version} (expected {}); update or restart the daemon and app",
+                                mew_protocol::PROTOCOL_VERSION,
+                            );
+                            return Ok(message);
+                        }
+                        ServerMessage::RemoteReady { .. } => {}
+                        ServerMessage::Error { message } => anyhow::bail!("daemon protocol handshake failed: {message}"),
+                        _ => anyhow::bail!("unexpected daemon protocol handshake response"),
+                    }
+                }
+                Message::Close(_) => anyhow::bail!("daemon closed during protocol handshake"),
+                _ => {}
+            }
+        }
+    }).await.context("daemon protocol handshake timed out")?
+}
+
 /// Connect to a daemon over iroh and run the message loop.
 ///
 /// This function owns the WebSocket connection and processes incoming
@@ -835,12 +852,6 @@ async fn connect_and_run(
         .await
         .context("websocket handshake over iroh")?;
 
-    set_shared_connection_status(conn_state, mew_client_core::ConnectionStatus::Connected);
-    emit_event(CoreEvent::DaemonStatusChanged {
-        daemon: daemon_id.to_string(),
-        status: DaemonStatus::Connected,
-    });
-
     // Iroh connections must complete the daemon's transport-level handshake
     // before sending normal protocol messages. Existing paired mobile nodes
     // authenticate through the daemon's trusted-node record, so they do not
@@ -851,9 +862,15 @@ async fn connect_and_run(
     })?;
     ws.send(Message::Text(hello)).await?;
 
-    // Send Ping to get daemon version.
-    let ping = mew_protocol::encode_json(&ClientMessage::Ping)?;
-    ws.send(Message::Text(ping)).await?;
+    let pong = verify_daemon_protocol(&mut ws).await?;
+    set_shared_connection_status(conn_state, mew_client_core::ConnectionStatus::Connected);
+    emit_event(CoreEvent::DaemonStatusChanged {
+        daemon: daemon_id.to_string(),
+        status: DaemonStatus::Connected,
+    });
+    for event in translate_message(&pong, conn_state, &mut None, daemon_id) {
+        emit_event(event);
+    }
 
     // If we have a previously-attached session, re-send AttachSession so the
     // daemon replays the newest history page (spec: reconnect re-attach).
@@ -1140,7 +1157,7 @@ fn translate_message(
     }
 
     match msg {
-        ServerMessage::Pong { version } => {
+        ServerMessage::Pong { version, .. } => {
             *conn_state.daemon_version.lock().unwrap() = Some(version.clone());
             events.push(CoreEvent::DaemonVersion {
                 daemon: d,
@@ -1483,32 +1500,6 @@ fn translate_message(
             });
         }
 
-        ServerMessage::PlanApprovalRequest {
-            request_id,
-            call_id,
-            plan_path,
-            plan_markdown,
-            persona,
-        } => {
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
-            let session_id = ss_lock
-                .as_ref()
-                .map(|s| s.session_id.clone())
-                .unwrap_or_default();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_questions += 1;
-            }
-            events.push(CoreEvent::PlanApprovalRequested {
-                daemon: d,
-                session_id,
-                request_id: request_id.clone(),
-                call_id: call_id.clone(),
-                plan_path: plan_path.clone(),
-                plan_markdown: plan_markdown.clone(),
-                persona: persona.clone(),
-            });
-        }
-
         ServerMessage::GoalProposed {
             request_id,
             call_id,
@@ -1798,8 +1789,7 @@ fn translate_message(
             });
         }
 
-        ServerMessage::PersonaSwitched { name }
-        | ServerMessage::PersonaSwitchRequested { name } => {
+        ServerMessage::PersonaSwitched { name } => {
             *conn_state.current_persona.lock().unwrap() = Some(name.clone());
             if let Some(ss) = conn_state.session_state.lock().unwrap().as_mut() {
                 ss.current_persona = Some(name.clone());
@@ -1962,6 +1952,59 @@ fn rand_jitter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn protocol_handshake_result(pong: &str) -> anyhow::Result<ServerMessage> {
+        let (client, server) = tokio::io::duplex(4096);
+        let mut client = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            client,
+            tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        let mut server = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            server,
+            tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        let pong = pong.to_owned();
+        let peer = tokio::spawn(async move {
+            let ping = server.next().await.unwrap().unwrap();
+            assert!(
+                matches!(ping, Message::Text(ref text) if mew_protocol::decode_json::<ClientMessage>(text).is_ok_and(|msg| matches!(msg, ClientMessage::Ping)))
+            );
+            let ready = mew_protocol::encode_json(&ServerMessage::RemoteReady {
+                scope: mew_protocol::RemoteScope::Control,
+            })
+            .unwrap();
+            server.send(Message::Text(ready)).await.unwrap();
+            server.send(Message::Text(pong)).await.unwrap();
+        });
+        let result = verify_daemon_protocol(&mut client).await;
+        peer.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn protocol_handshake_accepts_current_daemon_after_remote_ready() {
+        let pong =
+            protocol_handshake_result(r#"{"type":"pong","version":"test","protocol_version":1}"#)
+                .await
+                .unwrap();
+        assert!(matches!(pong, ServerMessage::Pong { .. }));
+    }
+
+    #[tokio::test]
+    async fn protocol_handshake_rejects_legacy_and_future_daemons() {
+        for pong in [
+            r#"{"type":"pong","version":"legacy"}"#,
+            r#"{"type":"pong","version":"future","protocol_version":2}"#,
+        ] {
+            let error = protocol_handshake_result(pong).await.unwrap_err();
+            assert!(error.to_string().contains("protocol"));
+            assert!(error.to_string().contains("daemon"));
+        }
+    }
 
     #[test]
     fn test_parse_dial_info_raw_node_id() {
@@ -2208,25 +2251,6 @@ mod tests {
         assert_eq!(
             conn.current_persona.lock().unwrap().as_deref(),
             Some("explainer")
-        );
-    }
-
-    #[test]
-    fn test_translate_persona_switch_requested() {
-        let conn = Arc::new(ConnState::new());
-        let daemon_id = "node-abc".to_string();
-        let mut last_prompt: Option<String> = None;
-
-        let msg = ServerMessage::PersonaSwitchRequested {
-            name: "code-reviewer".into(),
-        };
-
-        let events = translate_message(&msg, &conn, &mut last_prompt, &daemon_id);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], CoreEvent::PersonaSwitched { .. }));
-        assert_eq!(
-            conn.current_persona.lock().unwrap().as_deref(),
-            Some("code-reviewer")
         );
     }
 }

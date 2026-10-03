@@ -1145,3 +1145,41 @@ switch_persona execution, built-in persona/subagent prompts, native action
 consumers, daemon detach/attach, client-core activity handling, native version
 handling, and mobile compatibility projection. Worktree was clean before this
 append-only journal update; no product source changes or new test results.
+
+# 2026-10-03 — Remove automatic planning handoffs
+
+Removed handoff_plan and model-driven switch_persona, blocking plan approvals,
+deferred persona events/state, transition metadata and client approval UI.
+Explicit persona selection, read-only planning, plan files, write_plan/edit_plan,
+and normal plan review remain. Built-in prompts now present a completed plan and
+finish; selecting an execution persona is an explicit user action. Old saved tool
+names and legacy persona frontmatter remain readable.
+
+Added wire revision 1 to Ping/Pong compatibility. Native desktop, mobile and TUI
+check the revision before attaching or sending session commands, with bounded
+timeouts and visible update/restart errors. Missing legacy revision defaults to
+0. The native supervisor refuses an incompatible existing daemon without
+launching a second process. Unknown additive events remain tolerant, but malformed
+handshake payloads fail explicitly. TypeScript exposes the normalized revision
+while preserving ping()'s string result.
+
+Regenerated Swift bindings and both iOS XCFramework slices from matching native
+libraries. Added the remaining Swift event cases and a goal-response surface that
+keeps daemon/session identity. ios-core now reuses its release generator and skips
+unneeded dependency metadata rather than rebuilding the mobile library in debug.
+
+Red regressions reproduced blocking retired calls, obsolete planner requirements,
+automatic web persona changes, and acceptance of a legacy daemon before the fix.
+Verified actual plan writing/ordinary completion, explicit persona selection, old
+history replay, legacy/future/malformed/timeout handshakes, and authorization event
+ordering. Passed agent/tools/personas/prompts suites, protocol 112, client-core 32,
+local transport 4, supervisor 8, daemon 27, TUI 265, mobile 27, SDK 22 and web UI
+116 tests, plus TypeScript/build checks and the tool-registry regression.
+Native macOS cargo check and iOS device/simulator/host release builds pass.
+The iOS simulator app compiles, links and launches; all 18 application tests pass
+with clean compiler output. Workspace clippy, architecture and theme checks pass.
+
+Concurrent native builds exhausted disk space. Removed only ignored, disposable
+target/debug/incremental caches, preserved all source and build evidence, and
+resumed checks with incremental compilation disabled. Native visual/focus QA
+still requires an unlocked Mac. Next work is active-session lifetime.

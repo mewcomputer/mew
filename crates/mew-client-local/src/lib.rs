@@ -131,6 +131,7 @@ mod tests {
             assert!(matches!(message, ClientMessage::Ping));
             let response = mew_protocol::encode_json(&ServerMessage::Pong {
                 version: "test".into(),
+                protocol_version: mew_protocol::PROTOCOL_VERSION,
             })
             .unwrap();
             socket.send(Message::Text(response)).await.unwrap();
@@ -141,8 +142,123 @@ mod tests {
         connection.send(ClientMessage::Ping).await.unwrap();
         assert!(matches!(
             connection.receive().await.unwrap(),
-            Some(ServerMessage::Pong { version }) if version == "test"
+            Some(ServerMessage::Pong { version, .. }) if version == "test"
         ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn engine_negotiates_revision_after_remote_authorization_before_session_commands() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let ping = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            assert!(matches!(
+                mew_protocol::decode_json::<ClientMessage>(&ping).unwrap(),
+                ClientMessage::Ping
+            ));
+            for message in [
+                ServerMessage::RemoteReady {
+                    scope: mew_protocol::RemoteScope::Observe,
+                },
+                ServerMessage::Pong {
+                    version: "test".into(),
+                    protocol_version: mew_protocol::PROTOCOL_VERSION,
+                },
+            ] {
+                socket
+                    .send(Message::Text(mew_protocol::encode_json(&message).unwrap()))
+                    .await
+                    .unwrap();
+            }
+            let command = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            assert!(matches!(
+                mew_protocol::decode_json::<ClientMessage>(&command).unwrap(),
+                ClientMessage::ListSessions {}
+            ));
+        });
+        let transport = LocalWebSocketTransport::new(format!("ws://{address}"));
+
+        let mut engine = mew_client_core::ClientEngine::connect(&transport)
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.state().remote_scope,
+            Some(mew_protocol::RemoteScope::Observe)
+        );
+        assert_eq!(engine.state().daemon_version.as_deref(), Some("test"));
+        engine.send(ClientMessage::ListSessions {}).await.unwrap();
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn engine_closes_incompatible_or_malformed_handshakes_without_sending_session_commands() {
+        for response in [
+            r#"{"type":"pong","version":"old"}"#.to_string(),
+            format!(
+                r#"{{"type":"pong","version":"future","protocol_version":{}}}"#,
+                mew_protocol::PROTOCOL_VERSION + 1
+            ),
+            r#"{"type":"pong","version":"broken","protocol_version":"1"}"#.to_string(),
+            r#"{"type":"session_ready","session_id":"premature"}"#.to_string(),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_async(stream).await.unwrap();
+                let ping = socket.next().await.unwrap().unwrap().into_text().unwrap();
+                assert!(matches!(
+                    mew_protocol::decode_json::<ClientMessage>(&ping).unwrap(),
+                    ClientMessage::Ping
+                ));
+                socket.send(Message::Text(response)).await.unwrap();
+                assert!(matches!(
+                    socket.next().await,
+                    Some(Ok(Message::Close(_))) | None
+                ));
+            });
+            let transport = LocalWebSocketTransport::new(format!("ws://{address}"));
+
+            let error = mew_client_core::ClientEngine::connect(&transport)
+                .await
+                .err()
+                .expect("handshake should fail");
+
+            assert!(error.to_string().contains("protocol"));
+            assert!(error.to_string().contains("restart or update"));
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_times_out_when_daemon_never_answers_ping() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let ping = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            assert!(matches!(
+                mew_protocol::decode_json::<ClientMessage>(&ping).unwrap(),
+                ClientMessage::Ping
+            ));
+            assert!(matches!(
+                socket.next().await,
+                Some(Ok(Message::Close(_))) | None
+            ));
+        });
+        let transport = LocalWebSocketTransport::new(format!("ws://{address}"));
+
+        let error = mew_client_core::ClientEngine::connect(&transport)
+            .await
+            .err()
+            .expect("handshake should time out");
+
+        assert!(error.to_string().contains("timed out"));
         server.await.unwrap();
     }
 }

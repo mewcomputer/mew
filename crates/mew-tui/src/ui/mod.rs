@@ -262,12 +262,6 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    if app.mode == Mode::PlanApproval {
-        if let Some(ref state) = app.plan_approval {
-            overlays::draw_plan_approval(f, state, area, &app.theme);
-        }
-    }
-
     if app.mode == Mode::GoalProposal {
         if let Some(ref state) = app.goal_proposal {
             overlays::draw_goal_proposal(f, state, area, &app.theme);

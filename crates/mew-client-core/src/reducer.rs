@@ -160,12 +160,6 @@ pub enum ActionKind {
         call_id: String,
         questions: Vec<Question>,
     },
-    PlanApproval {
-        call_id: String,
-        plan_path: String,
-        plan_markdown: String,
-        persona: String,
-    },
     GoalApproval {
         call_id: String,
         objective: String,
@@ -416,7 +410,7 @@ impl ClientState {
                 self.remote_scope = Some(scope);
                 vec![ClientEvent::RemoteReady(scope)]
             }
-            ServerMessage::Pong { version } => {
+            ServerMessage::Pong { version, .. } => {
                 self.daemon_version = Some(version);
                 Vec::new()
             }
@@ -630,21 +624,6 @@ impl ClientState {
                 call_id,
                 questions,
             } => self.add_action(ActionKind::AskUser { call_id, questions }, request_id),
-            ServerMessage::PlanApprovalRequest {
-                request_id,
-                call_id,
-                plan_path,
-                plan_markdown,
-                persona,
-            } => self.add_action(
-                ActionKind::PlanApproval {
-                    call_id,
-                    plan_path,
-                    plan_markdown,
-                    persona,
-                },
-                request_id,
-            ),
             ServerMessage::GoalProposed {
                 request_id,
                 call_id,
@@ -1101,6 +1080,67 @@ mod tests {
             provider: Some("fake".into()),
             permission_mode: Some("standard".into()),
         });
+    }
+
+    #[test]
+    fn manual_persona_selection_updates_state_without_requesting_input() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        state.apply_server_message(ServerMessage::PersonaSwitched {
+            name: "builder".into(),
+        });
+        assert_eq!(state.current_persona.as_deref(), Some("builder"));
+        assert!(state
+            .session(state.attached_session.as_deref().unwrap())
+            .unwrap()
+            .pending_actions
+            .is_empty());
+    }
+
+    #[test]
+    fn retired_handoff_tool_history_remains_visible_without_an_action() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        let session_id = state.attached_session.clone().unwrap();
+        let session_ulid = Ulid::from_string(&session_id).unwrap();
+        let message_id = Ulid::new();
+        let message = Message {
+            id: message_id,
+            session_id: session_ulid,
+            role: Role::Assistant,
+            parts: vec![Part::ToolCall(ToolCallPart {
+                base: PartBase {
+                    id: Ulid::new(),
+                    message_id,
+                    session_id: session_ulid,
+                },
+                tool_name: "handoff_plan".into(),
+                call_id: "old-handoff".into(),
+                state: ToolState::Running(ToolStateRunning {
+                    input: serde_json::json!({"plan_path": "PLAN.md", "persona": "builder"}),
+                    output: String::new(),
+                    time: ToolTime {
+                        start: 0,
+                        end: None,
+                    },
+                }),
+                raw_input: String::new(),
+            })],
+            time: Time {
+                created: 0,
+                completed: None,
+            },
+            assistant: None,
+        };
+        state.apply_server_message(ServerMessage::SessionHistory {
+            messages: vec![message],
+        });
+        let session = state.session(&session_id).unwrap();
+        assert!(
+            matches!(&session.messages[0].parts[0], Part::ToolCall(part) if part.tool_name == "handoff_plan")
+        );
+        assert!(session.pending_actions.is_empty());
+        assert!(state.current_persona.is_none());
     }
 
     #[test]

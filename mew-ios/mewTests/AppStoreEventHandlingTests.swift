@@ -19,6 +19,54 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store.selectedSessionId = "sess-1"
     }
 
+    func testGoalProposalPreservesIdentityAndRespondsOnOriginatingDaemon() {
+        store.handleEvent(.goalProposed(daemon: "daemon-1", sessionId: "sess-1",
+            requestId: "goal-1", callId: "call-1", objective: "finish the feature"))
+        XCTAssertEqual(store.pendingGoals.count, 1)
+        XCTAssertEqual(store.pendingGoals.first?.daemon, "daemon-1")
+        XCTAssertEqual(store.pendingGoals.first?.sessionId, "sess-1")
+        store.respondToGoal(requestId: "goal-1", accepted: true)
+        XCTAssertEqual(mock.goalResponseCalls.first?.nodeId, "daemon-1")
+        XCTAssertEqual(mock.goalResponseCalls.first?.requestId, "goal-1")
+        XCTAssertEqual(mock.goalResponseCalls.first?.accepted, true)
+    }
+
+    func testGoalProposalCannotBeAnsweredFromAnotherSession() {
+        store.handleEvent(.goalProposed(daemon: "daemon-1", sessionId: "sess-1",
+            requestId: "goal-1", callId: "call-1", objective: "finish the feature"))
+        store.selectedSessionId = "sess-2"
+        store.respondToGoal(requestId: "goal-1", accepted: false)
+        XCTAssertTrue(mock.goalResponseCalls.isEmpty)
+        XCTAssertEqual(store.pendingGoals.count, 1)
+    }
+
+    func testGoalProposalCanBeRejectedAndReplayDoesNotDuplicateIt() {
+        let event = CoreEvent.goalProposed(daemon: "daemon-1", sessionId: "sess-1",
+            requestId: "goal-1", callId: "call-1", objective: "finish the feature")
+        store.handleEvent(event)
+        store.handleEvent(event)
+        XCTAssertEqual(store.pendingGoals.count, 1)
+        store.respondToGoal(requestId: "goal-1", accepted: false)
+        XCTAssertEqual(mock.goalResponseCalls.first?.accepted, false)
+    }
+
+    func testGoalProposalCannotBeAnsweredFromAnotherDaemon() {
+        store.handleEvent(.goalProposed(daemon: "daemon-1", sessionId: "sess-1",
+            requestId: "goal-1", callId: "call-1", objective: "finish the feature"))
+        store.selectedDaemonId = DaemonId(nodeId: "daemon-2")
+        store.respondToGoal(requestId: "goal-1", accepted: true)
+        XCTAssertTrue(mock.goalResponseCalls.isEmpty)
+    }
+
+    func testGoalResolutionOnlyDismissesRequestsForItsDaemon() {
+        for daemon in ["daemon-1", "daemon-2"] {
+            store.handleEvent(.goalProposed(daemon: daemon, sessionId: "sess-1",
+                requestId: "goal-1", callId: "call-1", objective: "finish the feature"))
+        }
+        store.handleEvent(.requestResolved(daemon: "daemon-1", requestId: "goal-1"))
+        XCTAssertEqual(store.pendingGoals.map(\.daemon), ["daemon-2"])
+    }
+
     // MARK: - AC.1: SlashResult renders as synthetic message
 
     func testSlashResultAppendsSyntheticMessage() {

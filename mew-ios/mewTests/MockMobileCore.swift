@@ -4,8 +4,11 @@ import MewMobileCore
 /// A mock implementation of `MobileCoreProtocol` for unit testing.
 /// Records all method calls and returns configurable snapshot data.
 /// Events are delivered via `fireEvent` — the test controls timing.
-final class MockMobileCore: MobileCoreProtocol {
+// UniFFI exposes synchronous requirements; tests call this spy from the main actor.
+@MainActor
+final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     // Recorded calls
+    var goalResponseCalls: [(nodeId: String, requestId: String, accepted: Bool)] = []
     var promptCalls: [(nodeId: String, text: String)] = []
     var slashCommandCalls: [(nodeId: String, command: String)] = []
     var setPermissionModeCalls: [(nodeId: String, mode: String)] = []
@@ -64,8 +67,9 @@ final class MockMobileCore: MobileCoreProtocol {
 
     func respondPermission(id: DaemonId, requestId: String, decision: Decision) {}
     func respondAskUser(id: DaemonId, requestId: String, answers: [String]) {}
-    func respondPlanApproval(id: DaemonId, requestId: String, approved: Bool, feedback: String?) {}
-    func respondToGoal(id: DaemonId, requestId: String, accepted: Bool) {}
+    func respondToGoal(id: DaemonId, requestId: String, accepted: Bool) {
+        goalResponseCalls.append((id.nodeId, requestId, accepted))
+    }
 
     func listSessions(id: DaemonId) { listSessionsCalls.append(id.nodeId) }
     func newSession(id: DaemonId, cwd: String?) { newSessionCalls.append(cwd) }

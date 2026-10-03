@@ -114,7 +114,6 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
     match app.mode {
         crate::app::Mode::PermissionPrompt => handle_permission_key(app, key),
         crate::app::Mode::UserQuestion => handle_user_question_key(app, key),
-        crate::app::Mode::PlanApproval => handle_plan_approval_key(app, key),
         crate::app::Mode::GoalProposal => handle_goal_proposal_key(app, key),
         crate::app::Mode::GoalCompose => handle_goal_compose_key(app, key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
@@ -801,104 +800,6 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
         KeyCode::Char(c) => {
             if !on_review {
                 app.user_question_type_char(c);
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn handle_plan_approval_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
-    let editing = app
-        .plan_approval
-        .as_ref()
-        .map(|pa| pa.editing_feedback)
-        .unwrap_or(false);
-
-    match key.code {
-        KeyCode::Char('s') if editing && key.modifiers.contains(KeyModifiers::CONTROL) => {
-            // Ctrl+S submits the feedback.
-            app.plan_approval_confirm();
-            None
-        }
-        KeyCode::Enter => {
-            if editing {
-                // Enter inserts a newline at the cursor in the feedback editor.
-                if let Some(pa) = app.plan_approval.as_mut() {
-                    crate::app::editor::insert_with_undo(
-                        &mut pa.feedback,
-                        &mut pa.feedback_cursor,
-                        '\n',
-                        &mut pa.feedback_undo,
-                    );
-                }
-            } else {
-                app.plan_approval_confirm();
-            }
-            None
-        }
-        KeyCode::Esc => {
-            // While editing feedback, Esc backs out of the editor; otherwise
-            // it cancels the whole approval.
-            if editing {
-                if let Some(pa) = app.plan_approval.as_mut() {
-                    pa.editing_feedback = false;
-                }
-            } else {
-                app.cancel_plan_approval();
-            }
-            None
-        }
-        // While the feedback editor is active these would cycle the
-        // Approve/Request-changes/Submit selection mid-edit and could
-        // approve the plan or submit changes, dropping the typed feedback.
-        KeyCode::Tab | KeyCode::Left | KeyCode::Right if !editing => {
-            app.plan_approval_toggle();
-            None
-        }
-        KeyCode::Up if !editing => {
-            app.plan_approval_scroll_up(1);
-            None
-        }
-        KeyCode::Down if !editing => {
-            app.plan_approval_scroll_down(1);
-            None
-        }
-        KeyCode::PageUp => {
-            app.plan_approval_scroll_up(10);
-            None
-        }
-        KeyCode::PageDown => {
-            app.plan_approval_scroll_down(10);
-            None
-        }
-        KeyCode::Char('a') if !editing => {
-            if let Some(pa) = app.plan_approval.as_mut() {
-                pa.selected = 0;
-            }
-            app.plan_approval_confirm();
-            None
-        }
-        KeyCode::Char('r') if !editing => {
-            if let Some(pa) = app.plan_approval.as_mut() {
-                pa.selected = 1;
-            }
-            app.plan_approval_confirm();
-            None
-        }
-        _ if editing => {
-            // Every other key while editing goes through the shared
-            // readline editor: chars, Backspace/Delete, arrow + word
-            // moves, ^A/^E/^F/^B/^D/^K/^U/^W, ^Z/^Y undo. Keys the editor
-            // doesn't own (Tab, PageUp/PageDown) fall through to the
-            // catch-all.
-            if let Some(pa) = app.plan_approval.as_mut() {
-                crate::app::editor::handle_key_with_undo(
-                    &mut pa.feedback,
-                    &mut pa.feedback_cursor,
-                    key,
-                    &mut pa.feedback_undo,
-                );
             }
             None
         }
@@ -2077,28 +1978,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_approval_feedback_supports_kill_to_end() {
-        let (mut app, _rx) = plan_app();
-        // "Request changes" opens the feedback editor.
-        handle_key_event(&mut app, char_key('r'));
-        for c in ['h', 'e', 'l', 'l', 'o', ' ', 'w'] {
-            handle_key_event(&mut app, char_key(c));
-        }
-        // ^A home, then ^K kills to the end.
-        handle_key_event(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
-        );
-        handle_key_event(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
-        );
-        let pa = app.plan_approval.as_ref().unwrap();
-        assert_eq!(pa.feedback, "");
-        assert_eq!(pa.feedback_cursor, 0);
-    }
-
-    #[test]
     fn user_question_off_freeform_keys_still_navigate() {
         let (mut app, _rx) = question_app();
         // On an option row, j/k still move the highlight and digits still
@@ -2111,58 +1990,5 @@ mod tests {
         let uq = app.user_question.as_ref().expect("question stored");
         assert_eq!(uq.selected, 2);
         assert!(uq.freeform_text.is_empty());
-    }
-
-    // -----------------------------------------------------------------------
-    // Plan approval feedback editor
-    // -----------------------------------------------------------------------
-
-    /// An app in PlanApproval mode.
-    fn plan_app() -> (
-        crate::app::App,
-        tokio::sync::oneshot::Receiver<mew_agent::PlanDecision>,
-    ) {
-        use mew_agent::AgentEvent;
-        let mut app = crate::app::App::new();
-        let (tx, rx) = tokio::sync::oneshot::channel::<mew_agent::PlanDecision>();
-        app.handle_agent_event(AgentEvent::PlanApprovalRequest {
-            call_id: "c1".into(),
-            plan_path: "/repo/PLAN.md".into(),
-            plan_markdown: "# Goal\n\n1. do it".into(),
-            persona: "builder".into(),
-            tx,
-        });
-        (app, rx)
-    }
-
-    #[test]
-    fn plan_approval_feedback_editor_types_letters_and_keeps_selection() {
-        let (mut app, _rx) = plan_app();
-        // "Request changes" then confirm opens the feedback editor.
-        handle_key_event(&mut app, char_key('r'));
-        assert!(app.plan_approval.as_ref().unwrap().editing_feedback);
-        // Shortcut letters (a/r/s/n/...) type into the feedback instead of
-        // dispatching: verification that 'n' and friends are not captured.
-        for c in ['a', 'r', 's', 'n', 'j', 'y'] {
-            handle_key_event(&mut app, char_key(c));
-        }
-        let pa = app.plan_approval.as_ref().unwrap();
-        assert_eq!(pa.feedback, "arsnjy");
-        assert_eq!(pa.selected, 1, "selection must not drift while editing");
-
-        // Tab/Left/Right must not cycle the selection mid-edit (a cycle to
-        // Approve would submit the plan and drop the typed feedback).
-        handle_key_event(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        handle_key_event(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        handle_key_event(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        let pa = app.plan_approval.as_ref().unwrap();
-        assert_eq!(pa.selected, 1);
-        assert_eq!(pa.feedback, "arsnjy");
-
-        // Esc leaves the editor; letters no longer append.
-        handle_key_event(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!app.plan_approval.as_ref().unwrap().editing_feedback);
-        handle_key_event(&mut app, char_key('x'));
-        assert_eq!(app.plan_approval.as_ref().unwrap().feedback, "arsnjy");
     }
 }

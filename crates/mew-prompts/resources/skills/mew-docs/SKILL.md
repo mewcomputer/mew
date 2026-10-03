@@ -37,7 +37,7 @@ pages.
 - [Providers](https://mew.computer/docs/providers/) — Provider setup, credentials, router, thinking variants, catalog.
 - [Permissions](https://mew.computer/docs/permissions/) — Permission modes, declarative rules, workspace sandboxing, auto classifier.
 - [Tools](https://mew.computer/docs/tools/) — Built-in tool reference (bash, read, write, edit, grep, glob, etc.).
-- [Personas](https://mew.computer/docs/personas/) — Persona authoring, frontmatter, model pinning, transitions, autonomous hints, accent colors.
+- [Personas](https://mew.computer/docs/personas/) — Persona authoring, frontmatter, model pinning, autonomous hints, accent colors.
 - [Skills](https://mew.computer/docs/skills/) — Skill authoring, frontmatter, templating, when to use a skill vs context file.
 - [Subagents](https://mew.computer/docs/subagents/) — Subagent definitions, async vs blocking, nesting.
 - [Plugins](https://mew.computer/docs/plugins/) — Plugin authoring, JSON-RPC protocol, host functions.

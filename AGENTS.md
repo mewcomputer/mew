@@ -79,7 +79,7 @@ agent runtime
   crates/mew-tools        built-in tools and tool context
   crates/mew-mcp          MCP stdio/HTTP clients and MCP tool wrappers
   crates/mew-subagents    definitions, loaders, runners, child sessions
-  crates/mew-personas     persona definitions, loaders, transitions, model/tool policy
+  crates/mew-personas     persona definitions, loaders, model/tool policy
   crates/mew-skills       SKILL.md discovery and loading
   crates/mew-context      AGENTS.md/CLAUDE.md/project context loading
   crates/mew-prompts      embedded prompt resources and template rendering
@@ -230,7 +230,7 @@ skills and the `planner`/`builder` personas are added when not overridden.
 
 Persona frontmatter supports `name`, `description`, and a `mew:` or `polytoken:`
 block for model pinning, tool/skill allowlists, denied tools, templates,
-transitions, fallback models, and an accent color. Persona bodies are injected
+fallback models, and an accent color. Persona bodies are injected
 into a freshly rebuilt system prompt each turn.
 
 Subagent definitions can pin a fully qualified `provider/model` or a router tier

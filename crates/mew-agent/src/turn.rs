@@ -529,24 +529,6 @@ impl Agent {
             })?;
             let pending = self.pending_tool_calls(msg);
             if pending.is_empty() {
-                // End of turn. If the model called `switch_persona` during
-                // this turn, drain the pending slot and emit the event the
-                // main loop uses to apply the change. Done at end of turn
-                // (not mid-turn) so the user sees the full response before
-                // the model swap happens, and so the model can chain
-                // switch_persona with one final text response.
-                if let Some(name) = self.pending_persona_switch.lock().await.take() {
-                    if self.personas.iter().any(|p| p.name == name) {
-                        let _ = ev_tx
-                            .send(AgentEvent::PersonaSwitchRequested { name })
-                            .await;
-                    } else {
-                        tracing::warn!(
-                            name = %name,
-                            "switch_persona queued an unknown persona; dropping"
-                        );
-                    }
-                }
                 let messages = self.messages.lock().await.clone();
                 self.dispatcher.on_turn_end(&messages).await;
 
@@ -1476,7 +1458,7 @@ mod tests {
     fn repair_orphaned_tool_calls_collects_multiple_orphans() {
         // Multiple Pending tool calls on the same assistant message should
         // all be repaired in a single user message.
-        let mut messages = make_msg(
+        let messages = make_msg(
             Role::Assistant,
             vec![pending_tool_call("call_a"), pending_tool_call("call_b")],
         );

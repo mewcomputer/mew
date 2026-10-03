@@ -632,24 +632,6 @@ impl DesktopShell {
     }
 
     pub(super) fn submit_prompt(&mut self, cx: &mut Context<Self>) {
-        if let Some(request_id) = self.plan_feedback_request.take() {
-            let feedback = self.model.ui.take_prompt();
-            self.composer_selection = 0..0;
-            self.composer_selection_reversed = false;
-            self.composer_marked_range = None;
-            self.composer_is_selecting = false;
-            self.restart_composer_cursor_blink(cx);
-            if let Some(feedback) = feedback {
-                self.prompt_history.record(&feedback);
-                self.send_command(ClientMessage::PlanApprovalResponse {
-                    request_id,
-                    approved: false,
-                    feedback: Some(feedback),
-                });
-            }
-            cx.notify();
-            return;
-        }
         let awaiting_question = self
             .model
             .ui
@@ -715,18 +697,6 @@ impl DesktopShell {
         cx.notify();
     }
 
-    pub(super) fn begin_plan_feedback(
-        &mut self,
-        request_id: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.plan_feedback_request = Some(request_id);
-        self.release_browser_focus();
-        window.focus(&self.composer_focus_handle, cx);
-        cx.notify();
-    }
-
     pub(super) fn cancel_turn(&mut self, cx: &mut Context<Self>) {
         if !self.model.ui.running {
             return;
@@ -784,12 +754,6 @@ impl DesktopShell {
     ) {
         let key = event.keystroke.key.as_str();
         let shift = event.keystroke.modifiers.shift;
-        if key == "escape" && self.plan_feedback_request.is_some() {
-            self.plan_feedback_request = None;
-            cx.notify();
-            cx.stop_propagation();
-            return;
-        }
         if self.mention_menu_is_open() {
             match key {
                 "down" => {

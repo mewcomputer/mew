@@ -256,22 +256,8 @@ pub(crate) async fn build_and_run(
                 eprintln!("\n[ask_user_question: cancelled — no TUI in non-interactive mode]");
                 drop(tx);
             }
-            mew_agent::AgentEvent::PlanApprovalRequest { tx, .. } => {
-                // Non-interactive mode: no TUI to approve the plan. Dropping
-                // `tx` cancels the call so the model gets a clear "cancelled"
-                // result instead of hanging.
-                eprintln!("\n[handoff_plan: cancelled — no TUI in non-interactive mode]");
-                drop(tx);
-            }
             mew_agent::AgentEvent::TodosUpdated { .. } => {
                 // No sidebar in non-interactive mode; nothing to update.
-            }
-            mew_agent::AgentEvent::PersonaSwitchRequested { .. } => {
-                // Non-interactive mode: no TUI to confirm. The tool layer
-                // already gates switch_persona via the permission engine,
-                // and the switch is harmless on its own (no model pin
-                // means just a system prompt + tool allowlist change), so
-                // we silently drop the apply.
             }
             mew_agent::AgentEvent::JobUpdate { .. } => {
                 // No sidebar in non-interactive mode; the job's output is

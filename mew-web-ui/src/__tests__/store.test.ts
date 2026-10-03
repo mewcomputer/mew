@@ -32,6 +32,23 @@ describe("connection recovery", () => {
 });
 
 describe("session-ready bridge", () => {
+  it("changes persona only after the daemon confirms an explicit switch", () => {
+    const handlers = new Map<string, (data: any) => void>();
+    const client = {
+      on: (event: string, handler: (data: any) => void) => handlers.set(event, handler),
+      off: vi.fn(),
+    } as unknown as MewClient;
+
+    useSessionStore.setState({ currentPersona: "planner" });
+    bridgeClientToStore(client);
+
+    handlers.get("persona-switch-requested")?.({ name: "builder" });
+    expect(useSessionStore.getState().currentPersona).toBe("planner");
+
+    handlers.get("persona-switched")?.({ name: "builder" });
+    expect(useSessionStore.getState().currentPersona).toBe("builder");
+  });
+
   it("refreshes session metadata only after a session is ready", () => {
     const handlers = new Map<string, (data: any) => void>();
     const client = {
@@ -151,60 +168,6 @@ describe("flagged files lifecycle", () => {
     store().onFlaggedFilesChanged([{ path: "test.rs" }]);
     store().reset();
     expect(useSessionStore.getState().flaggedFiles).toHaveLength(0);
-  });
-});
-
-describe("plan approval lifecycle", () => {
-  beforeEach(() => {
-    store().reset();
-  });
-
-  it("onPlanApprovalRequest pushes a pending approval", () => {
-    store().onPlanApprovalRequest({
-      request_id: "r1",
-      call_id: "c1",
-      plan_path: "/repo/PLAN.md",
-      plan_markdown: "# Goal\n\n1. do it",
-      persona: "builder",
-    });
-    const pending = useSessionStore.getState().pendingPlanApprovals;
-    expect(pending).toHaveLength(1);
-    expect(pending[0]!.requestId).toBe("r1");
-    expect(pending[0]!.persona).toBe("builder");
-    expect(pending[0]!.planMarkdown).toContain("do it");
-  });
-
-  it("resolvePlanApproval removes the matching entry", () => {
-    store().onPlanApprovalRequest({
-      request_id: "r1",
-      call_id: "c1",
-      plan_path: "/repo/PLAN.md",
-      plan_markdown: "plan",
-      persona: "builder",
-    });
-    store().onPlanApprovalRequest({
-      request_id: "r2",
-      call_id: "c2",
-      plan_path: "/repo/PLAN.md",
-      plan_markdown: "plan2",
-      persona: "builder",
-    });
-    store().resolvePlanApproval("r1");
-    const pending = useSessionStore.getState().pendingPlanApprovals;
-    expect(pending).toHaveLength(1);
-    expect(pending[0]!.requestId).toBe("r2");
-  });
-
-  it("reset clears pending plan approvals", () => {
-    store().onPlanApprovalRequest({
-      request_id: "r1",
-      call_id: "c1",
-      plan_path: "/repo/PLAN.md",
-      plan_markdown: "plan",
-      persona: "builder",
-    });
-    store().reset();
-    expect(useSessionStore.getState().pendingPlanApprovals).toHaveLength(0);
   });
 });
 

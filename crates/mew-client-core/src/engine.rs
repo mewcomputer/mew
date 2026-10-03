@@ -1,7 +1,10 @@
 //! A small headless client driver that connects a transport to the reducer.
 
 use crate::{ClientConnection, ClientEvent, ClientState, ClientTransport, TransportError};
-use mew_protocol::ClientMessage;
+use mew_protocol::{ClientMessage, ServerMessage, PROTOCOL_VERSION};
+use std::time::Duration;
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct ClientEngine {
     state: ClientState,
@@ -10,8 +13,43 @@ pub struct ClientEngine {
 
 impl ClientEngine {
     pub async fn connect(transport: &dyn ClientTransport) -> Result<Self, TransportError> {
-        let connection = transport.connect().await?;
+        let mut connection = transport.connect().await?;
         let mut state = ClientState::default();
+        let handshake = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            connection.send(ClientMessage::Ping).await?;
+            loop {
+                match connection.receive().await? {
+                    Some(ServerMessage::Pong { protocol_version, version }) => {
+                        if protocol_version != PROTOCOL_VERSION {
+                            return Err(TransportError::Other(format!(
+                                "incompatible daemon protocol {protocol_version} (daemon {version}); \
+                                 this app requires {PROTOCOL_VERSION}"
+                            )));
+                        }
+                        state.apply_server_message(ServerMessage::Pong { protocol_version, version });
+                        return Ok(());
+                    }
+                    Some(message @ ServerMessage::RemoteReady { .. }) => {
+                        state.apply_server_message(message);
+                    }
+                    Some(_) => return Err(TransportError::Other(
+                        "daemon sent session data before completing the protocol handshake".into(),
+                    )),
+                    None => return Err(TransportError::Closed),
+                }
+            }
+        }).await;
+        let result = handshake.unwrap_or_else(|_| {
+            Err(TransportError::Other(
+                "daemon protocol handshake timed out".into(),
+            ))
+        });
+        if let Err(error) = result {
+            let _ = tokio::time::timeout(Duration::from_millis(250), connection.close()).await;
+            return Err(TransportError::Other(format!(
+                "daemon protocol handshake failed: {error}; restart or update the daemon and app to connect"
+            )));
+        }
         state.set_connection_status(crate::ConnectionStatus::Connected);
         Ok(Self { state, connection })
     }
@@ -125,8 +163,30 @@ mod tests {
     const SESSION_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
     #[tokio::test]
+    async fn connection_rejects_legacy_daemon_before_sending_session_commands() {
+        let transport = InMemoryTransport::default();
+        transport.push_server_message(
+            serde_json::from_str(r#"{"type":"pong","version":"0.2.0"}"#).unwrap(),
+        );
+
+        let result = ClientEngine::connect(&transport).await;
+
+        let error = result.err().expect("legacy daemon must be rejected");
+        assert!(error.to_string().contains("protocol"));
+        assert!(error.to_string().contains("restart"));
+        assert!(matches!(
+            transport.sent_messages().as_slice(),
+            [ClientMessage::Ping]
+        ));
+    }
+
+    #[tokio::test]
     async fn headless_engine_handles_prompt_stream_and_required_action() {
         let transport = InMemoryTransport::default();
+        transport.push_server_message(ServerMessage::Pong {
+            version: "test".into(),
+            protocol_version: PROTOCOL_VERSION,
+        });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
         assert!(matches!(
             engine.state().connection,
@@ -149,7 +209,7 @@ mod tests {
         engine.send_prompt("hello".into()).await.unwrap();
         assert!(matches!(
             transport.sent_messages().as_slice(),
-            [ClientMessage::Prompt { text, .. }] if text == "hello"
+            [ClientMessage::Ping, ClientMessage::Prompt { text, .. }] if text == "hello"
         ));
 
         let session_id = Ulid::from_string(SESSION_ID).unwrap();
@@ -237,6 +297,10 @@ mod tests {
         let history = engine.state().session(SESSION_ID).unwrap().messages.clone();
         engine.close().await.unwrap();
 
+        transport.push_server_message(ServerMessage::Pong {
+            version: "test".into(),
+            protocol_version: PROTOCOL_VERSION,
+        });
         let mut reconnected = ClientEngine::connect(&transport).await.unwrap();
         transport.push_server_message(ServerMessage::SessionReady {
             session_id: SESSION_ID.into(),
@@ -266,6 +330,10 @@ mod tests {
     #[tokio::test]
     async fn history_pages_replace_then_prepend_and_update_cursor() {
         let transport = InMemoryTransport::default();
+        transport.push_server_message(ServerMessage::Pong {
+            version: "test".into(),
+            protocol_version: PROTOCOL_VERSION,
+        });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
         transport.push_server_message(ServerMessage::SessionReady {
             session_id: SESSION_ID.into(),
@@ -332,6 +400,10 @@ mod tests {
     #[tokio::test]
     async fn engine_sends_session_management_and_workspace_messages() {
         let transport = InMemoryTransport::default();
+        transport.push_server_message(ServerMessage::Pong {
+            version: "test".into(),
+            protocol_version: PROTOCOL_VERSION,
+        });
         let mut engine = ClientEngine::connect(&transport).await.unwrap();
 
         engine.yield_control().await.unwrap();
@@ -344,6 +416,8 @@ mod tests {
         engine.watch_workspace("sess-1".into(), true).await.unwrap();
 
         let sent = transport.sent_messages();
+        assert!(matches!(sent[0], ClientMessage::Ping));
+        let sent = &sent[1..];
         assert!(matches!(sent[0], ClientMessage::YieldControl {}));
         assert!(matches!(
             &sent[1],

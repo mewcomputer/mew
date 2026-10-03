@@ -42,6 +42,8 @@ export class MewClient {
     openPromise = null;
     /** Session id returned by `newSession`. */
     sessionId = null;
+    /** Messages currently projected from the most recent history pages. */
+    sessionHistoryMessages = [];
     /** Session lifecycle requests share uncorrelated daemon errors. */
     sessionCommandTail = Promise.resolve();
     constructor(url, opts = {}) {
@@ -150,6 +152,7 @@ export class MewClient {
             return new Promise((resolve, reject) => {
                 const onReady = (data) => {
                     this.sessionId = data.session_id;
+                    this.sessionHistoryMessages = [];
                     this.off("session-ready", onReady);
                     resolve(data.session_id);
                 };
@@ -206,11 +209,6 @@ export class MewClient {
     respondToAskUser(request_id, answers) {
         this.send({ type: "ask_user_response", request_id, answers });
     }
-    /** Respond to a `plan_approval_request`. `approved = false` with optional
-     *  `feedback` requests changes to the plan. */
-    respondToPlanApproval(request_id, approved, feedback) {
-        this.send({ type: "plan_approval_response", request_id, approved, feedback });
-    }
     /** Attach to an existing session (active or idle). If the session is idle,
      *  the daemon loads its persisted history from disk and sends a
      *  `session-history` event. Resolves with the session id. */
@@ -220,6 +218,7 @@ export class MewClient {
             return new Promise((resolve, reject) => {
                 const onReady = (data) => {
                     this.sessionId = data.session_id;
+                    this.sessionHistoryMessages = [];
                     this.off("session-ready", onReady);
                     this.off("errorMessage", onError);
                     resolve(data.session_id);
@@ -234,6 +233,11 @@ export class MewClient {
                 this.send({ type: "attach_session", session_id, client_kind: this.clientKind });
             });
         });
+    }
+    /** Request older messages for the attached session using the cursor from a
+     *  previous history page. */
+    loadSessionHistory(session_id, before, limit) {
+        this.send({ type: "load_session_history", session_id, before, limit });
     }
     /** List all sessions known to the daemon (active + persisted idle).
      *  The daemon responds with a `session-list` event. */
@@ -499,15 +503,6 @@ export class MewClient {
                     questions: msg.questions,
                 });
                 break;
-            case "plan_approval_request":
-                this.emit("plan-approval-request", {
-                    request_id: msg.request_id,
-                    call_id: msg.call_id,
-                    plan_path: msg.plan_path,
-                    plan_markdown: msg.plan_markdown,
-                    persona: msg.persona,
-                });
-                break;
             case "subagent_permission_request":
                 this.emit("permission-request", {
                     request_id: msg.request_id,
@@ -541,9 +536,6 @@ export class MewClient {
             case "todos_updated":
                 this.emit("todos-updated", { todos: msg.todos });
                 break;
-            case "persona_switch_requested":
-                this.emit("persona-switch-requested", { name: msg.name });
-                break;
             case "job_update":
                 this.emit("job-update", {
                     job_id: msg.job_id,
@@ -564,8 +556,17 @@ export class MewClient {
                 this.emit("session-list", { sessions: msg.sessions });
                 break;
             case "session_history":
+                this.sessionHistoryMessages = msg.messages;
                 this.emit("session-history", { messages: msg.messages });
                 break;
+            case "session_history_page": {
+                const messages = msg.replace
+                    ? msg.messages
+                    : [...msg.messages, ...this.sessionHistoryMessages];
+                this.sessionHistoryMessages = messages;
+                this.emit("session-history", { messages });
+                break;
+            }
             case "model_list":
                 this.emit("model-list", { models: msg.models });
                 break;
@@ -696,7 +697,7 @@ export class MewClient {
                 this.emit("errorEvent", { message: msg.message });
                 break;
             case "pong":
-                this.emit("pong", { version: msg.version });
+                this.emit("pong", { version: msg.version, protocol_version: msg.protocol_version ?? 0 });
                 break;
             case "project_list":
                 this.emit("project-list", { projects: msg.projects });

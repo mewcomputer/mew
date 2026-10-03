@@ -384,11 +384,6 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_respond_ask_user(uint64_t ptr, 
 void uniffi_mew_mobile_core_fn_method_mobilecore_respond_permission(uint64_t ptr, RustBuffer id, RustBuffer request_id, RustBuffer decision, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_PLAN_APPROVAL
-#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_PLAN_APPROVAL
-void uniffi_mew_mobile_core_fn_method_mobilecore_respond_plan_approval(uint64_t ptr, RustBuffer id, RustBuffer request_id, int8_t approved, RustBuffer feedback, RustCallStatus *_Nonnull out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_TO_GOAL
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_RESPOND_TO_GOAL
 void uniffi_mew_mobile_core_fn_method_mobilecore_respond_to_goal(uint64_t ptr, RustBuffer id, RustBuffer request_id, int8_t accepted, RustCallStatus *_Nonnull out_status
@@ -859,12 +854,6 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_respond_ask_user(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_RESPOND_PERMISSION
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_RESPOND_PERMISSION
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_respond_permission(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_RESPOND_PLAN_APPROVAL
-#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_RESPOND_PLAN_APPROVAL
-uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_respond_plan_approval(void
     
 );
 #endif

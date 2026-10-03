@@ -51,12 +51,6 @@ export type ClientMessage =
       decision: PermissionDecision;
     }
   | { type: "ask_user_response"; request_id: string; answers: string[] }
-  | {
-      type: "plan_approval_response";
-      request_id: string;
-      approved: boolean;
-      feedback?: string;
-    }
   | { type: "slash_command"; command: string }
   | { type: "list_models" }
   | { type: "switch_model"; provider: string; model: string }
@@ -458,14 +452,6 @@ export type ServerMessage =
       questions: Question[];
     }
   | {
-      type: "plan_approval_request";
-      request_id: string;
-      call_id: string;
-      plan_path: string;
-      plan_markdown: string;
-      persona: string;
-    }
-  | {
       type: "subagent_start";
       parent_call_id: string;
       name: string;
@@ -493,7 +479,6 @@ export type ServerMessage =
       input: Record<string, unknown>;
     }
   | { type: "todos_updated"; todos: Todo[] }
-  | { type: "persona_switch_requested"; name: string }
   | { type: "job_update"; job_id: string; command: string; state: string }
   | { type: "slash_result"; text: string }
   | { type: "request_resolved"; request_id: string }
@@ -566,7 +551,7 @@ export type ServerMessage =
       pending_permissions: number;
       pending_questions: number;
     }
-  | { type: "pong"; version: string }
+  | { type: "pong"; version: string; protocol_version?: number }
   | { type: "project_list"; projects: ProjectInfo[] }
   | { type: "browser_snapshot"; snapshot: string; url: string; title: string; tab_id?: string }
   | { type: "browser_screenshot"; data: string; url: string; tab_id?: string }
@@ -649,14 +634,6 @@ export interface MewClientEvents {
     questions: Question[];
   }) => void;
 
-  "plan-approval-request": (data: {
-    request_id: string;
-    call_id: string;
-    plan_path: string;
-    plan_markdown: string;
-    persona: string;
-  }) => void;
-
   "subagent-start": (data: {
     parent_call_id: string;
     name: string;
@@ -675,7 +652,6 @@ export interface MewClientEvents {
     manifests?: TurnManifest[];
   }) => void;
   "todos-updated": (data: { todos: Todo[] }) => void;
-  "persona-switch-requested": (data: { name: string }) => void;
   "job-update": (data: {
     job_id: string;
     command: string;
@@ -742,7 +718,7 @@ export interface MewClientEvents {
 
   errorMessage: (data: { message: string }) => void;
   errorEvent: (data: { message: string }) => void;
-  pong: (data: { version: string }) => void;
+  pong: (data: { version: string; protocol_version: number }) => void;
   "project-list": (data: { projects: ProjectInfo[] }) => void;
   "browser-snapshot": (data: { snapshot: string; url: string; title: string; tabId?: string }) => void;
   "browser-screenshot": (data: { data: string; url: string; tabId?: string }) => void;
@@ -963,16 +939,6 @@ export class MewClient {
    *  submits answers to the questions. */
   respondToAskUser(request_id: string, answers: string[]): void {
     this.send({ type: "ask_user_response", request_id, answers });
-  }
-
-  /** Respond to a `plan_approval_request`. `approved = false` with optional
-   *  `feedback` requests changes to the plan. */
-  respondToPlanApproval(
-    request_id: string,
-    approved: boolean,
-    feedback?: string,
-  ): void {
-    this.send({ type: "plan_approval_response", request_id, approved, feedback });
   }
 
   /** Attach to an existing session (active or idle). If the session is idle,
@@ -1313,15 +1279,6 @@ export class MewClient {
           questions: msg.questions,
         });
         break;
-      case "plan_approval_request":
-        this.emit("plan-approval-request", {
-          request_id: msg.request_id,
-          call_id: msg.call_id,
-          plan_path: msg.plan_path,
-          plan_markdown: msg.plan_markdown,
-          persona: msg.persona,
-        });
-        break;
       case "subagent_permission_request":
         this.emit(
           "permission-request",
@@ -1358,9 +1315,6 @@ export class MewClient {
         break;
       case "todos_updated":
         this.emit("todos-updated", { todos: msg.todos });
-        break;
-      case "persona_switch_requested":
-        this.emit("persona-switch-requested", { name: msg.name });
         break;
       case "job_update":
         this.emit("job-update", {
@@ -1523,7 +1477,7 @@ export class MewClient {
         this.emit("errorEvent", { message: msg.message });
         break;
       case "pong":
-        this.emit("pong", { version: msg.version });
+        this.emit("pong", { version: msg.version, protocol_version: msg.protocol_version ?? 0 });
         break;
       case "project_list":
         this.emit("project-list", { projects: msg.projects });

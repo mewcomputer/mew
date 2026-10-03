@@ -16,6 +16,11 @@ export type ClientMessage = {
     session_id: string;
     client_kind: string;
 } | {
+    type: "load_session_history";
+    session_id: string;
+    before: number;
+    limit?: number;
+} | {
     type: "list_sessions";
 } | {
     type: "delete_session";
@@ -47,11 +52,6 @@ export type ClientMessage = {
     type: "ask_user_response";
     request_id: string;
     answers: string[];
-} | {
-    type: "plan_approval_response";
-    request_id: string;
-    approved: boolean;
-    feedback?: string;
 } | {
     type: "slash_command";
     command: string;
@@ -526,13 +526,6 @@ export type ServerMessage = {
     call_id: string;
     questions: Question[];
 } | {
-    type: "plan_approval_request";
-    request_id: string;
-    call_id: string;
-    plan_path: string;
-    plan_markdown: string;
-    persona: string;
-} | {
     type: "subagent_start";
     parent_call_id: string;
     name: string;
@@ -559,9 +552,6 @@ export type ServerMessage = {
     type: "todos_updated";
     todos: Todo[];
 } | {
-    type: "persona_switch_requested";
-    name: string;
-} | {
     type: "job_update";
     job_id: string;
     command: string;
@@ -580,6 +570,12 @@ export type ServerMessage = {
 } | {
     type: "session_history";
     messages: Message[];
+} | {
+    type: "session_history_page";
+    session_id: string;
+    messages: Message[];
+    next_cursor?: number;
+    replace: boolean;
 } | {
     type: "model_list";
     models: ModelInfo[];
@@ -682,6 +678,7 @@ export type ServerMessage = {
 } | {
     type: "pong";
     version: string;
+    protocol_version?: number;
 } | {
     type: "project_list";
     projects: ProjectInfo[];
@@ -766,13 +763,6 @@ export interface MewClientEvents {
         call_id: string;
         questions: Question[];
     }) => void;
-    "plan-approval-request": (data: {
-        request_id: string;
-        call_id: string;
-        plan_path: string;
-        plan_markdown: string;
-        persona: string;
-    }) => void;
     "subagent-start": (data: {
         parent_call_id: string;
         name: string;
@@ -792,9 +782,6 @@ export interface MewClientEvents {
     }) => void;
     "todos-updated": (data: {
         todos: Todo[];
-    }) => void;
-    "persona-switch-requested": (data: {
-        name: string;
     }) => void;
     "job-update": (data: {
         job_id: string;
@@ -921,6 +908,7 @@ export interface MewClientEvents {
     }) => void;
     pong: (data: {
         version: string;
+        protocol_version: number;
     }) => void;
     "project-list": (data: {
         projects: ProjectInfo[];
@@ -981,6 +969,8 @@ export declare class MewClient {
     private openPromise;
     /** Session id returned by `newSession`. */
     private sessionId;
+    /** Messages currently projected from the most recent history pages. */
+    private sessionHistoryMessages;
     /** Session lifecycle requests share uncorrelated daemon errors. */
     private sessionCommandTail;
     constructor(url: string, opts?: MewClientOptions);
@@ -1010,13 +1000,13 @@ export declare class MewClient {
     /** Respond to an `ask_user_request`. The UI calls this after the user
      *  submits answers to the questions. */
     respondToAskUser(request_id: string, answers: string[]): void;
-    /** Respond to a `plan_approval_request`. `approved = false` with optional
-     *  `feedback` requests changes to the plan. */
-    respondToPlanApproval(request_id: string, approved: boolean, feedback?: string): void;
     /** Attach to an existing session (active or idle). If the session is idle,
      *  the daemon loads its persisted history from disk and sends a
      *  `session-history` event. Resolves with the session id. */
     attachSession(session_id: string): Promise<string>;
+    /** Request older messages for the attached session using the cursor from a
+     *  previous history page. */
+    loadSessionHistory(session_id: string, before: number, limit?: number): void;
     /** List all sessions known to the daemon (active + persisted idle).
      *  The daemon responds with a `session-list` event. */
     listSessions(): Promise<SessionInfo[]>;

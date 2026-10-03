@@ -131,14 +131,6 @@ export interface PendingAskUser {
   questions: Question[];
 }
 
-export interface PendingPlanApproval {
-  requestId: string;
-  callId: string;
-  planPath: string;
-  planMarkdown: string;
-  persona: string;
-}
-
 export interface TodoItem {
   id: number;
   content: string;
@@ -241,8 +233,6 @@ interface SessionState {
   // Ask-user requests
   pendingAskUser: PendingAskUser[];
 
-  // Plan-approval requests (handoff_plan)
-  pendingPlanApprovals: PendingPlanApproval[];
 
   // Todo list
   todos: TodoItem[];
@@ -326,16 +316,6 @@ interface SessionState {
   onAskUserRequest: (data: { request_id: string; call_id: string; questions: Question[] }) => void;
   resolveAskUser: (requestId: string) => void;
 
-  // Plan-approval actions
-  onPlanApprovalRequest: (data: {
-    request_id: string;
-    call_id: string;
-    plan_path: string;
-    plan_markdown: string;
-    persona: string;
-  }) => void;
-  resolvePlanApproval: (requestId: string) => void;
-
   // Todo actions
   onTodosUpdated: (todos: WireTodo[]) => void;
 
@@ -397,7 +377,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   flaggedFiles: [],
   subagents: new Map(),
   pendingAskUser: [],
-  pendingPlanApprovals: [],
   todos: [],
   jobs: new Map(),
   daemonVersion: null,
@@ -1023,7 +1002,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       toolOutputs: new Map(),
       pendingPermissions: [],
       pendingAskUser: [],
-      pendingPlanApprovals: [],
       subagents: new Map(),
       todos: [],
       jobs: new Map(),
@@ -1096,27 +1074,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       pendingAskUser: s.pendingAskUser.filter((a) => a.requestId !== requestId),
     })),
 
-  onPlanApprovalRequest: (data) =>
-    set((s) => ({
-      pendingPlanApprovals: [
-        ...s.pendingPlanApprovals,
-        {
-          requestId: data.request_id,
-          callId: data.call_id,
-          planPath: data.plan_path,
-          planMarkdown: data.plan_markdown,
-          persona: data.persona,
-        },
-      ],
-    })),
-
-  resolvePlanApproval: (requestId) =>
-    set((s) => ({
-      pendingPlanApprovals: s.pendingPlanApprovals.filter(
-        (a) => a.requestId !== requestId,
-      ),
-    })),
-
   onTodosUpdated: (wireTodos) =>
     set({
       todos: wireTodos.map((t) => ({
@@ -1173,7 +1130,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       toolOutputs: new Map(),
       pendingPermissions: [],
       pendingAskUser: [],
-      pendingPlanApprovals: [],
       subagents: new Map(),
       todos: [],
       jobs: new Map(),
@@ -1274,10 +1230,6 @@ export function bridgeClientToStore(client: MewClient) {
     store.getState().onAskUserRequest(data);
   });
 
-  client.on("plan-approval-request", (data) => {
-    store.getState().onPlanApprovalRequest(data);
-  });
-
   client.on("todos-updated", (data) => store.getState().onTodosUpdated(data.todos));
 
   client.on("job-update", (data) =>
@@ -1310,9 +1262,6 @@ export function bridgeClientToStore(client: MewClient) {
   );
   client.on("control-yielded", (data) =>
     store.getState().onControlYielded(data.client_id),
-  );
-  client.on("persona-switch-requested", (data) =>
-    store.getState().setCurrentPersona(data.name),
   );
   client.on("persona-list", (data) =>
     store.getState().setAvailablePersonas(data.personas),

@@ -51,12 +51,10 @@ use mew_tools::tools::flag_important::{FlagImportant, FlaggedFile};
 use mew_tools::tools::glob::Glob;
 use mew_tools::tools::goal::{BlockGoal, CompleteGoal, ProposeGoal};
 use mew_tools::tools::grep::Grep;
-use mew_tools::tools::handoff_plan::HandoffPlan;
 use mew_tools::tools::jobs::{JobBlock, JobCancel, JobStatus, ShellBackground, ShellMonitor};
 use mew_tools::tools::progress_update::ProgressUpdate;
 use mew_tools::tools::read::Read;
 use mew_tools::tools::skill::Skill;
-use mew_tools::tools::switch_persona::SwitchPersona as SwitchPersonaTool;
 use mew_tools::tools::todo::{TodoComplete, TodoCreate, TodoDelete, TodoListTool, TodoUpdate};
 use mew_tools::tools::web_fetch::WebFetch;
 use mew_tools::tools::write::Write;
@@ -72,9 +70,6 @@ pub(crate) fn build_tools(
     skills: Arc<Vec<mew_skills::Skill>>,
     skill_filter: Arc<tokio::sync::RwLock<Option<std::collections::HashSet<String>>>>,
     template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>>,
-    personas: Arc<Vec<mew_personas::Persona>>,
-    pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
-    current_persona_name: Arc<tokio::sync::RwLock<Option<String>>>,
     hashline_enabled: bool,
     plan_path: String,
 ) -> Vec<Arc<dyn mew_tools::Tool>> {
@@ -104,7 +99,6 @@ pub(crate) fn build_tools(
         // planner-only use — persona allowlists gate access when set.
         Arc::new(WritePlan::new(plan_path.clone())),
         Arc::new(EditPlan::new(plan_path)),
-        Arc::new(HandoffPlan),
         Arc::new(ProposeGoal),
         Arc::new(CompleteGoal),
         Arc::new(BlockGoal),
@@ -114,16 +108,6 @@ pub(crate) fn build_tools(
     }
     if !skills.is_empty() {
         tools.push(Arc::new(Skill::new(skills, skill_filter, template_ctx)));
-    }
-    // The switch_persona tool is only useful when there's at least one
-    // persona to switch to. With zero discovered personas the tool would
-    // be a permanent dead-end for the model.
-    if !personas.is_empty() {
-        tools.push(Arc::new(SwitchPersonaTool::new(
-            personas,
-            pending_persona_switch,
-            current_persona_name,
-        )));
     }
     tools
 }
@@ -530,17 +514,12 @@ pub(crate) fn build_session_agent(
         mew_personas::Loader::with_extra_dirs(cwd.clone(), personas_extra)
     };
     let personas_arc = Arc::new(persona_loader.load().unwrap_or_default());
-    let pending_persona_switch = Arc::new(tokio::sync::Mutex::new(None));
-    let current_persona_name = Arc::new(tokio::sync::RwLock::new(None));
     let template_ctx: Arc<tokio::sync::RwLock<Option<mew_prompts::template::TemplateContext>>> =
         Arc::new(tokio::sync::RwLock::new(None));
     let mut tools = build_tools(
         skills.clone(),
         skill_filter.clone(),
         template_ctx.clone(),
-        personas_arc.clone(),
-        pending_persona_switch.clone(),
-        current_persona_name.clone(),
         crate::commands::config::hashline_enabled_for(cfg, provider_id),
         cfg.plan_path.clone(),
     );
@@ -572,8 +551,6 @@ pub(crate) fn build_session_agent(
     maybe_set_classifier_provider(&mut agent, cfg, cat, raw, provider_id, model_id);
     agent.set_plan_path(&cfg.plan_path);
     agent.set_personas((*personas_arc).clone());
-    agent.set_pending_persona_switch(pending_persona_switch.clone());
-    agent.set_current_persona_name(current_persona_name.clone());
 
     // Enable a persistent shell session so `cd`, `export`, and other
     // state survive across bash tool calls.
@@ -763,6 +740,22 @@ mod tests {
         let provider = Arc::new(FakeProvider::new(vec![]));
         let dispatcher: Arc<dyn mew_hooks::Dispatcher> = Arc::new(mew_hooks::NopDispatcher);
         mew_agent::Agent::new(provider, dispatcher, None, vec![], None)
+    }
+
+    #[test]
+    fn planning_tools_do_not_offer_automatic_persona_transitions() {
+        let tools = build_tools(
+            Arc::new(Vec::new()),
+            Arc::new(tokio::sync::RwLock::new(None)),
+            Arc::new(tokio::sync::RwLock::new(None)),
+            false,
+            "PLAN.md".into(),
+        );
+        let names: Vec<_> = tools.iter().map(|tool| tool.name()).collect();
+        assert!(names.contains(&"write_plan"));
+        assert!(names.contains(&"edit_plan"));
+        assert!(!names.contains(&"handoff_plan"));
+        assert!(!names.contains(&"switch_persona"));
     }
 
     #[test]

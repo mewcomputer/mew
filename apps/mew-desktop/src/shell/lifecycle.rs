@@ -355,7 +355,6 @@ impl DesktopShell {
             file_tree_pending: BTreeSet::new(),
             watching_workspace_session: None,
             prompt_history: PromptHistory::default(),
-            plan_feedback_request: None,
             composer_cursor_visible: true,
             composer_blink_epoch: 0,
             streaming_render_scheduled: false,

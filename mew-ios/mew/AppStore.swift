@@ -63,6 +63,15 @@ enum MewFontChoice: String, CaseIterable {
     }
 }
 
+struct PendingGoalProposal: Identifiable {
+    let daemon: String
+    let sessionId: String
+    let requestId: String
+    let objective: String
+
+    var id: String { "\(daemon):\(sessionId):\(requestId)" }
+}
+
 // MARK: - App Store
 
 /// The single source of truth for the app, mirroring the web UI's session store.
@@ -119,6 +128,7 @@ final class AppStore: ObservableObject {
     // Pending requests
     @Published var pendingPermissions: [PendingPermission] = []
     @Published var pendingAskUser: [PendingAskUser] = []
+    @Published var pendingGoals: [PendingGoalProposal] = []
 
     // Models
     @Published var availableModels: [ModelSummary] = []
@@ -322,6 +332,15 @@ final class AppStore: ObservableObject {
         core.respondPermission(id: daemonId, requestId: requestId, decision: decision)
     }
 
+    func respondToGoal(requestId: String, accepted: Bool) {
+        guard let daemonId = selectedDaemonId, let core,
+              let goal = pendingGoals.first(where: {
+                  $0.requestId == requestId && $0.daemon == daemonId.nodeId
+                      && $0.sessionId == selectedSessionId
+              }) else { return }
+        core.respondToGoal(id: DaemonId(nodeId: goal.daemon), requestId: goal.requestId, accepted: accepted)
+    }
+
     func respondAskUser(requestId: String, answers: [String]) {
         guard let daemonId = selectedDaemonId, let core else { return }
         core.respondAskUser(id: daemonId, requestId: requestId, answers: answers)
@@ -521,7 +540,17 @@ final class AppStore: ObservableObject {
                 ))
             }
 
-        case .requestResolved(_, let requestId):
+        case .goalProposed(let daemon, let sessionId, let requestId, _, let objective):
+            if !pendingGoals.contains(where: { $0.daemon == daemon && $0.requestId == requestId }) {
+                pendingGoals.append(PendingGoalProposal(daemon: daemon, sessionId: sessionId,
+                    requestId: requestId, objective: objective))
+            }
+
+        case .subagentEnd:
+            break
+
+        case .requestResolved(let daemon, let requestId):
+            pendingGoals.removeAll { $0.daemon == daemon && $0.requestId == requestId }
             pendingPermissions.removeAll { $0.requestId == requestId }
             pendingAskUser.removeAll { $0.requestId == requestId }
 

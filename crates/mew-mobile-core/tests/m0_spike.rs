@@ -166,7 +166,7 @@ async fn mobile_core_ping_pong_round_trip() -> Result<()> {
     send(&mut ws, ClientMessage::Ping).await;
     let msgs = recv_until(&mut ws, |m| matches!(m, ServerMessage::Pong { .. })).await;
     match &msgs[0] {
-        ServerMessage::Pong { version } => {
+        ServerMessage::Pong { version, .. } => {
             println!("✓ Ping/Pong: daemon version = {version}");
             assert!(!version.is_empty(), "version should be non-empty");
         }

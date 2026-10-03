@@ -20,8 +20,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use mew_agent::{
-    AgentEvent, AskUserQuestion, GoalDecision, PlanDecision, QuestionOption as AgentQuestionOption,
-    Todo, TodoStatus,
+    AgentEvent, AskUserQuestion, GoalDecision, QuestionOption as AgentQuestionOption, Todo,
+    TodoStatus,
 };
 use mew_hooks::{PermissionDecision, ToolCall as HookToolCall};
 use mew_message::Part;
@@ -40,8 +40,6 @@ struct ClientState {
     pending_permissions: Mutex<HashMap<String, oneshot::Receiver<PermissionDecision>>>,
     /// `request_id → receiver` for ask-user answers.
     pending_ask_user: Mutex<HashMap<String, oneshot::Receiver<Vec<String>>>>,
-    /// `request_id → receiver` for plan-approval decisions.
-    pending_plan_approvals: Mutex<HashMap<String, oneshot::Receiver<PlanDecision>>>,
     /// `request_id → receiver` for goal-proposal decisions.
     pending_goal_proposals: Mutex<HashMap<String, oneshot::Receiver<GoalDecision>>>,
     /// The current event sender, set by `prompt()` and closed when the
@@ -83,9 +81,33 @@ impl DaemonClient {
             max_frame_size: None,
             ..WebSocketConfig::default()
         };
-        let (ws_stream, _response) = connect_async_with_config(url, Some(config), false)
+        let (mut ws_stream, _response) = connect_async_with_config(url, Some(config), false)
             .await
             .context("connect to daemon")?;
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            ws_stream
+                .send(Message::Text(mew_protocol::encode_json(&ClientMessage::Ping)?))
+                .await?;
+            loop {
+                let frame = ws_stream.next().await.context("daemon closed during handshake")??;
+                match frame {
+                    Message::Text(text) => {
+                        let message: ServerMessage = mew_protocol::decode_json(&text)
+                            .context("invalid daemon protocol handshake")?;
+                        match message {
+                            ServerMessage::Pong { protocol_version, .. }
+                                if protocol_version == mew_protocol::PROTOCOL_VERSION => return Ok(()),
+                            _ => anyhow::bail!("incompatible daemon protocol; restart or update the daemon and client"),
+                        }
+                    }
+                    Message::Close(_) => anyhow::bail!("daemon closed during protocol handshake"),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .context("daemon protocol handshake timed out; restart or update the daemon")??;
 
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
@@ -105,7 +127,6 @@ impl DaemonClient {
         let state = Arc::new(ClientState {
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
-            pending_plan_approvals: Mutex::new(HashMap::new()),
             pending_goal_proposals: Mutex::new(HashMap::new()),
             event_tx: Mutex::new(None),
             notify_tx,
@@ -573,54 +594,6 @@ async fn translate_server_message(
             }]
         }
 
-        ServerMessage::PlanApprovalRequest {
-            request_id,
-            call_id,
-            plan_path,
-            plan_markdown,
-            persona,
-        } => {
-            let (tx, rx) = oneshot::channel();
-            state
-                .pending_plan_approvals
-                .lock()
-                .await
-                .insert(request_id.clone(), rx);
-
-            let request_id = request_id.clone();
-            let state = state.clone();
-            tokio::spawn(async move {
-                let rx = {
-                    let mut guard = state.pending_plan_approvals.lock().await;
-                    guard.remove(&request_id)
-                };
-                if let Some(rx) = rx {
-                    if let Ok(decision) = rx.await {
-                        let (approved, feedback) = match decision {
-                            PlanDecision::Approved => (true, None),
-                            PlanDecision::ChangesRequested(f) => (false, Some(f)),
-                        };
-                        let msg = ClientMessage::PlanApprovalResponse {
-                            request_id,
-                            approved,
-                            feedback,
-                        };
-                        if let Ok(json) = mew_protocol::encode_json(&msg) {
-                            let _ = state.ws_out.send(json).await;
-                        }
-                    }
-                }
-            });
-
-            vec![AgentEvent::PlanApprovalRequest {
-                call_id: call_id.clone(),
-                plan_path: plan_path.clone(),
-                plan_markdown: plan_markdown.clone(),
-                persona: persona.clone(),
-                tx,
-            }]
-        }
-
         ServerMessage::GoalProposed {
             request_id,
             call_id,
@@ -752,10 +725,6 @@ async fn translate_server_message(
                     })
                     .collect(),
             }]
-        }
-
-        ServerMessage::PersonaSwitchRequested { name } => {
-            vec![AgentEvent::PersonaSwitchRequested { name: name.clone() }]
         }
 
         ServerMessage::JobUpdate {
@@ -947,6 +916,43 @@ fn wire_to_provider_event(
 mod tests {
     use super::*;
 
+    async fn accept_current_handshake(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ) {
+        let frame = ws.next().await.unwrap().unwrap();
+        assert!(
+            matches!(frame, Message::Text(text) if matches!(mew_protocol::decode_json::<ClientMessage>(&text).unwrap(), ClientMessage::Ping))
+        );
+        let pong = ServerMessage::Pong {
+            version: "test".into(),
+            protocol_version: mew_protocol::PROTOCOL_VERSION,
+        };
+        ws.send(Message::Text(mew_protocol::encode_json(&pong).unwrap()))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_rejects_legacy_daemon_before_attaching() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let message = ws.next().await.unwrap().unwrap();
+            assert!(matches!(message, Message::Text(text) if text.contains("ping")));
+            ws.send(Message::Text(r#"{"type":"pong","version":"0.2.0"}"#.into()))
+                .await
+                .unwrap();
+            while ws.next().await.is_some() {}
+        });
+        let result = DaemonClient::connect(&format!("ws://{address}")).await;
+        let error = result.err().expect("legacy daemon must be rejected");
+        assert!(error.to_string().contains("protocol"));
+        assert!(error.to_string().contains("restart"));
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn prompt_stream_closes_only_when_attached_turn_is_idle() {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -956,6 +962,7 @@ mod tests {
             let server = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                accept_current_handshake(&mut ws).await;
                 let ready = ServerMessage::SessionReady {
                     session_id: "active".into(),
                     cwd: None,
@@ -1040,6 +1047,7 @@ mod tests {
             let server = tokio::spawn(async move {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                accept_current_handshake(&mut ws).await;
                 let ready = ServerMessage::SessionReady {
                     session_id: "active".into(),
                     cwd: None,

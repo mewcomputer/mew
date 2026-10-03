@@ -1073,7 +1073,7 @@ async fn ping_returns_pong_with_version() {
 
     let msg = recv_one_matching(&mut ws, |m| matches!(m, ServerMessage::Pong { .. })).await;
     match msg {
-        ServerMessage::Pong { version } => {
+        ServerMessage::Pong { version, .. } => {
             assert!(
                 !version.is_empty(),
                 "version should be non-empty, got {version:?}"

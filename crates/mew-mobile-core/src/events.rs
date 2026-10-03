@@ -99,17 +99,6 @@ pub enum CoreEvent {
         questions: Vec<String>,
     },
 
-    /// A plan-approval request from the agent (`handoff_plan`).
-    PlanApprovalRequested {
-        daemon: String,
-        session_id: String,
-        request_id: String,
-        call_id: String,
-        plan_path: String,
-        plan_markdown: String,
-        persona: String,
-    },
-
     /// A goal proposal from the agent (`propose_goal`). The UI should present
     /// the objective for user approval and call `respond_to_goal`.
     GoalProposed {

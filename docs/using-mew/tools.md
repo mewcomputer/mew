@@ -96,7 +96,6 @@ These tools only register when their prerequisites are met:
 | Tool | Condition | Description |
 |------|-----------|-------------|
 | `skill` | At least one skill discovered | Load a skill's full instructions into context. See [Skills](/docs/using-mew/skills/). |
-| `switch_persona` | At least one persona defined | Queue a persona switch for the end of the current turn. See [Personas](/docs/using-mew/personas/). |
 | `mcp__*` | MCP servers configured | Tools from connected MCP servers. See [MCP Servers](/docs/using-mew/mcp-servers/). |
 
 ## Secret redaction

@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
-use mew_agent::{Agent, AgentEvent, GoalDecision, PlanDecision};
+use mew_agent::{Agent, AgentEvent, GoalDecision};
 use mew_protocol::{
     ClientKind, ClientMessage, Question, QuestionOption, RemoteScope, ServerMessage, SessionState,
 };
@@ -369,7 +369,6 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::Cancel
                 | ClientMessage::PermissionResponse { .. }
                 | ClientMessage::AskUserResponse { .. }
-                | ClientMessage::PlanApprovalResponse { .. }
                 | ClientMessage::GoalResponse { .. }
                 | ClientMessage::SlashCommand { .. }
                 | ClientMessage::ListModels
@@ -436,7 +435,6 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::Cancel
                 | ClientMessage::PermissionResponse { .. }
                 | ClientMessage::AskUserResponse { .. }
-                | ClientMessage::PlanApprovalResponse { .. }
                 | ClientMessage::YieldControl { .. }
         )
 }
@@ -1431,6 +1429,7 @@ where
             ClientMessage::Ping => {
                 reply(ServerMessage::Pong {
                     version: env!("CARGO_PKG_VERSION").to_string(),
+                    protocol_version: mew_protocol::PROTOCOL_VERSION,
                 });
             }
             ClientMessage::ListProjects => {
@@ -1499,40 +1498,6 @@ where
                     let tx = session.pending_ask_user.lock().await.remove(&request_id);
                     if let Some(tx) = tx {
                         let _ = tx.send(answers);
-                    }
-                    session
-                        .broadcast(ServerMessage::RequestResolved { request_id })
-                        .await;
-                    // Broadcast updated attention count.
-                    let perm_count = session.pending_permissions.lock().await.len() as u32;
-                    let q_count = session.pending_questions_count().await;
-                    session_manager
-                        .broadcast_all(ServerMessage::SessionAttentionChanged {
-                            session_id: session.id.clone(),
-                            pending_permissions: perm_count,
-                            pending_questions: q_count,
-                        })
-                        .await;
-                }
-            }
-            ClientMessage::PlanApprovalResponse {
-                request_id,
-                approved,
-                feedback,
-            } => {
-                if let Some(session) = &attached_session {
-                    let tx = session
-                        .pending_plan_approvals
-                        .lock()
-                        .await
-                        .remove(&request_id);
-                    if let Some(tx) = tx {
-                        let decision = if approved {
-                            PlanDecision::Approved
-                        } else {
-                            PlanDecision::ChangesRequested(feedback.unwrap_or_default())
-                        };
-                        let _ = tx.send(decision);
                     }
                     session
                         .broadcast(ServerMessage::RequestResolved { request_id })
@@ -3096,40 +3061,6 @@ async fn translate_event(
                 },
             ]
         }
-        AgentEvent::PlanApprovalRequest {
-            call_id,
-            plan_path,
-            plan_markdown,
-            persona,
-            tx,
-        } => {
-            let id = session.next_request_id();
-            session
-                .pending_plan_approvals
-                .lock()
-                .await
-                .insert(id.clone(), tx);
-            vec![
-                ServerMessage::PlanApprovalRequest {
-                    request_id: id,
-                    call_id,
-                    plan_path,
-                    plan_markdown,
-                    persona,
-                },
-                ServerMessage::SessionAlert {
-                    session_id: session.id.clone(),
-                    title: session.display_title().await,
-                    kind: mew_protocol::AlertKind::InputNeeded,
-                    detail: None,
-                },
-                ServerMessage::SessionAttentionChanged {
-                    session_id: session.id.clone(),
-                    pending_permissions: session.pending_permissions.lock().await.len() as u32,
-                    pending_questions: session.pending_questions_count().await,
-                },
-            ]
-        }
         AgentEvent::SubagentStart {
             parent_call_id,
             name,
@@ -3204,9 +3135,6 @@ async fn translate_event(
                     })
                     .collect(),
             }]
-        }
-        AgentEvent::PersonaSwitchRequested { name } => {
-            vec![ServerMessage::PersonaSwitchRequested { name }]
         }
         AgentEvent::JobUpdate {
             job_id,

@@ -85,12 +85,11 @@ Encoding/decoding via `encode_json` / `decode_json` in `mew-protocol`.
 | `ModelSwitched` | `provider`, `model` | Confirms model switch |
 | `ThinkingVariantChanged` | `variant?: String` | Confirms thinking variant (null = disabled) |
 | `TodosUpdated` | `todos: Vec<Todo>` | Session todo list changed |
-| `PersonaSwitchRequested` | `name` | `switch_persona` tool was called |
 | `JobUpdate` | `job_id`, `command`, `state` | Background shell job changed |
 | `SlashResult` | `text` | Slash command produced text output |
 | `Error` | `message` | Error before or outside a turn |
 | `ErrorEvent` | `message` | Terminal error during a turn |
-| `Pong` | `version: String` | Response to `Ping`; carries daemon version |
+| `Pong` | `version: String`, `protocol_version: u32` | Response to `Ping`; carries daemon version and wire revision |
 | `ProjectList` | `projects: Vec<ProjectInfo>` | Response to `ListProjects`; deduped project directories with session counts |
 
 ## Session model

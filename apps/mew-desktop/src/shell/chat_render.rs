@@ -320,112 +320,6 @@ impl DesktopShell {
                     )
                     .into_any_element()
             }
-            ActionKind::PlanApproval {
-                plan_path,
-                plan_markdown,
-                persona,
-                ..
-            } => {
-                let feedback_active =
-                    self.plan_feedback_request.as_deref() == Some(request_id.as_str());
-                let preview = plan_markdown
-                    .lines()
-                    .take(8)
-                    .enumerate()
-                    .map(|(index, line)| {
-                        div()
-                            .id(format!("action-{request_id}-plan-line-{index}"))
-                            .text_xs()
-                            .text_color(theme_rgb(&self.theme, "text.muted"))
-                            .child(SharedString::from(line.to_owned()))
-                            .into_any_element()
-                    })
-                    .collect::<Vec<_>>();
-                div()
-                    .id(format!("required-action-{request_id}"))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .p(px(12.))
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(theme_rgb(&self.theme, "accent"))
-                    .bg(theme_rgb(&self.theme, "panel.background"))
-                    .shadow_md()
-                    .child(div().text_sm().child("plan approval"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme_rgb(&self.theme, "text.muted"))
-                            .child(SharedString::from(format!("{persona} · {plan_path}"))),
-                    )
-                    .children(preview)
-                    .child(div().flex().items_center().gap(px(6.)).children([
-                        self.render_action_button(
-                            format!("action-{request_id}-approve"),
-                            "approve",
-                            ClientMessage::PlanApprovalResponse {
-                                request_id: request_id.clone(),
-                                approved: true,
-                                feedback: None,
-                            },
-                            ActionButtonTone::Primary,
-                            cx,
-                        ),
-                        if feedback_active {
-                            div()
-                                .id(format!("action-{request_id}-cancel-feedback"))
-                                .px(px(10.))
-                                .py(px(6.))
-                                .rounded(px(7.))
-                                .cursor_pointer()
-                                .bg(theme_rgb(&self.theme, "card"))
-                                .text_xs()
-                                .role(Role::Button)
-                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                .aria_label("Cancel plan feedback")
-                                .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                                .on_click(cx.listener(|shell, _, _, cx| {
-                                    shell.plan_feedback_request = None;
-                                    cx.notify();
-                                }))
-                                .child("cancel")
-                                .into_any_element()
-                        } else {
-                            let feedback_request_id = request_id.clone();
-                            div()
-                                .id(format!("action-{request_id}-reject"))
-                                .px(px(10.))
-                                .py(px(6.))
-                                .rounded(px(7.))
-                                .cursor_pointer()
-                                .bg(theme_rgb(&self.theme, "card"))
-                                .text_xs()
-                                .role(Role::Button)
-                                .desktop_focus(theme_rgb(&self.theme, "text.accent"))
-                                .aria_label("Request plan changes")
-                                .hover(|element| element.bg(theme_rgb(&self.theme, "muted")))
-                                .on_click(cx.listener(move |shell, _, window, cx| {
-                                    shell.begin_plan_feedback(
-                                        feedback_request_id.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }))
-                                .child("request changes")
-                                .into_any_element()
-                        },
-                    ]))
-                    .when(feedback_active, |element| {
-                        element.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme_rgb(&self.theme, "text.muted"))
-                                .child("type feedback in the composer, then press Enter to send · Esc to cancel"),
-                        )
-                    })
-                    .into_any_element()
-            }
             ActionKind::GoalApproval { objective, .. } => div()
                 .id(format!("required-action-{request_id}"))
                 .flex()
@@ -1740,11 +1634,7 @@ impl DesktopShell {
                                     .role(Role::TextInput)
                                     .aria_label("Message composer")
                                     .aria_value(composer_value.clone())
-                                    .aria_placeholder(if self.plan_feedback_request.is_some() {
-                                        "Plan feedback…"
-                                    } else {
-                                        "Do anything…"
-                                    })
+                                    .aria_placeholder("Do anything…")
                                     .aria_description("Type a message, then press Enter to send.")
                                     .cursor(gpui::CursorStyle::IBeam)
                                     .on_click(cx.listener(|shell, _, window, cx| {

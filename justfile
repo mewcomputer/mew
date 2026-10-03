@@ -403,9 +403,9 @@ ios-core:
 
     echo "── Generating Swift bindings ──"
     mkdir -p "${BINDINGS_DIR}"
-    cargo run -p mew-mobile-core --bin uniffi-bindgen -- generate \
+    cargo run -p mew-mobile-core --release --bin uniffi-bindgen -- generate \
         --library target/release/libmew_mobile_core.dylib \
-        --language swift --out-dir "${BINDINGS_DIR}"
+        --language swift --metadata-no-deps --out-dir "${BINDINGS_DIR}"
 
     # SwiftPM binary targets need module.modulemap (not <name>.modulemap)
     cp "${BINDINGS_DIR}/mew_mobile_coreFFI.modulemap" "${BINDINGS_DIR}/module.modulemap" 2>/dev/null || true

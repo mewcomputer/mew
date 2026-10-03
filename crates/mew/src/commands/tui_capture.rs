@@ -1128,9 +1128,7 @@ fn agent_event_name(ev: &mew_agent::AgentEvent) -> &'static str {
         mew_agent::AgentEvent::SubagentEnd { .. } => "SubagentEnd",
         mew_agent::AgentEvent::SubagentPermissionRequest { .. } => "SubagentPermissionRequest",
         mew_agent::AgentEvent::AskUser { .. } => "AskUser",
-        mew_agent::AgentEvent::PlanApprovalRequest { .. } => "PlanApprovalRequest",
         mew_agent::AgentEvent::TodosUpdated { .. } => "TodosUpdated",
-        mew_agent::AgentEvent::PersonaSwitchRequested { .. } => "PersonaSwitchRequested",
         mew_agent::AgentEvent::JobUpdate { .. } => "JobUpdate",
         mew_agent::AgentEvent::FileDelta { .. } => "FileDelta",
         mew_agent::AgentEvent::FlaggedFilesChanged { .. } => "FlaggedFilesChanged",
@@ -1158,7 +1156,6 @@ fn server_message_type(msg: &mew_protocol::ServerMessage) -> &'static str {
             "WorkspacePermissionRequest"
         }
         mew_protocol::ServerMessage::AskUserRequest { .. } => "AskUserRequest",
-        mew_protocol::ServerMessage::PlanApprovalRequest { .. } => "PlanApprovalRequest",
         mew_protocol::ServerMessage::GoalProposed { .. } => "GoalProposed",
         mew_protocol::ServerMessage::SubagentStart { .. } => "SubagentStart",
         mew_protocol::ServerMessage::SubagentStatus { .. } => "SubagentStatus",
@@ -1167,7 +1164,6 @@ fn server_message_type(msg: &mew_protocol::ServerMessage) -> &'static str {
             "SubagentPermissionRequest"
         }
         mew_protocol::ServerMessage::TodosUpdated { .. } => "TodosUpdated",
-        mew_protocol::ServerMessage::PersonaSwitchRequested { .. } => "PersonaSwitchRequested",
         mew_protocol::ServerMessage::JobUpdate { .. } => "JobUpdate",
         mew_protocol::ServerMessage::SessionList { .. } => "SessionList",
         mew_protocol::ServerMessage::SessionHistory { .. } => "SessionHistory",

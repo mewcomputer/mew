@@ -233,6 +233,45 @@ test("history pages prepend older messages and can be requested by cursor", asyn
   }]);
 });
 
+test("manual persona selection waits for the daemon's confirmed persona", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connectP = client.connect();
+  setImmediate(() => latest().open());
+  await connectP;
+  const personas: string[] = [];
+  client.on("persona-switched", ({ name }) => personas.push(name));
+
+  client.switchPersona("builder");
+  assert.deepEqual(latest().sent, [{ type: "switch_persona", name: "builder" }]);
+  assert.deepEqual(personas, []);
+
+  latest().peerSend({ type: "persona_switched", name: "builder" });
+  assert.deepEqual(personas, ["builder"]);
+});
+
+for (const [response, expectedProtocol] of [
+  [{ type: "pong", version: "0.1.0", protocol_version: 1 }, 1],
+  [{ type: "pong", version: "0.1.0" }, 0],
+] as const) {
+  test(`ping preserves the daemon version and exposes protocol ${expectedProtocol}`, async () => {
+    const { factory, latest } = makeFactory();
+    const client = new MewClient("ws://test/", { socketFactory: factory });
+    const connectP = client.connect();
+    setImmediate(() => latest().open());
+    await connectP;
+    const replies: unknown[] = [];
+    client.on("pong", (data) => replies.push(data));
+
+    const ping = client.ping();
+    assert.deepEqual(latest().sent, [{ type: "ping" }]);
+    latest().peerSend(response);
+
+    assert.equal(await ping, "0.1.0");
+    assert.deepEqual(replies, [{ version: "0.1.0", protocol_version: expectedProtocol }]);
+  });
+}
+
 test("serializes overlapping session requests so errors stay with their request", async () => {
   const { factory, latest } = makeFactory();
   const client = new MewClient("ws://test/", { socketFactory: factory });

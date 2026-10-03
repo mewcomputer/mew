@@ -4,7 +4,8 @@ use mew_protocol::{ClientMessage, ServerMessage};
 use tracing::warn;
 
 /// Decode a server frame without terminating a connection when a newer daemon
-/// adds a variant this client does not know yet.
+/// adds a variant this client does not know yet. Malformed handshake messages
+/// remain errors so callers can reject an incompatible connection immediately.
 pub fn decode_server_message_lenient(
     text: &str,
 ) -> Result<Option<ServerMessage>, serde_json::Error> {
@@ -16,6 +17,9 @@ pub fn decode_server_message_lenient(
                 .get("type")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("unknown");
+            if type_tag == "pong" {
+                return Err(decode_error);
+            }
             warn!(%type_tag, error = %decode_error, "dropping undecodable ServerMessage frame");
             Ok(None)
         }
@@ -36,19 +40,28 @@ mod tests {
         let message = decode_server_message_lenient(r#"{"type":"pong","version":"0.2.0"}"#)
             .unwrap()
             .expect("known message");
-        assert!(matches!(message, ServerMessage::Pong { version } if version == "0.2.0"));
+        assert!(
+            matches!(message, ServerMessage::Pong { version, protocol_version: 0 } if version == "0.2.0")
+        );
     }
 
     #[test]
-    fn unknown_and_malformed_messages_are_dropped() {
+    fn unknown_messages_are_dropped() {
         assert!(
             decode_server_message_lenient(r#"{"type":"future_variant","value":true}"#)
                 .unwrap()
                 .is_none()
         );
-        assert!(decode_server_message_lenient(r#"{"type":"pong"}"#)
-            .unwrap()
-            .is_none());
+    }
+
+    #[test]
+    fn malformed_handshake_is_an_error() {
+        for frame in [
+            r#"{"type":"pong"}"#,
+            r#"{"type":"pong","version":"test","protocol_version":"1"}"#,
+        ] {
+            assert!(decode_server_message_lenient(frame).is_err());
+        }
     }
 
     #[test]

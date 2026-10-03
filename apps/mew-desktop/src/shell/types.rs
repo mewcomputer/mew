@@ -143,7 +143,6 @@ pub(super) struct DesktopShell {
     pub(super) file_tree_pending: BTreeSet<String>,
     pub(super) watching_workspace_session: Option<String>,
     pub(super) prompt_history: PromptHistory,
-    pub(super) plan_feedback_request: Option<String>,
     pub(super) composer_cursor_visible: bool,
     pub(super) composer_blink_epoch: usize,
     pub(super) streaming_render_scheduled: bool,

@@ -57,10 +57,6 @@ pub struct PersonaConfig {
     /// the classifier toward more conservative decisions. `None` = no
     /// hint (the classifier uses its default prompt).
     pub autonomous_hint: Option<String>,
-    /// Controls which personas this one can switch to via the
-    /// `switch_persona` tool, and whether the user must confirm.
-    /// `None` = unrestricted (can switch to any persona, no confirmation).
-    pub transitions: Option<TransitionRules>,
     /// Fallback models to try if the primary model's provider returns a
     /// stream error. Each entry is a `provider/model` string (same format
     /// as `model`). Tried in order; the first that succeeds is used for
@@ -71,23 +67,6 @@ pub struct PersonaConfig {
     /// the sidebar entry, and the confirm modal border. When `None`,
     /// a deterministic color is generated from the persona name.
     pub color: Option<String>,
-}
-
-/// Transition rules for a persona. Controls which personas this one can
-/// switch to and whether the user must confirm the switch.
-#[derive(Debug, Clone, Default)]
-pub struct TransitionRules {
-    /// Which persona names this persona is allowed to switch to.
-    /// `None` = any persona (the default). `Some(vec)` = only those
-    /// listed. An empty vec means the persona cannot switch at all —
-    /// useful for locked-down personas like a read-only planner that
-    /// should not self-escalate to a builder.
-    pub allowed: Option<Vec<String>>,
-    /// When `true`, the user is asked to confirm before the switch is
-    /// applied. The `switch_persona` tool returns a message indicating
-    /// the switch was queued pending confirmation; the main loop shows
-    /// a confirm modal (same as the `/persona` slash command).
-    pub confirm: bool,
 }
 
 /// Frontmatter parsed from a PERSONA.md file.
@@ -119,19 +98,9 @@ struct MewFrontmatter {
     #[serde(default)]
     autonomous_hint: Option<String>,
     #[serde(default)]
-    transitions: Option<TransitionRulesFrontmatter>,
-    #[serde(default)]
     fallback_models: Option<Vec<String>>,
     #[serde(default)]
     color: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct TransitionRulesFrontmatter {
-    #[serde(default)]
-    allowed: Option<Vec<String>>,
-    #[serde(default)]
-    confirm: bool,
 }
 
 static NAME_RE: LazyLock<Regex> =
@@ -260,10 +229,6 @@ fn parse_persona_content(content: &str, path: PathBuf) -> Result<Persona, Person
                     skills: mew.skills,
                     template: mew.template,
                     autonomous_hint: mew.autonomous_hint,
-                    transitions: mew.transitions.map(|t| TransitionRules {
-                        allowed: t.allowed,
-                        confirm: t.confirm,
-                    }),
                     fallback_models: mew.fallback_models,
                     color: mew.color,
                 },
@@ -579,7 +544,8 @@ mod tests {
         assert!(tools.contains(&"grep".to_string()));
         assert!(tools.contains(&"write_plan".to_string()));
         assert!(tools.contains(&"edit_plan".to_string()));
-        assert!(tools.contains(&"handoff_plan".to_string()));
+        assert!(!tools.contains(&"handoff_plan".to_string()));
+        assert!(!tools.contains(&"switch_persona".to_string()));
         assert!(!tools.contains(&"write".to_string()));
         assert!(!tools.contains(&"bash".to_string()));
     }
@@ -674,48 +640,6 @@ mod tests {
     }
 
     #[test]
-    fn test_persona_transitions_allowed_list() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cwd = tmp.path();
-        write_persona_with_mew(
-            cwd,
-            "guarded",
-            "Guarded persona",
-            "body",
-            "  transitions:\n    allowed:\n      - builder\n      - reviewer\n    confirm: true\n",
-        );
-
-        let loader = Loader::new(cwd).without_builtins();
-        let personas = loader.load().unwrap();
-        assert_eq!(personas.len(), 1);
-        let t = personas[0].config.transitions.as_ref().unwrap();
-        assert_eq!(
-            t.allowed.as_ref().unwrap(),
-            &vec!["builder".to_string(), "reviewer".to_string()]
-        );
-        assert!(t.confirm);
-    }
-
-    #[test]
-    fn test_persona_transitions_empty_allowed_blocks_all() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cwd = tmp.path();
-        write_persona_with_mew(
-            cwd,
-            "locked",
-            "Locked persona",
-            "body",
-            "  transitions:\n    allowed: []\n",
-        );
-
-        let loader = Loader::new(cwd).without_builtins();
-        let personas = loader.load().unwrap();
-        let t = personas[0].config.transitions.as_ref().unwrap();
-        assert!(t.allowed.as_ref().unwrap().is_empty());
-        assert!(!t.confirm);
-    }
-
-    #[test]
     fn test_persona_fallback_models() {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
@@ -745,19 +669,6 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_planner_has_locked_transitions() {
-        let builtins = builtin_defaults();
-        let planner = builtins.iter().find(|p| p.name == "planner").unwrap();
-        let t = planner
-            .config
-            .transitions
-            .as_ref()
-            .expect("planner has transition rules");
-        // Planner cannot switch to any persona on its own.
-        assert!(t.allowed.as_ref().unwrap().is_empty());
-    }
-
-    #[test]
     fn test_builtin_planner_has_autonomous_hint() {
         let builtins = builtin_defaults();
         let planner = builtins.iter().find(|p| p.name == "planner").unwrap();
@@ -771,10 +682,25 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_builder_has_no_transition_restrictions() {
-        let builtins = builtin_defaults();
-        let builder = builtins.iter().find(|p| p.name == "builder").unwrap();
-        // Builder has no transition restrictions — can switch to any persona.
-        assert!(builder.config.transitions.is_none());
+    fn test_legacy_transition_metadata_preserves_manual_persona_configuration() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_persona_with_mew(
+            tmp.path(),
+            "planner",
+            "Custom planner",
+            "Plan with care.",
+            "  model: fake/model\n  tools:\n    - read\n    - write_plan\n  transitions:\n    allowed: []\n    confirm: true\n",
+        );
+
+        let personas = Loader::new(tmp.path()).without_builtins().load().unwrap();
+
+        assert_eq!(personas.len(), 1);
+        assert_eq!(personas[0].name, "planner");
+        assert_eq!(personas[0].body, "Plan with care.");
+        assert_eq!(personas[0].config.model.as_deref(), Some("fake/model"));
+        assert_eq!(
+            personas[0].config.tools.as_ref().unwrap(),
+            &["read", "write_plan"]
+        );
     }
 }

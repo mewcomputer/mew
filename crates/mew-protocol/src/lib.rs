@@ -13,6 +13,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Wire revision required by native clients. Increment for incompatible changes.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 pub const DEFAULT_HISTORY_PAGE_LIMIT: usize = 24;
 
 fn default_history_page_limit() -> usize {
@@ -134,15 +137,6 @@ pub enum ClientMessage {
         request_id: String,
         /// One answer per question, in order.
         answers: Vec<String>,
-    },
-
-    /// Respond to a `PlanApprovalRequest` from the daemon. `approved = false`
-    /// with optional `feedback` requests changes to the plan.
-    PlanApprovalResponse {
-        request_id: String,
-        approved: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        feedback: Option<String>,
     },
 
     /// Respond to a `GoalProposed` from the daemon. `accepted = true` activates
@@ -289,7 +283,7 @@ pub enum ClientMessage {
     },
 
     /// Ping the daemon for liveness check and version negotiation.
-    /// The daemon responds with `ServerMessage::Pong { version }`.
+    /// The daemon responds with `ServerMessage::Pong` including its wire revision.
     Ping,
 
     // -- Browser --
@@ -689,16 +683,6 @@ pub enum ServerMessage {
         questions: Vec<Question>,
     },
 
-    /// Present a completed plan for user approval (from `handoff_plan`). The
-    /// frontend responds with `PlanApprovalResponse`.
-    PlanApprovalRequest {
-        request_id: String,
-        call_id: String,
-        plan_path: String,
-        plan_markdown: String,
-        persona: String,
-    },
-
     /// Present a proposed goal for user approval (from `propose_goal`). The
     /// frontend responds with `GoalResponse`.
     GoalProposed {
@@ -741,11 +725,6 @@ pub enum ServerMessage {
     /// The session's todo list changed.
     TodosUpdated {
         todos: Vec<Todo>,
-    },
-
-    /// A `switch_persona` tool call was queued and the turn ended.
-    PersonaSwitchRequested {
-        name: String,
     },
 
     /// A background shell job state changed.
@@ -951,9 +930,7 @@ pub enum ServerMessage {
         personas: Vec<PersonaInfo>,
     },
 
-    /// Confirmation that a persona switch succeeded. Distinct from
-    /// `PersonaSwitchRequested` (which is emitted when a tool queues
-    /// a persona switch during a turn).
+    /// Confirmation that an explicit persona selection succeeded.
     PersonaSwitched {
         name: String,
     },
@@ -963,6 +940,9 @@ pub enum ServerMessage {
     Pong {
         /// Daemon version string (e.g. "0.2.0").
         version: String,
+        /// Missing in legacy daemons, which are incompatible with this revision.
+        #[serde(default)]
+        protocol_version: u32,
     },
 
     /// Response to `ListProjects`. Contains deduped project directories
@@ -1583,14 +1563,50 @@ mod tests {
 
         let pong = ServerMessage::Pong {
             version: "0.2.0".into(),
+            protocol_version: PROTOCOL_VERSION,
         };
         let j = encode_json(&pong).unwrap();
         assert!(j.contains(r#""type":"pong""#));
         assert!(j.contains(r#""version":"0.2.0""#));
         let decoded: ServerMessage = decode_json(&j).unwrap();
         match decoded {
-            ServerMessage::Pong { version } => assert_eq!(version, "0.2.0"),
+            ServerMessage::Pong {
+                version,
+                protocol_version,
+            } => {
+                assert_eq!(version, "0.2.0");
+                assert_eq!(protocol_version, PROTOCOL_VERSION);
+            }
             _ => panic!("expected Pong"),
+        }
+    }
+
+    #[test]
+    fn legacy_pong_defaults_to_an_incompatible_revision() {
+        let pong: ServerMessage = decode_json(r#"{"type":"pong","version":"0.2.0"}"#).unwrap();
+        assert!(matches!(
+            pong,
+            ServerMessage::Pong {
+                protocol_version: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn retired_plan_approval_responses_are_rejected() {
+        let response =
+            r#"{"type":"plan_approval_response","request_id":"old-request","approved":true}"#;
+        assert!(decode_json::<ClientMessage>(response).is_err());
+    }
+
+    #[test]
+    fn retired_handoff_events_are_rejected() {
+        for event in [
+            r#"{"type":"plan_approval_request","request_id":"old-request","call_id":"old-call","plan_path":"PLAN.md","plan_markdown":"plan","persona":"builder"}"#,
+            r#"{"type":"persona_switch_requested","name":"builder"}"#,
+        ] {
+            assert!(decode_json::<ServerMessage>(event).is_err());
         }
     }
 
@@ -1795,51 +1811,6 @@ mod tests {
             } => {
                 assert_eq!(request_id, "uuid-5");
                 assert_eq!(answers, vec!["alpha", "beta", "gamma"]);
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn client_message_plan_approval_response_approved_roundtrip() {
-        let m = ClientMessage::PlanApprovalResponse {
-            request_id: "uuid-6".into(),
-            approved: true,
-            feedback: None,
-        };
-        // Approved responses omit the feedback field on the wire.
-        let json = serde_json::to_string(&m).unwrap();
-        assert!(!json.contains("feedback"));
-        match round_trip(&m) {
-            ClientMessage::PlanApprovalResponse {
-                request_id,
-                approved,
-                feedback,
-            } => {
-                assert_eq!(request_id, "uuid-6");
-                assert!(approved);
-                assert_eq!(feedback, None);
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn client_message_plan_approval_response_changes_roundtrip() {
-        let m = ClientMessage::PlanApprovalResponse {
-            request_id: "uuid-7".into(),
-            approved: false,
-            feedback: Some("add tests".into()),
-        };
-        match round_trip(&m) {
-            ClientMessage::PlanApprovalResponse {
-                request_id,
-                approved,
-                feedback,
-            } => {
-                assert_eq!(request_id, "uuid-7");
-                assert!(!approved);
-                assert_eq!(feedback.as_deref(), Some("add tests"));
             }
             _ => panic!(),
         }
@@ -2286,33 +2257,6 @@ mod tests {
     }
 
     #[test]
-    fn server_message_plan_approval_request_roundtrip() {
-        let m = ServerMessage::PlanApprovalRequest {
-            request_id: "uuid-8".into(),
-            call_id: "handoff_1".into(),
-            plan_path: "/repo/PLAN.md".into(),
-            plan_markdown: "# Goal\n\n1. do the thing".into(),
-            persona: "builder".into(),
-        };
-        match round_trip(&m) {
-            ServerMessage::PlanApprovalRequest {
-                request_id,
-                call_id,
-                plan_path,
-                plan_markdown,
-                persona,
-            } => {
-                assert_eq!(request_id, "uuid-8");
-                assert_eq!(call_id, "handoff_1");
-                assert_eq!(plan_path, "/repo/PLAN.md");
-                assert!(plan_markdown.contains("do the thing"));
-                assert_eq!(persona, "builder");
-            }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
     fn server_message_subagent_events_roundtrip() {
         let start = ServerMessage::SubagentStart {
             parent_call_id: "p1".into(),
@@ -2422,17 +2366,6 @@ mod tests {
                 assert_eq!(todos[1].depends_on, vec![1]);
                 assert_eq!(todos[2].depends_on, vec![1, 2]);
             }
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn server_message_persona_switch_roundtrip() {
-        let m = ServerMessage::PersonaSwitchRequested {
-            name: "explorer".into(),
-        };
-        match round_trip(&m) {
-            ServerMessage::PersonaSwitchRequested { name } => assert_eq!(name, "explorer"),
             _ => panic!(),
         }
     }

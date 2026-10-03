@@ -283,26 +283,13 @@ pub struct Agent {
     /// `rebuild_system` can re-derive `self.system` after a persona change
     /// without losing the original context prompt.
     pub base_system: String,
-    /// All personas discovered at startup. Used by the turn loop when a
-    /// `switch_persona` tool call queued a switch: the agent looks up the
-    /// persona by name at end of turn and emits `PersonaSwitchRequested`
-    /// for the main loop to apply.
+    /// Discovered personas available for explicit user selection.
     pub personas: Vec<mew_personas::Persona>,
-    /// Pending persona switch queued by the `switch_persona` tool. Shared
-    /// with the tool via `Arc<Mutex<...>>` so the tool can set it during
-    /// `execute` and the turn loop can drain it at end of turn. The
-    /// actual switch (model pin, provider rebuild) is the main loop's
-    /// responsibility, triggered by the `PersonaSwitchRequested` event.
-    pub pending_persona_switch: Arc<tokio::sync::Mutex<Option<String>>>,
     /// Short user messages queued to steer the *running* turn. Injected into
     /// the next provider request (even a tool-call continuation) rather than
     /// starting a new turn. If the turn ends first, the guidance is picked up
     /// by the next turn. Shared via `Arc` so the running turn's clone sees it.
     pub pending_guidance: Arc<tokio::sync::Mutex<VecDeque<String>>>,
-    /// Current persona name, shared with the `switch_persona` tool so it
-    /// can look up transition rules for the *active* persona before
-    /// queuing a switch. Updated by `apply_persona` and `clear_persona`.
-    pub current_persona_name: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Active persona name (for display/status). `None` = no persona.
     pub persona_name: Option<String>,
     /// Active persona's autonomous hint for the Auto/Auto+ permission
@@ -310,10 +297,6 @@ pub struct Agent {
     /// (e.g. "this persona is read-only; be strict about shell commands").
     /// `None` = no hint (classifier uses its default prompt).
     pub autonomous_hint: Option<String>,
-    /// Active persona's transition rules. Controls which personas this
-    /// one can switch to and whether confirmation is required. `None` =
-    /// unrestricted.
-    pub persona_transitions: Option<mew_personas::TransitionRules>,
     /// Active persona's fallback models. Tried in order if the primary
     /// model's provider returns a stream error. `None` or empty = no
     /// fallbacks.
@@ -459,12 +442,9 @@ impl Agent {
             skills: Vec::new(),
             base_system: String::new(),
             personas: Vec::new(),
-            pending_persona_switch: Arc::new(tokio::sync::Mutex::new(None)),
             pending_guidance: Arc::new(tokio::sync::Mutex::new(VecDeque::new())),
-            current_persona_name: Arc::new(tokio::sync::RwLock::new(None)),
             persona_name: None,
             autonomous_hint: None,
-            persona_transitions: None,
             fallback_models: None,
             model_id: String::new(),
             provider_id: String::new(),
@@ -809,31 +789,9 @@ impl Agent {
         self.rebuild_system();
     }
 
-    /// Set the discovered personas. Stored for the turn loop to look up
-    /// a target persona by name when a `switch_persona` tool call is
-    /// drained at end of turn.
+    /// Set the discovered personas available for explicit user selection.
     pub fn set_personas(&mut self, personas: Vec<mew_personas::Persona>) {
         self.personas = personas;
-    }
-
-    /// Provide a shared `pending_persona_switch` slot. Should be the same
-    /// `Arc` passed to the `SwitchPersona` tool so the tool can queue a
-    /// switch and the turn loop can drain it.
-    pub fn set_pending_persona_switch(&mut self, slot: Arc<tokio::sync::Mutex<Option<String>>>) {
-        self.pending_persona_switch = slot;
-    }
-
-    /// Share the current-persona-name slot with the `switch_persona` tool
-    /// so it can look up transition rules for the active persona. The
-    /// agent keeps this in sync via `apply_persona` / `clear_persona`.
-    pub fn set_current_persona_name(&mut self, current: Arc<tokio::sync::RwLock<Option<String>>>) {
-        // Preserve the current value if the agent already has a persona active.
-        if let Some(ref name) = self.persona_name {
-            if let Ok(mut g) = current.try_write() {
-                *g = Some(name.clone());
-            }
-        }
-        self.current_persona_name = current;
     }
 
     /// Set the provider builder callback used by the turn loop to try
@@ -954,11 +912,7 @@ impl Agent {
     /// the provider.
     pub fn apply_persona(&mut self, persona: &mew_personas::Persona) -> Option<String> {
         self.persona_name = Some(persona.name.clone());
-        if let Ok(mut g) = self.current_persona_name.try_write() {
-            *g = Some(persona.name.clone());
-        }
         self.autonomous_hint = persona.config.autonomous_hint.clone();
-        self.persona_transitions = persona.config.transitions.clone();
         self.fallback_models = persona.config.fallback_models.clone();
 
         // Compute tool filters before rendering the prompt so a templated
@@ -1051,14 +1005,10 @@ impl Agent {
     /// default (empty), and the unfiltered skills list.
     pub fn clear_persona(&mut self) {
         self.persona_name = None;
-        if let Ok(mut g) = self.current_persona_name.try_write() {
-            *g = None;
-        }
         self.persona_prompt = None;
         self.active_tool_names = None;
         self.denied_tool_names.clear();
         self.autonomous_hint = None;
-        self.persona_transitions = None;
         self.fallback_models = None;
         if let Ok(mut g) = self.skill_filter.try_write() {
             *g = None;

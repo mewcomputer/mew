@@ -95,6 +95,16 @@ struct ChatView: View {
                 .interactiveDismissDisabled()
             }
             .sheet(item: Binding(
+                get: { store.pendingGoals.first { $0.daemon == daemonNodeId && $0.sessionId == sessionId } },
+                set: { _ in }
+            )) { goal in
+                GoalProposalSheet(objective: goal.objective) { accepted in
+                    store.respondToGoal(requestId: goal.requestId, accepted: accepted)
+                }
+                .presentationDetents([.medium, .large])
+                .interactiveDismissDisabled()
+            }
+            .sheet(item: Binding(
                 get: { fileBrowserPath.map { FileBrowserItem(path: $0) } },
                 set: { newValue in fileBrowserPath = newValue?.path }
             )) { item in
@@ -113,22 +123,27 @@ struct ChatView: View {
                 )
                 .presentationDetents([.large])
             }
-            .onChange(of: store.availableModels) { models in
-                if currentModel == nil { currentModel = models.first }
-            }
-            .onChange(of: store.currentModel) { currentModels in
-                if let daemonId = store.selectedDaemonId?.nodeId,
-                   let modelName = currentModels[daemonId] {
-                    if let m = store.availableModels.first(where: { $0.model == modelName }) {
-                        currentModel = m
-                    }
-                }
-            }
-            .onChange(of: store.visibleMessages) { _ in
+            .onChange(of: store.availableModels) { initializeModelSelection() }
+            .onChange(of: store.currentModel) { updateModelSelection() }
+            .onChange(of: store.visibleMessages) {
                 if !store.visibleMessages.isEmpty {
                     isLoadingSession = false
                 }
             }
+    }
+
+    private func initializeModelSelection() {
+        if currentModel == nil {
+            currentModel = store.availableModels.first
+        }
+    }
+
+    private func updateModelSelection() {
+        if let daemonId = store.selectedDaemonId?.nodeId,
+           let modelName = store.currentModel[daemonId],
+           let model = store.availableModels.first(where: { $0.model == modelName }) {
+            currentModel = model
+        }
     }
 
     @ViewBuilder
@@ -210,12 +225,12 @@ struct ChatView: View {
                 // Auto-scroll on any content change (new messages, streaming
                 // deltas, and growing reasoning/tool output within a message),
                 // not just when the message count changes.
-                .onChange(of: store.visibleMessages) { _ in
+                .onChange(of: store.visibleMessages) {
                     scrollToBottom(proxy: proxy)
                 }
                 // Streaming deltas arrive rapidly; scroll without animation so
                 // the growing text and an animated scroll don't fight (jitter).
-                .onChange(of: store.streamingText) { _ in
+                .onChange(of: store.streamingText) {
                     scrollToBottom(proxy: proxy, animated: false)
                 }
             }
@@ -226,7 +241,7 @@ struct ChatView: View {
             GeometryReader { geo in
                 Color.clear
                     .onAppear { containerHeight = geo.size.height }
-                    .onChange(of: geo.size.height) { containerHeight = $0 }
+                    .onChange(of: geo.size.height) { containerHeight = geo.size.height }
             }
         )
     }
@@ -504,6 +519,31 @@ private struct PermissionSheet: View {
             return raw
         }
         return result
+    }
+}
+
+private struct GoalProposalSheet: View {
+    let objective: String
+    let onRespond: (Bool) -> Void
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(objective)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(20)
+            }
+            .navigationTitle("Proposed goal")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Reject", role: .destructive) { onRespond(false) }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Accept") { onRespond(true) }
+                }
+            }
+        }
     }
 }
 
