@@ -751,8 +751,10 @@ impl DesktopShell {
     }
 
     pub(super) fn release_browser_focus(&self) {
-        if let Some(portal) = self.browser_portal.as_ref() {
-            let _ = portal.blur(BROWSER_OWNER);
+        if let (Some(portal), Some(owner)) =
+            (self.browser_portal.as_ref(), self.current_browser_owner())
+        {
+            let _ = portal.blur(&owner);
         }
     }
 

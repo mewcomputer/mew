@@ -165,11 +165,12 @@ pub(super) struct DesktopShell {
     pub(super) terminal_status: String,
     pub(super) browser_portal: Option<BrowserPortal>,
     pub(super) browser_panel_open: bool,
-    pub(super) browser_initialization_pending: bool,
+    pub(super) browser_initialization_pending: Option<BrowserPage>,
     pub(super) browser_url: String,
     pub(super) browser_title: String,
     pub(super) browser_error: Option<String>,
-    pub(super) browser_pump_epoch: u64,
+    pub(super) browser_confirmed_sessions: BTreeSet<String>,
+    pub(super) browser_registration_attempts: BTreeMap<BrowserOwner, String>,
     pub(super) browser_pump: Option<Entity<BrowserPumpView>>,
     pub(super) settings_open: bool,
     pub(super) settings_page: SettingsPage,
@@ -382,7 +383,7 @@ impl BrowserPumpView {
                     return false;
                 };
                 shell.update(cx, |shell, cx| {
-                    if !shell.browser_panel_open || shell.browser_portal.is_none() {
+                    if !browser_pump_is_needed(shell.browser_portal.is_some(), shell.quitting) {
                         return false;
                     }
                     if let Some(portal) = shell.browser_portal.as_ref() {
@@ -896,7 +897,6 @@ pub(super) const TERMINAL_EXPANDED_ROWS: u16 = 7;
 pub(super) const TERMINAL_COLS: u16 = 80;
 pub(super) const TERMINAL_EXPANDED_HEIGHT: f32 = 190.;
 pub(super) const MAX_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
-pub(super) const BROWSER_OWNER: &str = "native-browser";
 pub(super) const DEFAULT_BROWSER_URL: &str = "about:blank";
 pub(super) const TERMINAL_FONT_CHOICES: &[(&str, &str)] = &[
     (DEFAULT_FONT_FAMILY, "Bundled mono"),

@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod shell_tests {
+    use super::super::browser::replace_browser_event_value;
     use super::super::composer::composer_input_height;
     use super::super::lifecycle::transcript_is_scrolled_away;
-    use super::super::session::replace_browser_event_value;
     use super::super::session_data::transcript_part_block_count;
     use super::super::*;
 
@@ -989,6 +989,81 @@ mod shell_tests {
         assert!(!browser_initialization_is_needed(
             false, false, false, false
         ));
+    }
+
+    #[test]
+    fn browser_pages_require_a_confirmed_loopback_profile() {
+        for url in [
+            "ws://127.0.0.1:25566",
+            "ws://[::1]:25566",
+            "ws://localhost:25566",
+        ] {
+            let profile = DesktopConnectionProfile::LocalWebSocket { url: url.into() };
+            assert!(browser_profile_is_local(&profile));
+        }
+        for url in [
+            "ws://192.0.2.1:25566",
+            "ws://127.0.0.1.evil:25566",
+            "ws://user@127.0.0.1:25566",
+            "ws://localhost:0",
+        ] {
+            let profile = DesktopConnectionProfile::LocalWebSocket { url: url.into() };
+            assert!(!browser_profile_is_local(&profile));
+        }
+        let profile = DesktopConnectionProfile::RemoteIroh {
+            node_id: "remote".into(),
+            pairing_token: None,
+            device_name: "test".into(),
+        };
+        assert!(!browser_profile_is_local(&profile));
+    }
+
+    #[test]
+    fn deferred_browser_creation_rejects_replaced_or_disconnected_owners() {
+        let owner = BrowserOwner {
+            connection_profile: "ws://127.0.0.1:25566".into(),
+            session_id: "a".into(),
+        };
+        let first = BrowserPage {
+            owner: owner.clone(),
+            page_instance: "first".into(),
+        };
+        let replacement = BrowserPage {
+            owner,
+            page_instance: "replacement".into(),
+        };
+        assert!(browser_creation_is_current(
+            Some(&first),
+            &first,
+            true,
+            false
+        ));
+        assert!(!browser_creation_is_current(
+            Some(&replacement),
+            &first,
+            true,
+            false
+        ));
+        assert!(!browser_creation_is_current(None, &first, true, false));
+        assert!(!browser_creation_is_current(
+            Some(&first),
+            &first,
+            false,
+            false
+        ));
+        assert!(!browser_creation_is_current(
+            Some(&first),
+            &first,
+            true,
+            true
+        ));
+    }
+
+    #[test]
+    fn hidden_browser_pump_survives_until_runtime_exit() {
+        assert!(browser_pump_is_needed(true, false));
+        assert!(!browser_pump_is_needed(false, false));
+        assert!(!browser_pump_is_needed(true, true));
     }
 
     #[test]

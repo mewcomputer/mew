@@ -142,6 +142,19 @@ packaging is handled by `scripts/package-desktop-native.sh`; the native browser
 portal uses `native/cef-host` behind `mew-browser-host` and does not share the
 web client’s host bridge.
 
+Each confirmed local desktop conversation owns a retained CEF page. Page callbacks
+carry the connection profile, session and page generation; hidden pages keep the
+app's main-thread pump. The daemon receives the ready loopback CDP endpoint and
+exact target before browser tools become available. Native packaging bundles the
+standalone `agent-browser` executable, version 0.34 or newer, beside the daemon.
+Remote profiles do not register native browser pages.
+
+Native clients negotiate protocol revision 2 before session commands. Browser
+registration and session-diff commands are part of that revision; extension wire
+revision is independent. Review reads the requested daemon session's workspace,
+and replies carry both session and request IDs. Workspace watches detect worktree,
+HEAD and index changes without traversing `.git` objects.
+
 `SessionManager` owns active sessions and reloads idle top-level sessions from
 the path returned by `mew_session::session_dir()` (`MEW_SESSION_DIR` overrides
 it). A session serializes turns with a lock and

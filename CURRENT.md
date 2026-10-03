@@ -1375,3 +1375,35 @@ protocol 115, local transport and supervisor compatibility gates passed. Matchin
 mobile archives/bindings and all 31 iOS tests passed; SDK 23 and web UI 123 tests
 and both builds passed. Scoped strict clippy, formatting, architecture and theme
 checks passed. Native surface/UI integration follows as its own chunk.
+
+# 2026-10-03 — Retained native conversation browser pages
+
+The native portal retains an actual CEF page for each confirmed local conversation,
+with immutable connection/session/generation callbacks and exact target readiness.
+Switching conversations or hiding the panel preserves DOM state. One retained
+GPUI main-thread pump serves the CEF runtime until app exit; the unused pump
+callback and portal timer thread are removed. Unchanged renders no longer toggle
+native visibility. Navigation arriving before page creation is applied afterward.
+
+CEF target information comes from the page's own DevTools observer. Explicit
+close callbacks leave generation-safe tombstones and release the daemon lease;
+retry recreates only the selected owner's page. Ordinary HTTP(S) popup targets
+navigate the owned page rather than reusing its client for a second browser.
+Empty script-created popups requiring later window control remain unsupported.
+The matched Alloy embedding has no default DevTools popup entry point.
+
+Packaging includes the compatible standalone browser CLI. Repeated packaging
+first replaces executable inodes, avoiding a reproduced macOS cached-signature
+failure where an in-place copied browser binary was killed with exit 137. The
+freshly packaged binary reports 0.34.0 and passes the real browser/daemon fixtures.
+
+Verified native browser-host 9, CEF callback/lifecycle 8 and full desktop 129 tests,
+strict all-target native clippy, formatting and architecture checks. Built the
+actual macOS desktop, daemon and CEF helper and packaged the debug app with valid
+bundle metadata and runtime assets. Browser methods are extracted into the
+consumed shell/browser.rs module. The protocol/runtime foundation is e151238.
+
+Live focus, bounds and rendering remain unverified. Automatic approval review
+rejected launching the locally built app as software from an unrecognized source;
+explicit launch confirmation was requested. A separate fixture app/config/session
+store/browser cache is prepared for that check, without changing installed apps.

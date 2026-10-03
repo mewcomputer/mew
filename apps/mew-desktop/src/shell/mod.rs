@@ -12,7 +12,7 @@ use gpui::{
     Window, WindowAppearance, WindowBounds, WindowOptions, WrappedLine,
 };
 use gpui_platform::application;
-use mew_browser_host::{BrowserEvent, BrowserPortal, BrowserRect, PumpTrigger};
+use mew_browser_host::{BrowserEvent, BrowserOwner, BrowserPage, BrowserPortal, BrowserRect};
 use mew_client_core::{
     ActionKind, ClientEngine, ClientEvent, ClientState, ClientTransport, PendingAction,
 };
@@ -50,6 +50,7 @@ use crate::{
     terminal::{TerminalEvent, TerminalView, DEFAULT_FONT_FAMILY},
 };
 
+mod browser;
 mod chat;
 mod chat_render;
 mod composer;

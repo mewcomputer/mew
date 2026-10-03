@@ -1,13 +1,5 @@
 use super::*;
 
-pub(super) fn replace_browser_event_value(current: &mut String, next: String) -> bool {
-    if *current == next {
-        return false;
-    }
-    *current = next;
-    true
-}
-
 impl DesktopShell {
     pub(super) fn new_conversation(&mut self, cx: &mut Context<Self>) {
         self.begin_new_conversation(None, None, cx);
@@ -53,57 +45,6 @@ impl DesktopShell {
         cx.notify();
     }
 
-    pub(super) fn open_browser_panel(&mut self, cx: &mut Context<Self>) {
-        let was_open = self.browser_panel_open;
-        self.auxiliary_view = AuxiliaryView::Browser;
-        self.capture_session_view_state();
-        self.browser_panel_open = true;
-        self.browser_error = None;
-        self.browser_url_focus_requested = true;
-        if self.browser_url.is_empty() {
-            self.browser_url = self
-                .model
-                .ui
-                .browser
-                .url
-                .clone()
-                .unwrap_or_else(|| DEFAULT_BROWSER_URL.to_owned());
-        }
-        if !was_open && self.browser_portal.is_some() {
-            self.start_browser_pump(cx);
-        }
-        self.capture_session_view_state();
-        cx.notify();
-    }
-
-    pub(super) fn close_browser_panel(&mut self, cx: &mut Context<Self>) {
-        self.browser_panel_open = false;
-        self.browser_native_rect = None;
-        self.browser_pump_epoch = self.browser_pump_epoch.wrapping_add(1);
-        self.browser_pump = None;
-        self.browser_url_focus_requested = false;
-        if let Some(portal) = self.browser_portal.as_ref() {
-            let _ = portal.close(BROWSER_OWNER);
-        }
-        self.capture_session_view_state();
-        cx.notify();
-    }
-
-    fn reset_browser_for_unattached_tab(&mut self) {
-        self.browser_panel_open = false;
-        self.browser_native_rect = None;
-        self.browser_pump_epoch = self.browser_pump_epoch.wrapping_add(1);
-        self.browser_pump = None;
-        self.browser_initialization_pending = false;
-        self.browser_url_focus_requested = false;
-        self.browser_url.clear();
-        self.browser_title.clear();
-        self.browser_error = None;
-        if let Some(portal) = self.browser_portal.as_ref() {
-            let _ = portal.close(BROWSER_OWNER);
-        }
-    }
-
     fn reset_unbound_tab_view(&mut self) {
         self.pending_session_request = false;
         self.pending_session_target = None;
@@ -131,41 +72,6 @@ impl DesktopShell {
         self.clear_review();
     }
 
-    pub(super) fn retry_browser(&mut self, cx: &mut Context<Self>) {
-        if let Some(portal) = self.browser_portal.take() {
-            let _ = portal.close(BROWSER_OWNER);
-        }
-        self.browser_initialization_pending = false;
-        self.browser_native_rect = None;
-        self.browser_error = None;
-        self.browser_url_focus_requested = false;
-        cx.notify();
-    }
-
-    pub(super) fn navigate_browser_to(&mut self, cx: &mut Context<Self>) {
-        let Some(url) = normalize_browser_url(&self.browser_url) else {
-            self.browser_error = Some("enter a valid http(s) URL".into());
-            cx.notify();
-            return;
-        };
-        self.browser_url = url.clone();
-        self.browser_error = None;
-        if let Some(portal) = self.browser_portal.as_ref() {
-            if let Err(error) = portal.navigate(BROWSER_OWNER, &url) {
-                self.browser_error = Some(error.to_string());
-            }
-        }
-        self.capture_session_view_state();
-        cx.notify();
-    }
-
-    fn start_browser_pump(&mut self, cx: &mut Context<Self>) {
-        if self.browser_pump.is_none() {
-            let shell = cx.entity().downgrade();
-            self.browser_pump = Some(cx.new(|cx| BrowserPumpView::new(shell, cx)));
-        }
-    }
-
     pub(super) fn select_auxiliary_view(&mut self, view: AuxiliaryView, cx: &mut Context<Self>) {
         self.auxiliary_view = view;
         self.capture_session_view_state();
@@ -176,121 +82,6 @@ impl DesktopShell {
             self.close_browser_panel(cx);
         } else {
             cx.notify();
-        }
-    }
-
-    pub(super) fn ensure_browser_portal(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if !browser_initialization_is_needed(
-            self.browser_panel_open,
-            self.browser_portal.is_some(),
-            self.browser_initialization_pending,
-            self.browser_error.is_some(),
-        ) {
-            return;
-        }
-        let Some(parent_view) = parent_view_handle(window) else {
-            self.browser_error = Some("native browser is unavailable on this platform".into());
-            cx.notify();
-            return;
-        };
-        let initial_url = if self.browser_url.is_empty() {
-            DEFAULT_BROWSER_URL
-        } else {
-            self.browser_url.as_str()
-        };
-        self.browser_initialization_pending = true;
-        let initial_url = initial_url.to_owned();
-        let shell = cx.entity();
-        cx.defer(move |cx| {
-            shell.update(cx, |shell, cx| {
-                shell.initialize_browser_portal(parent_view, initial_url, cx);
-            });
-        });
-    }
-
-    fn initialize_browser_portal(
-        &mut self,
-        parent_view: usize,
-        initial_url: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.browser_initialization_pending = false;
-        if !self.browser_panel_open || self.browser_portal.is_some() {
-            return;
-        }
-        // GPUI's render pass runs on AppKit's main thread. The native CEF
-        // message loop must be pumped there, so the render loop below is the
-        // scheduler for this child surface.
-        let pump_trigger: PumpTrigger = std::sync::Arc::new(|| {});
-        let portal = match BrowserPortal::initialize(parent_view, &initial_url, pump_trigger) {
-            Ok(Some(portal)) => portal,
-            Ok(None) => {
-                self.browser_error = Some(
-                    "native browser is unavailable; install the packaged browser runtime".into(),
-                );
-                eprintln!("native browser unavailable: packaged browser runtime missing");
-                return;
-            }
-            Err(error) => {
-                self.browser_error = Some(format!("could not start native browser: {error:#}"));
-                return;
-            }
-        };
-        self.browser_portal = Some(portal);
-        self.start_browser_pump(cx);
-        if let Some(portal) = self.browser_portal.as_ref() {
-            let _ = portal.set_visible(BROWSER_OWNER, true);
-            if !initial_url.is_empty() {
-                let _ = portal.navigate(BROWSER_OWNER, &initial_url);
-            }
-        }
-        cx.notify();
-    }
-
-    pub(super) fn apply_browser_events(&mut self, _cx: &mut Context<Self>) -> bool {
-        let mut changed = false;
-        let events = self
-            .browser_portal
-            .as_ref()
-            .map(BrowserPortal::drain_events)
-            .unwrap_or_default();
-        for event in events {
-            match event {
-                BrowserEvent::AddressChanged { owner, url }
-                    if owner.as_deref().is_none_or(|owner| owner == BROWSER_OWNER) =>
-                {
-                    if replace_browser_event_value(&mut self.browser_url, url) {
-                        self.browser_error = None;
-                        changed = true;
-                    }
-                }
-                BrowserEvent::TitleChanged { owner, title, .. }
-                    if owner.as_deref().is_none_or(|owner| owner == BROWSER_OWNER) =>
-                {
-                    changed |= replace_browser_event_value(&mut self.browser_title, title);
-                }
-                _ => {}
-            }
-        }
-        changed
-    }
-
-    pub(super) fn update_browser_bounds(&mut self, bounds: Bounds<Pixels>, window: &Window) {
-        let Some(portal) = self.browser_portal.as_ref() else {
-            return;
-        };
-        let rect = browser_native_rect(
-            bounds,
-            window.bounds().size,
-            self.browser_panel_open && !self.layout.workbench_collapsed,
-        );
-        if self.browser_native_rect == Some(rect) {
-            return;
-        }
-        if let Err(error) = portal.set_rect(BROWSER_OWNER, rect) {
-            self.browser_error = Some(error.to_string());
-        } else {
-            self.browser_native_rect = Some(rect);
         }
     }
 
@@ -807,31 +598,9 @@ impl DesktopShell {
         self.browser_url = view_state.browser_url;
         self.browser_title = view_state.browser_title;
         self.browser_error = None;
-        self.browser_initialization_pending = false;
         self.sync_browser_portal_to_view_state();
         if self.browser_panel_open && self.browser_portal.is_some() {
             self.start_browser_pump(cx);
-        }
-    }
-
-    fn sync_browser_portal_to_view_state(&mut self) {
-        let Some(portal) = self.browser_portal.as_ref() else {
-            return;
-        };
-        if !self.browser_panel_open {
-            if let Err(error) = portal.set_visible(BROWSER_OWNER, false) {
-                self.browser_error = Some(error.to_string());
-            }
-            return;
-        }
-        if let Err(error) = portal.set_visible(BROWSER_OWNER, true) {
-            self.browser_error = Some(error.to_string());
-            return;
-        }
-        if browser_url_is_navigable(&self.browser_url) {
-            if let Err(error) = portal.navigate(BROWSER_OWNER, &self.browser_url) {
-                self.browser_error = Some(error.to_string());
-            }
         }
     }
 
@@ -1380,7 +1149,7 @@ impl DesktopShell {
         state: &ClientState,
         cx: &mut Context<Self>,
     ) {
-        for event in events {
+        for event in events.iter() {
             match event {
                 ClientEvent::TerminalOpened { terminal_id } => {
                     self.terminal_id = Some(terminal_id.clone());
@@ -1416,30 +1185,49 @@ impl DesktopShell {
                 } => {
                     self.model.append_tool_progress(session_id, call_id, chunk);
                 }
-                ClientEvent::BrowserStateChanged {
-                    open, url, title, ..
+                ClientEvent::SessionReady { session_id } => {
+                    self.browser_confirmed_sessions.insert(session_id.clone());
+                }
+                ClientEvent::BrowserPageRegistration {
+                    session_id,
+                    page_instance,
+                    error,
                 } => {
-                    self.browser_panel_open = *open;
-                    if let Some(url) = url {
-                        self.browser_url = url.clone();
+                    let page = self
+                        .browser_portal
+                        .as_ref()
+                        .and_then(|portal| portal.page_for_instance(page_instance))
+                        .filter(|page| {
+                            page.owner.session_id == *session_id
+                                && self.browser_owner_is_confirmed(&page.owner)
+                        });
+                    if let Some(page) = page {
+                        if let Some(portal) = &self.browser_portal {
+                            portal.set_error(&page, error.clone());
+                        }
+                        if self.current_browser_owner().as_ref() == Some(&page.owner) {
+                            self.browser_error = error.clone();
+                            cx.notify();
+                        }
                     }
-                    if let Some(title) = title {
-                        self.browser_title = title.clone();
+                }
+                ClientEvent::BrowserError {
+                    message,
+                    tab_id: Some(instance),
+                } => {
+                    let page = self
+                        .browser_portal
+                        .as_ref()
+                        .and_then(|portal| portal.page_for_instance(instance))
+                        .filter(|page| self.browser_owner_is_confirmed(&page.owner));
+                    if let Some(page) = page {
+                        if let Some(portal) = &self.browser_portal {
+                            portal.set_error(&page, Some(message.clone()));
+                        }
+                        if self.current_browser_owner().as_ref() == Some(&page.owner) {
+                            self.browser_error = Some(message.clone());
+                        }
                     }
-                    self.browser_error = None;
-                }
-                ClientEvent::BrowserSnapshot { url, title, .. } => {
-                    self.browser_panel_open = true;
-                    self.browser_url = url.clone();
-                    self.browser_title = title.clone();
-                    self.browser_error = None;
-                }
-                ClientEvent::BrowserScreenshot { url, .. } => {
-                    self.browser_panel_open = true;
-                    self.browser_url = url.clone();
-                }
-                ClientEvent::BrowserError { message, .. } => {
-                    self.browser_error = Some(message.clone());
                 }
                 _ => {}
             }
@@ -1481,6 +1269,23 @@ impl DesktopShell {
             .any(|event| matches!(event, ClientEvent::FileTreeChanged))
         {
             self.apply_file_tree_update(state);
+        }
+        if let Some(session_id) = ready_session_id {
+            if let Some(profile) = &self.connection_profile {
+                let owner = BrowserOwner {
+                    connection_profile: profile.endpoint_label(),
+                    session_id: session_id.to_owned(),
+                };
+                if let Some(page) = self
+                    .browser_portal
+                    .as_ref()
+                    .and_then(|portal| portal.page_state(&owner))
+                    .map(|state| state.page)
+                {
+                    self.register_ready_browser_page(&page);
+                }
+            }
+            self.sync_browser_portal_to_view_state();
         }
         self.sync_workspace_watch();
         if has_browser_event {
@@ -1537,7 +1342,7 @@ impl DesktopShell {
             }
         }
         if events.iter().any(client_event_is_text_delta) {
-            for event in events {
+            for event in events.iter() {
                 if let ClientEvent::TextDelta {
                     session_id, delta, ..
                 } = event

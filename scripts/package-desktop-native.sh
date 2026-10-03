@@ -28,6 +28,43 @@ esac
 
 case "$(uname -s)" in
     Darwin)
+        browser_cli="$(command -v agent-browser || true)"
+        if [[ -z "$browser_cli" ]]; then
+            echo "agent-browser 0.34.0 or newer is required for native browser tab ownership" >&2
+            exit 1
+        fi
+        while [[ -L "$browser_cli" ]]; do
+            browser_link="$(readlink "$browser_cli")"
+            if [[ "$browser_link" == /* ]]; then
+                browser_cli="$browser_link"
+            else
+                browser_cli="$(dirname "$browser_cli")/$browser_link"
+            fi
+        done
+        if [[ "$(file -b "$browser_cli")" != *Mach-O* ]]; then
+            case "$(uname -m)" in
+                arm64) browser_arch="arm64" ;;
+                x86_64) browser_arch="x64" ;;
+                *) echo "unsupported native browser architecture" >&2; exit 1 ;;
+            esac
+            browser_cli="$(dirname "$browser_cli")/agent-browser-darwin-$browser_arch"
+            if [[ ! -x "$browser_cli" || "$(file -b "$browser_cli")" != *Mach-O* ]]; then
+                echo "agent-browser's standalone macOS binary is required for app packaging" >&2
+                exit 1
+            fi
+        fi
+        browser_version="$("$browser_cli" --version)"
+        if [[ "$browser_version" =~ ([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+            browser_major="${BASH_REMATCH[1]}"
+            browser_minor="${BASH_REMATCH[2]}"
+        else
+            echo "could not determine agent-browser version: $browser_version" >&2
+            exit 1
+        fi
+        if (( browser_major == 0 && browser_minor < 34 )); then
+            echo "native browser requires agent-browser 0.34.0 or newer; found $browser_version" >&2
+            exit 1
+        fi
         target_dir="$repo_root/target/$profile"
         app="$target_dir/bundle/macos/mew.app"
         contents="$app/Contents"
@@ -39,9 +76,11 @@ case "$(uname -s)" in
                 exit 1
             fi
         done
-        rm -f "$contents/MacOS/mew-desktop" "$contents/MacOS/mew"
+        rm -f "$contents/MacOS/mew-desktop" "$contents/MacOS/mew" \
+            "$contents/MacOS/agent-browser" "$contents/MacOS/mew-cef-host-helper"
         cp "$target_dir/mew-desktop" "$contents/MacOS/mew-desktop"
         cp "$target_dir/mew" "$contents/MacOS/mew"
+        cp "$browser_cli" "$contents/MacOS/agent-browser"
         cef_framework="${MEW_CEF_FRAMEWORK_SOURCE:-}"
         if [[ -n "$cef_framework" && -d "$cef_framework/Chromium Embedded Framework.framework" ]]; then
             cef_framework="$cef_framework/Chromium Embedded Framework.framework"
@@ -114,6 +153,7 @@ case "$(uname -s)" in
         /usr/bin/plutil -replace CFBundleVersion -string "$version" \
             "$contents/Info.plist"
         chmod 755 "$contents/MacOS/mew-desktop" "$contents/MacOS/mew" \
+            "$contents/MacOS/agent-browser" \
             "$contents/MacOS/mew-cef-host-helper" \
             "$frameworks"/*/Contents/MacOS/*
         echo "✓ packaged $app"

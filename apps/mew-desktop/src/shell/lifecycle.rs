@@ -377,11 +377,12 @@ impl DesktopShell {
             terminal_status: "closed".into(),
             browser_portal: None,
             browser_panel_open: false,
-            browser_initialization_pending: false,
+            browser_initialization_pending: None,
             browser_url: String::new(),
             browser_title: String::new(),
             browser_error: None,
-            browser_pump_epoch: 0,
+            browser_confirmed_sessions: BTreeSet::new(),
+            browser_registration_attempts: BTreeMap::new(),
             browser_pump: None,
             settings_open: false,
             settings_page: SettingsPage::General,
@@ -481,6 +482,7 @@ impl DesktopShell {
     }
 
     fn stop_client(&mut self) {
+        self.reset_browser_connection();
         if let Some(stop_tx) = self.client_stop_tx.take() {
             let _ = stop_tx.send(());
         }
@@ -545,6 +547,7 @@ impl DesktopShell {
                     for event in batch {
                         match event {
                             DesktopClientEvent::Connected => {
+                                shell.reset_browser_connection();
                                 shell.model.connected();
                                 if let Some(session_id) = shell.pending_session_target.clone() {
                                     shell.send_command(ClientMessage::AttachSession {
@@ -564,6 +567,7 @@ impl DesktopShell {
                                 shell.apply_client_update(&events, &state, cx);
                             }
                             DesktopClientEvent::Failed(error) => {
+                                shell.reset_browser_connection();
                                 shell.model.fail(error);
                                 needs_shell_render = true;
                             }

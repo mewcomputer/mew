@@ -1641,13 +1641,45 @@ pub(super) fn browser_native_rect(
     }
 }
 
+pub(super) fn browser_profile_is_local(profile: &DesktopConnectionProfile) -> bool {
+    let DesktopConnectionProfile::LocalWebSocket { url } = profile else {
+        return false;
+    };
+    let Some(rest) = url
+        .strip_prefix("ws://")
+        .or_else(|| url.strip_prefix("wss://"))
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    if let Ok(address) = authority.parse::<std::net::SocketAddr>() {
+        return address.ip().is_loopback() && address.port() != 0;
+    }
+    authority
+        .strip_prefix("localhost:")
+        .is_some_and(|port| port.parse::<u16>().is_ok_and(|port| port != 0))
+}
+
+pub(super) fn browser_creation_is_current(
+    pending: Option<&BrowserPage>,
+    page: &BrowserPage,
+    owner_confirmed: bool,
+    quitting: bool,
+) -> bool {
+    pending == Some(page) && owner_confirmed && !quitting
+}
+
+pub(super) fn browser_pump_is_needed(runtime_present: bool, quitting: bool) -> bool {
+    runtime_present && !quitting
+}
+
 pub(super) fn browser_initialization_is_needed(
-    panel_open: bool,
+    confirmed_local_session: bool,
     portal_present: bool,
     initialization_pending: bool,
     has_error: bool,
 ) -> bool {
-    panel_open && !portal_present && !initialization_pending && !has_error
+    confirmed_local_session && !portal_present && !initialization_pending && !has_error
 }
 
 pub(super) fn browser_url_is_navigable(url: &str) -> bool {

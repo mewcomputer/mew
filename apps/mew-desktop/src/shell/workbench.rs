@@ -411,7 +411,7 @@ impl DesktopShell {
                         .inset_0()
                         .size_full(),
                     )
-                    .when_some(browser_error, |element, _error| {
+                    .when_some(browser_error, |element, error| {
                         element.child(
                             div()
                                 .absolute()
@@ -424,14 +424,14 @@ impl DesktopShell {
                                 .min_w(px(220.))
                                 .p(px(16.))
                                 .bg(theme_rgb(&self.theme, "background"))
-                                .child(div().text_sm().child("Browser couldn't start"))
+                                .child(div().text_sm().child("Browser unavailable"))
                                 .child(
                                     div()
                                         .max_w(px(260.))
                                         .text_center()
                                         .text_xs()
                                         .text_color(theme_rgb(&self.theme, "text.muted"))
-                                        .child("The in-app browser is unavailable right now. Try again or continue in the conversation."),
+                                        .child(error),
                                 )
                                 .child(
                                     div()
