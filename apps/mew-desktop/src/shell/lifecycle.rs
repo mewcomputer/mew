@@ -326,7 +326,7 @@ impl DesktopShell {
             review_lines: Vec::new(),
             review_selected_file: None,
             review_line_list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(2048.)),
-            review_signature: None,
+            review_requests: review::ReviewRequests::default(),
             review_loading: false,
             review_error: None,
             input_animation_id: 0,
@@ -557,14 +557,14 @@ impl DesktopShell {
                                 }
                                 needs_shell_render = true;
                             }
-                            DesktopClientEvent::Updated { events, state } => {
+                            DesktopClientEvent::Updated { mut events, state } => {
                                 if client_events_are_streaming_only(&events) {
                                     has_streaming_update = true;
                                 } else {
                                     needs_shell_render |=
                                         client_events_require_shell_render(&events);
                                 }
-                                shell.apply_client_update(&events, &state, cx);
+                                shell.apply_client_update(&mut events, &state, cx);
                             }
                             DesktopClientEvent::Failed(error) => {
                                 shell.reset_browser_connection();

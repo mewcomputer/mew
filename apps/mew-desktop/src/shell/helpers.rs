@@ -1509,6 +1509,9 @@ pub(super) fn client_event_requires_metadata_sync(event: &ClientEvent) -> bool {
             | ClientEvent::TerminalExited { .. }
             | ClientEvent::TerminalError { .. }
             | ClientEvent::PermissionModeChanged { .. }
+            | ClientEvent::WorkspaceChanged { .. }
+            | ClientEvent::SessionDiff { .. }
+            | ClientEvent::SessionDiffError { .. }
     )
 }
 

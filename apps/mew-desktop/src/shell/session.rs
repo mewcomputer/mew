@@ -76,6 +76,15 @@ impl DesktopShell {
         self.auxiliary_view = view;
         self.capture_session_view_state();
         self.sync_workspace_watch();
+        if view == AuxiliaryView::Local {
+            if let Some(session_id) = self.model.attached_session.clone() {
+                self.refresh_file_tree(&session_id);
+            }
+        }
+        if view == AuxiliaryView::Changes {
+            self.review_requests.invalidate();
+            self.refresh_review(cx);
+        }
         if view == AuxiliaryView::Browser {
             self.open_browser_panel(cx);
         } else if self.browser_panel_open {
@@ -268,6 +277,11 @@ impl DesktopShell {
             return;
         }
         self.layout.workbench_collapsed = !self.layout.workbench_collapsed;
+        self.sync_workspace_watch();
+        if !self.layout.workbench_collapsed && self.auxiliary_view == AuxiliaryView::Changes {
+            self.review_requests.invalidate();
+            self.refresh_review(cx);
+        }
         self.workbench_animation_id = self.workbench_animation_id.wrapping_add(1);
         self.capture_session_view_state();
         self.persist_layout();
@@ -1145,7 +1159,7 @@ impl DesktopShell {
 
     pub(super) fn apply_client_update(
         &mut self,
-        events: &[ClientEvent],
+        events: &mut [ClientEvent],
         state: &ClientState,
         cx: &mut Context<Self>,
     ) {
@@ -1315,19 +1329,6 @@ impl DesktopShell {
                 .and_then(|session| session.history_before);
             self.history_loading = false;
         }
-        if events.iter().any(|event| {
-            matches!(
-                event,
-                ClientEvent::SessionReady { .. }
-                    | ClientEvent::SessionHistoryLoaded { .. }
-                    | ClientEvent::SessionHistoryPageLoaded { .. }
-                    | ClientEvent::MessageChanged { .. }
-                    | ClientEvent::FlaggedFilesChanged { .. }
-                    | ClientEvent::SessionMetaChanged { .. }
-            )
-        }) {
-            self.refresh_review(cx);
-        }
         if let Some(session_id) = self.model.ui.selected_session.clone() {
             if !self
                 .open_tabs
@@ -1445,6 +1446,35 @@ impl DesktopShell {
         {
             self.send_pending_prompt();
         }
+        if self.model.session_is_ready() {
+            if let Some(session_id) = self.model.attached_session.clone() {
+                for event in events.iter() {
+                    self.review_requests.observe(event, &session_id);
+                    if matches!(event, ClientEvent::WorkspaceChanged { session_id: origin } if origin == &session_id)
+                    {
+                        self.refresh_file_tree(&session_id);
+                    }
+                }
+                for event in events.iter_mut() {
+                    if let Some(result) = self.review_requests.complete_event(event, &session_id) {
+                        self.review_loading = false;
+                        match result {
+                            Ok(files) => {
+                                self.review_diffs = files;
+                                self.review_selected_file = None;
+                                self.review_lines.clear();
+                                self.review_line_list.reset(0);
+                                if !self.review_diffs.is_empty() {
+                                    self.select_review_file(0, cx);
+                                }
+                            }
+                            Err(message) => self.review_error = Some(message),
+                        }
+                    }
+                }
+            }
+        }
+        self.refresh_review(cx);
     }
 }
 

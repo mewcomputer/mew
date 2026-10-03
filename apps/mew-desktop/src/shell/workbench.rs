@@ -130,17 +130,10 @@ impl DesktopShell {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Vec<gpui::AnyElement> {
-        let loaded = !self.review_diffs.is_empty();
         range
             .filter_map(|index| {
-                let (file, status) = if let Some(diff) = self.review_diffs.get(index) {
-                    (diff.path.clone(), diff.status)
-                } else {
-                    (
-                        self.model.ui.review.files.get(index)?.clone(),
-                        FileStatus::Modified,
-                    )
-                };
+                let diff = self.review_diffs.get(index)?;
+                let (file, status) = (diff.path.clone(), diff.status);
                 let selected = self.review_selected_file == Some(index);
                 Some(
                     div()
@@ -175,17 +168,11 @@ impl DesktopShell {
                         .child(
                             div()
                                 .text_xs()
-                                .text_color(if loaded {
-                                    match status {
-                                        FileStatus::Added => theme_rgb(&self.theme, "green.fg"),
-                                        FileStatus::Deleted => theme_rgb(&self.theme, "red.fg"),
-                                        FileStatus::Binary => {
-                                            theme_rgb(&self.theme, "text.warning")
-                                        }
-                                        _ => theme_rgb(&self.theme, "text.muted"),
-                                    }
-                                } else {
-                                    theme_rgb(&self.theme, "text.muted")
+                                .text_color(match status {
+                                    FileStatus::Added => theme_rgb(&self.theme, "green.fg"),
+                                    FileStatus::Deleted => theme_rgb(&self.theme, "red.fg"),
+                                    FileStatus::Binary => theme_rgb(&self.theme, "text.warning"),
+                                    _ => theme_rgb(&self.theme, "text.muted"),
                                 })
                                 .child(file_status_label(status)),
                         )
@@ -819,25 +806,13 @@ impl DesktopShell {
             f32::from(window.bounds().size.width),
             sidebar_width,
         ));
-        let review = self.model.ui.review.clone();
-        let file_count = if self.review_diffs.is_empty() {
-            review.files.len()
-        } else {
-            self.review_diffs.len()
-        };
-        let added = if self.review_diffs.is_empty() {
-            review.added
-        } else {
-            self.review_diffs.iter().map(|diff| diff.added as u64).sum()
-        };
-        let removed = if self.review_diffs.is_empty() {
-            review.removed
-        } else {
-            self.review_diffs
-                .iter()
-                .map(|diff| diff.removed as u64)
-                .sum()
-        };
+        let file_count = self.review_diffs.len();
+        let added: u64 = self.review_diffs.iter().map(|diff| diff.added as u64).sum();
+        let removed: u64 = self
+            .review_diffs
+            .iter()
+            .map(|diff| diff.removed as u64)
+            .sum();
         let changes_expanded = self.layout.changes_expanded;
         let review_message = if self.review_loading {
             "Loading workspace changes…"
@@ -846,10 +821,9 @@ impl DesktopShell {
         } else {
             "No workspace changes yet"
         };
-        let review_detail = self
-            .review_error
-            .clone()
-            .unwrap_or_else(|| "Changed files will appear here during a run.".into());
+        let review_detail = self.review_error.clone().unwrap_or_else(|| {
+            "Workspace changes appear here, including edits made outside a run.".into()
+        });
         let change_label = if file_count == 0 {
             "Changes".to_owned()
         } else {

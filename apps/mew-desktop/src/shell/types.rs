@@ -114,7 +114,7 @@ pub(super) struct DesktopShell {
     pub(super) review_lines: Vec<DiffLine>,
     pub(super) review_selected_file: Option<usize>,
     pub(super) review_line_list: gpui::ListState,
-    pub(super) review_signature: Option<String>,
+    pub(super) review_requests: review::ReviewRequests,
     pub(super) review_loading: bool,
     pub(super) review_error: Option<String>,
     pub(super) input_animation_id: u64,

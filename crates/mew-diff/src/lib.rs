@@ -101,17 +101,6 @@ impl FileDiff {
     }
 }
 
-/// Load current worktree contents and their `HEAD` counterparts for changed
-/// paths reported by the daemon, then compute render-ready diffs.
-pub fn load_worktree_diffs(root: &Path, paths: &[String]) -> Result<Vec<FileDiff>, DiffError> {
-    let base = DiffBase::read(root)?;
-    let mut budget = ReviewBudget::default();
-    paths
-        .iter()
-        .map(|path| load_named_diff(root, &base, path, None, &mut budget))
-        .collect()
-}
-
 struct ReviewBudget(usize);
 
 impl Default for ReviewBudget {
@@ -741,23 +730,34 @@ mod tests {
 
         std::fs::write(directory.path().join("tracked.txt"), "after\n").unwrap();
         std::fs::write(directory.path().join("new.txt"), "new file\n").unwrap();
-        let paths = vec!["tracked.txt".into(), "new.txt".into()];
-        let diffs = load_worktree_diffs(directory.path(), &paths).unwrap();
+        let diffs = load_session_diffs(directory.path()).unwrap();
 
         assert_eq!(diffs.len(), 2);
-        assert_eq!(diffs[0].status, FileStatus::Modified);
-        assert_eq!(diffs[0].added, 1);
-        assert_eq!(diffs[0].removed, 1);
-        assert_eq!(diffs[1].status, FileStatus::Added);
-        assert_eq!(diffs[1].hunks[0].lines[0].text, "new file");
+        let tracked = diffs
+            .iter()
+            .find(|diff| diff.path == "tracked.txt")
+            .unwrap();
+        let added = diffs.iter().find(|diff| diff.path == "new.txt").unwrap();
+        assert_eq!(tracked.status, FileStatus::Modified);
+        assert_eq!(tracked.added, 1);
+        assert_eq!(tracked.removed, 1);
+        assert_eq!(added.status, FileStatus::Added);
+        assert_eq!(added.hunks[0].lines[0].text, "new file");
     }
 
     #[test]
     fn rejects_paths_that_escape_the_repository() {
         let directory = tempfile::tempdir().unwrap();
         git(directory.path(), &["init", "-q"]);
-        let paths = vec!["../outside.txt".into()];
-        let error = load_worktree_diffs(directory.path(), &paths).unwrap_err();
+        let base = DiffBase::read(directory.path()).unwrap();
+        let error = load_named_diff(
+            directory.path(),
+            &base,
+            "../outside.txt",
+            None,
+            &mut ReviewBudget::default(),
+        )
+        .unwrap_err();
         assert!(matches!(error, DiffError::InvalidPath { .. }));
     }
 
@@ -873,11 +873,18 @@ mod tests {
             directory.path().join("link.txt"),
         )
         .unwrap();
-        let diffs = load_worktree_diffs(directory.path(), &["link.txt".into()]).unwrap();
+        let diffs = load_session_diffs(directory.path()).unwrap();
         assert!(!diffs[0].lines().any(|line| line.text == "private content"));
         std::os::unix::fs::symlink(outside.path(), directory.path().join("escape")).unwrap();
+        let base = DiffBase::read(directory.path()).unwrap();
         assert!(matches!(
-            load_worktree_diffs(directory.path(), &["escape/secret.txt".into()]),
+            load_named_diff(
+                directory.path(),
+                &base,
+                "escape/secret.txt",
+                None,
+                &mut ReviewBudget::default()
+            ),
             Err(DiffError::InvalidPath { .. })
         ));
     }
@@ -914,7 +921,7 @@ mod tests {
         .unwrap();
         fs::write(directory.path().join("tracked.txt"), "after\n").unwrap();
         assert!(matches!(
-            load_worktree_diffs(directory.path(), &["tracked.txt".into()]),
+            load_session_diffs(directory.path()),
             Err(DiffError::Git { .. })
         ));
     }

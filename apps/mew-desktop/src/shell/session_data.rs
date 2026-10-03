@@ -30,90 +30,30 @@ impl DesktopShell {
         self.transcript_rows_prepend_count = Some(added_messages);
     }
 
-    pub(super) fn refresh_review(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_review(&mut self, _cx: &mut Context<Self>) {
         if !self.model.session_is_ready() {
             self.clear_review();
             return;
         }
-        let Some(selected_session) = self.model.ui.selected_session.as_deref() else {
-            self.clear_review();
-            return;
-        };
-        let Some(conversation) = self
-            .model
-            .ui
-            .conversations
-            .iter()
-            .find(|conversation| conversation.session_id == selected_session)
-        else {
-            self.clear_review();
-            return;
-        };
-        let Some(root) = conversation.cwd.clone() else {
-            self.clear_review();
-            return;
-        };
-        let paths = self.model.ui.review.files.clone();
-        let signature = format!(
-            "{selected_session}|{root}|{}|{}|{paths:?}",
-            self.model.ui.review.added, self.model.ui.review.removed
-        );
-        if self.review_signature.as_deref() == Some(signature.as_str()) {
+        if self.auxiliary_view != AuxiliaryView::Changes || self.layout.workbench_collapsed {
             return;
         }
-
-        self.review_signature = Some(signature.clone());
+        let Some(session_id) = self.model.attached_session.as_deref() else {
+            return;
+        };
+        let Some(request) = self.review_requests.start(session_id) else {
+            return;
+        };
         self.review_diffs.clear();
         self.review_lines.clear();
         self.review_selected_file = None;
         self.review_line_list.reset(0);
+        self.review_loading = true;
         self.review_error = None;
-        self.review_loading = !paths.is_empty();
-        if paths.is_empty() {
-            return;
-        }
-
-        let (sender, receiver) = oneshot::channel();
-        let root_path = PathBuf::from(root);
-        let worker = std::thread::Builder::new()
-            .name("mew-review-loader".into())
-            .spawn(move || {
-                let result = mew_diff::load_worktree_diffs(&root_path, &paths);
-                let _ = sender.send(result);
-            });
-        if let Err(error) = worker {
-            self.review_loading = false;
-            self.review_error = Some(format!("could not start diff loader: {error}"));
-            return;
-        }
-
-        cx.spawn(async move |this, cx| {
-            let Ok(result) = receiver.await else {
-                return;
-            };
-            this.update(cx, |shell, cx| {
-                if shell.review_signature.as_deref() != Some(signature.as_str()) {
-                    return;
-                }
-                shell.review_loading = false;
-                match result {
-                    Ok(diffs) => {
-                        shell.review_diffs = diffs;
-                        if shell.review_selected_file.is_none() {
-                            if let Some(diff) = shell.review_diffs.first() {
-                                shell.review_selected_file = Some(0);
-                                shell.review_lines = diff.lines().cloned().collect();
-                                shell.review_line_list.reset(shell.review_lines.len());
-                            }
-                        }
-                    }
-                    Err(error) => shell.review_error = Some(error.to_string()),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+        self.send_command(ClientMessage::ReadSessionDiff {
+            session_id: request.session_id,
+            request_id: request.request_id,
+        });
     }
 
     pub(super) fn clear_review(&mut self) {
@@ -121,7 +61,7 @@ impl DesktopShell {
         self.review_lines.clear();
         self.review_selected_file = None;
         self.review_line_list.reset(0);
-        self.review_signature = None;
+        self.review_requests.reset();
         self.review_loading = false;
         self.review_error = None;
     }
@@ -509,20 +449,21 @@ impl DesktopShell {
         cx.notify();
     }
 
-    /// Keeps the daemon's workspace watch aligned with the Local view: the
-    /// watch is enabled only while the Local panel is visible on the
-    /// attached session, mirroring the web client's right-rail lifecycle.
     pub(super) fn sync_workspace_watch(&mut self) {
-        let desired =
-            if self.auxiliary_view == AuxiliaryView::Local && self.model.session_is_ready() {
-                self.model.attached_session.clone().filter(|session_id| {
-                    self.model.ui.conversations.iter().any(|conversation| {
-                        conversation.session_id == *session_id && conversation.cwd.is_some()
-                    })
+        let desired = if matches!(
+            self.auxiliary_view,
+            AuxiliaryView::Local | AuxiliaryView::Changes
+        ) && !self.layout.workbench_collapsed
+            && self.model.session_is_ready()
+        {
+            self.model.attached_session.clone().filter(|session_id| {
+                self.model.ui.conversations.iter().any(|conversation| {
+                    conversation.session_id == *session_id && conversation.cwd.is_some()
                 })
-            } else {
-                None
-            };
+            })
+        } else {
+            None
+        };
         if self.watching_workspace_session == desired {
             return;
         }
@@ -541,14 +482,12 @@ impl DesktopShell {
                 enabled: true,
             });
             self.watching_workspace_session = desired;
-            self.request_dir_listing(None);
+            if self.auxiliary_view == AuxiliaryView::Local {
+                self.request_dir_listing(None);
+            }
         }
     }
 
-    /// Handles `ClientEvent::FileTreeChanged`. A response to one of our
-    /// pending `ListDir` requests stores the listing; anything else is an
-    /// `FsChanged` push, which triggers a re-request of the visible paths
-    /// like the web store's `onFsChanged`.
     pub(super) fn apply_file_tree_update(&mut self, state: &ClientState) {
         if state.dir_listing_session_id.as_deref() != self.watching_workspace_session.as_deref() {
             return;
@@ -557,15 +496,20 @@ impl DesktopShell {
             if self.file_tree_pending.remove(&path) {
                 self.file_tree_entries
                     .insert(path, state.dir_listing.clone());
-                return;
             }
         }
-        if self.watching_workspace_session.is_some() {
-            self.request_dir_listing(None);
-            let expanded: Vec<String> = self.file_tree_expanded.iter().cloned().collect();
-            for path in expanded {
-                self.request_dir_listing(Some(path));
-            }
+    }
+
+    pub(super) fn refresh_file_tree(&mut self, session_id: &str) {
+        if self.auxiliary_view != AuxiliaryView::Local
+            || self.watching_workspace_session.as_deref() != Some(session_id)
+        {
+            return;
+        }
+        self.request_dir_listing(None);
+        let expanded: Vec<String> = self.file_tree_expanded.iter().cloned().collect();
+        for path in expanded {
+            self.request_dir_listing(Some(path));
         }
     }
 

@@ -59,6 +59,7 @@ mod lifecycle;
 mod platform;
 mod preferences;
 mod render;
+mod review;
 mod session;
 mod session_data;
 mod settings;

@@ -1407,3 +1407,30 @@ Live focus, bounds and rendering remain unverified. Automatic approval review
 rejected launching the locally built app as software from an unrecognized source;
 explicit launch confirmation was requested. A separate fixture app/config/session
 store/browser cache is prepared for that check, without changing installed apps.
+
+# 2026-10-03 — Native review uses fresh daemon diffs
+
+The Changes panel requests current diffs from its attached daemon session, including
+untracked files and edits outside a run. Removed the local HEAD worker and the
+path/count signature cache. Pending requests coalesce invalidations; completed
+payloads move into the panel only when both session and request IDs match. Late
+responses, stale errors and previous attachments cannot replace the current view.
+
+Visible Local/Changes views own workspace watches. Worktree and git-baseline
+changes refresh review; reopening, reattaching and terminal activity also refresh
+it. Directory-list responses remain separate from filesystem invalidations. File
+rows and counts come from the accepted diff payload, and failures keep their
+actual detail. Removed the obsolete public path-list diff loader, retaining its
+path-safety, object-failure and symlink regressions on the consumed reader/helpers.
+
+Verified the full native desktop suite (129), diff suite (16), eight real daemon
+review/watcher tests, six watcher regressions and native all-target clippy. The
+final daemon/iroh gate passed 104 tests; SDK/web tests and builds, generated themes,
+formatting and architecture checks passed. Rebuilt and packaged the final native
+source with the compatible standalone browser executable. Normal commit hooks
+remain enabled. Review/control expansion, broader client parity, MCP/plugin
+startup and larger task-navigation design stay in the previously triaged queue.
+
+Live native visual testing still awaits explicit app-launch confirmation after
+its automatic approval rejection. No focus, bounds or native rendering proof is
+claimed by the source and integration gates.
