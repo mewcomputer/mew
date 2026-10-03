@@ -1273,3 +1273,27 @@ directory and fails under sandbox restrictions; it was not granted access to
 overwrite user state. Separate shell issues remain recorded for another pass:
 newline-free output can merge the completion sentinel, and already-completed
 jobs can miss their completion notification. Next work is saved session policy.
+
+# 2026-10-03 — Restore effective session policy and todos
+
+Sessions save complete effective model, provider, persona, thinking and permission
+settings in an atomic policy sidecar. Resume uses saved settings ahead of changed
+defaults and reloads todo dependency state. Malformed policy or todos produce a
+visible error. Idle session listings also use the saved model and provider.
+Setting changes serialize with agent updates; failed persistence restores owned
+and shared prompt state. Persona pins resolve before acknowledgement, bare pins
+inherit the current provider, and clearing a persona survives reload.
+
+Model switches refresh capabilities, pricing, context, default thinking, rendered
+project prompts and child runners. Changed identities detach prompt caches while
+preserving shared skill/template handles. Explicit thinking off retains required
+model-specific disable payloads.
+
+Behavior regressions reproduced lost settings/todos, failed pin acknowledgement,
+lost concurrent updates, stale caches/prompts/child providers and persistence
+rollback errors. Policy tests 11, session 11 unit plus 7 integration, CLI policy 6,
+setup 22 and agent 185 pass. Full daemon checks passed 44 unit, 6 concurrency,
+23 end-to-end, 6 lifetime and 7 TCP tests before the final bare-pin regression;
+the updated policy suite passes. Full CLI passed 172 unit and 3 integration tests.
+Scoped all-target clippy, format and diff checks pass. Next work is final native
+reconnect and delivery feedback.

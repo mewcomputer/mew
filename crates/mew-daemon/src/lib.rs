@@ -73,6 +73,8 @@ pub struct AgentBuildParams {
     pub writer: mew_session::Writer,
     pub cwd: Option<std::path::PathBuf>,
     pub browser_enabled: bool,
+    /// Complete saved runtime choices; None uses startup defaults for legacy sessions.
+    pub policy: Option<mew_session::SessionPolicy>,
 }
 
 /// Type alias for the agent-builder closure. The daemon calls this once
@@ -1735,19 +1737,16 @@ where
                     let result = match &switcher {
                         Some(switcher) => {
                             let mut agent = session.agent.lock().await;
-                            let switched = switcher(&mut agent, &provider, &model);
-                            // Capture the switched-to model's active thinking
-                            // variant before the agent guard drops.
-                            let variant = agent.active_thinking_variant().map(str::to_owned);
-                            switched.map(|(p, m)| (p, m, variant))
+                            change_session_model(
+                                &session, &mut agent, switcher, &provider, &model, None,
+                            )
+                            .await
                         }
                         None => Err(anyhow::anyhow!("model switching not available")),
                     };
                     match result {
                         Ok((new_provider, new_model, variant)) => {
                             info!(provider = %new_provider, model = %new_model, "model switched");
-                            *session.provider.lock().await = Some(new_provider.clone());
-                            *session.model.lock().await = Some(new_model.clone());
                             session
                                 .broadcast(ServerMessage::ModelSwitched {
                                     provider: new_provider,
@@ -1783,14 +1782,33 @@ where
                         Some(setter) => {
                             let model = session.model.lock().await.clone().unwrap_or_default();
                             let mut agent = session.agent.lock().await;
-                            setter(&mut agent, &model, &variant)
+                            let previous_reasoning = agent.reasoning.clone();
+                            let previous_variant = agent.active_thinking_variant.clone();
+                            let result = match setter(&mut agent, &model, &variant) {
+                                Ok(resolved) => {
+                                    agent.set_active_thinking_variant(resolved.clone());
+                                    session
+                                        .save_policy(&session.policy(&agent).await)
+                                        .await
+                                        .map(|()| resolved)
+                                }
+                                Err(error) => Err(error),
+                            };
+                            if result.is_err() {
+                                agent.set_reasoning(previous_reasoning);
+                                agent.set_active_thinking_variant(previous_variant);
+                            }
+                            result
                         }
                         None => Err(anyhow::anyhow!("thinking variant switching not available")),
                     };
                     match result {
                         Ok(resolved) => {
-                            let _ = client_tx
-                                .send(ServerMessage::ThinkingVariantChanged { variant: resolved });
+                            session
+                                .broadcast(ServerMessage::ThinkingVariantChanged {
+                                    variant: resolved,
+                                })
+                                .await;
                         }
                         Err(e) => {
                             let _ = client_tx.send(ServerMessage::Error {
@@ -1814,10 +1832,18 @@ where
                     let parsed = mew_hooks::PermissionMode::from_id(&mode);
                     match parsed {
                         Some(m) => {
-                            {
-                                let agent = session.agent.lock().await;
-                                agent.set_permission_mode(m);
+                            let agent = session.agent.lock().await;
+                            let mut policy = session.policy(&agent).await;
+                            policy.permission_mode = m.id().to_owned();
+                            if let Err(error) = session.save_policy(&policy).await {
+                                session
+                                    .broadcast(ServerMessage::Error {
+                                        message: format!("failed to set permission mode: {error}"),
+                                    })
+                                    .await;
+                                return;
                             }
+                            agent.set_permission_mode(m);
                             // Broadcast to all attached clients.
                             session
                                 .broadcast(ServerMessage::PermissionModeChanged {
@@ -2340,38 +2366,84 @@ where
                     let _guard = session.turn_lock.lock().await;
                     let mut agent = session.agent.lock().await;
                     let persona = agent.personas.iter().find(|p| p.name == name).cloned();
+                    if persona.is_none() && matches!(name.as_str(), "default" | "none") {
+                        let mut policy = session.policy(&agent).await;
+                        policy.persona = None;
+                        if let Err(error) = session.save_policy(&policy).await {
+                            let _ = client_tx.send(ServerMessage::Error {
+                                message: format!("failed to clear persona: {error}"),
+                            });
+                            return;
+                        }
+                        agent.clear_persona();
+                        let personas = agent
+                            .personas
+                            .iter()
+                            .map(|persona| mew_protocol::PersonaInfo {
+                                name: persona.name.clone(),
+                                description: persona.description.clone(),
+                                color: persona.config.color.clone(),
+                                active: false,
+                            })
+                            .collect();
+                        session
+                            .broadcast(ServerMessage::PersonaList { personas })
+                            .await;
+                        return;
+                    }
                     match persona {
                         Some(p) => {
-                            // apply_persona returns a pinned model if the
-                            // persona config specifies one.
-                            let pinned_model = agent.apply_persona(&p);
-                            let persona_name = p.name.clone();
-                            let _ = client_tx.send(ServerMessage::PersonaSwitched {
-                                name: persona_name.clone(),
-                            });
-                            // If the persona pinned a model, apply it via
-                            // the switcher (same path as SwitchModel).
-                            if let Some(model_str) = pinned_model {
-                                if let Some(switcher) = &switcher {
-                                    if let Some((provider, model)) = model_str.split_once('/') {
-                                        if let Ok((new_provider, new_model)) =
-                                            switcher(&mut agent, provider, model)
-                                        {
-                                            *session.provider.lock().await =
-                                                Some(new_provider.clone());
-                                            *session.model.lock().await = Some(new_model.clone());
-                                            session
-                                                .broadcast(ServerMessage::ModelSwitched {
-                                                    provider: new_provider,
-                                                    model: new_model,
-                                                })
-                                                .await;
-                                        }
+                            let result = if let Some(pinned) = &p.config.model {
+                                let inherited_provider =
+                                    session.provider.lock().await.clone().unwrap_or_default();
+                                let (provider, model) = pinned
+                                    .split_once('/')
+                                    .unwrap_or((&inherited_provider, pinned));
+                                match &switcher {
+                                    Some(switcher) if !provider.is_empty() && !model.is_empty() => {
+                                        change_session_model(
+                                            &session,
+                                            &mut agent,
+                                            switcher,
+                                            provider,
+                                            model,
+                                            Some(&p.name),
+                                        )
+                                        .await
+                                        .map(Some)
                                     }
+                                    _ if provider.is_empty() || model.is_empty() => {
+                                        Err(anyhow::anyhow!(
+                                            "persona model must be provider/model: {pinned}"
+                                        ))
+                                    }
+                                    _ => Err(anyhow::anyhow!("model switching not available")),
                                 }
+                            } else {
+                                let mut policy = session.policy(&agent).await;
+                                policy.persona = Some(p.name.clone());
+                                session.save_policy(&policy).await.map(|()| None)
+                            };
+                            let switched = match result {
+                                Ok(switched) => switched,
+                                Err(error) => {
+                                    let _ = client_tx.send(ServerMessage::Error {
+                                        message: format!("failed to switch persona: {error}"),
+                                    });
+                                    return;
+                                }
+                            };
+                            agent.apply_persona(&p);
+                            if let Some((provider, model, variant)) = switched {
+                                session
+                                    .broadcast(ServerMessage::ModelSwitched { provider, model })
+                                    .await;
+                                session
+                                    .broadcast(ServerMessage::ThinkingVariantChanged { variant })
+                                    .await;
                             }
                             session
-                                .broadcast(ServerMessage::PersonaSwitched { name: persona_name })
+                                .broadcast(ServerMessage::PersonaSwitched { name: p.name })
                                 .await;
                         }
                         None => {
@@ -2926,6 +2998,43 @@ async fn generate_session_summary(agent: &Agent) -> Option<String> {
     }
 }
 
+async fn change_session_model(
+    session: &Session,
+    agent: &mut Agent,
+    switcher: &ModelSwitcher,
+    provider: &str,
+    model: &str,
+    persona: Option<&str>,
+) -> Result<(String, String, Option<String>)> {
+    // Skill tools share these locks with the agent. A failed save must restore
+    // their contents as well as the provider and other owned agent fields.
+    let previous_template = agent.template_ctx.read().await.clone();
+    let previous_filter = agent.skill_filter.read().await.clone();
+    let previous = agent.clone();
+    let result = async {
+        let (provider, model) = switcher(agent, provider, model)?;
+        let variant = agent.active_thinking_variant().map(str::to_owned);
+        let mut policy = session.policy(agent).await;
+        policy.provider = Some(provider.clone());
+        policy.model = Some(model.clone());
+        policy.thinking_variant = variant.clone();
+        if let Some(persona) = persona {
+            policy.persona = Some(persona.to_owned());
+        }
+        session.save_policy(&policy).await?;
+        *session.provider.lock().await = Some(provider.clone());
+        *session.model.lock().await = Some(model.clone());
+        Ok((provider, model, variant))
+    }
+    .await;
+    if result.is_err() {
+        *agent = previous;
+        *agent.template_ctx.write().await = previous_template;
+        *agent.skill_filter.write().await = previous_filter;
+    }
+    result
+}
+
 async fn broadcast_attention(session: &Session, manager: &SessionManager) {
     let pending_permissions = session.pending_permissions.lock().await.len() as u32;
     let pending_questions = session.pending_questions_count().await;
@@ -3314,6 +3423,9 @@ async fn send_msg<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
 #[cfg(test)]
 mod request_tests;
+
+#[cfg(test)]
+mod policy_tests;
 
 #[cfg(test)]
 mod tests {

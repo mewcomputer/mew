@@ -17,26 +17,26 @@ use mew_ext_broker::{
 };
 use mew_hooks::Dispatcher;
 
-/// Apply catalog pricing for `model_id` onto `agent`.
-///
-/// Sets catalog-derived pricing and prompt-cache retention on the agent. An
-/// absent catalog entry resets retention to `Unknown` while leaving pricing
-/// unchanged, preserving the existing pricing fallback behavior.
+/// Apply catalog pricing and prompt-cache retention for the active model.
 pub(crate) fn apply_catalog_pricing(agent: &mut Agent, cat: Option<&Catalog>, model_id: &str) {
-    let retention = cat
-        .and_then(|catalog| catalog.lookup(model_id))
-        .and_then(|model| model.prompt_cache_retention_secs);
+    let model = cat.and_then(|catalog| catalog.lookup(model_id));
+    let retention = model.and_then(|model| model.prompt_cache_retention_secs);
     agent.set_prompt_cache_retention(PromptCacheRetention::from_secs(retention));
+    let pricing = model.map(|model| &model.pricing);
+    agent.input_price = pricing.map_or(0.0, |pricing| pricing.input);
+    agent.output_price = pricing.map_or(0.0, |pricing| pricing.output);
+    agent.cache_read_price = pricing.map_or(0.0, |pricing| pricing.cache_read);
+    agent.cache_write_price = pricing.map_or(0.0, |pricing| pricing.cache_write);
+    agent.reasoning_price = pricing.map_or(0.0, |pricing| pricing.reasoning);
+}
 
-    if let Some(c) = cat {
-        if let Some(m) = c.lookup(model_id) {
-            agent.input_price = m.pricing.input;
-            agent.output_price = m.pricing.output;
-            agent.cache_read_price = m.pricing.cache_read;
-            agent.cache_write_price = m.pricing.cache_write;
-            agent.reasoning_price = m.pricing.reasoning;
-        }
-    }
+fn apply_model_metadata(agent: &mut Agent, cat: Option<&Catalog>, model_id: &str) {
+    agent.supports_vision = cat.is_none_or(|catalog| catalog.supports_vision(model_id));
+    agent.context_window = cat.map_or(0, |catalog| catalog.context_window(model_id).max(0) as u32);
+    agent.default_max_output_tokens = cat
+        .and_then(|catalog| catalog.max_output(model_id))
+        .map_or(0, |max| max.min(32_768));
+    apply_catalog_pricing(agent, cat, model_id);
 }
 use mew_message::SessionId;
 use mew_session::Writer as SessionWriter;
@@ -367,6 +367,7 @@ pub(crate) fn render_templated_context_files(
     let mut tool_names: Vec<String> = agent.tools.keys().cloned().collect();
     tool_names.sort_unstable();
     let ctx = mew_prompts::template::TemplateContext {
+        supports_vision: agent.supports_vision,
         model_id: agent.model_id.clone(),
         provider_id: agent.provider_id.clone(),
         session_id: agent.session_id.to_string(),
@@ -479,13 +480,38 @@ pub(crate) fn wire_subagents(
     }
 }
 
-/// Build a full agent for a session. Used by `run_daemon` (and the TUI's
-/// `--connect` daemon-client mode goes through the daemon side). Sets up
-/// the provider, tools, MCP, personas, skills, subagents, context files,
-/// and pricing.
-///
-/// `writer` / `session_id` come from the daemon's `SessionManager`, which
-/// owns the session directory. The agent is wired to append to that writer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn switch_session_model(
+    agent: &mut Agent,
+    cfg: &Config,
+    cat: Option<&Catalog>,
+    provider: Arc<dyn mew_provider::Provider>,
+    provider_id: &str,
+    model_id: &str,
+    raw: bool,
+) {
+    agent.provider = provider;
+    agent.set_model_info(model_id, provider_id);
+    apply_model_metadata(agent, cat, model_id);
+    let dispatcher = agent.dispatcher.clone();
+    wire_subagents(agent, cfg, cat, provider_id, raw, dispatcher, &[]);
+    agent.project_vars = mew_context::load_project_vars(&agent.cwd);
+    if let Some(persona) = agent
+        .personas
+        .iter()
+        .find(|persona| Some(persona.name.as_str()) == agent.persona_name.as_deref())
+        .cloned()
+    {
+        agent.apply_persona(&persona);
+    }
+    let context = mew_context::Loader::new(&agent.cwd)
+        .load()
+        .unwrap_or_default();
+    rebuild_session_system(agent, &context);
+}
+
+/// Build a full agent for a session. Used by the daemon builder.
+/// The session manager supplies its writer, identity, and project directory.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_session_agent(
     cfg: &Config,
@@ -554,6 +580,7 @@ pub(crate) fn build_session_agent(
     agent.subagent_registry_path = subagent_registry_path;
     agent.set_browser_enabled(browser_enabled);
     agent.set_model_info(model_id, provider_id);
+    apply_model_metadata(&mut agent, cat, model_id);
     agent.template_ctx = template_ctx;
     agent.flagged_files = flagged_files;
     agent.secrets = build_secret_set(cfg);
@@ -585,13 +612,6 @@ pub(crate) fn build_session_agent(
     // the call is safe. When a real dispatcher is wired, this will need to
     // become async — at which point the AgentBuilder type should change.
     // agent.register_plugin_tools().await;
-    // Apply the default persona on startup (non-interactive path — no TUI app).
-    if cfg.default_persona != "none" && cfg.default_persona != "default" {
-        if let Some(persona) = personas_arc.iter().find(|p| p.name == cfg.default_persona) {
-            agent.apply_persona(persona);
-            tracing::info!(persona = %persona.name, "applied default persona on startup");
-        }
-    }
     if cfg.workspace.roots.is_empty() {
         agent.workspace_roots = vec![cwd.clone()];
     } else {
@@ -615,6 +635,24 @@ pub(crate) fn build_session_agent(
     let project_vars = mew_context::load_project_vars(&cwd);
     agent.project_vars = project_vars;
 
+    if !skills.is_empty() {
+        agent.set_skills((*skills).clone());
+    }
+    if cfg.default_persona != "none" && cfg.default_persona != "default" {
+        if let Some(persona) = personas_arc
+            .iter()
+            .find(|persona| persona.name == cfg.default_persona)
+        {
+            agent.apply_persona(persona);
+            tracing::info!(persona = %persona.name, "applied default persona on startup");
+        }
+    }
+    rebuild_session_system(&mut agent, &ctx_files);
+
+    Ok(agent)
+}
+
+fn rebuild_session_system(agent: &mut Agent, ctx_files: &[mew_context::File]) {
     // Build the stable system scaffold by rendering base.md through minijinja.
     // Runtime capability names and schemas are carried by the provider request
     // instead of being repeated in this cacheable instruction block.
@@ -622,7 +660,7 @@ pub(crate) fn build_session_agent(
         let mut tool_names: Vec<String> = agent
             .tools
             .keys()
-            .filter(|name| browser_enabled || !name.starts_with("browser_"))
+            .filter(|name| agent.browser_enabled || !name.starts_with("browser_"))
             .cloned()
             .collect();
         tool_names.sort_unstable();
@@ -658,7 +696,7 @@ pub(crate) fn build_session_agent(
             model_id: agent.model_id.clone(),
             provider_id: agent.provider_id.clone(),
             session_id: agent.session_id.to_string(),
-            cwd: cwd.to_string_lossy().into_owned(),
+            cwd: agent.cwd.to_string_lossy().into_owned(),
             current_date: mew_prompts::template::TemplateContext::today(),
             tools: tool_names,
             available_skills: mew_prompts::template::SkillInfo::from_skills(&agent.skills),
@@ -674,29 +712,10 @@ pub(crate) fn build_session_agent(
     // Assemble: base prompt → context files → (skills added by rebuild_system)
     let mut system = base_prompt;
     if !ctx_files.is_empty() {
-        let rendered_ctx = render_templated_context_files(&ctx_files, &agent);
+        let rendered_ctx = render_templated_context_files(ctx_files, agent);
         system.push_str(&mew_context::build_system_prompt(&rendered_ctx));
     }
     agent.set_system(system);
-    if !skills.is_empty() {
-        agent.set_skills((*skills).clone());
-    }
-
-    if let Some(c) = cat {
-        agent.supports_vision = c.supports_vision(model_id);
-        agent.context_window = c.context_window(model_id).max(0) as u32;
-        // Default `max_output_tokens` from the catalog, capped at 32K so
-        // models with very large total context (e.g. GPT-5-Codex at 400K
-        // with 128K max output) leave more room for input. 0 means
-        // "unknown" — the agent keeps its existing default of 0 (no
-        // override) so the provider's own default applies.
-        if let Some(raw_max_output) = c.max_output(model_id) {
-            agent.default_max_output_tokens = raw_max_output.min(32_768);
-        }
-        apply_catalog_pricing(&mut agent, cat, model_id);
-    }
-
-    Ok(agent)
 }
 
 /// Assemble the system prompt for a fresh session rooted at `cwd` without

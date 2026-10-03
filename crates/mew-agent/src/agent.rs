@@ -467,6 +467,12 @@ impl Agent {
     /// `provider_id`). The main loop calls this after constructing the agent
     /// and whenever the model is switched.
     pub fn set_model_info(&mut self, model_id: &str, provider_id: &str) {
+        if (!self.model_id.is_empty() || !self.provider_id.is_empty())
+            && (self.model_id != model_id || self.provider_id != provider_id)
+        {
+            self.prompt_cache_state = Arc::new(std::sync::Mutex::new(PromptCacheState::default()));
+            self.prompt_generation = 0;
+        }
         self.model_id = model_id.to_string();
         self.provider_id = provider_id.to_string();
     }

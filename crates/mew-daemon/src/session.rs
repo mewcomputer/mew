@@ -100,6 +100,23 @@ pub struct Session {
 }
 
 impl Session {
+    pub(crate) async fn policy(&self, agent: &Agent) -> mew_session::SessionPolicy {
+        mew_session::SessionPolicy {
+            model: self.model.lock().await.clone(),
+            provider: self.provider.lock().await.clone(),
+            persona: agent.persona_name.clone(),
+            thinking_variant: agent.active_thinking_variant().map(str::to_owned),
+            permission_mode: agent.permission_mode().id().to_owned(),
+        }
+    }
+
+    pub(crate) async fn save_policy(&self, policy: &mew_session::SessionPolicy) -> Result<()> {
+        policy
+            .write(&self.session_dir, &self.id)
+            .await
+            .context("save session policy")
+    }
+
     pub fn new(
         id: String,
         agent: Agent,
@@ -304,7 +321,9 @@ impl SessionManager {
             writer,
             cwd,
             browser_enabled: client_kind == mew_protocol::ClientKind::Desktop,
+            policy: None,
         })?;
+        load_todos(&agent).await?;
         let session = Arc::new(Session::new(
             session_id.clone(),
             agent,
@@ -312,6 +331,9 @@ impl SessionManager {
             provider.clone(),
             self.session_dir.clone(),
         ));
+        session
+            .save_policy(&session.policy(&*session.agent.lock().await).await)
+            .await?;
         self.active.lock().await.insert(session_id, session.clone());
         Ok(session)
     }
@@ -353,6 +375,10 @@ impl SessionManager {
         }
 
         let cwd = meta.cwd.clone().map(PathBuf::from);
+        let policy = mew_session::SessionPolicy::read(&self.session_dir, session_id)
+            .await
+            .context("read session policy")
+            .map_err(AttachError::BuildAgent)?;
         let writer = mew_session::Writer::open_at_with_meta(&self.session_dir, session_id, meta)
             .await
             .context("open session writer for resume")
@@ -363,9 +389,11 @@ impl SessionManager {
             writer,
             cwd,
             browser_enabled: false,
+            policy,
         })
         .context("build agent for resume")
         .map_err(AttachError::BuildAgent)?;
+        load_todos(&agent).await.map_err(AttachError::BuildAgent)?;
 
         let messages = mew_session::Reader::load_from(&self.session_dir, session_id)
             .await
@@ -380,6 +408,10 @@ impl SessionManager {
             provider.clone(),
             self.session_dir.clone(),
         ));
+        session
+            .save_policy(&session.policy(&*session.agent.lock().await).await)
+            .await
+            .map_err(AttachError::BuildAgent)?;
         self.active
             .lock()
             .await
@@ -516,11 +548,23 @@ impl SessionManager {
                             let _ = tokio::fs::remove_dir_all(&path).await;
                             continue;
                         }
+                        let policy = match mew_session::SessionPolicy::read(&self.session_dir, &id)
+                            .await
+                        {
+                            Ok(policy) => policy,
+                            Err(error) => {
+                                tracing::warn!(session_id = %id, error = %error, "failed to read listed session policy");
+                                None
+                            }
+                        };
                         infos.push(SessionInfo {
                             session_id: id.clone(),
                             state: SessionState::Idle,
-                            model: meta.model.clone(),
-                            provider: None,
+                            model: policy
+                                .as_ref()
+                                .and_then(|policy| policy.model.clone())
+                                .or_else(|| meta.model.clone()),
+                            provider: policy.and_then(|policy| policy.provider),
                             created_at: meta.created_at,
                             last_message_at: meta.last_message_at.or(Some(meta.created_at)),
                             summary: meta.summary.clone(),
@@ -628,6 +672,16 @@ impl SessionManager {
             _ => None,
         }
     }
+}
+
+async fn load_todos(agent: &Agent) -> Result<()> {
+    if let Some(path) = &agent.todos_path {
+        *agent.todos.lock().await = mew_agent::TodoList::load(path)
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("load session todos")?;
+    }
+    Ok(())
 }
 
 /// Extract the first user message text from an agent's message list.

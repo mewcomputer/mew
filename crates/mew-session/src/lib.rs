@@ -10,6 +10,9 @@ use tracing::debug;
 
 use mew_message::Message;
 
+mod policy;
+pub use policy::SessionPolicy;
+
 #[derive(Error, Debug)]
 pub enum SessionError {
     #[error("io error: {0}")]

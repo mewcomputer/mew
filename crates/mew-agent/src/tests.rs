@@ -86,6 +86,39 @@ impl Provider for CapturingProvider {
     }
 }
 
+#[tokio::test]
+async fn model_changes_refresh_the_request_prompt_without_mutating_saved_agent_state() {
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::text_response("first"),
+        FakeProvider::text_response("second"),
+        FakeProvider::text_response("restored"),
+    ]));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.set_model_info("first", "fixture");
+    agent.set_prompt_cache_retention(crate::PromptCacheRetention::from_secs(Some(3600)));
+    agent.set_system("first model scaffold".into());
+    let mut events = agent.run("hello".into());
+    while events.recv().await.is_some() {}
+    let saved = agent.clone();
+
+    agent.set_model_info("second", "fixture");
+    agent.set_system("second model scaffold".into());
+    let mut events = agent.run("continue".into());
+    while events.recv().await.is_some() {}
+    let mut events = saved.run("restore".into());
+    while events.recv().await.is_some() {}
+
+    let requests = provider.captured.lock().unwrap();
+    assert!(requests[1].system.contains("second model scaffold"));
+    assert!(requests[2].system.contains("first model scaffold"));
+}
+
 struct EchoTool {
     schema: serde_json::Value,
     sensitivity: Sensitivity,

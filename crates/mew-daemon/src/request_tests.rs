@@ -20,20 +20,21 @@ fn test_server(path: PathBuf) -> DaemonServer {
     )
 }
 
-async fn connect(server: &DaemonServer) -> TestSocket {
+pub(super) async fn connect(server: &DaemonServer) -> TestSocket {
     let (client, stream) = tokio::io::duplex(256 * 1024);
     let manager = server.session_manager.clone();
     let groups = server.groups_store.clone();
     let auto_summary = server.auto_summary_enabled.clone();
+    let thinking_setter = server.thinking_setter.clone();
     tokio::spawn(async move {
-        handle_connection(stream, manager, groups, None, auto_summary)
+        handle_connection(stream, manager, groups, thinking_setter, auto_summary)
             .await
             .unwrap();
     });
     client_async("ws://localhost/", client).await.unwrap().0
 }
 
-async fn send(socket: &mut TestSocket, message: ClientMessage) {
+pub(super) async fn send(socket: &mut TestSocket, message: ClientMessage) {
     socket
         .send(Message::Text(mew_protocol::encode_json(&message).unwrap()))
         .await
@@ -41,7 +42,7 @@ async fn send(socket: &mut TestSocket, message: ClientMessage) {
 }
 
 // Ping is handled after previous commands and shares their ordered outbound queue.
-async fn flush(socket: &mut TestSocket) -> Vec<ServerMessage> {
+pub(super) async fn flush(socket: &mut TestSocket) -> Vec<ServerMessage> {
     send(socket, ClientMessage::Ping).await;
     let mut messages = Vec::new();
     loop {

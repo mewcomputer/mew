@@ -377,6 +377,106 @@ async fn context_discovery_and_templates_use_the_selected_project() {
 }
 
 #[tokio::test]
+async fn model_switch_refreshes_project_templates_and_the_child_provider() {
+    let (_directory, root) = project("model-switch");
+    std::fs::write(
+        root.join("AGENTS.md"),
+        "---\nmew: true\n---\ncontext-model: {{ model_id }}; vision: {{ supports_vision }}\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(".mew/personas/cwd-test/PERSONA.md"), "---\nname: cwd-test\ndescription: model persona\nmew:\n  template: true\n---\npersona-model: {{ model_id }}; vision: {{ supports_vision }}\n").unwrap();
+    std::fs::write(root.join(".mew/skills/cwd-test/SKILL.md"), "---\nname: cwd-test\ndescription: model skill\ntemplate: true\n---\nskill-model: {{ model_id }}\n").unwrap();
+    let mut cat = Catalog::empty();
+    for (id, vision) in [("first", false), ("second", true)] {
+        cat.models.insert(
+            id.into(),
+            mew_catalog::Model {
+                id: id.into(),
+                vision,
+                ..Default::default()
+            },
+        );
+    }
+    let old = ProjectProvider::new(vec![
+        FakeProvider::text_response("initial"),
+        FakeProvider::text_response("old provider child"),
+    ]);
+    let next = ProjectProvider::new(vec![
+        FakeProvider::tool_call(
+            "skill",
+            "model-skill",
+            serde_json::json!({"name":"cwd-test"}),
+        ),
+        FakeProvider::tool_call(
+            "subagent",
+            "model-child",
+            serde_json::json!({"name":"cwd-test", "prompt":"finish"}),
+        ),
+        FakeProvider::text_response("new provider child"),
+        FakeProvider::text_response("new provider parent"),
+    ]);
+    let cfg = Config {
+        default_persona: "cwd-test".into(),
+        ..config()
+    };
+    let id = SessionId::new();
+    let writer = SessionWriter::open_at(&root.join("sessions"), &id.to_string())
+        .await
+        .unwrap();
+    let mut agent = build_session_agent(
+        &cfg,
+        Some(&cat),
+        old.clone(),
+        "fixture",
+        "first",
+        false,
+        PermissionMode::Standard,
+        Some(writer),
+        Some(id),
+        Some(root.clone()),
+        false,
+        Arc::new(NopDispatcher),
+        None,
+        &[],
+    )
+    .unwrap();
+    assert!(agent
+        .persona_prompt
+        .as_ref()
+        .unwrap()
+        .contains("vision: false"));
+    assert!(agent.system.contains("context-model: first; vision: false"));
+    run(&agent).await;
+
+    switch_session_model(
+        &mut agent,
+        &cfg,
+        Some(&cat),
+        next.clone(),
+        "fixture",
+        "second",
+        false,
+    );
+    run(&agent).await;
+
+    assert_eq!(old.requests.lock().unwrap().len(), 1);
+    let requests = next.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[0]
+        .system
+        .contains("context-model: second; vision: true"));
+    assert!(requests[0]
+        .system
+        .contains("persona-model: second; vision: true"));
+    assert!(requests[1].messages.iter().flat_map(|message| &message.parts).any(|part| {
+        matches!(part, Part::ToolCall(call) if call.call_id == "model-skill" && call.state.output().is_some_and(|output| output.contains("skill-model: second")))
+    }));
+    assert!(requests[3].messages.iter().flat_map(|message| &message.parts).any(|part| {
+        matches!(part, Part::ToolCall(call) if call.call_id == "model-child" && call.state.output().is_some_and(|output| output.contains("new provider child")))
+    }));
+}
+
+#[tokio::test]
 async fn child_tools_templates_and_transcripts_inherit_the_parent_project() {
     let (_directory, root) = project("child-project");
     let sessions = root.join("sessions");

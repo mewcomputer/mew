@@ -300,12 +300,11 @@ output. Permission modes are `standard`, `permissive`, `auto`, `auto_plus`, and
 `dangerous`; dangerous mode bypasses prompts and rules, so use it only when
 explicitly requested.
 
-Daemon sessions currently carry a `cwd` through the protocol and persist it in
-session metadata, but `build_session_agent` still derives its operational cwd
-from the daemon process. Treat per-session loading of context, skills, personas,
-MCP config, shell state, and workspace roots as incomplete until the builder
-accepts and uses `AgentBuildParams.cwd`. Project `.env` and MCP discovery are
-also process-startup concerns, not per-session configuration.
+Daemon sessions persist their `cwd` and use it for context, skills, personas,
+tools, shell state and workspace roots. Effective model, persona, thinking and
+permission settings are saved in `policy.json`; resume also restores todos.
+Project `.env`, MCP discovery and plugin startup remain process-startup concerns,
+not per-session configuration.
 
 ### Plugins and extensions
 
