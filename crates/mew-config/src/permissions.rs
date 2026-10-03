@@ -145,24 +145,25 @@ impl PermissionEngine {
     ///
     /// Precedence:
     /// 1. `input["cwd"]` for `shell_background` / `shell_monitor` if present
-    ///    and a string (those tools expose per-call `cwd`).
+    ///    and a string (those tools expose per-call `cwd`). Relative values
+    ///    resolve against the caller-supplied cwd or the engine default.
     /// 2. The caller-supplied `cwd` argument to `check()`.
     /// 3. `self.default_cwd` (set via `with_workspace_roots`).
     /// 4. `Path::new(".")` (last-resort fallback matching the agent's
     ///    behavior).
     fn resolve_effective_cwd(&self, input: &Value, cwd: &Path) -> PathBuf {
-        if let Some(s) = input.get("cwd").and_then(|v| v.as_str()) {
-            if !s.is_empty() {
-                return PathBuf::from(s);
-            }
-        }
-        if !cwd.as_os_str().is_empty() {
-            return cwd.to_path_buf();
-        }
-        if !self.default_cwd.as_os_str().is_empty() {
-            return self.default_cwd.clone();
-        }
-        PathBuf::from(".")
+        let base = if !cwd.as_os_str().is_empty() {
+            cwd
+        } else if !self.default_cwd.as_os_str().is_empty() {
+            &self.default_cwd
+        } else {
+            Path::new(".")
+        };
+        input
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map_or_else(|| base.to_path_buf(), |path| base.join(path))
     }
 
     /// Evaluate rules for a tool call and return the runtime decision.
@@ -1704,6 +1705,51 @@ mod tests {
             mew_hooks::PermissionDecision::Prompt,
             "without input['cwd'], caller-supplied cwd wins"
         );
+    }
+
+    #[tokio::test]
+    async fn relative_shell_cwd_is_resolved_from_the_session_project() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        let process = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.join("nested")).unwrap();
+        std::fs::write(project.join("nested/file.txt"), "project").unwrap();
+        std::fs::write(directory.path().join("file.txt"), "outside").unwrap();
+        let engine = PermissionEngine::new(vec![PermissionRule {
+            tool: "*".into(),
+            decision: RuleDecision::Allow,
+            r#match: MatchConditions::default(),
+        }])
+        .with_workspace_roots(vec![project.clone()], process.path().to_path_buf());
+
+        for tool in ["shell_background", "shell_monitor"] {
+            for command in ["cat ./file.txt", "cat ./file.txt && cat ./file.txt"] {
+                assert_eq!(
+                    engine
+                        .check(
+                            tool,
+                            &serde_json::json!({"command":command,"cwd":"nested"}),
+                            mew_tools::Sensitivity::Dangerous,
+                            &project
+                        )
+                        .await,
+                    mew_hooks::PermissionDecision::AllowOnce,
+                    "relative shell cwd must stay inside the session project"
+                );
+            }
+            assert_eq!(
+                engine
+                    .check(
+                        tool,
+                        &serde_json::json!({"command":"cat ./file.txt","cwd":"../"}),
+                        mew_tools::Sensitivity::Dangerous,
+                        &project
+                    )
+                    .await,
+                mew_hooks::PermissionDecision::Prompt,
+                "relative parent cwd must still trigger the configured escape tier"
+            );
+        }
     }
 
     #[tokio::test]

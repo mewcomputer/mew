@@ -162,6 +162,7 @@ pub struct Agent {
     pub tools: HashMap<String, Arc<dyn Tool>>,
     pub messages: Arc<tokio::sync::Mutex<Vec<Message>>>,
     pub session_id: SessionId,
+    pub cwd: PathBuf,
     pub system: String,
     prompt_cache_state: Arc<std::sync::Mutex<PromptCacheState>>,
     prompt_generation: u64,
@@ -385,6 +386,7 @@ impl Agent {
             tools: tools_map,
             messages: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             session_id: session_id.unwrap_or_default(),
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             system: String::new(),
             prompt_cache_state: Arc::new(std::sync::Mutex::new(PromptCacheState::default())),
             prompt_generation: 0,
@@ -614,8 +616,7 @@ impl Agent {
             }
         }
 
-        let cwd = std::env::current_dir().ok();
-        let cwd_str = cwd.as_ref().map(|p| p.to_string_lossy().to_string());
+        let cwd_str = self.cwd.to_string_lossy();
 
         let model = self
             .classifier_model
@@ -626,7 +627,7 @@ impl Agent {
             &tool_call.tool_name,
             &tool_call.input,
             sensitivity_label(sensitivity),
-            cwd_str.as_deref(),
+            Some(&cwd_str),
             None,
             self.autonomous_hint.as_deref(),
         );
@@ -944,9 +945,7 @@ impl Agent {
             model_id: self.model_id.clone(),
             provider_id: self.provider_id.clone(),
             session_id: self.session_id.to_string(),
-            cwd: std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
+            cwd: self.cwd.to_string_lossy().into_owned(),
             current_date: mew_prompts::template::TemplateContext::today(),
             tools,
             denied_tools,
@@ -1174,15 +1173,15 @@ impl Agent {
         (chars / 4) as u32
     }
 
-    /// Resolve the configured plan path against the current working directory.
+    /// Resolve the configured plan path against the session working directory.
     /// Returns `None` when no `plan_path` is configured. Relative paths are
-    /// joined onto `std::env::current_dir()`; absolute paths are used as-is.
+    /// joined onto the session cwd; absolute paths are used as-is.
     pub fn resolved_plan_path(&self) -> Option<PathBuf> {
         self.plan_path.as_ref().map(|plan_path| {
             if plan_path.is_absolute() {
                 plan_path.clone()
             } else {
-                std::env::current_dir().unwrap_or_default().join(plan_path)
+                self.cwd.join(plan_path)
             }
         })
     }

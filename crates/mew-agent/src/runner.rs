@@ -50,7 +50,7 @@ fn validate_against_schema(schema: &serde_json::Value, text: &str) -> SchemaChec
     let validator = match jsonschema::validator_for(schema) {
         Ok(v) => v,
         Err(e) => {
-            return SchemaCheck::InvalidSchema(format!("def's output_schema is invalid: {e}"))
+            return SchemaCheck::InvalidSchema(format!("def's output_schema is invalid: {e}"));
         }
     };
     let errors: Vec<String> = validator
@@ -96,14 +96,19 @@ pub struct SimpleRunner {
     default_provider: Arc<dyn Provider>,
     tools: HashMap<String, Arc<dyn Tool>>,
     dispatcher: Arc<dyn Dispatcher>,
+    cwd: PathBuf,
+    workspace_roots: Vec<PathBuf>,
+    permission_engine: Option<Arc<mew_config::permissions::PermissionEngine>>,
+    classifier_provider: Option<Arc<dyn Provider>>,
+    classifier_model: Option<String>,
     /// Optional resolver for per-subagent model overrides. When a subagent def
     /// has `model: "provider/model"`, the runner asks the resolver for a
     /// provider for that model. If no resolver is configured, the override is
     /// ignored and the default provider is used.
     model_resolver: Option<Arc<dyn ModelResolver>>,
     /// Optional override for where subagent session files are written.
-    /// `None` means use the global `mew_session::session_dir()`. Set this
-    /// from tests to isolate the runner from the user's real sessions.
+    /// `None` means use the global `mew_session::session_dir()`. Session
+    /// builders preserve the parent writer's root here.
     session_root: Option<PathBuf>,
     /// Subagent definitions, handed to children that are allowed to spawn
     /// (`can_spawn: true` within the depth cap) so they can nest further.
@@ -130,6 +135,11 @@ impl SimpleRunner {
             default_provider: provider,
             tools: tools_map,
             dispatcher,
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            workspace_roots: Vec::new(),
+            permission_engine: None,
+            classifier_provider: None,
+            classifier_model: None,
             model_resolver: None,
             session_root: None,
             defs: Vec::new(),
@@ -162,9 +172,31 @@ impl SimpleRunner {
     }
 
     /// Builder method to override the root directory for subagent session
-    /// files. Used by tests to isolate from the global session dir.
+    /// files, preserving the parent session's storage location.
     pub fn with_session_root(mut self, root: PathBuf) -> Self {
         self.session_root = Some(root);
+        self
+    }
+
+    pub fn with_workspace(
+        mut self,
+        cwd: PathBuf,
+        roots: Vec<PathBuf>,
+        permission_engine: Option<Arc<mew_config::permissions::PermissionEngine>>,
+    ) -> Self {
+        self.cwd = cwd;
+        self.workspace_roots = roots;
+        self.permission_engine = permission_engine;
+        self
+    }
+
+    pub fn with_classifier(
+        mut self,
+        provider: Option<Arc<dyn Provider>>,
+        model: Option<String>,
+    ) -> Self {
+        self.classifier_provider = provider;
+        self.classifier_model = model;
         self
     }
 
@@ -284,6 +316,16 @@ impl SubagentRunner for SimpleRunner {
             Some(session_id),
         );
 
+        agent.cwd = self.cwd.clone();
+        agent.workspace_roots = self.workspace_roots.clone();
+        agent.permission_engine = self.permission_engine.clone();
+        if let Some(provider) = &self.classifier_provider {
+            agent.set_classifier_provider(provider.clone(), self.classifier_model.clone());
+        }
+        agent.set_shell_session(mew_tools::tools::shell_session::shared_session(
+            self.cwd.clone(),
+        ));
+
         // Wire nesting when the policy allows it: the child gets a runner of
         // its own, the defs it may invoke, and the session's limits.
         if child_can_spawn {
@@ -304,9 +346,7 @@ impl SubagentRunner for SimpleRunner {
             model_id: agent.model_id.clone(),
             provider_id: agent.provider_id.clone(),
             session_id: session_id.to_string(),
-            cwd: std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
+            cwd: self.cwd.to_string_lossy().into_owned(),
             current_date: mew_prompts::template::TemplateContext::today(),
             tools: tool_names,
             supports_vision: agent.supports_vision,
@@ -501,6 +541,22 @@ impl SubagentRunner for SimpleRunner {
                                 break;
                             }
                         }
+                    }
+                    crate::AgentEvent::WorkspacePermissionRequest { path, tx } => {
+                        let _ = event_tx
+                            .send(SubagentEvent::WorkspacePermissionRequest { path, tx })
+                            .await;
+                    }
+                    crate::AgentEvent::PermissionRequest { call, tx }
+                    | crate::AgentEvent::SubagentPermissionRequest { call, tx, .. } => {
+                        let _ = event_tx
+                            .send(SubagentEvent::PermissionRequest {
+                                tool_name: call.tool_name,
+                                call_id: call.call_id,
+                                input: call.input,
+                                tx,
+                            })
+                            .await;
                     }
                     crate::AgentEvent::Error(msg) => {
                         last_error = Some(msg);

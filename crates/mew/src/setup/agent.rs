@@ -115,6 +115,7 @@ pub(crate) fn build_tools(
 pub(crate) fn build_permission_engine(
     cfg: &Config,
     mode: mew_hooks::PermissionMode,
+    cwd: &std::path::Path,
 ) -> Arc<mew_config::permissions::PermissionEngine> {
     let secret_globs: Vec<String> = cfg
         .secrets
@@ -122,15 +123,11 @@ pub(crate) fn build_permission_engine(
         .iter()
         .flat_map(|f| f.paths.iter().cloned())
         .collect();
-    // Default cwd for the escape tier: the process's current directory.
-    // The 4 call sites all hand the same `cfg` to this helper, so the
-    // escape tier gets the same default cwd everywhere.
-    let default_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     Arc::new(
         mew_config::permissions::PermissionEngine::new(cfg.permissions.rules.clone())
             .with_secret_files(secret_globs)
             .with_mode(mode)
-            .with_workspace_roots(cfg.workspace.roots.clone(), default_cwd),
+            .with_workspace_roots(cfg.workspace.roots.clone(), cwd.to_path_buf()),
     )
 }
 
@@ -373,9 +370,7 @@ pub(crate) fn render_templated_context_files(
         model_id: agent.model_id.clone(),
         provider_id: agent.provider_id.clone(),
         session_id: agent.session_id.to_string(),
-        cwd: std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default(),
+        cwd: agent.cwd.to_string_lossy().into_owned(),
         current_date: mew_prompts::template::TemplateContext::today(),
         tools: tool_names,
         available_skills: mew_prompts::template::SkillInfo::from_skills(&agent.skills),
@@ -412,7 +407,7 @@ pub(crate) fn wire_subagents(
     dispatcher: Arc<dyn Dispatcher>,
     discovered_extensions: &[mew_ext_broker::DiscoveredExtension],
 ) {
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = agent.cwd.clone();
     let subagents_extra: Vec<std::path::PathBuf> = discovered_extensions
         .iter()
         .filter_map(|ext| ext.provides_subagents())
@@ -448,18 +443,37 @@ pub(crate) fn wire_subagents(
             "subagent_wait".into(),
             Arc::new(mew_tools::tools::subagent_wait::SubagentWait::new()),
         );
-        let runner = mew_agent::runner::SimpleRunner::new(
+        let mut runner = mew_agent::runner::SimpleRunner::new(
             agent.provider.clone(),
             agent.tools.values().cloned().collect(),
             dispatcher,
         )
         .with_model_resolver(resolver)
+        .with_workspace(
+            agent.cwd.clone(),
+            agent.workspace_roots.clone(),
+            agent.permission_engine.clone(),
+        )
+        .with_classifier(
+            agent.classifier_provider.clone(),
+            agent.classifier_model.clone(),
+        )
         .with_spawn_policy(
             subagent_defs.to_vec(),
             cfg.orchestration.max_subagent_depth,
             cfg.orchestration.max_concurrent_subagents,
             cfg.orchestration.default_max_duration_secs,
         );
+        if let Some(root) = agent.session.as_ref().and_then(|session| {
+            let writer = session.try_lock().ok()?;
+            writer
+                .path()
+                .parent()?
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        }) {
+            runner = runner.with_session_root(root);
+        }
         agent.subagent_runner = Some(Arc::new(runner));
         agent.subagent_defs = subagent_defs.to_vec();
     }
@@ -530,12 +544,13 @@ pub(crate) fn build_session_agent(
     let mut tools = tools;
     tools.push(Arc::new(FlagImportant::new(flagged_files.clone())));
 
-    let permission_engine = build_permission_engine(cfg, mode);
+    let permission_engine = build_permission_engine(cfg, mode, &cwd);
 
     let subagent_registry_path = writer
         .as_ref()
         .and_then(|w| w.path().parent().map(|p| p.join("subagent_tasks.json")));
     let mut agent = Agent::new(provider, dispatcher.clone(), writer, tools, session_id);
+    agent.cwd = cwd.clone();
     agent.subagent_registry_path = subagent_registry_path;
     agent.set_browser_enabled(browser_enabled);
     agent.set_model_info(model_id, provider_id);
@@ -554,9 +569,7 @@ pub(crate) fn build_session_agent(
 
     // Enable a persistent shell session so `cd`, `export`, and other
     // state survive across bash tool calls.
-    let shell_session = mew_tools::tools::shell_session::shared_session(
-        std::env::current_dir().unwrap_or_default(),
-    );
+    let shell_session = mew_tools::tools::shell_session::shared_session(cwd.clone());
     agent.set_shell_session(shell_session);
 
     // Wire the fallback-model provider builder.
@@ -645,9 +658,7 @@ pub(crate) fn build_session_agent(
             model_id: agent.model_id.clone(),
             provider_id: agent.provider_id.clone(),
             session_id: agent.session_id.to_string(),
-            cwd: std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
+            cwd: cwd.to_string_lossy().into_owned(),
             current_date: mew_prompts::template::TemplateContext::today(),
             tools: tool_names,
             available_skills: mew_prompts::template::SkillInfo::from_skills(&agent.skills),
@@ -729,6 +740,10 @@ pub(crate) fn build_system_prompt_snapshot(
     let agent = agent?;
     Ok((agent.system, vfs))
 }
+
+#[cfg(test)]
+#[path = "agent_cwd_tests.rs"]
+mod cwd_tests;
 
 #[cfg(test)]
 mod tests {

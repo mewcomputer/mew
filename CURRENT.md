@@ -1252,3 +1252,24 @@ end-to-end, 6 lifetime and 7 TCP tests. Shared core 38, mobile 31, real mobile i
 and scoped clippy. Swift bindings match current host metadata; handwritten Swift
 parses. Matching device/simulator archives and application tests remain in the
 final mobile gate. Next work is operational project isolation.
+
+# 2026-10-03 — Execute tools in the session's project
+
+Session builders now pass the operational cwd through tools, plans, templates,
+permission resolution, background jobs and persistent shells. Relative shell cwd
+is resolved against the session project. Each session retains its own shell state.
+Child discovery and execution inherit the project, workspace rules and permission
+engine; ordinary, nested and workspace approvals reach the parent client.
+Children inherit the configured classifier with independent caches, so a cached
+decision for one project's command cannot authorize the same command elsewhere.
+The missing shell_monitor interception now uses the agent's existing job path.
+
+Ten project behavior regressions pass after reproducing wrong-project paths,
+dropped child approvals and absent child classification. Passed agent 184,
+permissions 73, subagents 14 unit plus 12 integration, and the full CLI suite
+(165 unit, 1 version, 2 integration), with scoped all-target clippy.
+The broader config backup test writes a sentinel into the real user config
+directory and fails under sandbox restrictions; it was not granted access to
+overwrite user state. Separate shell issues remain recorded for another pass:
+newline-free output can merge the completion sentinel, and already-completed
+jobs can miss their completion notification. Next work is saved session policy.

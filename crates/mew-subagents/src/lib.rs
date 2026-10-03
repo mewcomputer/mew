@@ -213,6 +213,10 @@ pub enum SubagentEvent {
         tool_name: String,
         message: String,
     },
+    WorkspacePermissionRequest {
+        path: PathBuf,
+        tx: tokio::sync::oneshot::Sender<mew_hooks::PermissionDecision>,
+    },
     PermissionRequest {
         tool_name: String,
         call_id: String,

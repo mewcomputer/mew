@@ -226,7 +226,7 @@ impl Agent {
 
             if matches!(
                 tc.tool_name.as_str(),
-                "shell_background" | "job_status" | "job_block" | "job_cancel"
+                "shell_background" | "shell_monitor" | "job_status" | "job_block" | "job_cancel"
             ) {
                 self.execute_job_tool(tc, assistant_msg, ev_tx, &mut result_parts)
                     .await;
@@ -279,25 +279,18 @@ impl Agent {
                 input: tc.input().clone(),
             };
 
-            // Permission check. The escape tier inside the engine reads
-            // the cwd to resolve relative path args. The agent layer's
-            // `ToolCtx` is constructed a few lines below with
-            // `std::env::current_dir()` as its cwd — we mirror that here
-            // so the engine sees the same working directory the tool
-            // itself will see.
+            // Resolve permission paths from the same cwd used by the tool.
             let sensitivity = self
                 .tools
                 .get(&tc.tool_name)
                 .map(|t| t.sensitivity())
                 .unwrap_or(Sensitivity::Dangerous);
-            let engine_cwd =
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let (decision, deny_reason) = self
                 .resolve_permission_decision(
                     &tc.tool_name,
                     &hook_call,
                     sensitivity,
-                    &engine_cwd,
+                    &self.cwd,
                     ev_tx,
                 )
                 .await;
@@ -557,7 +550,7 @@ impl Agent {
             let ctx = ToolCtx::new(
                 std::sync::Arc::new(mew_tools::ToolCtxShared {
                     session_id: self.session_id,
-                    cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                    cwd: self.cwd.clone(),
                     dispatcher: Some(self.dispatcher.clone()),
                     secrets: self.secrets.clone(),
                     shell_session: self.shell_session.clone(),
@@ -985,6 +978,11 @@ impl Agent {
                             tool_name: progress_tool_name,
                             message,
                         })
+                        .await;
+                }
+                mew_subagents::SubagentEvent::WorkspacePermissionRequest { path, tx } => {
+                    let _ = ev_tx_clone
+                        .send(AgentEvent::WorkspacePermissionRequest { path, tx })
                         .await;
                 }
                 mew_subagents::SubagentEvent::PermissionRequest {
@@ -1619,7 +1617,9 @@ impl Agent {
                     let objective = goal.objective.clone();
                     goal.status = GoalStatus::Paused;
                     (
-                        format!("Goal blocked: {objective}\nReason: {reason}\n\nThe user can resume with /goal resume."),
+                        format!(
+                            "Goal blocked: {objective}\nReason: {reason}\n\nThe user can resume with /goal resume."
+                        ),
                         true,
                     )
                 }
@@ -1705,9 +1705,7 @@ impl Agent {
                     ("shell_background: 'command' is required".into(), false)
                 } else {
                     let cwd_str = input.get("cwd").and_then(|v| v.as_str());
-                    let cwd = cwd_str
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                    let cwd = cwd_str.map_or_else(|| self.cwd.clone(), |path| self.cwd.join(path));
                     let hook_call = mew_hooks::ToolCall {
                         tool_name: tc.tool_name.clone(),
                         call_id: tc.call_id.clone(),
@@ -1723,7 +1721,7 @@ impl Agent {
                             &tc.tool_name,
                             &hook_call,
                             sensitivity,
-                            &cwd,
+                            &self.cwd,
                             ev_tx,
                         )
                         .await;
@@ -1807,9 +1805,7 @@ impl Agent {
                     ("shell_monitor: 'command' is required".into(), false)
                 } else {
                     let cwd_str = input.get("cwd").and_then(|v| v.as_str());
-                    let cwd = cwd_str
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                    let cwd = cwd_str.map_or_else(|| self.cwd.clone(), |path| self.cwd.join(path));
                     let hook_call = mew_hooks::ToolCall {
                         tool_name: tc.tool_name.clone(),
                         call_id: tc.call_id.clone(),
@@ -1825,7 +1821,7 @@ impl Agent {
                             &tc.tool_name,
                             &hook_call,
                             sensitivity,
-                            &cwd,
+                            &self.cwd,
                             ev_tx,
                         )
                         .await;
