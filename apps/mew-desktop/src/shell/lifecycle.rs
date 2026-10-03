@@ -711,32 +711,6 @@ mod lifecycle_tests {
         }
     }
 
-    struct PendingConnection;
-
-    #[async_trait::async_trait]
-    impl ClientConnection for PendingConnection {
-        async fn send(&mut self, _message: ClientMessage) -> Result<(), TransportError> {
-            Ok(())
-        }
-
-        async fn receive(&mut self) -> Result<Option<mew_protocol::ServerMessage>, TransportError> {
-            pending().await
-        }
-
-        async fn close(&mut self) -> Result<(), TransportError> {
-            Ok(())
-        }
-    }
-
-    struct ReadyTransport;
-
-    #[async_trait::async_trait]
-    impl ClientTransport for ReadyTransport {
-        async fn connect(&self) -> Result<Box<dyn ClientConnection>, TransportError> {
-            Ok(Box::new(PendingConnection))
-        }
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn client_stop_cancels_a_connection_attempt() {
         let (_command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -761,12 +735,41 @@ mod lifecycle_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn client_stop_cancels_after_connection_is_ready() {
+        use futures::SinkExt;
+        use mew_protocol::{ServerMessage, PROTOCOL_VERSION};
+        use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (server_stop_tx, server_stop_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let Message::Text(text) = socket.next().await.unwrap().unwrap() else {
+                panic!("expected daemon handshake ping");
+            };
+            assert!(matches!(
+                mew_protocol::decode_json::<ClientMessage>(text.as_ref()).unwrap(),
+                ClientMessage::Ping
+            ));
+            socket
+                .send(Message::Text(
+                    mew_protocol::encode_json(&ServerMessage::Pong {
+                        version: "test".into(),
+                        protocol_version: PROTOCOL_VERSION,
+                    })
+                    .unwrap(),
+                ))
+                .await
+                .unwrap();
+            server_stop_rx.await.unwrap();
+        });
         let (_command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
         let (stop_tx, stop_rx) = oneshot::channel();
         let (event_tx, mut event_rx) = mpsc::unbounded();
         let task = tokio::spawn(async move {
             DesktopShell::run_client_with_transport(
-                Box::new(ReadyTransport),
+                Box::new(LocalWebSocketTransport::new(url)),
                 &mut command_rx,
                 stop_rx,
                 event_tx,
@@ -778,10 +781,13 @@ mod lifecycle_tests {
             event_rx.next().await,
             Some(DesktopClientEvent::Connected)
         ));
+        assert!(!task.is_finished());
         stop_tx.send(()).unwrap();
         tokio::time::timeout(Duration::from_millis(100), task)
             .await
             .expect("connected client should stop")
             .unwrap();
+        server_stop_tx.send(()).unwrap();
+        server.await.unwrap();
     }
 }

@@ -109,8 +109,11 @@ impl ShellModel {
                         }
                     };
                 }
-                ClientEvent::SessionReady { session_id }
-                | ClientEvent::SessionHistoryLoaded { session_id }
+                ClientEvent::SessionReady { session_id } => {
+                    self.last_error = None;
+                    self.ui.selected_session = Some(session_id.clone());
+                }
+                ClientEvent::SessionHistoryLoaded { session_id }
                 | ClientEvent::SessionHistoryPageLoaded { session_id, .. } => {
                     self.ui.selected_session = Some(session_id.clone());
                 }
@@ -128,6 +131,205 @@ impl ShellModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_completion_is_acknowledged_only_by_its_attachment_or_next_turn() {
+        use mew_protocol::{AlertKind, ServerMessage, SessionState};
+
+        let mut client = ClientState::default();
+        client.apply_server_message(ServerMessage::SessionList {
+            sessions: serde_json::from_value(serde_json::json!([
+                { "session_id": "background", "state": "idle", "created_at": 0, "client_count": 0 },
+                { "session_id": "selected", "state": "active", "created_at": 0, "client_count": 1 }
+            ]))
+            .unwrap(),
+        });
+        let ready = |session_id: &str| ServerMessage::SessionReady {
+            session_id: session_id.into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        };
+        let complete = |session_id: &str| ServerMessage::SessionAlert {
+            session_id: session_id.into(),
+            title: "work".into(),
+            kind: AlertKind::TurnComplete,
+            detail: None,
+        };
+        client.apply_server_message(ready("selected"));
+        let mut model = ShellModel::starting(None);
+        let events = client.apply_server_message(complete("background"));
+        model.apply_events(&events);
+        model.sync_client_metadata(&client.ui_metadata_snapshot());
+        assert!(model.ui.conversations[0].unread_completion);
+        assert!(!model.ui.conversations[1].unread_completion);
+        assert_eq!(model.attached_session.as_deref(), Some("selected"));
+
+        client.apply_server_message(ready("selected"));
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(model.ui.conversations[0].unread_completion);
+        client.apply_server_message(ready("background"));
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(!model.ui.conversations[0].unread_completion);
+        client.apply_server_message(complete("background"));
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(!model.ui.conversations[0].unread_completion);
+
+        client.apply_server_message(ready("selected"));
+        client.apply_server_message(complete("background"));
+        client.apply_server_message(ServerMessage::SessionActivityChanged {
+            session_id: "selected".into(),
+            activity: SessionState::Running,
+        });
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(model.ui.conversations[0].unread_completion);
+        client.apply_server_message(ServerMessage::SessionActivityChanged {
+            session_id: "background".into(),
+            activity: SessionState::Running,
+        });
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(!model.ui.conversations[0].unread_completion);
+
+        client.apply_server_message(complete("background"));
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(model.ui.conversations[0].unread_completion);
+        let other_daemon = ClientState {
+            session_list: client.session_list.clone(),
+            ..ClientState::default()
+        };
+        model.sync_client_metadata(&other_daemon.ui_snapshot());
+        assert!(model
+            .ui
+            .conversations
+            .iter()
+            .all(|item| !item.unread_completion));
+    }
+
+    #[test]
+    fn background_failure_keeps_its_session_and_survives_stale_session_metadata() {
+        use mew_protocol::{AlertKind, ServerMessage, SessionInfo};
+
+        let sessions: Vec<SessionInfo> = serde_json::from_value(serde_json::json!([
+            { "session_id": "background", "state": "idle", "created_at": 0, "client_count": 0 },
+            { "session_id": "selected", "state": "active", "created_at": 0, "client_count": 1 }
+        ]))
+        .unwrap();
+        let mut client = ClientState::default();
+        client.apply_server_message(ServerMessage::SessionList {
+            sessions: sessions.clone(),
+        });
+        client.apply_server_message(ServerMessage::SessionReady {
+            session_id: "selected".into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        });
+        let mut model = ShellModel::starting(None);
+        let events = client.apply_server_message(ServerMessage::SessionAlert {
+            session_id: "background".into(),
+            title: "background work".into(),
+            kind: AlertKind::TurnFailed,
+            detail: Some("provider unavailable".into()),
+        });
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::SessionListChanged)));
+        model.apply_events(&events);
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert_eq!(model.attached_session.as_deref(), Some("selected"));
+        assert!(model.ui.conversations[0].last_turn_failed);
+        assert_eq!(
+            model.ui.conversations[0].failure_detail.as_deref(),
+            Some("provider unavailable")
+        );
+        assert!(!model.ui.conversations[1].last_turn_failed);
+        assert!(model.last_error.is_none());
+
+        client.apply_server_message(ServerMessage::SessionList { sessions });
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(model.ui.conversations[0].last_turn_failed);
+        assert!(!model.ui.conversations[1].last_turn_failed);
+
+        client.apply_server_message(ServerMessage::SessionAlert {
+            session_id: "background".into(),
+            title: "background work".into(),
+            kind: AlertKind::TurnComplete,
+            detail: None,
+        });
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(!model.ui.conversations[0].last_turn_failed);
+        assert!(model.ui.conversations[0].failure_detail.is_none());
+        let mut stale_sessions = client.session_list.clone();
+        stale_sessions[0].last_turn_failed = true;
+        client.apply_server_message(ServerMessage::SessionList {
+            sessions: stale_sessions,
+        });
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(!model.ui.conversations[0].last_turn_failed);
+    }
+
+    #[test]
+    fn retry_failure_detail_belongs_to_the_selected_session() {
+        use mew_protocol::{AlertKind, ServerMessage, SessionState};
+
+        let mut client = ClientState::default();
+        client.apply_server_message(ServerMessage::SessionList {
+            sessions: serde_json::from_value(serde_json::json!([
+                { "session_id": "a", "state": "idle", "created_at": 0, "client_count": 0 },
+                { "session_id": "b", "state": "active", "created_at": 0, "client_count": 1 }
+            ]))
+            .unwrap(),
+        });
+        client.apply_server_message(ServerMessage::SessionReady {
+            session_id: "b".into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        });
+        let mut model = ShellModel::starting(None);
+        let events = client.apply_server_message(ServerMessage::ErrorEvent {
+            message: "b's provider failed".into(),
+        });
+        model.apply_events(&events);
+        client.apply_server_message(ServerMessage::SessionAlert {
+            session_id: "b".into(),
+            title: "b".into(),
+            kind: AlertKind::TurnFailed,
+            detail: None,
+        });
+        client.apply_server_message(ServerMessage::SessionAlert {
+            session_id: "a".into(),
+            title: "a".into(),
+            kind: AlertKind::TurnFailed,
+            detail: None,
+        });
+        let events = client.apply_server_message(ServerMessage::SessionReady {
+            session_id: "a".into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        });
+        model.apply_events(&events);
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert_eq!(model.ui.selected_session.as_deref(), Some("a"));
+        assert!(model.ui.conversations[0].failure_detail.is_none());
+        assert_eq!(
+            model.ui.conversations[1].failure_detail.as_deref(),
+            Some("b's provider failed")
+        );
+        assert!(model.last_error.is_none());
+        client.apply_server_message(ServerMessage::SessionActivityChanged {
+            session_id: "b".into(),
+            activity: SessionState::Running,
+        });
+        model.sync_client_metadata(&client.ui_snapshot());
+        assert!(!model.ui.conversations[1].last_turn_failed);
+        assert!(model.ui.conversations[1].failure_detail.is_none());
+    }
 
     #[test]
     fn composer_stays_busy_between_provider_messages_until_daemon_activity_ends() {

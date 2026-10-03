@@ -2,6 +2,7 @@
 
 use mew_client_core::{
     BrowserState, ClientState, ConnectionStatus, PendingAction, PresenceEntry, SubagentEntry,
+    TurnOutcome,
 };
 use mew_message::{Message, Part, Role, ToolState};
 use mew_protocol::{
@@ -19,6 +20,8 @@ pub struct ConversationItem {
     pub last_message_at: Option<i64>,
     pub state: SessionState,
     pub last_turn_failed: bool,
+    pub failure_detail: Option<String>,
+    pub unread_completion: bool,
     pub needs_attention: bool,
     pub archived: bool,
     pub pinned: bool,
@@ -249,6 +252,17 @@ impl UiModel {
                 if let Some(title) = state.session_titles.get(&session.session_id) {
                     conversation.title = title.clone();
                 }
+                if let Some(outcome) = state.session_turn_outcomes.get(&session.session_id) {
+                    match outcome {
+                        TurnOutcome::Completed => conversation.last_turn_failed = false,
+                        TurnOutcome::Failed { detail } => {
+                            conversation.last_turn_failed = true;
+                            conversation.failure_detail = detail.clone();
+                        }
+                    }
+                }
+                conversation.unread_completion =
+                    state.unread_completions.contains(&session.session_id);
                 conversation
             })
             .collect();
@@ -447,6 +461,8 @@ impl From<&SessionInfo> for ConversationItem {
             last_message_at: session.last_message_at,
             state: session.state,
             last_turn_failed: session.last_turn_failed,
+            failure_detail: None,
+            unread_completion: false,
             needs_attention: session.pending_permissions > 0 || session.pending_questions > 0,
             archived: session.archived,
             pinned: session.pinned,
@@ -1036,8 +1052,10 @@ mod tests {
 
     #[test]
     fn metadata_updates_preserve_the_attached_run_and_required_actions() {
-        let mut state = ClientState::default();
-        state.attached_session = Some(SESSION_ID.into());
+        let mut state = ClientState {
+            attached_session: Some(SESSION_ID.into()),
+            ..ClientState::default()
+        };
         let session = state.session_mut(SESSION_ID);
         session.running = true;
         session.pending_actions.push(PendingAction {

@@ -153,6 +153,8 @@ final class AppStore: ObservableObject {
     @Published var alerts: [AlertItem] = []
     @Published var activeBanner: AlertItem?
 
+    @Published private var pendingSubmissions: [String: Set<String>] = [:]
+
     // Retry: last prompt per session + per-session turn-failure tracking
     @Published var lastPrompt: [String: String] = [:]
     @Published var lastTurnFailed: [String: Bool] = [:]
@@ -250,6 +252,13 @@ final class AppStore: ObservableObject {
         }
     }
 
+    func openAlertSession(_ alert: AlertItem) {
+        guard !alert.sessionId.isEmpty,
+              alert.daemon != selectedDaemonId?.nodeId || alert.sessionId != selectedSessionId else { return }
+        selectedDaemonId = DaemonId(nodeId: alert.daemon)
+        path.append(.chat(daemonNodeId: alert.daemon, sessionId: alert.sessionId))
+    }
+
     func selectSession(_ sessionId: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
         selectedSessionId = sessionId
@@ -298,12 +307,23 @@ final class AppStore: ObservableObject {
         return "\(sessionId)::\(p)"
     }
 
-    func sendPrompt(_ text: String) {
-        guard let daemonId = selectedDaemonId, let core else { return }
+    var canSendPrompt: Bool {
+        guard !isStreaming, let daemonId = selectedDaemonId,
+              let sessionId = selectedSessionId,
+              case .connected? = daemonStatuses[daemonId.nodeId],
+              let snapshot = core?.snapshot(id: daemonId) else { return false }
+        return snapshot.attachedSession == sessionId && pendingSubmissions[daemonId.nodeId]?.contains(sessionId) != true
+    }
+
+    @discardableResult
+    func sendPrompt(_ text: String) -> Bool {
+        guard canSendPrompt, let daemonId = selectedDaemonId, let core,
+              core.prompt(id: daemonId, text: text) else { return false }
         if let sessionId = selectedSessionId {
+            pendingSubmissions[daemonId.nodeId, default: []].insert(sessionId)
             lastPrompt[sessionId] = text
         }
-        core.prompt(id: daemonId, text: text)
+        return true
     }
 
     /// Re-send the last prompt for the selected session (retry after a failed
@@ -313,8 +333,10 @@ final class AppStore: ObservableObject {
         guard let sessionId = selectedSessionId,
               let prompt = lastPrompt[sessionId],
               !prompt.isEmpty else { return }
-        lastTurnFailed[sessionId] = false
-        core.prompt(id: daemonId, text: prompt)
+        if canSendPrompt, core.prompt(id: daemonId, text: prompt) {
+            pendingSubmissions[daemonId.nodeId, default: []].insert(sessionId)
+            lastTurnFailed[sessionId] = false
+        }
     }
 
     func cancelTurn() {
@@ -362,9 +384,10 @@ final class AppStore: ObservableObject {
         core.setPermissionMode(id: daemonId, mode: mode)
     }
 
-    func sendSlashCommand(_ command: String) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.slashCommand(id: daemonId, command: command)
+    @discardableResult
+    func sendSlashCommand(_ command: String) -> Bool {
+        guard canSendPrompt, let daemonId = selectedDaemonId, let core else { return false }
+        return core.slashCommand(id: daemonId, command: command)
     }
 
     func setThinkingVariant(_ variant: String) {
@@ -379,16 +402,7 @@ final class AppStore: ObservableObject {
 
     func switchPersona(name: String) {
         guard let daemonId = selectedDaemonId, let core else { return }
-        // "default" is a client-side concept meaning "no persona selected."
-        // The daemon has no persona named "default" — sending SwitchPersona
-        // would return an error. Just clear locally.
-        if name == "default" {
-            currentPersona[daemonId.nodeId] = nil
-        } else {
-            // Optimistic update — PersonaSwitched event will confirm.
-            currentPersona[daemonId.nodeId] = name
-            core.switchPersona(id: daemonId, name: name)
-        }
+        core.switchPersona(id: daemonId, name: name)
     }
 
     func setAutoTitle(enabled: Bool) {
@@ -433,6 +447,8 @@ final class AppStore: ObservableObject {
                     let id = DaemonId(nodeId: daemon)
                     core.listSessions(id: id)
                 }
+            } else {
+                pendingSubmissions.removeValue(forKey: daemon)
             }
 
         case .daemonVersion(let daemon, let version):
@@ -463,7 +479,8 @@ final class AppStore: ObservableObject {
             directoryLoading.remove(key)
             objectWillChange.send()
 
-        case .sessionReady(let daemon, _):
+        case .sessionReady(let daemon, let sessionId):
+            pendingSubmissions[daemon]?.remove(sessionId)
             pendingPermissions.removeAll { $0.daemon == daemon }
             pendingAskUser.removeAll { $0.daemon == daemon }
             pendingGoals.removeAll { $0.daemon == daemon }
@@ -505,6 +522,7 @@ final class AppStore: ObservableObject {
             updatePartInMessages(partId: partId)
 
         case .sessionActivityChanged(let daemon, let sessionId, let running):
+            if running { pendingSubmissions[daemon]?.remove(sessionId) }
             guard selectedDaemonId?.nodeId == daemon, selectedSessionId == sessionId else { return }
             isStreaming = running
             if !running {
@@ -573,18 +591,26 @@ final class AppStore: ObservableObject {
             pendingPermissions.removeAll { $0.daemon == daemon && $0.requestId == requestId }
             pendingAskUser.removeAll { $0.daemon == daemon && $0.requestId == requestId }
 
-        case .alert(_, let sessionId, let kind, let title, let detail):
+        case .alert(let daemon, let sessionId, let kind, let title, let detail):
+            switch kind {
+            case "error", "turncomplete", "turnfailed":
+                pendingSubmissions[daemon]?.remove(sessionId)
+            default:
+                break
+            }
             let item = AlertItem(
+                daemon: daemon,
                 sessionId: sessionId,
                 kind: kind,
                 title: title,
                 detail: detail
             )
             alerts.append(item)
-            // Show banner if the alert is for a different session than the one
-            // the user is currently viewing.
-            if sessionId != selectedSessionId {
+            if kind == "error" || daemon != selectedDaemonId?.nodeId || sessionId != selectedSessionId {
                 activeBanner = item
+            }
+            if kind == "error", daemon == selectedDaemonId?.nodeId, sessionId == selectedSessionId {
+                lastTurnFailed[sessionId] = true
             }
 
         case .attentionChanged(let daemon, let sessionId, let permissions, let questions):
@@ -634,6 +660,7 @@ final class AppStore: ObservableObject {
 
         case .personaList(let daemon, let personas):
             availablePersonas[daemon] = personas
+            currentPersona[daemon] = personas.first(where: { $0.active })?.name
 
         case .personaSwitched(let daemon, let name):
             currentPersona[daemon] = name
@@ -714,6 +741,7 @@ struct DirListing {
 
 struct AlertItem: Identifiable, Equatable {
     let id = UUID()
+    let daemon: String
     let sessionId: String
     let kind: String
     let title: String

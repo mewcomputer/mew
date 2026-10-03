@@ -923,9 +923,10 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     func pinSession(id: DaemonId, sessionId: String, pinned: Bool) 
     
     /**
-     * Send a prompt to the attached session on a daemon.
+     * Queue a prompt only after the requested session is confirmed.
+     * False leaves the caller's composer and transcript unchanged.
      */
-    func prompt(id: DaemonId, text: String) 
+    func prompt(id: DaemonId, text: String)  -> Bool
     
     /**
      * Remove a daemon from the registry and disconnect.
@@ -981,7 +982,7 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     /**
      * Send a slash command to the daemon. Response comes as SlashResult event.
      */
-    func slashCommand(id: DaemonId, command: String) 
+    func slashCommand(id: DaemonId, command: String)  -> Bool
     
     /**
      * Get a full snapshot of a daemon's state.
@@ -1301,16 +1302,18 @@ open func pinSession(id: DaemonId, sessionId: String, pinned: Bool)  {try! rustC
 }
     
     /**
-     * Send a prompt to the attached session on a daemon.
+     * Queue a prompt only after the requested session is confirmed.
+     * False leaves the caller's composer and transcript unchanged.
      */
-open func prompt(id: DaemonId, text: String)  {try! rustCall() {
+open func prompt(id: DaemonId, text: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_mew_mobile_core_fn_method_mobilecore_prompt(
             self.uniffiCloneHandle(),
         FfiConverterTypeDaemonId_lower(id),
         FfiConverterString.lower(text),uniffiCallStatus
     )
-}
+})
 }
     
     /**
@@ -1449,14 +1452,15 @@ open func setThinkingVariant(id: DaemonId, variant: String)  {try! rustCall() {
     /**
      * Send a slash command to the daemon. Response comes as SlashResult event.
      */
-open func slashCommand(id: DaemonId, command: String)  {try! rustCall() {
+open func slashCommand(id: DaemonId, command: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
         uniffiCallStatus in
     uniffi_mew_mobile_core_fn_method_mobilecore_slash_command(
             self.uniffiCloneHandle(),
         FfiConverterTypeDaemonId_lower(id),
         FfiConverterString.lower(command),uniffiCallStatus
     )
-}
+})
 }
     
     /**
@@ -4691,7 +4695,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_pin_session() != 39853) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mew_mobile_core_checksum_method_mobilecore_prompt() != 40469) {
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_prompt() != 57596) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_remove_daemon() != 48368) {
@@ -4724,7 +4728,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_set_thinking_variant() != 62301) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_mew_mobile_core_checksum_method_mobilecore_slash_command() != 9123) {
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_slash_command() != 49599) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_snapshot() != 7085) {

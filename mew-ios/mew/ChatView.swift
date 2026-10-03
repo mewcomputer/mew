@@ -262,7 +262,7 @@ struct ChatView: View {
     /// session was attached fresh after a failure (no Swift-side prompt
     /// captured), the button is disabled.
     private var canRetry: Bool {
-        (store.lastPrompt[sessionId]?.isEmpty == false)
+        store.canSendPrompt && (store.lastPrompt[sessionId]?.isEmpty == false)
     }
 
     @ViewBuilder
@@ -392,17 +392,17 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !store.isStreaming
+        !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && store.canSendPrompt
     }
 
     private func send() {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !store.isStreaming else { return }
+        guard !trimmed.isEmpty, store.canSendPrompt else { return }
         if trimmed.hasPrefix("/") {
             // Slash commands go to the daemon's slash handler, not the LLM.
-            store.sendSlashCommand(trimmed)
+            guard store.sendSlashCommand(trimmed) else { return }
         } else {
-            store.sendPrompt(trimmed)
+            guard store.sendPrompt(trimmed) else { return }
         }
         inputText = ""
     }

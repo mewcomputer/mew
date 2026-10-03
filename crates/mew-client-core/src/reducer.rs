@@ -2,11 +2,11 @@
 
 use mew_message::{AssistantMeta, Message, Part, PartId, ProviderEventWire, Role, Time, ToolState};
 use mew_protocol::{
-    ClientKind, ClientMessage, DirEntry, FlaggedFileWire, GroupInfo, ModelInfo, PermissionDecision,
-    PersonaInfo, ProjectInfo, Question, RemoteScope, ServerMessage, SessionInfo, SessionUsageWire,
-    Todo,
+    AlertKind, ClientKind, ClientMessage, DirEntry, FlaggedFileWire, GroupInfo, ModelInfo,
+    PermissionDecision, PersonaInfo, ProjectInfo, Question, RemoteScope, ServerMessage,
+    SessionInfo, SessionUsageWire, Todo,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use ulid::Ulid;
 
@@ -313,6 +313,12 @@ pub enum ClientEvent {
     Error(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnOutcome {
+    Completed,
+    Failed { detail: Option<String> },
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ClientState {
     pub connection: Option<ConnectionStatus>,
@@ -322,6 +328,8 @@ pub struct ClientState {
     pub sessions: BTreeMap<String, ClientSession>,
     pub session_list: Vec<SessionInfo>,
     pub session_titles: BTreeMap<String, String>,
+    pub session_turn_outcomes: BTreeMap<String, TurnOutcome>,
+    pub unread_completions: BTreeSet<String>,
     pub groups: Vec<GroupInfo>,
     pub projects: Vec<ProjectInfo>,
     pub models: Vec<ModelInfo>,
@@ -365,6 +373,8 @@ impl ClientState {
             sessions: BTreeMap::new(),
             session_list: self.session_list.clone(),
             session_titles: self.session_titles.clone(),
+            session_turn_outcomes: self.session_turn_outcomes.clone(),
+            unread_completions: self.unread_completions.clone(),
             groups: self.groups.clone(),
             projects: self.projects.clone(),
             models: self.models.clone(),
@@ -426,6 +436,7 @@ impl ClientState {
                 permission_mode,
             } => {
                 self.attached_session = Some(session_id.clone());
+                self.unread_completions.remove(&session_id);
                 let session = self.session_mut(&session_id);
                 session.cwd = cwd;
                 session.model = model.clone();
@@ -449,6 +460,36 @@ impl ClientState {
             }
             ServerMessage::SessionTitleChanged { session_id, title } => {
                 self.session_titles.insert(session_id, title);
+                vec![ClientEvent::SessionListChanged]
+            }
+            ServerMessage::SessionAlert {
+                session_id,
+                kind,
+                detail,
+                ..
+            } => {
+                let outcome = match kind {
+                    AlertKind::TurnComplete => {
+                        if self.attached_session.as_deref() == Some(&session_id) {
+                            self.unread_completions.remove(&session_id);
+                        } else {
+                            self.unread_completions.insert(session_id.clone());
+                        }
+                        TurnOutcome::Completed
+                    }
+                    AlertKind::TurnFailed => {
+                        self.unread_completions.remove(&session_id);
+                        let detail = detail.or_else(|| {
+                            match self.session_turn_outcomes.remove(&session_id) {
+                                Some(TurnOutcome::Failed { detail }) => detail,
+                                _ => None,
+                            }
+                        });
+                        TurnOutcome::Failed { detail }
+                    }
+                    AlertKind::PermissionNeeded | AlertKind::InputNeeded => return Vec::new(),
+                };
+                self.session_turn_outcomes.insert(session_id, outcome);
                 vec![ClientEvent::SessionListChanged]
             }
             ServerMessage::SessionSummaryChanged {
@@ -476,6 +517,10 @@ impl ClientState {
                     session.state = activity;
                 }
                 let running = activity == mew_protocol::SessionState::Running;
+                if running {
+                    self.unread_completions.remove(&session_id);
+                    self.session_turn_outcomes.remove(&session_id);
+                }
                 let session = self.session_mut(&session_id);
                 session.running = running;
                 if !running {
@@ -917,7 +962,18 @@ impl ClientState {
             // The daemon pushes this after a WatchWorkspace subscription; the
             // client is expected to re-request a `ListDir`, like the web UI.
             ServerMessage::FsChanged { .. } => vec![ClientEvent::FileTreeChanged],
-            ServerMessage::Error { message } | ServerMessage::ErrorEvent { message } => {
+            ServerMessage::ErrorEvent { message } => {
+                if let Some(session_id) = &self.attached_session {
+                    self.session_turn_outcomes.insert(
+                        session_id.clone(),
+                        TurnOutcome::Failed {
+                            detail: Some(message.clone()),
+                        },
+                    );
+                }
+                vec![ClientEvent::SessionListChanged, ClientEvent::Error(message)]
+            }
+            ServerMessage::Error { message } => {
                 vec![ClientEvent::Error(message)]
             }
             _ => Vec::new(),

@@ -39,3 +39,4 @@ unicode-segmentation = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 mew-message = { workspace = true }
+tokio-tungstenite = { workspace = true }

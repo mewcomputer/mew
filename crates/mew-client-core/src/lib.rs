@@ -13,7 +13,7 @@ pub use codec::{decode_server_message_lenient, encode_client_message};
 pub use engine::ClientEngine;
 pub use reducer::{
     ActionKind, BrowserState, ClientEvent, ClientSession, ClientState, ConnectionStatus,
-    PendingAction, PresenceEntry, SessionEvent, SubagentEntry,
+    PendingAction, PresenceEntry, SessionEvent, SubagentEntry, TurnOutcome,
 };
 pub use transport::{
     ClientConnection, ClientTransport, InMemoryConnection, InMemoryTransport, TransportError,

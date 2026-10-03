@@ -1760,6 +1760,8 @@ mod tests {
             last_message_at: None,
             state: mew_protocol::SessionState::Idle,
             last_turn_failed: false,
+            failure_detail: None,
+            unread_completion: false,
             needs_attention: false,
             archived: false,
             pinned: false,

@@ -1297,3 +1297,30 @@ setup 22 and agent 185 pass. Full daemon checks passed 44 unit, 6 concurrency,
 the updated policy suite passes. Full CLI passed 172 unit and 3 integration tests.
 Scoped all-target clippy, format and diff checks pass. Next work is final native
 reconnect and delivery feedback.
+
+# 2026-10-03 — Recover native connections and show task outcomes
+
+Mobile owns and cancels connection tasks, separates requested from confirmed
+attachments and rejects commands queued for an obsolete connection/session.
+Offline submissions retain the composer and do not create phantom messages.
+Accepted submissions reserve their daemon/session until acknowledgement, closing
+the double-send window without inventing Running activity. Delivery failures and
+reconnect reset that reservation. History and deltas retain their original session.
+The redundant compatibility history conversion was removed; canonical state is
+projected once.
+
+Native desktop retains completion/failure outcomes for background conversations,
+marks unseen completions in the rail and shows the correct session's failure with
+retry even after a partial assistant response. Activity and metadata stay
+authoritative. iOS routes action navigation and replies to the origin daemon and
+session, and clears input only after successful enqueue.
+
+Regression tests reproduced offline/stale delivery, history leakage, lost
+background outcomes, partial-turn retry and duplicate submissions before Running.
+Mobile 41, real iroh reconnect 3, desktop 122, shared core 38 and UI model 12 pass.
+Matching host, device and simulator libraries, generated bindings and XCFramework
+were rebuilt; actual iOS 31 tests pass with no skipped tests. Scoped clippy passes.
+The three independent code review lenses found the submission race now fixed and
+redundant history work now removed; no other required findings remain.
+Next work is native browser ownership/readiness/pumping and daemon-backed fresh
+review. Actual CEF focus, bounds and rendering still require an unlocked Mac.

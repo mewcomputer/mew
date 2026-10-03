@@ -1230,19 +1230,22 @@ impl DesktopShell {
             self.transcript_text_registry.borrow_mut().clear();
         }
         let selected_session = self.model.ui.selected_session.is_some();
-        let last_turn_failed = self
-            .model
-            .ui
-            .selected_session
-            .as_deref()
-            .and_then(|selected| {
-                self.model
-                    .ui
-                    .conversations
-                    .iter()
-                    .find(|conversation| conversation.session_id == selected)
-            })
-            .is_some_and(|conversation| conversation.last_turn_failed);
+        let selected_conversation =
+            self.model
+                .ui
+                .selected_session
+                .as_deref()
+                .and_then(|selected| {
+                    self.model
+                        .ui
+                        .conversations
+                        .iter()
+                        .find(|conversation| conversation.session_id == selected)
+                });
+        let last_turn_failed =
+            selected_conversation.is_some_and(|conversation| conversation.last_turn_failed);
+        let failure_detail =
+            selected_conversation.and_then(|conversation| conversation.failure_detail.clone());
         let last_message_is_user = self
             .model
             .ui
@@ -1320,7 +1323,7 @@ impl DesktopShell {
                             .child(self.render_transcript_attention(
                                 attention,
                                 if matches!(attention, TranscriptAttention::Failed) {
-                                    last_error.as_deref()
+                                    failure_detail.as_deref()
                                 } else {
                                     None
                                 },

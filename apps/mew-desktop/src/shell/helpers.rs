@@ -1051,7 +1051,8 @@ fn visible_tasks(
             || Some(conversation.session_id.as_str()) == selected_session
             || conversation.needs_attention
             || conversation.state == mew_protocol::SessionState::Running
-            || conversation.last_turn_failed;
+            || conversation.last_turn_failed
+            || conversation.unread_completion;
         if forced
             || conversation.pinned
             || visible
@@ -1240,6 +1241,8 @@ mod workspace_tests {
             last_message_at: Some(id as i64),
             state: SessionState::Idle,
             last_turn_failed: false,
+            failure_detail: None,
+            unread_completion: false,
             needs_attention: false,
             archived: false,
             pinned,
@@ -1303,6 +1306,26 @@ mod workspace_tests {
         assert!(!rows
             .iter()
             .any(|row| matches!(row, SidebarRow::ShowMore { .. })));
+    }
+
+    #[test]
+    fn unseen_completion_remains_discoverable_beyond_the_recent_task_limit() {
+        let mut tasks = (0..7)
+            .map(|id| task(id, Some("/work/app"), false))
+            .collect::<Vec<_>>();
+        tasks[0].unread_completion = true;
+        let rows = build_workspace_sidebar_rows(
+            &tasks,
+            &[project("/work/app", false)],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            "",
+            None,
+        );
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::Session(item) if item.session_id == "session-0" && item.unread_completion
+        )));
     }
 }
 
@@ -1445,13 +1468,15 @@ pub(super) fn transcript_attention(
     last_turn_failed: bool,
     has_pending_action: bool,
 ) -> Option<TranscriptAttention> {
-    if !last_message_is_user || has_pending_action {
+    if has_pending_action {
         return None;
     }
-    if running {
-        Some(TranscriptAttention::Running)
-    } else if last_turn_failed {
+    if !running && last_turn_failed {
         Some(TranscriptAttention::Failed)
+    } else if !last_message_is_user {
+        None
+    } else if running {
+        Some(TranscriptAttention::Running)
     } else {
         Some(TranscriptAttention::Waiting)
     }

@@ -496,6 +496,8 @@ mod shell_tests {
             last_message_at: None,
             state: mew_protocol::SessionState::Idle,
             last_turn_failed: false,
+            failure_detail: None,
+            unread_completion: false,
             needs_attention: false,
             archived: false,
             pinned: false,
@@ -595,6 +597,16 @@ mod shell_tests {
     fn pending_actions_replace_generic_working_status() {
         assert_eq!(transcript_attention(true, true, false, true), None);
         assert_eq!(transcript_attention(true, false, true, true), None);
+    }
+
+    #[test]
+    fn failed_partial_assistant_turn_has_retry_attention() {
+        assert_eq!(
+            transcript_attention(false, false, true, false),
+            Some(TranscriptAttention::Failed)
+        );
+        assert_eq!(transcript_attention(false, true, true, false), None);
+        assert_eq!(transcript_attention(false, false, true, true), None);
     }
 
     #[test]
@@ -1266,6 +1278,8 @@ mod shell_tests {
             last_message_at,
             state: mew_protocol::SessionState::Idle,
             last_turn_failed: false,
+            failure_detail: None,
+            unread_completion: false,
             needs_attention: false,
             archived,
             pinned: false,

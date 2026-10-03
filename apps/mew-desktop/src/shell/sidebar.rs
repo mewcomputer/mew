@@ -667,6 +667,8 @@ impl DesktopShell {
                         theme_rgb(&self.theme, "yellow.fg")
                     } else if conversation.last_turn_failed {
                         theme_rgb(&self.theme, "red.fg")
+                    } else if conversation.unread_completion {
+                        theme_rgb(&self.theme, "green.fg")
                     } else if selected {
                         theme_rgb(&self.theme, "text.body")
                     } else {
@@ -678,6 +680,8 @@ impl DesktopShell {
                         Some("running")
                     } else if conversation.last_turn_failed {
                         Some("failed")
+                    } else if conversation.unread_completion {
+                        Some("completed")
                     } else {
                         None
                     };

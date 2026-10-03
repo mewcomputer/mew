@@ -11,10 +11,12 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     var goalResponseCalls: [(nodeId: String, requestId: String, accepted: Bool)] = []
     var permissionResponseCalls: [(nodeId: String, requestId: String, decision: Decision)] = []
     var askUserResponseCalls: [(nodeId: String, requestId: String, answers: [String])] = []
+    var promptAccepted = true
     var promptCalls: [(nodeId: String, text: String)] = []
     var slashCommandCalls: [(nodeId: String, command: String)] = []
     var setPermissionModeCalls: [(nodeId: String, mode: String)] = []
     var setThinkingVariantCalls: [(nodeId: String, variant: String)] = []
+    var switchPersonaCalls: [(nodeId: String, name: String)] = []
     var switchModelCalls: [(nodeId: String, provider: String, model: String)] = []
     var connectCalls: [String] = []
     var cancelCalls: [String] = []
@@ -61,8 +63,9 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
 
     func snapshot(id: DaemonId) -> DaemonSnapshot? { snapshotResult }
 
-    func prompt(id: DaemonId, text: String) {
+    func prompt(id: DaemonId, text: String) -> Bool {
         promptCalls.append((id.nodeId, text))
+        return promptAccepted
     }
 
     func cancel(id: DaemonId) { cancelCalls.append(id.nodeId) }
@@ -88,7 +91,9 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     }
 
     func listPersonas(id: DaemonId) {}
-    func switchPersona(id: DaemonId, name: String) {}
+    func switchPersona(id: DaemonId, name: String) {
+        switchPersonaCalls.append((id.nodeId, name))
+    }
 
     func setAutoTitle(id: DaemonId, enabled: Bool) {}
     func setAutoSummary(id: DaemonId, enabled: Bool) {}
@@ -97,8 +102,9 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
         setPermissionModeCalls.append((id.nodeId, mode))
     }
 
-    func slashCommand(id: DaemonId, command: String) {
+    func slashCommand(id: DaemonId, command: String) -> Bool {
         slashCommandCalls.append((id.nodeId, command))
+        return promptAccepted
     }
 
     func setThinkingVariant(id: DaemonId, variant: String) {

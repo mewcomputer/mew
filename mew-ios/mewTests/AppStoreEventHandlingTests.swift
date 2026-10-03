@@ -19,6 +19,70 @@ final class AppStoreEventHandlingTests: XCTestCase {
         store.selectedSessionId = "sess-1"
     }
 
+    func testRejectedPromptPreservesRetryTextAndWaitsForConfirmedAttachment() {
+        mock.snapshotResult = DaemonSnapshot(sessions: [], attachedSession: "sess-1", pendingPermissions: [],
+            pendingAskUser: [], models: [], daemonVersion: nil, permissionMode: nil,
+            currentModel: nil, currentProvider: nil, thinkingVariant: nil,
+            currentPersona: nil, availablePersonas: [])
+        store.daemonStatuses["daemon-1"] = .connected
+        mock.promptAccepted = false
+        store.lastPrompt["sess-1"] = "previous"
+        XCTAssertFalse(store.sendPrompt("new text"))
+        XCTAssertEqual(store.lastPrompt["sess-1"], "previous")
+        mock.promptAccepted = true
+        XCTAssertTrue(store.sendPrompt("accepted"))
+        XCTAssertEqual(store.lastPrompt["sess-1"], "accepted")
+        store.selectedSessionId = "sess-2"
+        XCTAssertFalse(store.canSendPrompt)
+        XCTAssertFalse(store.sendPrompt("wrong session"))
+        XCTAssertEqual(mock.promptCalls.count, 2)
+        store.selectedSessionId = "sess-1"
+        store.daemonStatuses["daemon-1"] = .backoff(attempt: 0, error: "offline")
+        XCTAssertFalse(store.canSendPrompt)
+    }
+
+    func testRepeatedSubmissionReservesUntilAuthoritativeRunAndRecoversFromError() {
+        mock.snapshotResult = DaemonSnapshot(sessions: [], attachedSession: "sess-1", pendingPermissions: [],
+            pendingAskUser: [], models: [], daemonVersion: nil, permissionMode: nil,
+            currentModel: nil, currentProvider: nil, thinkingVariant: nil,
+            currentPersona: nil, availablePersonas: [])
+        store.daemonStatuses["daemon-1"] = .connected
+        XCTAssertTrue(store.sendPrompt("first"))
+        XCTAssertFalse(store.isStreaming)
+        XCTAssertFalse(store.canSendPrompt)
+        XCTAssertFalse(store.sendPrompt("second"))
+        XCTAssertEqual(mock.promptCalls.count, 1)
+        store.handleEvent(.alert(daemon: "daemon-2", sessionId: "sess-1", kind: "error", title: "Other daemon", detail: nil))
+        XCTAssertFalse(store.canSendPrompt)
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-2", sessionId: "sess-1", running: true))
+        XCTAssertFalse(store.canSendPrompt)
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true))
+        XCTAssertTrue(store.isStreaming)
+        store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: false))
+        XCTAssertTrue(store.sendPrompt("next"))
+        store.handleEvent(.alert(daemon: "daemon-1", sessionId: "sess-1", kind: "error", title: "Rejected", detail: nil))
+        XCTAssertTrue(store.canSendPrompt)
+        XCTAssertTrue(store.sendPrompt("retry"))
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .backoff(attempt: 0, error: "closed")))
+        XCTAssertFalse(store.canSendPrompt)
+        store.handleEvent(.daemonStatusChanged(daemon: "daemon-1", status: .connected))
+        store.handleEvent(.sessionReady(daemon: "daemon-1", sessionId: "sess-1"))
+        XCTAssertTrue(store.canSendPrompt)
+    }
+
+    func testPersonaChoicesWaitForDaemonConfirmationIncludingDefault() {
+        store.currentPersona["daemon-1"] = "planner"
+        store.switchPersona(name: "default")
+        XCTAssertEqual(mock.switchPersonaCalls.last?.name, "default")
+        XCTAssertEqual(store.currentPersona["daemon-1"], "planner")
+        store.switchPersona(name: "builder")
+        XCTAssertEqual(store.currentPersona["daemon-1"], "planner")
+        store.handleEvent(.personaList(daemon: "daemon-2", personas: []))
+        XCTAssertEqual(store.currentPersona["daemon-1"], "planner")
+        store.handleEvent(.personaList(daemon: "daemon-1", personas: []))
+        XCTAssertNil(store.currentPersona["daemon-1"])
+    }
+
     func testProviderCompletionKeepsRunBusyUntilDaemonActivityEnds() {
         store.handleEvent(.sessionActivityChanged(daemon: "daemon-1", sessionId: "sess-1", running: true))
         store.handleEvent(.providerMessageEnded(daemon: "daemon-1", sessionId: "sess-1",
@@ -295,6 +359,27 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertNotNil(store.activeBanner)
         XCTAssertEqual(store.activeBanner?.sessionId, "sess-2")
         XCTAssertEqual(store.activeBanner?.title, "Permission needed")
+    }
+
+    func testDeliveryErrorsAreVisibleAndRetainDaemonOrigin() {
+        store.handleEvent(.alert(daemon: "daemon-1", sessionId: "sess-1",
+            kind: "error", title: "Message delivery interrupted", detail: "Check history before retrying."))
+        XCTAssertEqual(store.activeBanner?.daemon, "daemon-1")
+        XCTAssertEqual(store.lastTurnFailed["sess-1"], true)
+        store.lastTurnFailed["sess-1"] = false
+        store.handleEvent(.alert(daemon: "daemon-2", sessionId: "sess-1",
+            kind: "error", title: "Other daemon", detail: nil))
+        XCTAssertEqual(store.activeBanner?.daemon, "daemon-2")
+        XCTAssertEqual(store.lastTurnFailed["sess-1"], false)
+    }
+
+    func testOpeningAnAlertNavigatesOnItsOriginatingDaemon() {
+        store.handleEvent(.alert(daemon: "daemon-2", sessionId: "sess-2",
+            kind: "error", title: "Other daemon", detail: nil))
+        let alert = store.activeBanner!
+        store.openAlertSession(alert)
+        XCTAssertEqual(store.selectedDaemonId?.nodeId, "daemon-2")
+        XCTAssertEqual(store.path.last, .chat(daemonNodeId: "daemon-2", sessionId: "sess-2"))
     }
 
     func testAlertDoesNotSetBannerForActiveSession() {

@@ -361,7 +361,7 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_pin_session(uint64_t ptr, RustB
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_PROMPT
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_PROMPT
-void uniffi_mew_mobile_core_fn_method_mobilecore_prompt(uint64_t ptr, RustBuffer id, RustBuffer text, RustCallStatus *_Nonnull out_status
+int8_t uniffi_mew_mobile_core_fn_method_mobilecore_prompt(uint64_t ptr, RustBuffer id, RustBuffer text, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_REMOVE_DAEMON
@@ -416,7 +416,7 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_set_thinking_variant(uint64_t p
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SLASH_COMMAND
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SLASH_COMMAND
-void uniffi_mew_mobile_core_fn_method_mobilecore_slash_command(uint64_t ptr, RustBuffer id, RustBuffer command, RustCallStatus *_Nonnull out_status
+int8_t uniffi_mew_mobile_core_fn_method_mobilecore_slash_command(uint64_t ptr, RustBuffer id, RustBuffer command, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_SNAPSHOT
