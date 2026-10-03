@@ -167,6 +167,7 @@ fn to_mobile_segment_kind(k: &mew_message::SegmentKind) -> MobileSegmentKind {
 /// A pending permission request.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PendingPermission {
+    pub daemon: String,
     pub request_id: String,
     pub session_id: String,
     pub tool_name: String,
@@ -176,6 +177,7 @@ pub struct PendingPermission {
 /// A pending ask-user request.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PendingAskUser {
+    pub daemon: String,
     pub request_id: String,
     pub session_id: String,
     pub call_id: String,

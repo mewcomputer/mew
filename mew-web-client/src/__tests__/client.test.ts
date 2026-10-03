@@ -250,6 +250,26 @@ test("manual persona selection waits for the daemon's confirmed persona", async 
   assert.deepEqual(personas, ["builder"]);
 });
 
+test("proposed goals can be accepted or rejected using the request ID", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connectP = client.connect();
+  setImmediate(() => latest().open());
+  await connectP;
+  const goals: unknown[] = [];
+  client.on("goal-proposed", (data) => goals.push(data));
+
+  latest().peerSend({ type: "goal_proposed", request_id: "g1", call_id: "c1", objective: "ship the change" });
+  client.respondToGoal("g1", true);
+  client.respondToGoal("g2", false);
+
+  assert.deepEqual(goals, [{ request_id: "g1", call_id: "c1", objective: "ship the change" }]);
+  assert.deepEqual(latest().sent, [
+    { type: "goal_response", request_id: "g1", accepted: true },
+    { type: "goal_response", request_id: "g2", accepted: false },
+  ]);
+});
+
 for (const [response, expectedProtocol] of [
   [{ type: "pong", version: "0.1.0", protocol_version: 1 }, 1],
   [{ type: "pong", version: "0.1.0" }, 0],

@@ -53,6 +53,10 @@ export type ClientMessage = {
     request_id: string;
     answers: string[];
 } | {
+    type: "goal_response";
+    request_id: string;
+    accepted: boolean;
+} | {
     type: "slash_command";
     command: string;
 } | {
@@ -526,6 +530,11 @@ export type ServerMessage = {
     call_id: string;
     questions: Question[];
 } | {
+    type: "goal_proposed";
+    request_id: string;
+    call_id: string;
+    objective: string;
+} | {
     type: "subagent_start";
     parent_call_id: string;
     name: string;
@@ -762,6 +771,11 @@ export interface MewClientEvents {
         request_id: string;
         call_id: string;
         questions: Question[];
+    }) => void;
+    "goal-proposed": (data: {
+        request_id: string;
+        call_id: string;
+        objective: string;
     }) => void;
     "subagent-start": (data: {
         parent_call_id: string;
@@ -1000,6 +1014,8 @@ export declare class MewClient {
     /** Respond to an `ask_user_request`. The UI calls this after the user
      *  submits answers to the questions. */
     respondToAskUser(request_id: string, answers: string[]): void;
+    /** Accept or reject a proposed goal using its original request ID. */
+    respondToGoal(request_id: string, accepted: boolean): void;
     /** Attach to an existing session (active or idle). If the session is idle,
      *  the daemon loads its persisted history from disk and sends a
      *  `session-history` event. Resolves with the session id. */

@@ -2,7 +2,7 @@ use mew_agent::{AgentEvent, AskUserQuestion};
 use mew_message::{Message, Part, PartId, Role, ToolState};
 use mew_provider::ProviderEvent;
 use ratatui::layout::Rect;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -100,6 +100,9 @@ pub struct App {
     pub permission: Option<PermissionState>,
     pub user_question: Option<UserQuestionState>,
     pub goal_proposal: Option<GoalProposalState>,
+    /// Identity of the daemon request currently shown in the input overlay.
+    pub daemon_request_id: Option<String>,
+    daemon_required_actions: VecDeque<(String, AgentEvent)>,
     /// The user's active goal (sidebar chip + status), mirroring the
     /// daemon's authoritative state.
     pub active_goal: Option<GoalView>,
@@ -738,6 +741,8 @@ impl App {
             permission: None,
             user_question: None,
             goal_proposal: None,
+            daemon_request_id: None,
+            daemon_required_actions: VecDeque::new(),
             active_goal: None,
             goal_compose: None,
             persona_switch_confirm: None,
@@ -905,6 +910,16 @@ impl App {
                     (*pending_permissions, *pending_questions),
                 );
             }
+            ServerMessage::SessionActivityChanged {
+                session_id,
+                activity,
+            } if session_id == &self.status.session_id
+                && *activity == mew_protocol::SessionState::Idle =>
+            {
+                // Passive observers have no prompt stream to clear a pending
+                // cancellation. Active streams still finish after buffered events.
+                self.cancelling = false;
+            }
             ServerMessage::SessionAlert {
                 title,
                 kind,
@@ -1035,6 +1050,7 @@ impl App {
                 permission_mode,
                 ..
             } => {
+                self.clear_daemon_required_actions();
                 self.status.session_id = session_id.clone();
                 // On attach, update the active model/provider from the
                 // daemon's session state. Fields may be empty if the
@@ -1091,11 +1107,62 @@ impl App {
                     })
                     .collect();
             }
+            ServerMessage::RequestResolved { request_id } => {
+                self.daemon_required_actions
+                    .retain(|(id, _)| id != request_id);
+                if self.daemon_request_id.as_ref() == Some(request_id) {
+                    self.clear_daemon_required_action();
+                    self.show_next_daemon_required_action();
+                }
+            }
             _ => {
                 // Other notifications (ClientAttached, FsChanged, etc.)
                 // are not yet consumed by the TUI.
             }
         }
+    }
+
+    /// Show daemon input requests in arrival order without losing concurrent
+    /// subagent permissions or resetting an answer when a request is replayed.
+    pub fn handle_daemon_required_action(&mut self, request_id: String, event: AgentEvent) {
+        if self.daemon_request_id.as_ref() == Some(&request_id)
+            || self
+                .daemon_required_actions
+                .iter()
+                .any(|(id, _)| id == &request_id)
+        {
+            return;
+        }
+        self.daemon_required_actions.push_back((request_id, event));
+        self.show_next_daemon_required_action();
+    }
+
+    fn show_next_daemon_required_action(&mut self) {
+        if self.daemon_request_id.is_none() {
+            if let Some((request_id, event)) = self.daemon_required_actions.pop_front() {
+                self.daemon_request_id = Some(request_id);
+                self.handle_agent_event(event);
+            }
+        }
+    }
+
+    fn clear_daemon_required_action(&mut self) {
+        if self.daemon_request_id.take().is_some() {
+            self.permission = None;
+            self.user_question = None;
+            self.goal_proposal = None;
+            self.mode = Mode::Normal;
+        }
+    }
+
+    fn clear_daemon_required_actions(&mut self) {
+        self.daemon_required_actions.clear();
+        self.clear_daemon_required_action();
+    }
+
+    fn finish_daemon_required_action(&mut self) {
+        self.daemon_request_id = None;
+        self.show_next_daemon_required_action();
     }
 
     /// Open a session picker that reads from disk (standalone mode).
@@ -2409,6 +2476,7 @@ impl App {
             }
         }
         self.mode = Mode::Normal;
+        self.finish_daemon_required_action();
     }
 
     /// Select next permission option.
@@ -2535,17 +2603,13 @@ impl App {
         enum Next {
             Advance,
             Submit,
+            Cancel,
         }
         let next = if let Some(ref mut uq) = self.user_question {
             if uq.review {
                 match uq.review_selected {
                     0 => Next::Submit,
-                    _ => {
-                        // Cancel: drop without sending.
-                        self.user_question = None;
-                        self.mode = Mode::Normal;
-                        return;
-                    }
+                    _ => Next::Cancel,
                 }
             } else {
                 let question = match uq.questions.get(uq.page) {
@@ -2581,8 +2645,10 @@ impl App {
             return;
         };
 
-        if matches!(next, Next::Submit) {
-            self.submit_user_question();
+        match next {
+            Next::Submit => self.submit_user_question(),
+            Next::Cancel => self.cancel_user_question(),
+            Next::Advance => {}
         }
     }
 
@@ -2594,6 +2660,7 @@ impl App {
             }
         }
         self.mode = Mode::Normal;
+        self.finish_daemon_required_action();
     }
 
     /// Cancel the question prompt. Dropping `tx` without sending makes the
@@ -2602,6 +2669,7 @@ impl App {
     pub fn cancel_user_question(&mut self) {
         self.user_question = None;
         self.mode = Mode::Normal;
+        self.clear_daemon_required_actions();
     }
 
     /// Toggle between accept (0) and reject (1) in the goal proposal modal.
@@ -2630,13 +2698,21 @@ impl App {
             }
         }
         self.mode = Mode::Normal;
+        self.finish_daemon_required_action();
     }
 
     /// Cancel the goal proposal. Dropping `tx` without sending makes the
     /// agent's `rx.await` return `Err`, treated as a rejection.
     pub fn cancel_goal_proposal(&mut self) {
-        self.goal_proposal = None;
+        if let Some(gp) = self.goal_proposal.take() {
+            if self.daemon_request_id.is_some() {
+                if let Some(tx) = gp.tx {
+                    let _ = tx.send(mew_agent::GoalDecision::Rejected);
+                }
+            }
+        }
         self.mode = Mode::Normal;
+        self.finish_daemon_required_action();
     }
 
     /// Record the active goal locally (sidebar chip + status bar).

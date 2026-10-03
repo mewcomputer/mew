@@ -406,6 +406,9 @@ impl DaemonBackend {
                         "wait_turn: received server message"
                     );
                     self.app.apply_daemon_notification(&msg);
+                    if let Some((request_id, event)) = self.client.take_required_action(&msg) {
+                        self.app.handle_daemon_required_action(request_id, event);
+                    }
                     had_event = true;
                 }
             }
@@ -485,6 +488,9 @@ impl DaemonBackend {
         }
         while let Ok(msg) = self.notify_rx.try_recv() {
             self.app.apply_daemon_notification(&msg);
+            if let Some((request_id, event)) = self.client.take_required_action(&msg) {
+                self.app.handle_daemon_required_action(request_id, event);
+            }
         }
     }
 

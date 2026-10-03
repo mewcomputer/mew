@@ -10,9 +10,11 @@
 //! `AgentEvent` variants like `PermissionRequest` carry a `oneshot::Sender`
 //! so the TUI can respond. On the client side, we reconstruct these by
 //! creating a fresh `oneshot::channel` for each incoming wire request.
-//! The `Receiver` goes into the `AgentEvent` (handed to the TUI); the
-//! `Sender` is awaited by a background task that forwards the decision
+//! The `Sender` goes into the `AgentEvent` (handed to the TUI); the
+//! `Receiver` is awaited by a background task that forwards the decision
 //! back to the daemon as a `ClientMessage::PermissionResponse`.
+//! Required actions use the persistent notification channel, including when
+//! the TUI attaches to a turn initiated by another client.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,6 +36,9 @@ use tungstenite::{protocol::WebSocketConfig, Message};
 
 /// Shared state for pending request/response pairs.
 struct ClientState {
+    /// Buffered required actions, with consumed entries retained until the
+    /// daemon resolves them so replay never creates a second response sender.
+    required_actions: std::sync::Mutex<HashMap<String, Option<AgentEvent>>>,
     /// `request_id → receiver` for permission decisions.
     /// The receiver is awaited by a spawned task that forwards the
     /// decision back to the daemon.
@@ -48,7 +53,7 @@ struct ClientState {
     event_tx: Mutex<Option<mpsc::Sender<AgentEvent>>>,
     /// Persistent notification channel — always alive, unlike `event_tx`
     /// which is prompt-scoped. Session-management `ServerMessage`s
-    /// (SessionList, SessionTitleChanged, etc.) are forwarded here as raw
+    /// (SessionList, SessionTitleChanged, etc.) and required actions arrive as raw
     /// wire types so the TUI can maintain a live session rail, alerts,
     /// and metadata without being in the middle of a turn.
     notify_tx: mpsc::Sender<ServerMessage>,
@@ -73,9 +78,9 @@ impl DaemonClient {
     /// Returns the `DaemonClient` and a `Receiver<ServerMessage>` for
     /// session-management notifications. The notification channel is
     /// always alive (unlike the prompt-scoped event channel) and receives
-    /// raw `ServerMessage`s that don't map to `AgentEvent`s — SessionList,
-    /// SessionTitleChanged, SessionAlert, etc. The caller should drain
-    /// it in the main event loop via `tokio::select!`.
+    /// raw `ServerMessage`s for session state and required actions. After
+    /// applying a notification, callers consume its reconstructed action with
+    /// `take_required_action`. Drain this channel in the main event loop.
     pub async fn connect(url: &str) -> Result<(Self, mpsc::Receiver<ServerMessage>)> {
         let config = WebSocketConfig {
             max_frame_size: None,
@@ -125,6 +130,7 @@ impl DaemonClient {
         let (notify_tx, notify_rx) = mpsc::channel::<ServerMessage>(128);
 
         let state = Arc::new(ClientState {
+            required_actions: std::sync::Mutex::new(HashMap::new()),
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
             pending_goal_proposals: Mutex::new(HashMap::new()),
@@ -168,8 +174,37 @@ impl DaemonClient {
                     }
                     *current_session = Some(session_id.clone());
                     drop(current_session);
+                    state_clone.required_actions.lock().unwrap().clear();
                     let _ = state_clone.notify_tx.send(server_msg.clone()).await;
                     continue;
+                }
+
+                if let Some(request_id) = required_action_id(&server_msg) {
+                    if !state_clone
+                        .required_actions
+                        .lock()
+                        .unwrap()
+                        .contains_key(request_id)
+                    {
+                        let action = translate_server_message(&server_msg, &state_clone)
+                            .await
+                            .into_iter()
+                            .next();
+                        state_clone
+                            .required_actions
+                            .lock()
+                            .unwrap()
+                            .insert(request_id.to_owned(), action);
+                        let _ = state_clone.notify_tx.send(server_msg).await;
+                    }
+                    continue;
+                }
+                if let ServerMessage::RequestResolved { ref request_id } = server_msg {
+                    state_clone
+                        .required_actions
+                        .lock()
+                        .unwrap()
+                        .remove(request_id);
                 }
 
                 let events = translate_server_message(&server_msg, &state_clone).await;
@@ -436,15 +471,40 @@ impl DaemonClient {
         self.state.session_id.lock().await.clone()
     }
 
+    /// Take a required action from its ordered notification. Requests remain
+    /// available when observing a session without initiating its active turn.
+    pub fn take_required_action(&self, message: &ServerMessage) -> Option<(String, AgentEvent)> {
+        let request_id = required_action_id(message)?;
+        let event = self
+            .state
+            .required_actions
+            .lock()
+            .unwrap()
+            .get_mut(request_id)?
+            .take()?;
+        Some((request_id.to_owned(), event))
+    }
+
     /// Clear the event sender (called when the turn ends).
     pub async fn clear_event_channel(&self) {
         *self.state.event_tx.lock().await = None;
     }
 }
 
+fn required_action_id(message: &ServerMessage) -> Option<&str> {
+    match message {
+        ServerMessage::PermissionRequest { request_id, .. }
+        | ServerMessage::WorkspacePermissionRequest { request_id, .. }
+        | ServerMessage::SubagentPermissionRequest { request_id, .. }
+        | ServerMessage::AskUserRequest { request_id, .. }
+        | ServerMessage::GoalProposed { request_id, .. } => Some(request_id),
+        _ => None,
+    }
+}
+
 /// Translate a `ServerMessage` into zero or more `AgentEvent`s.
 /// Channel-bearing wire messages get fresh `oneshot::channel`s; the
-/// `Receiver` goes into the `AgentEvent`, and a spawned task forwards
+/// `Sender` goes into the `AgentEvent`, and a spawned task forwards
 /// the response back to the daemon.
 async fn translate_server_message(
     msg: &ServerMessage,
@@ -930,6 +990,149 @@ mod tests {
         ws.send(Message::Text(mew_protocol::encode_json(&pong).unwrap()))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn required_actions_are_available_without_prompt_and_not_duplicated_in_prompt_stream() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for active_prompt in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                    accept_current_handshake(&mut ws).await;
+                    ws.send(Message::Text(mew_protocol::encode_json(&ServerMessage::SessionReady {
+                        session_id: "active".into(), cwd: None, model: None, provider: None, permission_mode: None,
+                    }).unwrap())).await.unwrap();
+                    if active_prompt {
+                        assert!(matches!(ws.next().await.unwrap().unwrap(), Message::Text(text) if text.contains("prompt")));
+                    }
+                    let requests = [
+                        ServerMessage::PermissionRequest { request_id: "p".into(), tool_name: "bash".into(), input: serde_json::json!({"command":"pwd"}) },
+                        ServerMessage::WorkspacePermissionRequest { request_id: "w".into(), path: "/elsewhere".into() },
+                        ServerMessage::SubagentPermissionRequest { request_id: "s".into(), parent_call_id: "parent".into(), tool_name: "write".into(), input: serde_json::json!({}) },
+                        ServerMessage::AskUserRequest { request_id: "q".into(), call_id: "call-q".into(), questions: vec![mew_protocol::Question { prompt: "pick".into(), options: vec![] }] },
+                        ServerMessage::GoalProposed { request_id: "g".into(), call_id: "call-g".into(), objective: "finish".into() },
+                    ];
+                    for request in requests {
+                        ws.send(Message::Text(mew_protocol::encode_json(&request).unwrap())).await.unwrap();
+                        let Message::Text(response) = ws.next().await.unwrap().unwrap() else { panic!("expected response") };
+                        let response: ClientMessage = mew_protocol::decode_json(&response).unwrap();
+                        let request_id = match response {
+                            ClientMessage::PermissionResponse { request_id, decision } => {
+                                assert_eq!(decision, WirePermissionDecision::AllowOnce); request_id
+                            }
+                            ClientMessage::AskUserResponse { request_id, answers } => {
+                                assert_eq!(answers, vec!["answer"]); request_id
+                            }
+                            ClientMessage::GoalResponse { request_id, accepted } => {
+                                assert!(accepted); request_id
+                            }
+                            other => panic!("unexpected response: {other:?}"),
+                        };
+                        assert_eq!(Some(request_id.as_str()), required_action_id(&request));
+                        ws.send(Message::Text(mew_protocol::encode_json(&ServerMessage::RequestResolved { request_id }).unwrap())).await.unwrap();
+                    }
+                    ws.send(Message::Text(mew_protocol::encode_json(&ServerMessage::SessionActivityChanged {
+                        session_id: "active".into(), activity: mew_protocol::SessionState::Idle,
+                    }).unwrap())).await.unwrap();
+                    while ws.next().await.is_some() {}
+                });
+                let (client, mut notifications) = DaemonClient::connect(&format!("ws://{addr}")).await.unwrap();
+                assert!(matches!(notifications.recv().await, Some(ServerMessage::SessionReady { .. })));
+                let mut prompt = if active_prompt { Some(client.prompt("go".into(), vec![]).await) } else { None };
+                for expected_id in ["p", "w", "s", "q", "g"] {
+                    let request = notifications.recv().await.unwrap();
+                    let (request_id, action) = client.take_required_action(&request).unwrap();
+                    assert_eq!(request_id, expected_id);
+                    assert!(client.take_required_action(&request).is_none());
+                    match action {
+                        AgentEvent::PermissionRequest { tx, .. } | AgentEvent::WorkspacePermissionRequest { tx, .. } | AgentEvent::SubagentPermissionRequest { tx, .. } => { tx.send(PermissionDecision::AllowOnce).unwrap(); }
+                        AgentEvent::AskUser { tx, .. } => { tx.send(vec!["answer".into()]).unwrap(); }
+                        AgentEvent::GoalProposed { tx, .. } => { tx.send(GoalDecision::Accepted).unwrap(); }
+                        other => panic!("unexpected action: {other:?}"),
+                    }
+                    assert!(matches!(notifications.recv().await, Some(ServerMessage::RequestResolved { request_id }) if request_id == expected_id));
+                }
+                assert!(matches!(notifications.recv().await, Some(ServerMessage::SessionActivityChanged { .. })));
+                if let Some(prompt) = prompt.as_mut() { assert!(prompt.recv().await.is_none()); }
+                server.abort();
+            }
+        }).await.expect("required-action client sequence timed out");
+    }
+
+    #[tokio::test]
+    async fn resolving_another_clients_request_does_not_send_a_decision_or_cancel() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                accept_current_handshake(&mut ws).await;
+                for message in [
+                    ServerMessage::SessionReady {
+                        session_id: "active".into(),
+                        cwd: None,
+                        model: None,
+                        provider: None,
+                        permission_mode: None,
+                    },
+                    ServerMessage::AskUserRequest {
+                        request_id: "q".into(),
+                        call_id: "c".into(),
+                        questions: vec![],
+                    },
+                ] {
+                    ws.send(Message::Text(mew_protocol::encode_json(&message).unwrap()))
+                        .await
+                        .unwrap();
+                }
+                let Message::Text(ping) = ws.next().await.unwrap().unwrap() else {
+                    panic!("expected ping")
+                };
+                assert!(matches!(
+                    mew_protocol::decode_json::<ClientMessage>(&ping).unwrap(),
+                    ClientMessage::Ping
+                ));
+                ws.send(Message::Text(
+                    mew_protocol::encode_json(&ServerMessage::RequestResolved {
+                        request_id: "q".into(),
+                    })
+                    .unwrap(),
+                ))
+                .await
+                .unwrap();
+                let Message::Text(ping) = ws.next().await.unwrap().unwrap() else {
+                    panic!("expected ping")
+                };
+                assert!(matches!(
+                    mew_protocol::decode_json::<ClientMessage>(&ping).unwrap(),
+                    ClientMessage::Ping
+                ));
+            });
+            let (client, mut notifications) = DaemonClient::connect(&format!("ws://{address}"))
+                .await
+                .unwrap();
+            assert!(matches!(
+                notifications.recv().await,
+                Some(ServerMessage::SessionReady { .. })
+            ));
+            let request = notifications.recv().await.unwrap();
+            let (_, event) = client.take_required_action(&request).unwrap();
+            let ping = mew_protocol::encode_json(&ClientMessage::Ping).unwrap();
+            client.send_raw(&ping).await.unwrap();
+            assert!(matches!(
+                notifications.recv().await,
+                Some(ServerMessage::RequestResolved { .. })
+            ));
+            drop(event);
+            client.send_raw(&ping).await.unwrap();
+            server.await.unwrap();
+        })
+        .await
+        .expect("external request resolution timed out");
     }
 
     #[tokio::test]

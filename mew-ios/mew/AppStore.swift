@@ -323,8 +323,11 @@ final class AppStore: ObservableObject {
     }
 
     func respondPermission(requestId: String, decision: Decision) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.respondPermission(id: daemonId, requestId: requestId, decision: decision)
+        guard let daemonId = selectedDaemonId, let core,
+              let request = pendingPermissions.first(where: {
+                  $0.daemon == daemonId.nodeId && $0.sessionId == selectedSessionId && $0.requestId == requestId
+              }) else { return }
+        core.respondPermission(id: DaemonId(nodeId: request.daemon), requestId: request.requestId, decision: decision)
     }
 
     func respondToGoal(requestId: String, accepted: Bool) {
@@ -337,8 +340,11 @@ final class AppStore: ObservableObject {
     }
 
     func respondAskUser(requestId: String, answers: [String]) {
-        guard let daemonId = selectedDaemonId, let core else { return }
-        core.respondAskUser(id: daemonId, requestId: requestId, answers: answers)
+        guard let daemonId = selectedDaemonId, let core,
+              let request = pendingAskUser.first(where: {
+                  $0.daemon == daemonId.nodeId && $0.sessionId == selectedSessionId && $0.requestId == requestId
+              }) else { return }
+        core.respondAskUser(id: DaemonId(nodeId: request.daemon), requestId: request.requestId, answers: answers)
     }
 
     func listModels() {
@@ -457,6 +463,11 @@ final class AppStore: ObservableObject {
             directoryLoading.remove(key)
             objectWillChange.send()
 
+        case .sessionReady(let daemon, _):
+            pendingPermissions.removeAll { $0.daemon == daemon }
+            pendingAskUser.removeAll { $0.daemon == daemon }
+            pendingGoals.removeAll { $0.daemon == daemon }
+
         case .sessionReloaded(let daemon, let sessionId):
             guard selectedDaemonId?.nodeId == daemon else { return }
             // A newly created session becomes selected before its snapshot is applied.
@@ -525,22 +536,24 @@ final class AppStore: ObservableObject {
             // Refresh messages from snapshot
             refreshMessages()
 
-        case .permissionRequested(_, _, let requestId, let toolName, let input):
+        case .permissionRequested(let daemon, let sessionId, let requestId, let toolName, let input):
             // Dedup: the daemon replays outstanding requests on re-attach.
-            if !pendingPermissions.contains(where: { $0.requestId == requestId }) {
+            if !pendingPermissions.contains(where: { $0.daemon == daemon && $0.sessionId == sessionId && $0.requestId == requestId }) {
                 pendingPermissions.append(PendingPermission(
+                    daemon: daemon,
                     requestId: requestId,
-                    sessionId: selectedSessionId ?? "",
+                    sessionId: sessionId,
                     toolName: toolName,
                     input: input
                 ))
             }
 
-        case .askUserRequested(_, _, let requestId, let callId, let questions):
-            if !pendingAskUser.contains(where: { $0.requestId == requestId }) {
+        case .askUserRequested(let daemon, let sessionId, let requestId, let callId, let questions):
+            if !pendingAskUser.contains(where: { $0.daemon == daemon && $0.sessionId == sessionId && $0.requestId == requestId }) {
                 pendingAskUser.append(PendingAskUser(
+                    daemon: daemon,
                     requestId: requestId,
-                    sessionId: selectedSessionId ?? "",
+                    sessionId: sessionId,
                     callId: callId,
                     questions: questions
                 ))
@@ -557,8 +570,8 @@ final class AppStore: ObservableObject {
 
         case .requestResolved(let daemon, let requestId):
             pendingGoals.removeAll { $0.daemon == daemon && $0.requestId == requestId }
-            pendingPermissions.removeAll { $0.requestId == requestId }
-            pendingAskUser.removeAll { $0.requestId == requestId }
+            pendingPermissions.removeAll { $0.daemon == daemon && $0.requestId == requestId }
+            pendingAskUser.removeAll { $0.daemon == daemon && $0.requestId == requestId }
 
         case .alert(_, let sessionId, let kind, let title, let detail):
             let item = AlertItem(
@@ -574,8 +587,11 @@ final class AppStore: ObservableObject {
                 activeBanner = item
             }
 
-        case .attentionChanged:
-            break
+        case .attentionChanged(let daemon, let sessionId, let permissions, let questions):
+            if let index = sessionLists[daemon]?.firstIndex(where: { $0.sessionId == sessionId }) {
+                sessionLists[daemon]?[index].pendingPermissions = permissions
+                sessionLists[daemon]?[index].pendingQuestions = questions
+            }
 
         case .todosUpdated(_, let sessionId, let todoItems):
             todos[sessionId] = todoItems
@@ -630,6 +646,16 @@ final class AppStore: ObservableObject {
         if let session = snap.sessions.first(where: { $0.sessionId == selectedSessionId }) {
             messages = session.messages
             isStreaming = session.running
+            if let daemon = selectedDaemonId?.nodeId {
+                pendingPermissions.removeAll { $0.daemon == daemon && $0.sessionId == session.sessionId }
+                pendingPermissions.append(contentsOf: snap.pendingPermissions.filter {
+                    $0.daemon == daemon && $0.sessionId == session.sessionId
+                })
+                pendingAskUser.removeAll { $0.daemon == daemon && $0.sessionId == session.sessionId }
+                pendingAskUser.append(contentsOf: snap.pendingAskUser.filter {
+                    $0.daemon == daemon && $0.sessionId == session.sessionId
+                })
+            }
             // Seed usage + todos from snapshot
             if let sessionId = session.sessionId.isEmpty ? nil : Optional(session.sessionId) {
                 sessionUsage[sessionId] = SessionUsage(

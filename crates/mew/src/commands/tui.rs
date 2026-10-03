@@ -106,6 +106,9 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
                 // input).
                 if let Some(msg) = msg {
                     app.apply_daemon_notification(&msg);
+                    if let Some((request_id, event)) = client.take_required_action(&msg) {
+                        app.handle_daemon_required_action(request_id, event);
+                    }
                 }
                 continue;
             }

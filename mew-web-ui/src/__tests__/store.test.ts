@@ -1,11 +1,85 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { bridgeClientToStore, useSessionStore } from "../stores/session";
+import { askUserResponders, bridgeClientToStore, permissionResponders, useSessionStore } from "../stores/session";
 import type { MewClient } from "@mew/web-client";
 
 // Helper to get fresh store state.
 function store() {
   return useSessionStore.getState();
 }
+
+describe("pending input recovery", () => {
+  let handlers: Map<string, (...args: any[]) => void>;
+
+  beforeEach(() => {
+    store().reset();
+    permissionResponders.clear();
+    askUserResponders.clear();
+    handlers = new Map();
+    bridgeClientToStore({
+      on: (event: string, handler: (...args: any[]) => void) => handlers.set(event, handler),
+      listModels: () => Promise.resolve([]),
+      listPersonas: () => Promise.resolve([]),
+    } as unknown as MewClient);
+  });
+
+  it("deduplicates replayed permission, question, and goal requests", () => {
+    for (let replay = 0; replay < 2; replay++) {
+      handlers.get("permission-request")?.({ request_id: "p", tool_name: "bash", input: {} }, () => {});
+      handlers.get("ask-user-request")?.({ request_id: "q", call_id: "call-q", questions: [] });
+      handlers.get("goal-proposed")?.({ request_id: "g", call_id: "call-g", objective: "finish the task" });
+    }
+
+    expect(store().pendingPermissions).toHaveLength(1);
+    expect(store().pendingAskUser).toHaveLength(1);
+    expect(store().pendingGoals).toHaveLength(1);
+  });
+
+  it("clears resolved cards and response callbacks across all input kinds", () => {
+    handlers.get("permission-request")?.({ request_id: "p", tool_name: "bash", input: {} }, () => {});
+    handlers.get("ask-user-request")?.({ request_id: "q", call_id: "call-q", questions: [] });
+    handlers.get("goal-proposed")?.({ request_id: "g", call_id: "call-g", objective: "finish the task" });
+    askUserResponders.set("q", () => {});
+
+    for (const request_id of ["p", "q", "g", "unknown"]) {
+      handlers.get("request-resolved")?.({ request_id });
+    }
+
+    expect(store().pendingPermissions).toEqual([]);
+    expect(store().pendingAskUser).toEqual([]);
+    expect(store().pendingGoals).toEqual([]);
+    expect(permissionResponders.size).toBe(0);
+    expect(askUserResponders.size).toBe(0);
+  });
+
+  it("clears stale input on session-ready before replay, including reconnect to the same session", () => {
+    for (const session_id of ["s1", "s2", "s2"]) {
+      handlers.get("permission-request")?.({ request_id: "p", tool_name: "bash", input: {} }, () => {});
+      handlers.get("ask-user-request")?.({ request_id: "q", call_id: "call-q", questions: [] });
+      handlers.get("goal-proposed")?.({ request_id: "g", call_id: "call-g", objective: "finish the task" });
+      askUserResponders.set("q", () => {});
+
+      handlers.get("session-ready")?.({ session_id });
+
+      expect(store().pendingPermissions).toEqual([]);
+      expect(store().pendingAskUser).toEqual([]);
+      expect(store().pendingGoals).toEqual([]);
+      expect(permissionResponders.size).toBe(0);
+      expect(askUserResponders.size).toBe(0);
+    }
+  });
+
+  it("keeps live pending inputs when another history page arrives", () => {
+    handlers.get("permission-request")?.({ request_id: "p", tool_name: "bash", input: {} }, () => {});
+    handlers.get("ask-user-request")?.({ request_id: "q", call_id: "call-q", questions: [] });
+    handlers.get("goal-proposed")?.({ request_id: "g", call_id: "call-g", objective: "finish the task" });
+
+    handlers.get("session-history")?.({ messages: [] });
+
+    expect(store().pendingPermissions).toHaveLength(1);
+    expect(store().pendingAskUser).toHaveLength(1);
+    expect(store().pendingGoals).toHaveLength(1);
+  });
+});
 
 describe("connection recovery", () => {
   beforeEach(() => {

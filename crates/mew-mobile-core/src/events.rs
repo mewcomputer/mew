@@ -40,7 +40,10 @@ pub enum CoreEvent {
         entries: Vec<DirEntry>,
     },
 
-    /// A session was reloaded after reconnect. Swift should pull `snapshot()`.
+    /// An attachment was acknowledged; discard cached required actions before replay.
+    SessionReady { daemon: String, session_id: String },
+
+    /// Session history was loaded. Swift should pull `snapshot()`.
     SessionReloaded { daemon: String, session_id: String },
 
     /// Streaming text delta for a part. Coalesced in Rust before FFI.

@@ -731,6 +731,50 @@ impl MobileCore {
                 turns: ss.turns,
                 todos: ss.todos.clone(),
             });
+            let client = conn.state.client_state.lock().unwrap();
+            if let Some(session) = client.session(&ss.session_id) {
+                for action in &session.pending_actions {
+                    use mew_client_core::ActionKind;
+                    let permission = match &action.kind {
+                        ActionKind::Permission { tool_name, input } => Some((
+                            tool_name.clone(),
+                            serde_json::to_string_pretty(input).unwrap_or_default(),
+                        )),
+                        ActionKind::WorkspacePermission { path } => {
+                            Some(("workspace_escape".into(), path.clone()))
+                        }
+                        ActionKind::SubagentPermission {
+                            tool_name, input, ..
+                        } => Some((
+                            format!("subagent:{tool_name}"),
+                            serde_json::to_string_pretty(input).unwrap_or_default(),
+                        )),
+                        ActionKind::AskUser { call_id, questions } => {
+                            snap.pending_ask_user.push(state::PendingAskUser {
+                                daemon: id.node_id.clone(),
+                                request_id: action.request_id.clone(),
+                                session_id: ss.session_id.clone(),
+                                call_id: call_id.clone(),
+                                questions: questions
+                                    .iter()
+                                    .map(|question| question.prompt.clone())
+                                    .collect(),
+                            });
+                            None
+                        }
+                        ActionKind::GoalApproval { .. } => None,
+                    };
+                    if let Some((tool_name, input)) = permission {
+                        snap.pending_permissions.push(state::PendingPermission {
+                            daemon: id.node_id.clone(),
+                            request_id: action.request_id.clone(),
+                            session_id: ss.session_id.clone(),
+                            tool_name,
+                            input,
+                        });
+                    }
+                }
+            }
         }
         Some(snap)
     }
@@ -1181,6 +1225,10 @@ fn translate_message(
                     ss.permission_mode = Some(pm.clone());
                 }
             }
+            events.push(CoreEvent::SessionReady {
+                daemon: d.clone(),
+                session_id: session_id.clone(),
+            });
             events.push(CoreEvent::SessionReloaded {
                 daemon: d.clone(),
                 session_id: session_id.clone(),
@@ -1465,14 +1513,11 @@ fn translate_message(
             input,
         } => {
             let input_str = serde_json::to_string_pretty(input).unwrap_or_default();
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            let ss_lock = conn_state.session_state.lock().unwrap();
             let session_id = ss_lock
                 .as_ref()
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_permissions += 1;
-            }
             events.push(CoreEvent::PermissionRequested {
                 daemon: d,
                 session_id,
@@ -1487,14 +1532,11 @@ fn translate_message(
             call_id,
             questions,
         } => {
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            let ss_lock = conn_state.session_state.lock().unwrap();
             let session_id = ss_lock
                 .as_ref()
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_questions += 1;
-            }
             events.push(CoreEvent::AskUserRequested {
                 daemon: d,
                 session_id,
@@ -1509,14 +1551,11 @@ fn translate_message(
             call_id,
             objective,
         } => {
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            let ss_lock = conn_state.session_state.lock().unwrap();
             let session_id = ss_lock
                 .as_ref()
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_questions += 1;
-            }
             events.push(CoreEvent::GoalProposed {
                 daemon: d,
                 session_id,
@@ -1527,10 +1566,6 @@ fn translate_message(
         }
 
         ServerMessage::RequestResolved { request_id } => {
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_permissions = ss.pending_permissions.saturating_sub(1);
-            }
             events.push(CoreEvent::RequestResolved {
                 daemon: d,
                 request_id: request_id.clone(),
@@ -1558,7 +1593,7 @@ fn translate_message(
             pending_questions,
         } => {
             let mut ss_lock = conn_state.session_state.lock().unwrap();
-            if let Some(ss) = ss_lock.as_mut() {
+            if let Some(ss) = ss_lock.as_mut().filter(|ss| ss.session_id == *session_id) {
                 ss.pending_permissions = *pending_permissions;
                 ss.pending_questions = *pending_questions;
             }
@@ -1662,14 +1697,11 @@ fn translate_message(
 
         // Pass through events that need permission handling but no state assembly.
         ServerMessage::WorkspacePermissionRequest { request_id, path } => {
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            let ss_lock = conn_state.session_state.lock().unwrap();
             let session_id = ss_lock
                 .as_ref()
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_permissions += 1;
-            }
             events.push(CoreEvent::PermissionRequested {
                 daemon: d,
                 session_id,
@@ -1685,14 +1717,11 @@ fn translate_message(
             input,
             ..
         } => {
-            let mut ss_lock = conn_state.session_state.lock().unwrap();
+            let ss_lock = conn_state.session_state.lock().unwrap();
             let session_id = ss_lock
                 .as_ref()
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default();
-            if let Some(ss) = ss_lock.as_mut() {
-                ss.pending_permissions += 1;
-            }
             let input_str = serde_json::to_string_pretty(input).unwrap_or_default();
             events.push(CoreEvent::PermissionRequested {
                 daemon: d,
@@ -1955,6 +1984,216 @@ fn rand_jitter() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_action_frames_leave_attention_counts_authoritative() {
+        let conn = Arc::new(ConnState::new());
+        let daemon = "node-abc".to_owned();
+        let mut prompt = None;
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: id.into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        let permission = ServerMessage::PermissionRequest {
+            request_id: "permission".into(),
+            tool_name: "shell".into(),
+            input: serde_json::json!({}),
+        };
+        translate_message(&permission, &conn, &mut prompt, &daemon);
+        translate_message(&permission, &conn, &mut prompt, &daemon);
+        for request in [
+            ServerMessage::WorkspacePermissionRequest {
+                request_id: "workspace".into(),
+                path: "/project".into(),
+            },
+            ServerMessage::SubagentPermissionRequest {
+                request_id: "subagent".into(),
+                parent_call_id: "parent".into(),
+                tool_name: "shell".into(),
+                input: serde_json::json!({}),
+            },
+            ServerMessage::AskUserRequest {
+                request_id: "ask".into(),
+                call_id: "ask-call".into(),
+                questions: vec![],
+            },
+            ServerMessage::GoalProposed {
+                request_id: "goal".into(),
+                call_id: "goal-call".into(),
+                objective: "finish".into(),
+            },
+        ] {
+            translate_message(&request, &conn, &mut prompt, &daemon);
+            translate_message(&request, &conn, &mut prompt, &daemon);
+        }
+        assert_eq!(
+            conn.session_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .pending_permissions,
+            0
+        );
+        assert_eq!(
+            conn.session_state
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .pending_questions,
+            0
+        );
+        translate_message(
+            &ServerMessage::SessionAttentionChanged {
+                session_id: id.into(),
+                pending_permissions: 1,
+                pending_questions: 2,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        translate_message(
+            &ServerMessage::SessionAttentionChanged {
+                session_id: "other".into(),
+                pending_permissions: 7,
+                pending_questions: 8,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        translate_message(
+            &ServerMessage::RequestResolved {
+                request_id: "permission".into(),
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        let guard = conn.session_state.lock().unwrap();
+        let session = guard.as_ref().unwrap();
+        assert_eq!(session.pending_permissions, 1);
+        assert_eq!(session.pending_questions, 2);
+    }
+
+    #[tokio::test]
+    async fn snapshot_contains_replayed_permissions_and_questions() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = MobileCore::new(vec![7; 32], dir.path().to_str().unwrap().into())
+            .await
+            .unwrap();
+        let conn = Arc::new(ConnState::new());
+        let daemon = "node-abc".to_owned();
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let (tx, _rx) = mpsc::unbounded_channel();
+        core.connections.lock().unwrap().insert(
+            daemon.clone(),
+            DaemonConnection {
+                tx,
+                state: conn.clone(),
+            },
+        );
+        let mut prompt = None;
+        translate_message(
+            &ServerMessage::SessionReady {
+                session_id: id.into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        translate_message(
+            &ServerMessage::PermissionRequest {
+                request_id: "permission".into(),
+                tool_name: "shell".into(),
+                input: serde_json::json!({"command":"pwd"}),
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        translate_message(
+            &ServerMessage::AskUserRequest {
+                request_id: "ask".into(),
+                call_id: "ask-call".into(),
+                questions: vec![mew_protocol::Question {
+                    prompt: "which file?".into(),
+                    options: vec![],
+                }],
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        let snapshot = core
+            .snapshot(DaemonId {
+                node_id: daemon.clone(),
+            })
+            .unwrap();
+        assert_eq!(snapshot.pending_permissions.len(), 1);
+        assert_eq!(snapshot.pending_permissions[0].session_id, id);
+        assert_eq!(snapshot.pending_permissions[0].request_id, "permission");
+        assert_eq!(snapshot.pending_permissions[0].daemon, daemon);
+        assert_eq!(snapshot.pending_ask_user.len(), 1);
+        assert_eq!(snapshot.pending_ask_user[0].session_id, id);
+        assert_eq!(snapshot.pending_ask_user[0].questions, ["which file?"]);
+        assert_eq!(snapshot.pending_ask_user[0].daemon, daemon);
+        translate_message(
+            &ServerMessage::SessionHistoryPage {
+                session_id: id.into(),
+                messages: vec![],
+                next_cursor: None,
+                replace: false,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        assert_eq!(
+            core.snapshot(DaemonId {
+                node_id: daemon.clone()
+            })
+            .unwrap()
+            .pending_permissions
+            .len(),
+            1
+        );
+        let ready = translate_message(
+            &ServerMessage::SessionReady {
+                session_id: id.into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+            &conn,
+            &mut prompt,
+            &daemon,
+        );
+        assert!(
+            matches!(ready.as_slice(), [CoreEvent::SessionReady { daemon: ready_daemon, session_id }, CoreEvent::SessionReloaded { .. }]
+            if ready_daemon == &daemon && session_id == id)
+        );
+        let snapshot = core.snapshot(DaemonId { node_id: daemon }).unwrap();
+        assert!(snapshot.pending_permissions.is_empty());
+        assert!(snapshot.pending_ask_user.is_empty());
+        core.endpoint.close().await;
+    }
 
     #[test]
     fn mobile_provider_projection_reduces_each_frame_once() {

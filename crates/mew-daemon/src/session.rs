@@ -18,6 +18,11 @@ use mew_hooks::PermissionDecision;
 use mew_protocol::{ServerMessage, SessionInfo, SessionState};
 
 use crate::projects::ProjectPinsStore;
+
+pub struct PendingRequest<T> {
+    pub sender: oneshot::Sender<T>,
+    pub message: ServerMessage,
+}
 use crate::{AgentBuildParams, AgentBuilder, ModelLister, ModelSwitcher};
 
 /// Error returned when attaching to a session fails.
@@ -70,11 +75,13 @@ pub struct Session {
         )>,
     >,
     /// Pending permission / workspace-permission / subagent-permission requests.
-    pub pending_permissions: Mutex<HashMap<String, oneshot::Sender<PermissionDecision>>>,
+    pub pending_permissions: Mutex<HashMap<String, PendingRequest<PermissionDecision>>>,
     /// Pending ask-user requests.
-    pub pending_ask_user: Mutex<HashMap<String, oneshot::Sender<Vec<String>>>>,
+    pub pending_ask_user: Mutex<HashMap<String, PendingRequest<Vec<String>>>>,
     /// Pending goal-proposal requests (from `propose_goal`).
-    pub pending_goal_proposals: Mutex<HashMap<String, oneshot::Sender<GoalDecision>>>,
+    pub pending_goal_proposals: Mutex<HashMap<String, PendingRequest<GoalDecision>>>,
+    /// Serializes request publication, attach replay, responses and cancellation.
+    pub(crate) pending_action_lock: Mutex<()>,
     /// Monotonically increasing IDs for both clients and permission requests.
     pub next_id: AtomicU64,
     /// Token for the turn currently in progress, if any.
@@ -108,6 +115,7 @@ impl Session {
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
             pending_goal_proposals: Mutex::new(HashMap::new()),
+            pending_action_lock: Mutex::new(()),
             next_id: AtomicU64::new(1),
             current_turn_cancel: Mutex::new(None),
             model: Mutex::new(model),
@@ -216,10 +224,29 @@ impl Session {
     /// Cancel the current turn, if any. Also drains pending requests so the
     /// agent loop unblocks if it was waiting on a permission/ask-user oneshot.
     pub async fn cancel_turn(&self) {
-        if let Some(token) = self.current_turn_cancel.lock().await.take() {
+        let _actions = self.pending_action_lock.lock().await;
+        if let Some(token) = self.current_turn_cancel.lock().await.as_ref() {
             token.cancel();
         }
-        self.drain_pending().await;
+        let permissions = std::mem::take(&mut *self.pending_permissions.lock().await);
+        let questions = std::mem::take(&mut *self.pending_ask_user.lock().await);
+        let goals = std::mem::take(&mut *self.pending_goal_proposals.lock().await);
+        for request_id in permissions
+            .keys()
+            .chain(questions.keys())
+            .chain(goals.keys())
+        {
+            self.broadcast(ServerMessage::RequestResolved {
+                request_id: request_id.clone(),
+            })
+            .await;
+        }
+        self.broadcast(ServerMessage::SessionAttentionChanged {
+            session_id: self.id.clone(),
+            pending_permissions: 0,
+            pending_questions: 0,
+        })
+        .await;
     }
 
     /// Count of pending requests that need a user answer: `ask_user_question`,
@@ -229,16 +256,6 @@ impl Session {
         let asks = self.pending_ask_user.lock().await.len();
         let goals = self.pending_goal_proposals.lock().await.len();
         (asks + goals) as u32
-    }
-
-    /// Drop pending oneshot senders when the user cancels a turn.
-    pub async fn drain_pending(&self) {
-        let mut perms = self.pending_permissions.lock().await;
-        perms.clear();
-        let mut asks = self.pending_ask_user.lock().await;
-        asks.clear();
-        let mut goals = self.pending_goal_proposals.lock().await;
-        goals.clear();
     }
 }
 

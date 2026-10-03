@@ -24,6 +24,7 @@
 //! with that ID, and when the frontend responds with the same ID the
 //! daemon retrieves the `oneshot` and sends the decision back.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,7 +37,7 @@ use mew_protocol::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::accept_async;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -891,6 +892,7 @@ where
                         if let Some(previous_terminal) = terminal.take() {
                             previous_terminal.close();
                         }
+                        let actions = session.pending_action_lock.lock().await;
                         let (cid, was_first, _) =
                             session.attach_client(client_tx.clone(), client_kind).await;
                         client_id = Some(cid);
@@ -942,6 +944,7 @@ where
                         reply(ServerMessage::ThinkingVariantChanged {
                             variant: thinking_variant,
                         });
+                        drop(actions);
                         // Notify other clients that a new client joined.
                         if !was_first {
                             session
@@ -983,6 +986,7 @@ where
                         if let Some(previous_terminal) = terminal.take() {
                             previous_terminal.close();
                         }
+                        let actions = session.pending_action_lock.lock().await;
                         let (cid, was_first, _) =
                             session.attach_client(client_tx.clone(), client_kind).await;
                         let existing_clients = session.client_presence_except(cid).await;
@@ -1075,6 +1079,29 @@ where
                             }
                         }
 
+                        let mut permissions = session.pending_permissions.lock().await;
+                        let mut questions = session.pending_ask_user.lock().await;
+                        let mut goals = session.pending_goal_proposals.lock().await;
+                        permissions.retain(|_, request| !request.sender.is_closed());
+                        questions.retain(|_, request| !request.sender.is_closed());
+                        goals.retain(|_, request| !request.sender.is_closed());
+                        for message in permissions
+                            .values()
+                            .map(|request| &request.message)
+                            .chain(questions.values().map(|request| &request.message))
+                            .chain(goals.values().map(|request| &request.message))
+                        {
+                            reply(message.clone());
+                        }
+                        reply(ServerMessage::SessionAttentionChanged {
+                            session_id: session.id.clone(),
+                            pending_permissions: permissions.len() as u32,
+                            pending_questions: (questions.len() + goals.len()) as u32,
+                        });
+                        drop(goals);
+                        drop(questions);
+                        drop(permissions);
+
                         for (existing_id, existing_kind) in existing_clients {
                             reply(ServerMessage::ClientAttached {
                                 client_id: existing_id,
@@ -1082,6 +1109,7 @@ where
                             });
                         }
 
+                        drop(actions);
                         // Notify other clients that a new client joined.
                         if !was_first {
                             session
@@ -1306,6 +1334,8 @@ where
             ClientMessage::Cancel => {
                 if let Some(session) = &attached_session {
                     session.cancel_turn().await;
+                    let _actions = session.pending_action_lock.lock().await;
+                    broadcast_attention(session, &session_manager).await;
                 }
             }
             ClientMessage::Guide { text } => {
@@ -1497,23 +1527,15 @@ where
                 decision,
             } => {
                 if let Some(session) = &attached_session {
-                    let tx = session.pending_permissions.lock().await.remove(&request_id);
-                    if let Some(tx) = tx {
-                        let _ = tx.send(decision.into());
+                    let _actions = session.pending_action_lock.lock().await;
+                    let request = session.pending_permissions.lock().await.remove(&request_id);
+                    if let Some(request) = request {
+                        let _ = request.sender.send(decision.into());
+                        session
+                            .broadcast(ServerMessage::RequestResolved { request_id })
+                            .await;
+                        broadcast_attention(session, &session_manager).await;
                     }
-                    session
-                        .broadcast(ServerMessage::RequestResolved { request_id })
-                        .await;
-                    // Broadcast updated attention count.
-                    let perm_count = session.pending_permissions.lock().await.len() as u32;
-                    let q_count = session.pending_questions_count().await;
-                    session_manager
-                        .broadcast_all(ServerMessage::SessionAttentionChanged {
-                            session_id: session.id.clone(),
-                            pending_permissions: perm_count,
-                            pending_questions: q_count,
-                        })
-                        .await;
                 }
             }
             ClientMessage::AskUserResponse {
@@ -1521,23 +1543,15 @@ where
                 answers,
             } => {
                 if let Some(session) = &attached_session {
-                    let tx = session.pending_ask_user.lock().await.remove(&request_id);
-                    if let Some(tx) = tx {
-                        let _ = tx.send(answers);
+                    let _actions = session.pending_action_lock.lock().await;
+                    let request = session.pending_ask_user.lock().await.remove(&request_id);
+                    if let Some(request) = request {
+                        let _ = request.sender.send(answers);
+                        session
+                            .broadcast(ServerMessage::RequestResolved { request_id })
+                            .await;
+                        broadcast_attention(session, &session_manager).await;
                     }
-                    session
-                        .broadcast(ServerMessage::RequestResolved { request_id })
-                        .await;
-                    // Broadcast updated attention count.
-                    let perm_count = session.pending_permissions.lock().await.len() as u32;
-                    let q_count = session.pending_questions_count().await;
-                    session_manager
-                        .broadcast_all(ServerMessage::SessionAttentionChanged {
-                            session_id: session.id.clone(),
-                            pending_permissions: perm_count,
-                            pending_questions: q_count,
-                        })
-                        .await;
                 }
             }
             ClientMessage::GoalResponse {
@@ -1545,31 +1559,24 @@ where
                 accepted,
             } => {
                 if let Some(session) = &attached_session {
-                    let tx = session
+                    let _actions = session.pending_action_lock.lock().await;
+                    let request = session
                         .pending_goal_proposals
                         .lock()
                         .await
                         .remove(&request_id);
-                    if let Some(tx) = tx {
+                    if let Some(request) = request {
                         let decision = if accepted {
                             GoalDecision::Accepted
                         } else {
                             GoalDecision::Rejected
                         };
-                        let _ = tx.send(decision);
+                        let _ = request.sender.send(decision);
+                        session
+                            .broadcast(ServerMessage::RequestResolved { request_id })
+                            .await;
+                        broadcast_attention(session, &session_manager).await;
                     }
-                    session
-                        .broadcast(ServerMessage::RequestResolved { request_id })
-                        .await;
-                    let perm_count = session.pending_permissions.lock().await.len() as u32;
-                    let q_count = session.pending_questions_count().await;
-                    session_manager
-                        .broadcast_all(ServerMessage::SessionAttentionChanged {
-                            session_id: session.id.clone(),
-                            pending_permissions: perm_count,
-                            pending_questions: q_count,
-                        })
-                        .await;
                 }
             }
             ClientMessage::SlashCommand { command } => {
@@ -2919,13 +2926,91 @@ async fn generate_session_summary(agent: &Agent) -> Option<String> {
     }
 }
 
+async fn broadcast_attention(session: &Session, manager: &SessionManager) {
+    let pending_permissions = session.pending_permissions.lock().await.len() as u32;
+    let pending_questions = session.pending_questions_count().await;
+    manager
+        .broadcast_all(ServerMessage::SessionAttentionChanged {
+            session_id: session.id.clone(),
+            pending_permissions,
+            pending_questions,
+        })
+        .await;
+}
+
+async fn publish_pending_request<T>(
+    session: &Session,
+    manager: &SessionManager,
+    pending: &Mutex<HashMap<String, session::PendingRequest<T>>>,
+    sender: oneshot::Sender<T>,
+    message: ServerMessage,
+) -> Vec<ServerMessage> {
+    let _actions = session.pending_action_lock.lock().await;
+    if sender.is_closed()
+        || session
+            .current_turn_cancel
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+    {
+        return Vec::new();
+    }
+    let (request_id, kind, detail) = match &message {
+        ServerMessage::PermissionRequest {
+            request_id,
+            tool_name,
+            ..
+        }
+        | ServerMessage::SubagentPermissionRequest {
+            request_id,
+            tool_name,
+            ..
+        } => (
+            request_id.clone(),
+            mew_protocol::AlertKind::PermissionNeeded,
+            Some(tool_name.clone()),
+        ),
+        ServerMessage::WorkspacePermissionRequest { request_id, path } => (
+            request_id.clone(),
+            mew_protocol::AlertKind::PermissionNeeded,
+            Some(path.clone()),
+        ),
+        ServerMessage::AskUserRequest { request_id, .. }
+        | ServerMessage::GoalProposed { request_id, .. } => (
+            request_id.clone(),
+            mew_protocol::AlertKind::InputNeeded,
+            None,
+        ),
+        _ => unreachable!("only required actions are published as pending requests"),
+    };
+    pending.lock().await.insert(
+        request_id,
+        session::PendingRequest {
+            sender,
+            message: message.clone(),
+        },
+    );
+    session.broadcast(message).await;
+    manager
+        .broadcast_all(ServerMessage::SessionAlert {
+            session_id: session.id.clone(),
+            title: session.display_title().await,
+            kind,
+            detail,
+        })
+        .await;
+    broadcast_attention(session, manager).await;
+    Vec::new()
+}
+
 /// Translate a single `AgentEvent` (owned) into zero or more `ServerMessage`s.
 /// Channel-bearing events are converted to wire requests with fresh IDs;
 /// the `oneshot::Sender` is stashed in the `Session` for later response.
 async fn translate_event(
     event: AgentEvent,
     session: &Session,
-    _session_mgr: &SessionManager,
+    session_mgr: &SessionManager,
 ) -> Vec<ServerMessage> {
     match event {
         AgentEvent::Provider(pe) => {
@@ -3009,83 +3094,59 @@ async fn translate_event(
             vec![ServerMessage::ErrorEvent { message: msg }]
         }
         AgentEvent::PermissionRequest { call, tx } => {
-            let id = session.next_request_id();
-            session
-                .pending_permissions
-                .lock()
-                .await
-                .insert(id.clone(), tx);
-            let title = session.display_title().await;
-            let alert = ServerMessage::SessionAlert {
-                session_id: session.id.clone(),
-                title,
-                kind: mew_protocol::AlertKind::PermissionNeeded,
-                detail: Some(call.tool_name.clone()),
+            let request = ServerMessage::PermissionRequest {
+                request_id: session.next_request_id(),
+                tool_name: call.tool_name,
+                input: call.input,
             };
-            vec![
-                ServerMessage::PermissionRequest {
-                    request_id: id,
-                    tool_name: call.tool_name,
-                    input: call.input,
-                },
-                alert,
-                ServerMessage::SessionAttentionChanged {
-                    session_id: session.id.clone(),
-                    pending_permissions: session.pending_permissions.lock().await.len() as u32,
-                    pending_questions: session.pending_questions_count().await,
-                },
-            ]
+            publish_pending_request(
+                session,
+                session_mgr,
+                &session.pending_permissions,
+                tx,
+                request,
+            )
+            .await
         }
         AgentEvent::WorkspacePermissionRequest { path, tx } => {
-            let id = session.next_request_id();
-            session
-                .pending_permissions
-                .lock()
-                .await
-                .insert(id.clone(), tx);
-            vec![ServerMessage::WorkspacePermissionRequest {
-                request_id: id,
+            let request = ServerMessage::WorkspacePermissionRequest {
+                request_id: session.next_request_id(),
                 path: path.display().to_string(),
-            }]
+            };
+            publish_pending_request(
+                session,
+                session_mgr,
+                &session.pending_permissions,
+                tx,
+                request,
+            )
+            .await
         }
         AgentEvent::AskUser {
             call_id,
             questions,
             tx,
         } => {
-            let id = session.next_request_id();
-            session.pending_ask_user.lock().await.insert(id.clone(), tx);
-            vec![
-                ServerMessage::AskUserRequest {
-                    request_id: id,
-                    call_id,
-                    questions: questions
-                        .into_iter()
-                        .map(|q| Question {
-                            prompt: q.prompt,
-                            options: q
-                                .options
-                                .into_iter()
-                                .map(|o| QuestionOption {
-                                    label: o.label,
-                                    description: o.description,
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                },
-                ServerMessage::SessionAlert {
-                    session_id: session.id.clone(),
-                    title: session.display_title().await,
-                    kind: mew_protocol::AlertKind::InputNeeded,
-                    detail: None,
-                },
-                ServerMessage::SessionAttentionChanged {
-                    session_id: session.id.clone(),
-                    pending_permissions: session.pending_permissions.lock().await.len() as u32,
-                    pending_questions: session.pending_questions_count().await,
-                },
-            ]
+            let request = ServerMessage::AskUserRequest {
+                request_id: session.next_request_id(),
+                call_id,
+                questions: questions
+                    .into_iter()
+                    .map(|q| Question {
+                        prompt: q.prompt,
+                        options: q
+                            .options
+                            .into_iter()
+                            .map(|o| QuestionOption {
+                                label: o.label,
+                                description: o.description,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            };
+            publish_pending_request(session, session_mgr, &session.pending_ask_user, tx, request)
+                .await
         }
         AgentEvent::SubagentStart {
             parent_call_id,
@@ -3129,18 +3190,20 @@ async fn translate_event(
             call,
             tx,
         } => {
-            let id = session.next_request_id();
-            session
-                .pending_permissions
-                .lock()
-                .await
-                .insert(id.clone(), tx);
-            vec![ServerMessage::SubagentPermissionRequest {
-                request_id: id,
+            let request = ServerMessage::SubagentPermissionRequest {
+                request_id: session.next_request_id(),
                 parent_call_id,
                 tool_name: call.tool_name,
                 input: call.input,
-            }]
+            };
+            publish_pending_request(
+                session,
+                session_mgr,
+                &session.pending_permissions,
+                tx,
+                request,
+            )
+            .await
         }
         AgentEvent::SubagentProgress { .. } => {
             // Recurse into the child event. The boxed child event is
@@ -3219,30 +3282,19 @@ async fn translate_event(
             objective,
             tx,
         } => {
-            let id = session.next_request_id();
-            session
-                .pending_goal_proposals
-                .lock()
-                .await
-                .insert(id.clone(), tx);
-            vec![
-                ServerMessage::GoalProposed {
-                    request_id: id,
-                    call_id,
-                    objective,
-                },
-                ServerMessage::SessionAlert {
-                    session_id: session.id.clone(),
-                    title: session.display_title().await,
-                    kind: mew_protocol::AlertKind::InputNeeded,
-                    detail: None,
-                },
-                ServerMessage::SessionAttentionChanged {
-                    session_id: session.id.clone(),
-                    pending_permissions: session.pending_permissions.lock().await.len() as u32,
-                    pending_questions: session.pending_questions_count().await,
-                },
-            ]
+            let request = ServerMessage::GoalProposed {
+                request_id: session.next_request_id(),
+                call_id,
+                objective,
+            };
+            publish_pending_request(
+                session,
+                session_mgr,
+                &session.pending_goal_proposals,
+                tx,
+                request,
+            )
+            .await
         }
     }
 }
@@ -3259,6 +3311,9 @@ async fn send_msg<S: AsyncRead + AsyncWrite + Unpin + Send>(
     ws_tx.send(Message::Text(json)).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod request_tests;
 
 #[cfg(test)]
 mod tests {

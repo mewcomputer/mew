@@ -678,14 +678,8 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
     });
     if freeform_active {
         return match key.code {
-            KeyCode::Enter => {
-                app.user_question_confirm();
-                None
-            }
-            KeyCode::Esc => {
-                app.cancel_user_question();
-                None
-            }
+            KeyCode::Enter => confirm_user_question(app),
+            KeyCode::Esc => cancel_user_question(app),
             KeyCode::Tab => {
                 app.user_question_select_next();
                 None
@@ -725,14 +719,8 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
         .unwrap_or(false);
 
     match key.code {
-        KeyCode::Enter => {
-            app.user_question_confirm();
-            None
-        }
-        KeyCode::Esc => {
-            app.cancel_user_question();
-            None
-        }
+        KeyCode::Enter => confirm_user_question(app),
+        KeyCode::Esc => cancel_user_question(app),
         KeyCode::Tab => {
             if on_review {
                 app.user_question_review_next();
@@ -781,9 +769,10 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
         }
         KeyCode::Char('n') => {
             if on_review {
-                app.cancel_user_question();
+                cancel_user_question(app)
+            } else {
+                None
             }
-            None
         }
         KeyCode::Backspace => {
             if !on_review {
@@ -804,6 +793,25 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
             None
         }
         _ => None,
+    }
+}
+
+fn cancel_user_question(app: &mut crate::app::App) -> Option<Action> {
+    let cancel_daemon_turn = app.daemon_request_id.is_some();
+    app.cancel_user_question();
+    cancel_daemon_turn.then_some(Action::Cancel)
+}
+
+fn confirm_user_question(app: &mut crate::app::App) -> Option<Action> {
+    if app
+        .user_question
+        .as_ref()
+        .is_some_and(|question| question.review && question.review_selected != 0)
+    {
+        cancel_user_question(app)
+    } else {
+        app.user_question_confirm();
+        None
     }
 }
 
@@ -1793,6 +1801,57 @@ mod tests {
 
     fn char_key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn daemon_question_escape_cancels_the_waiting_turn_without_answering() {
+        let mut app = crate::app::App::new();
+        app.daemon_mode = true;
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        app.handle_daemon_required_action(
+            "q".into(),
+            mew_agent::AgentEvent::AskUser {
+                call_id: "c".into(),
+                questions: vec![mew_agent::AskUserQuestion {
+                    prompt: "pick".into(),
+                    options: vec![],
+                }],
+                tx,
+            },
+        );
+
+        let action = handle_key_event(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(matches!(action, Some(Action::Cancel)));
+        assert!(app.user_question.is_none());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+    }
+
+    #[test]
+    fn daemon_goal_escape_sends_rejection_without_canceling_the_turn() {
+        let mut app = crate::app::App::new();
+        app.daemon_mode = true;
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        app.handle_daemon_required_action(
+            "g".into(),
+            mew_agent::AgentEvent::GoalProposed {
+                call_id: "c".into(),
+                objective: "finish".into(),
+                tx,
+            },
+        );
+
+        let action = handle_key_event(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(action.is_none());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            mew_agent::GoalDecision::Rejected
+        ));
+        assert!(app.goal_proposal.is_none());
     }
 
     #[test]

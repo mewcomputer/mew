@@ -131,6 +131,12 @@ export interface PendingAskUser {
   questions: Question[];
 }
 
+export interface PendingGoal {
+  requestId: string;
+  callId: string;
+  objective: string;
+}
+
 export interface TodoItem {
   id: number;
   content: string;
@@ -232,6 +238,7 @@ interface SessionState {
 
   // Ask-user requests
   pendingAskUser: PendingAskUser[];
+  pendingGoals: PendingGoal[];
 
 
   // Todo list
@@ -315,6 +322,8 @@ interface SessionState {
   // Ask-user actions
   onAskUserRequest: (data: { request_id: string; call_id: string; questions: Question[] }) => void;
   resolveAskUser: (requestId: string) => void;
+  onGoalProposed: (data: { request_id: string; call_id: string; objective: string }) => void;
+  resolveGoal: (requestId: string) => void;
 
   // Todo actions
   onTodosUpdated: (todos: WireTodo[]) => void;
@@ -377,6 +386,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   flaggedFiles: [],
   subagents: new Map(),
   pendingAskUser: [],
+  pendingGoals: [],
   todos: [],
   jobs: new Map(),
   daemonVersion: null,
@@ -762,7 +772,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   onPermissionRequest: (req) =>
-    set((s) => ({ pendingPermissions: [...s.pendingPermissions, req] })),
+    set((s) => ({
+      pendingPermissions: [...s.pendingPermissions.filter((p) => p.requestId !== req.requestId), req],
+    })),
 
   resolvePermission: (requestId) =>
     set((s) => ({
@@ -988,7 +1000,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       streamingReasoningText: "",
       toolStates: new Map(),
       toolOutputs: new Map(),
-      pendingPermissions: [],
     }),
 
   onSessionCleared: () =>
@@ -1002,6 +1013,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       toolOutputs: new Map(),
       pendingPermissions: [],
       pendingAskUser: [],
+      pendingGoals: [],
       subagents: new Map(),
       todos: [],
       jobs: new Map(),
@@ -1060,7 +1072,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   onAskUserRequest: (data) =>
     set((s) => ({
       pendingAskUser: [
-        ...s.pendingAskUser,
+        ...s.pendingAskUser.filter((a) => a.requestId !== data.request_id),
         {
           requestId: data.request_id,
           callId: data.call_id,
@@ -1073,6 +1085,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set((s) => ({
       pendingAskUser: s.pendingAskUser.filter((a) => a.requestId !== requestId),
     })),
+
+  onGoalProposed: (data) =>
+    set((s) => ({
+      pendingGoals: [
+        ...s.pendingGoals.filter((goal) => goal.requestId !== data.request_id),
+        { requestId: data.request_id, callId: data.call_id, objective: data.objective },
+      ],
+    })),
+
+  resolveGoal: (requestId) =>
+    set((s) => ({ pendingGoals: s.pendingGoals.filter((goal) => goal.requestId !== requestId) })),
 
   onTodosUpdated: (wireTodos) =>
     set({
@@ -1130,6 +1153,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       toolOutputs: new Map(),
       pendingPermissions: [],
       pendingAskUser: [],
+      pendingGoals: [],
       subagents: new Map(),
       todos: [],
       jobs: new Map(),
@@ -1170,7 +1194,14 @@ export function bridgeClientToStore(client: MewClient) {
 
   client.on("session-ready", (data) => {
     store.getState().setSessionId(data.session_id);
-    useSessionStore.setState({ sessionCwd: data.cwd ?? null });
+    useSessionStore.setState({
+      sessionCwd: data.cwd ?? null,
+      pendingPermissions: [],
+      pendingAskUser: [],
+      pendingGoals: [],
+    });
+    permissionResponders.clear();
+    askUserResponders.clear();
     if (data.model && data.provider) {
       store.getState().setCurrentModel(data.provider, data.model);
     }
@@ -1229,6 +1260,7 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("ask-user-request", (data) => {
     store.getState().onAskUserRequest(data);
   });
+  client.on("goal-proposed", (data) => store.getState().onGoalProposed(data));
 
   client.on("todos-updated", (data) => store.getState().onTodosUpdated(data.todos));
 
@@ -1359,6 +1391,10 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("session-cleared", () => store.getState().onSessionCleared());
   client.on("request-resolved", (data) => {
     store.getState().resolvePermission(data.request_id);
+    store.getState().resolveAskUser(data.request_id);
+    store.getState().resolveGoal(data.request_id);
+    permissionResponders.delete(data.request_id);
+    askUserResponders.delete(data.request_id);
   });
 
   const handleDaemonError = (data: { message: string }) => {

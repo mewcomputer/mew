@@ -86,6 +86,66 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertEqual(mock.goalResponseCalls.first?.accepted, true)
     }
 
+    func testPermissionsAndQuestionsPreserveOriginWhenSelectionChanges() {
+        store.handleEvent(.permissionRequested(daemon: "daemon-2", sessionId: "sess-2", requestId: "p", toolName: "shell", input: "{}"))
+        store.handleEvent(.askUserRequested(daemon: "daemon-2", sessionId: "sess-2", requestId: "q", callId: "call", questions: ["which file?"]))
+        XCTAssertEqual(store.pendingPermissions.first?.daemon, "daemon-2")
+        XCTAssertEqual(store.pendingPermissions.first?.sessionId, "sess-2")
+        XCTAssertEqual(store.pendingAskUser.first?.daemon, "daemon-2")
+        XCTAssertEqual(store.pendingAskUser.first?.sessionId, "sess-2")
+        store.respondPermission(requestId: "p", decision: .allowOnce)
+        store.respondAskUser(requestId: "q", answers: ["file.swift"])
+        XCTAssertTrue(mock.permissionResponseCalls.isEmpty)
+        XCTAssertTrue(mock.askUserResponseCalls.isEmpty)
+        store.selectedDaemonId = DaemonId(nodeId: "daemon-2")
+        store.selectedSessionId = "sess-2"
+        store.respondPermission(requestId: "p", decision: .allowOnce)
+        store.respondAskUser(requestId: "q", answers: ["file.swift"])
+        XCTAssertEqual(mock.permissionResponseCalls.first?.nodeId, "daemon-2")
+        XCTAssertEqual(mock.askUserResponseCalls.first?.nodeId, "daemon-2")
+        XCTAssertEqual(mock.askUserResponseCalls.first?.answers, ["file.swift"])
+    }
+
+    func testReadyClearsOnlyOriginActionsWhileHistoryReloadPreservesReplay() {
+        func replay(_ daemon: String) {
+            store.handleEvent(.permissionRequested(daemon: daemon, sessionId: "sess-1", requestId: "p", toolName: "shell", input: "{}"))
+            store.handleEvent(.askUserRequested(daemon: daemon, sessionId: "sess-1", requestId: "q", callId: "call", questions: ["which file?"]))
+            store.handleEvent(.goalProposed(daemon: daemon, sessionId: "sess-1", requestId: "g", callId: "goal", objective: "finish"))
+        }
+        for daemon in ["daemon-1", "daemon-2"] { replay(daemon); replay(daemon) }
+        XCTAssertEqual(store.pendingPermissions.count, 2)
+        XCTAssertEqual(store.pendingAskUser.count, 2)
+        XCTAssertEqual(store.pendingGoals.count, 2)
+        store.handleEvent(.sessionReady(daemon: "daemon-1", sessionId: "sess-1"))
+        XCTAssertEqual(store.pendingPermissions.map(\.daemon), ["daemon-2"])
+        XCTAssertEqual(store.pendingAskUser.map(\.daemon), ["daemon-2"])
+        XCTAssertEqual(store.pendingGoals.map(\.daemon), ["daemon-2"])
+        replay("daemon-1")
+        store.handleEvent(.sessionReloaded(daemon: "daemon-1", sessionId: "sess-1"))
+        XCTAssertEqual(store.pendingPermissions.count, 2)
+        XCTAssertEqual(store.pendingAskUser.count, 2)
+        XCTAssertEqual(store.pendingGoals.count, 2)
+        store.handleEvent(.requestResolved(daemon: "daemon-1", requestId: "p"))
+        store.handleEvent(.requestResolved(daemon: "daemon-1", requestId: "q"))
+        XCTAssertEqual(store.pendingPermissions.map(\.daemon), ["daemon-2"])
+        XCTAssertEqual(store.pendingAskUser.map(\.daemon), ["daemon-2"])
+    }
+
+    func testAttentionCountsUpdateOnlyTheOriginatingDaemonSession() {
+        let summary = SessionSummary(sessionId: "sess-1", title: "Test", state: "running",
+            archived: false, pinned: false, pendingPermissions: 0, pendingQuestions: 0,
+            usageCost: 0, cwd: nil, model: nil, provider: nil, createdAt: 0,
+            lastMessageAt: nil, lastTurnFailed: false, groupId: nil,
+            inputTokens: 0, outputTokens: 0, turns: 0, contextTokens: nil)
+        store.sessionLists = ["daemon-1": [summary], "daemon-2": [summary]]
+        store.handleEvent(.attentionChanged(daemon: "daemon-1", sessionId: "sess-1", pendingPermissions: 1, pendingQuestions: 2))
+        store.handleEvent(.attentionChanged(daemon: "daemon-1", sessionId: "sess-2", pendingPermissions: 7, pendingQuestions: 8))
+        XCTAssertEqual(store.sessionLists["daemon-1"]?.first?.pendingPermissions, 1)
+        XCTAssertEqual(store.sessionLists["daemon-1"]?.first?.pendingQuestions, 2)
+        XCTAssertEqual(store.sessionLists["daemon-2"]?.first?.pendingPermissions, 0)
+        XCTAssertEqual(store.sessionLists["daemon-2"]?.first?.pendingQuestions, 0)
+    }
+
     func testGoalProposalCannotBeAnsweredFromAnotherSession() {
         store.handleEvent(.goalProposed(daemon: "daemon-1", sessionId: "sess-1",
             requestId: "goal-1", callId: "call-1", objective: "finish the feature"))

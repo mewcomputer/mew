@@ -9,6 +9,8 @@ import MewMobileCore
 final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     // Recorded calls
     var goalResponseCalls: [(nodeId: String, requestId: String, accepted: Bool)] = []
+    var permissionResponseCalls: [(nodeId: String, requestId: String, decision: Decision)] = []
+    var askUserResponseCalls: [(nodeId: String, requestId: String, answers: [String])] = []
     var promptCalls: [(nodeId: String, text: String)] = []
     var slashCommandCalls: [(nodeId: String, command: String)] = []
     var setPermissionModeCalls: [(nodeId: String, mode: String)] = []
@@ -65,8 +67,12 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
 
     func cancel(id: DaemonId) { cancelCalls.append(id.nodeId) }
 
-    func respondPermission(id: DaemonId, requestId: String, decision: Decision) {}
-    func respondAskUser(id: DaemonId, requestId: String, answers: [String]) {}
+    func respondPermission(id: DaemonId, requestId: String, decision: Decision) {
+        permissionResponseCalls.append((id.nodeId, requestId, decision))
+    }
+    func respondAskUser(id: DaemonId, requestId: String, answers: [String]) {
+        askUserResponseCalls.append((id.nodeId, requestId, answers))
+    }
     func respondToGoal(id: DaemonId, requestId: String, accepted: Bool) {
         goalResponseCalls.append((id.nodeId, requestId, accepted))
     }

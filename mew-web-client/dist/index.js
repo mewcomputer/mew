@@ -209,6 +209,10 @@ export class MewClient {
     respondToAskUser(request_id, answers) {
         this.send({ type: "ask_user_response", request_id, answers });
     }
+    /** Accept or reject a proposed goal using its original request ID. */
+    respondToGoal(request_id, accepted) {
+        this.send({ type: "goal_response", request_id, accepted });
+    }
     /** Attach to an existing session (active or idle). If the session is idle,
      *  the daemon loads its persisted history from disk and sends a
      *  `session-history` event. Resolves with the session id. */
@@ -501,6 +505,13 @@ export class MewClient {
                     request_id: msg.request_id,
                     call_id: msg.call_id,
                     questions: msg.questions,
+                });
+                break;
+            case "goal_proposed":
+                this.emit("goal-proposed", {
+                    request_id: msg.request_id,
+                    call_id: msg.call_id,
+                    objective: msg.objective,
                 });
                 break;
             case "subagent_permission_request":

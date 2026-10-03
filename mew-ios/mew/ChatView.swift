@@ -75,7 +75,7 @@ struct ChatView: View {
                 if !isEmpty { isLoadingSession = false }
             }
             .sheet(item: Binding(
-                get: { store.pendingPermissions.first { $0.sessionId == sessionId }.map { PermissionSheetItem(permission: $0) } },
+                get: { store.pendingPermissions.first { $0.daemon == daemonNodeId && $0.sessionId == sessionId }.map { PermissionSheetItem(permission: $0) } },
                 set: { _ in }
             )) { item in
                 PermissionSheet(permission: item.permission) { decision in
@@ -85,7 +85,7 @@ struct ChatView: View {
                 .interactiveDismissDisabled()
             }
             .sheet(item: Binding(
-                get: { store.pendingAskUser.first { $0.sessionId == sessionId }.map { AskUserSheetItem(ask: $0) } },
+                get: { store.pendingAskUser.first { $0.daemon == daemonNodeId && $0.sessionId == sessionId }.map { AskUserSheetItem(ask: $0) } },
                 set: { _ in }
             )) { item in
                 AskUserSheet(ask: item.ask) { answers in

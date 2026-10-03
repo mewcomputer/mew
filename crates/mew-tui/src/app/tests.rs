@@ -1,5 +1,159 @@
 use super::*;
 
+fn daemon_permission(
+    tool_name: &str,
+) -> (
+    AgentEvent,
+    tokio::sync::oneshot::Receiver<mew_hooks::PermissionDecision>,
+) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    (
+        AgentEvent::PermissionRequest {
+            call: mew_hooks::ToolCall {
+                tool_name: tool_name.into(),
+                call_id: "call".into(),
+                input: serde_json::json!({}),
+            },
+            tx,
+        },
+        rx,
+    )
+}
+
+#[test]
+fn daemon_required_actions_deduplicate_and_resolve_only_matching_ids() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    let (permission, mut permission_rx) = daemon_permission("bash");
+    app.handle_daemon_required_action("p".into(), permission);
+    let (duplicate, _) = daemon_permission("duplicate");
+    app.handle_daemon_required_action("p".into(), duplicate);
+    let (tx, mut goal_rx) = tokio::sync::oneshot::channel();
+    app.handle_daemon_required_action(
+        "g".into(),
+        AgentEvent::GoalProposed {
+            call_id: "goal-call".into(),
+            objective: "finish the task".into(),
+            tx,
+        },
+    );
+
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::RequestResolved {
+        request_id: "unknown".into(),
+    });
+    assert_eq!(app.permission.as_ref().unwrap().tool_name, "bash");
+    assert_eq!(app.mode, Mode::PermissionPrompt);
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::RequestResolved {
+        request_id: "p".into(),
+    });
+
+    assert!(matches!(
+        permission_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+    assert!(app.permission.is_none());
+    assert_eq!(app.mode, Mode::GoalProposal);
+    assert_eq!(
+        app.goal_proposal.as_ref().unwrap().objective,
+        "finish the task"
+    );
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::RequestResolved {
+        request_id: "g".into(),
+    });
+    assert!(matches!(
+        goal_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+    assert!(app.goal_proposal.is_none());
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+#[test]
+fn daemon_required_actions_clear_on_attach_before_replay() {
+    let mut app = App::new();
+    let (permission, mut rx) = daemon_permission("bash");
+    app.handle_daemon_required_action("old".into(), permission);
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionReady {
+        session_id: "new-session".into(),
+        cwd: None,
+        model: None,
+        provider: None,
+        permission_mode: None,
+    });
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+    assert!(app.permission.is_none());
+    assert_eq!(app.mode, Mode::Normal);
+    let (replayed, _) = daemon_permission("read");
+    app.handle_daemon_required_action("old".into(), replayed);
+    assert_eq!(app.permission.as_ref().unwrap().tool_name, "read");
+}
+
+#[test]
+fn daemon_required_action_response_advances_to_the_next_question() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    let (permission, mut rx) = daemon_permission("bash");
+    app.handle_daemon_required_action("p".into(), permission);
+    let (tx, _) = tokio::sync::oneshot::channel();
+    app.handle_daemon_required_action(
+        "q".into(),
+        AgentEvent::AskUser {
+            call_id: "question-call".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "pick a route".into(),
+                options: vec![],
+            }],
+            tx,
+        },
+    );
+
+    app.send_permission_decision(mew_hooks::PermissionDecision::AllowOnce);
+
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        mew_hooks::PermissionDecision::AllowOnce
+    );
+    assert_eq!(app.mode, Mode::UserQuestion);
+    assert_eq!(
+        app.user_question.as_ref().unwrap().questions[0].prompt,
+        "pick a route"
+    );
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::RequestResolved {
+        request_id: "p".into(),
+    });
+    assert_eq!(app.mode, Mode::UserQuestion);
+}
+
+#[test]
+fn daemon_idle_clears_cancellation_only_for_the_attached_session_without_finishing_stream() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.status.session_id = "active".into();
+    app.cancelling = true;
+    app.streaming = true;
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionActivityChanged {
+        session_id: "other".into(),
+        activity: mew_protocol::SessionState::Idle,
+    });
+    assert!(app.cancelling);
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionActivityChanged {
+        session_id: "active".into(),
+        activity: mew_protocol::SessionState::Running,
+    });
+    assert!(app.cancelling);
+
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionActivityChanged {
+        session_id: "active".into(),
+        activity: mew_protocol::SessionState::Idle,
+    });
+
+    assert!(!app.cancelling);
+    assert!(app.streaming);
+}
+
 /// Open a picker with an explicit item list, so rendering and scroll
 /// mechanics tests don't depend on the real filesystem or catalog contents.
 fn open_test_picker(app: &mut App, kind: &str, items: Vec<PickerItem>) {

@@ -51,6 +51,7 @@ export type ClientMessage =
       decision: PermissionDecision;
     }
   | { type: "ask_user_response"; request_id: string; answers: string[] }
+  | { type: "goal_response"; request_id: string; accepted: boolean }
   | { type: "slash_command"; command: string }
   | { type: "list_models" }
   | { type: "switch_model"; provider: string; model: string }
@@ -451,6 +452,7 @@ export type ServerMessage =
       call_id: string;
       questions: Question[];
     }
+  | { type: "goal_proposed"; request_id: string; call_id: string; objective: string }
   | {
       type: "subagent_start";
       parent_call_id: string;
@@ -633,6 +635,7 @@ export interface MewClientEvents {
     call_id: string;
     questions: Question[];
   }) => void;
+  "goal-proposed": (data: { request_id: string; call_id: string; objective: string }) => void;
 
   "subagent-start": (data: {
     parent_call_id: string;
@@ -939,6 +942,11 @@ export class MewClient {
    *  submits answers to the questions. */
   respondToAskUser(request_id: string, answers: string[]): void {
     this.send({ type: "ask_user_response", request_id, answers });
+  }
+
+  /** Accept or reject a proposed goal using its original request ID. */
+  respondToGoal(request_id: string, accepted: boolean): void {
+    this.send({ type: "goal_response", request_id, accepted });
   }
 
   /** Attach to an existing session (active or idle). If the session is idle,
@@ -1277,6 +1285,13 @@ export class MewClient {
           request_id: msg.request_id,
           call_id: msg.call_id,
           questions: msg.questions,
+        });
+        break;
+      case "goal_proposed":
+        this.emit("goal-proposed", {
+          request_id: msg.request_id,
+          call_id: msg.call_id,
+          objective: msg.objective,
         });
         break;
       case "subagent_permission_request":

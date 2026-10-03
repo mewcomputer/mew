@@ -1227,3 +1227,28 @@ regenerated from matching host metadata. Final device/simulator archives and
 application tests will run after the remaining mobile recovery changes; those
 results are not claimed here. Canonical generated Swift retains generator
 whitespace. Next work is required-action recovery.
+
+# 2026-10-03 — Recover required actions after attachment changes
+
+The daemon retains each live permission, workspace approval, child approval,
+question and goal payload with its original response channel. Attach resets the
+target projection, sends history and then replays pending actions. Publication,
+replay, resolution and cancellation are serialized. Wrong-kind and duplicate
+responses do not dismiss requests; cancellation resolves all cards and suppresses
+buffered requests from the cancelled turn. Closed channels are not replayed.
+
+Native and web projections deduplicate request IDs, preserve origin daemon and
+session identity, and use authoritative attention counts. History pagination
+preserves live cards. Mobile snapshots include pending actions. TUI clients receive
+actions even without a prompt stream and queue concurrent dialogs; resolving a
+card elsewhere sends no extra response or cancellation. Escape rejects a goal or
+cancels a waiting question, and matching Idle clears its cancellation indicator.
+
+Red regressions reproduced missing replay, duplicate native cards, wrong-session
+resolution, inferred mobile counts, missing snapshot actions and question Escape
+without cancellation. Passed full daemon checks: 34 unit, 6 concurrency, 23
+end-to-end, 6 lifetime and 7 TCP tests. Shared core 38, mobile 31, real mobile iroh
+2, TUI 271 plus 5 goldens, SDK 23 and web UI 123 pass, along with client/UI builds
+and scoped clippy. Swift bindings match current host metadata; handwritten Swift
+parses. Matching device/simulator archives and application tests remain in the
+final mobile gate. Next work is operational project isolation.

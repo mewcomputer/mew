@@ -10,6 +10,7 @@ import { InputArea } from "@/components/input-area";
 import { StatusFooter } from "@/components/status-footer";
 import { PermissionToast } from "@/components/permission-toast";
 import { AskUserCard } from "@/components/ask-user-card";
+import { GoalCard } from "@/components/goal-card";
 
 export const Route = createFileRoute("/session/$sessionId")({
   component: SessionRouteComponent,
@@ -67,6 +68,7 @@ function SessionRouteComponent() {
         <div className="relative flex flex-col">
           <div className="pointer-events-auto">
             <AskUserCard />
+            <GoalCard />
           </div>
           <InputArea
             ref={inputRef}

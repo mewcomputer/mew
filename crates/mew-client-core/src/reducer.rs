@@ -431,6 +431,7 @@ impl ClientState {
                 session.model = model.clone();
                 session.provider = provider.clone();
                 session.permission_mode = permission_mode.clone();
+                session.pending_actions.clear();
                 self.current_model = model;
                 self.current_provider = provider;
                 self.permission_mode = permission_mode;
@@ -750,8 +751,8 @@ impl ClientState {
                 vec![ClientEvent::PresenceChanged]
             }
             ServerMessage::RequestResolved { request_id } => {
-                for session in self.sessions.values_mut() {
-                    session
+                if let Some(session_id) = self.attached_session.clone() {
+                    self.session_mut(&session_id)
                         .pending_actions
                         .retain(|action| action.request_id != request_id);
                 }
@@ -927,12 +928,18 @@ impl ClientState {
         let Some(session_id) = self.attached_session.clone() else {
             return Vec::new();
         };
-        self.session_mut(&session_id)
-            .pending_actions
-            .push(PendingAction {
+        let actions = &mut self.session_mut(&session_id).pending_actions;
+        if let Some(action) = actions
+            .iter_mut()
+            .find(|action| action.request_id == request_id)
+        {
+            action.kind = kind;
+        } else {
+            actions.push(PendingAction {
                 request_id: request_id.clone(),
                 kind,
             });
+        }
         vec![ClientEvent::RequiredActionChanged {
             session_id,
             request_id,
@@ -1456,6 +1463,94 @@ mod tests {
             &state.session(&session_id).unwrap().messages[0].parts[0],
             Part::ToolCall(part) if part.state.output() == Some("/tmp/mew\n")
         ));
+    }
+
+    #[test]
+    fn required_action_replays_are_idempotent() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        let requests = [
+            ServerMessage::PermissionRequest {
+                request_id: "permission".into(),
+                tool_name: "shell".into(),
+                input: serde_json::json!({}),
+            },
+            ServerMessage::WorkspacePermissionRequest {
+                request_id: "workspace".into(),
+                path: "/project".into(),
+            },
+            ServerMessage::SubagentPermissionRequest {
+                request_id: "subagent".into(),
+                parent_call_id: "parent".into(),
+                tool_name: "shell".into(),
+                input: serde_json::json!({}),
+            },
+            ServerMessage::AskUserRequest {
+                request_id: "question".into(),
+                call_id: "call".into(),
+                questions: vec![],
+            },
+            ServerMessage::GoalProposed {
+                request_id: "goal".into(),
+                call_id: "goal-call".into(),
+                objective: "finish".into(),
+            },
+        ];
+        for request in requests {
+            state.apply_server_message(request.clone());
+            state.apply_server_message(request);
+        }
+        let id = state.attached_session.as_deref().unwrap();
+        assert_eq!(state.session(id).unwrap().pending_actions.len(), 5);
+        state.apply_server_message(ServerMessage::SessionHistoryPage {
+            session_id: id.into(),
+            messages: vec![],
+            next_cursor: None,
+            replace: false,
+        });
+        assert_eq!(
+            state
+                .session(state.attached_session.as_deref().unwrap())
+                .unwrap()
+                .pending_actions
+                .len(),
+            5
+        );
+        session_ready(&mut state);
+        assert!(state
+            .session(state.attached_session.as_deref().unwrap())
+            .unwrap()
+            .pending_actions
+            .is_empty());
+    }
+
+    #[test]
+    fn resolution_and_attach_reset_only_affect_the_attached_session() {
+        let mut state = ClientState::default();
+        session_ready(&mut state);
+        let first = state.attached_session.clone().unwrap();
+        state.apply_server_message(ServerMessage::WorkspacePermissionRequest {
+            request_id: "same-id".into(),
+            path: "/first".into(),
+        });
+        state.apply_server_message(ServerMessage::SessionReady {
+            session_id: "second".into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        });
+        state.apply_server_message(ServerMessage::WorkspacePermissionRequest {
+            request_id: "same-id".into(),
+            path: "/second".into(),
+        });
+        state.apply_server_message(ServerMessage::RequestResolved {
+            request_id: "same-id".into(),
+        });
+        assert!(state.session("second").unwrap().pending_actions.is_empty());
+        assert_eq!(state.session(&first).unwrap().pending_actions.len(), 1);
+        session_ready(&mut state);
+        assert!(state.session(&first).unwrap().pending_actions.is_empty());
     }
 
     #[test]
