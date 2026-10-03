@@ -912,3 +912,142 @@ tools, and CEF implementation. Live macOS inspection remains blocked by the lock
 Mac; visual scores and performance conclusions are deferred. No product code was
 changed by this assessment. Existing TUI changes were verified and committed
 separately as d8fd27a.
+
+# 2026-10-03 — Cross-client runtime and recovery assessment
+
+Expanded the UX assessment beyond desktop to the daemon, TUI adapter, shared Rust
+client reducer, TypeScript SDK/web store, mobile core, and Swift application. Three
+independent review lenses checked session correctness, client/protocol drift, and
+runtime integration. No product source was changed. Findings below distinguish
+execution defects from display and recovery defects; a shell replacement alone
+would retain these failures.
+
+## Task ownership and recovery
+
+- The daemon cancels a running turn and removes its agent 30 seconds after its
+  last client leaves. Switching conversations uses that same detach path, so a
+  task cannot reliably continue while the user works in another conversation.
+  Source: `crates/mew-daemon/src/lib.rs:468`.
+- Attaching replays history and selected settings, but no outstanding permission,
+  question, plan, or goal request payload. Pending maps retain response senders
+  only. A newly attached client cannot recover the action blocking the task.
+  Sources: daemon `lib.rs:953`, `session.rs:69`.
+- Resume reconstructs the agent from startup provider/model, persona, thinking,
+  and permission defaults, restoring messages and cwd rather than per-session
+  policy. Ordinary conversation switching can trigger this reset after the same
+  30-second unload. Sources: daemon `session.rs:351`, CLI `commands/daemon.rs:92`.
+- Daemon sessions pass `todos_path=None`, so todo state is not persisted and
+  disappears on unload. Noninteractive `run` does persist it. Sources: CLI
+  `commands/daemon.rs:119`, agent `tools.rs:2165`, CLI `commands/run.rs:91`.
+- The earlier per-session cwd finding affects every daemon client: context may
+  load from the selected project while shell and ToolCtx still use daemon cwd.
+  Sources: CLI `setup/agent.rs:508/580`, agent `tools.rs:566`.
+
+## Session state differs between clients
+
+- TUI's DaemonClient forwards translated events only through the channel created
+  by its own `prompt()`. Attach and turns initiated by another client have no
+  persistent event subscription. Assistant/tool activity and actionable requests
+  are dropped while sidebar notifications can still arrive. Source: daemon
+  `client.rs:161/217`.
+- Desktop's shared client reducer and mobile's compatibility event layer confuse
+  provider MessageEnd with completion of the full agent turn. Desktop can offer
+  Send and iOS can stop showing progress while tools/continuations remain active.
+  The recent TUI full-turn fix does not repair these separate reducers. Sources:
+  client-core `reducer.rs:1035`, mobile-core `lib.rs:1342`.
+- RequestResolved dismisses permissions in web but leaves questions and plan
+  approvals interactive; TUI ignores the notification and leaves its modal open
+  even after finish_turn. Sources: web `stores/session.ts:1411`, TUI
+  `app/mod.rs:896/2012`. Rust client-core already resolves all required actions.
+- Attach now sends only the newest 24 canonical messages. Desktop supports
+  pagination; TUI, web, and iOS discard or do not expose the cursor and cannot
+  reach older history. Tool continuations count against that limit. Web SDK's
+  independent history cache also omits live arrivals when merging a later page.
+  Sources: protocol `lib.rs:16`, daemon `lib.rs:1016`, web SDK `index.ts:1388`,
+  TUI `app/mod.rs:981`, mobile-core `lib.rs:1273`.
+
+## Runtime transitions and capabilities
+
+- Approved handoff_plan emits PersonaSwitchRequested, but no daemon transition
+  applies the builder persona. Web only changes its displayed persona; mobile
+  reports PersonaSwitched; TUI stores a pending name with no consumer. The agent
+  keeps its existing persona restrictions. Sources: daemon `lib.rs:3208`, web
+  `stores/session.ts:1314`, mobile-core `lib.rs:1801`, TUI `app/mod.rs:2243`.
+- Model switching replaces the top-level provider without updating model identity,
+  catalog pricing, or the subagent runner's captured default provider. The picker,
+  manifests, computed costs, and unpinned child requests can disagree. Source:
+  CLI `commands/daemon.rs:261`, agent `events.rs:65`, `runner.rs:203`.
+- Default-persona model pins are ignored. Manual switching announces the persona
+  before building its pinned provider and silently suppresses provider failures.
+  Sources: CLI `setup/agent.rs:601`, daemon `lib.rs:2351`.
+- Canonical chat startup uses NopDispatcher and no discovered extensions. Plugin
+  registration is skipped; declarative extension capabilities are absent. No
+  production MCP discovery/connection call exists in `crates/mew`, despite the
+  documented mcp.json behavior. Debug context and noninteractive run do not match
+  chat capability loading. Sources: CLI `commands/daemon.rs:118`,
+  `setup/agent.rs:590`, `docs/using-mew/mcp-servers.md:62`.
+
+## Web and iOS-specific discrepancies
+
+- OpenAI streams tool identity after PartStart. Web discards identity deltas and
+  later searches by finalized call_id rather than stable part_id, leaving a
+  completed live tool unnamed/pending with empty input/output. Replaying its
+  finalized history renders it correctly. Sources: OpenAI provider
+  `lib.rs:737/947`, web `stores/session.ts:570/727`.
+- The TypeScript protocol omits GoalProposed/GoalResponse. A valid daemon goal
+  request throws an unhandled-message error and has no approval UI or response
+  method. Rust clients have these wire cases. Source: web SDK `index.ts:1543`.
+- Web command discovery lists /help without implementing its client-side handler;
+  daemon silently ignores it. Supported commands such as /goal and /wiki can
+  become ordinary model prompts. SlashResult also has two transcript owners,
+  appending /compact output twice. Sources: web `components/input-area.tsx:30`,
+  `routes/session.$sessionId.tsx:33`, `stores/session.ts:1267`, daemon
+  `lib.rs:1704`.
+- Checked-in iOS AppStore does not compile against checked-in CoreEvent bindings:
+  its switch lacks subagentEnd, planApprovalRequested, and goalProposed. Plan and
+  goal requests also lack application handling. Source: `mew-ios/mew/AppStore.swift:407`.
+- iOS applies history/stream/permission events from other connected daemons to
+  the single visible conversation, discarding event identity. Responses can then
+  target the selected daemon rather than the request's daemon. Source: AppStore
+  `:446/467/479/503`.
+- iOS sets isStreaming before sending, but disconnects and protocol errors do not
+  clear it; sending on an absent connection silently does nothing. Its composer
+  can remain Stop-only, with active-session errors excluded from its banner.
+  Sources: AppStore `:296/408/538`, mobile-core `lib.rs:1746`.
+
+## Verification and repair direction
+
+A scratch executable used real daemon WebSocket handlers over in-memory duplex
+streams, temporary session storage, and the existing deterministic FakeProvider
+to emit an actual ask_user_question call. It confirmed that a second attach gets
+history but no pending question, then that switching conversations cancels and
+unloads the waiting turn after 30 seconds. The scratch Cargo project is at
+`/private/tmp/mew-cross-client-audit`; it makes no external provider calls.
+
+Review probes against actual web reducers/SDK reproduced live-versus-history tool
+identity, missing goal dispatch, stale resolved questions/plans, and pagination
+losing intervening live messages. A scratch executable linked to the TUI library
+confirmed stale permission state after RequestResolved and finish_turn. Direct
+Swift typechecking of real AppStore source against the checked-in binding module
+confirmed the three missing cases. Full xcodebuild was blocked by sandboxed
+SwiftPM/cache access; no successful iOS build or simulator test is claimed.
+Reproduction sources are `/private/tmp/mew-cross-client-web-traces.mjs` and
+`/private/tmp/mew-tui-resolved.rs`; exact TUI and Swift commands/logs are saved in
+`/private/tmp/mew-tui-resolved-command.txt`, `/private/tmp/mew-tui-resolved.log`,
+`/private/tmp/mew-ios-typecheck-command.txt`, and `/private/tmp/mew-ios-typecheck.log`.
+
+Existing narrow suites pass: web store 21 tests, client-core 28 tests, and agent
+handoff_plan 4 tests. These suites do not cover the failing cross-client traces;
+handoff coverage asserts the request event rather than the applied transition.
+An existing test-only unused_mut warning was observed in agent `turn.rs:1479`.
+Native macOS visual, focus, and performance QA remains blocked by the locked Mac.
+
+Repair the daemon's task lifetime, per-session operational state, and recoverable
+required actions first. Make persona/model/capability transitions authoritative
+and persistent. Then enforce one protocol contract and canonical message identity
+across client projections, with a common trace corpus for tool continuations,
+attach-mid-request, resolution from another client, paginated live history, and
+switch/unload/resume. After these behaviors hold, build the project/task shell,
+daemon-backed review, and shared human/agent browser slice identified above.
+Keep the useful engine and tools while replacing duplicated state plumbing in
+small verified changes. A complete engine rewrite is not justified by this audit.
