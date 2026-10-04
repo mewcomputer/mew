@@ -124,6 +124,7 @@ impl DesktopShell {
     /// `replace_composer_text` this does not reset the recall position.
     pub(super) fn set_composer_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.initial_auto_attach = false;
+        self.session_requests.cancel_initial_prompt();
         self.model.ui.set_composer(text);
         let end = self.model.ui.composer.len();
         self.composer_selection = end..end;
@@ -490,6 +491,7 @@ impl DesktopShell {
     ) {
         let mut updated = self.model.ui.composer.clone();
         self.initial_auto_attach = false;
+        self.session_requests.cancel_initial_prompt();
         updated.replace_range(range.clone(), replacement);
         let cursor = range.start + replacement.len();
         self.composer_selection = cursor..cursor;
@@ -511,6 +513,7 @@ impl DesktopShell {
     ) {
         let current = self.model.ui.composer.clone();
         self.initial_auto_attach = false;
+        self.session_requests.cancel_initial_prompt();
         let range = range_utf16
             .as_ref()
             .map(|range| {

@@ -93,12 +93,17 @@ impl TaskDrafts {
         self.saved.remove(&self.owner).unwrap_or_default()
     }
 
-    pub(super) fn bind_created_task(&mut self, creation: &DraftOwner, session_id: &str) {
+    pub(super) fn bind_created_task(
+        &mut self,
+        creation: &DraftOwner,
+        session_id: &str,
+        follow: bool,
+    ) {
         let owner = DraftOwner::session(&creation.profile, session_id);
         if let Some(draft) = self.saved.remove(creation) {
             self.saved.insert(owner.clone(), draft);
         }
-        if self.owner == *creation {
+        if follow && self.owner == *creation {
             self.owner = owner;
         }
     }
@@ -226,7 +231,7 @@ mod tests {
     fn navigating_after_history_recall_cannot_replace_another_tasks_draft() {
         let mut drafts = TaskDrafts::new(DraftOwner::session("local", "a"));
         let mut history = super::super::PromptHistory::default();
-        history.record("previous prompt");
+        history.record("previous prompt".into());
         let mut text = history.recall_older("a's original draft").unwrap();
         let mut attachments = Vec::new();
         drafts.activate(
@@ -251,7 +256,7 @@ mod tests {
             drafts.switch(other.clone(), draft("new task", "new.txt")),
             PromptDraft::default()
         );
-        drafts.bind_created_task(&creation, "created");
+        drafts.bind_created_task(&creation, "created", true);
         assert_eq!(drafts.owner(), &other);
         assert_eq!(
             drafts.switch(created, draft("other task", "other.txt")),
@@ -264,7 +269,7 @@ mod tests {
         let creation = DraftOwner::new_task("local");
         let created = DraftOwner::session("local", "created");
         let mut drafts = TaskDrafts::new(creation.clone());
-        drafts.bind_created_task(&creation, "created");
+        drafts.bind_created_task(&creation, "created", true);
         assert_eq!(drafts.owner(), &created);
         assert_eq!(
             drafts.switch(

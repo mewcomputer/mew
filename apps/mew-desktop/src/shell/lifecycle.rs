@@ -124,7 +124,7 @@ impl DesktopShell {
         );
         let (command_tx, client_stop_tx, client_thread) = if let Some(profile) = connection_profile
         {
-            let (command_tx, stop_tx, thread) = Self::start_client(profile, cx);
+            let (command_tx, stop_tx, thread) = Self::start_client(profile, 0, cx);
             (Some(command_tx), Some(stop_tx), thread)
         } else {
             if let Some(error) = startup_error {
@@ -364,16 +364,13 @@ impl DesktopShell {
             composer_blink_epoch: 0,
             streaming_render_scheduled: false,
             expanded_chat_parts: BTreeSet::new(),
-            pending_prompt: None,
             task_drafts: TaskDrafts::new(DraftOwner::new_task(&draft_profile)),
             initial_auto_attach: true,
-            pending_attachments: Vec::new(),
             attachments: Vec::new(),
             attachment_error: None,
             pending_model: None,
             awaiting_model_switch: None,
-            pending_session_request: false,
-            pending_session_target: None,
+            session_requests: SessionRequests::default(),
             model_picker_open: false,
             persona_picker_open: false,
             permission_picker_open: false,
@@ -439,23 +436,13 @@ impl DesktopShell {
 
         self.stop_client();
         let mut profile = self.connection_profile.clone();
-        let should_restart_owned_daemon = self
-            ._supervisor
-            .as_ref()
-            .and_then(|supervisor| supervisor.endpoint())
-            .is_some_and(|endpoint| endpoint.mode == DaemonMode::LocalOwned);
-
-        if profile.is_none() || should_restart_owned_daemon {
+        if should_refresh_supervisor(profile.as_ref(), self._supervisor.as_ref()) {
             let Some(supervisor) = self._supervisor.as_mut() else {
                 self.model.fail("no daemon connection is configured");
                 cx.notify();
                 return;
             };
-            let endpoint = if should_restart_owned_daemon {
-                supervisor.restart()
-            } else {
-                supervisor.connect_or_launch()
-            };
+            let endpoint = supervisor.connect_or_launch();
             match endpoint {
                 Ok(endpoint) => {
                     profile = Some(DesktopConnectionProfile::LocalWebSocket {
@@ -482,9 +469,8 @@ impl DesktopShell {
         self.model = ShellModel::starting(Some(profile.endpoint_label()));
         self.model.ui.composer = composer;
         self.model.ui.selected_session = selected_session.clone();
-        self.pending_session_request = selected_session.is_some();
-        self.pending_session_target = selected_session;
-        let (command_tx, stop_tx, thread) = Self::start_client(profile, cx);
+        let (command_tx, stop_tx, thread) =
+            Self::start_client(profile, self.session_requests.generation(), cx);
         self.command_tx = Some(command_tx);
         self.client_stop_tx = Some(stop_tx);
         self.client_thread = thread;
@@ -492,6 +478,7 @@ impl DesktopShell {
     }
 
     fn stop_client(&mut self) {
+        self.session_requests.reset_connection();
         self.reset_browser_connection();
         if let Some(stop_tx) = self.client_stop_tx.take() {
             let _ = stop_tx.send(());
@@ -506,6 +493,7 @@ impl DesktopShell {
 
     pub(super) fn start_client(
         profile: DesktopConnectionProfile,
+        generation: usize,
         cx: &mut Context<Self>,
     ) -> (
         UnboundedSender<ClientMessage>,
@@ -552,6 +540,9 @@ impl DesktopShell {
                     batch.push(event);
                 }
                 this.update(cx, |shell, cx| {
+                    if !shell.session_requests.accepts_source(generation) {
+                        return;
+                    }
                     let mut needs_shell_render = false;
                     let mut has_streaming_update = false;
                     for event in batch {
@@ -559,12 +550,11 @@ impl DesktopShell {
                             DesktopClientEvent::Connected => {
                                 shell.reset_browser_connection();
                                 shell.model.connected();
-                                if let Some(session_id) = shell.pending_session_target.clone() {
+                                if let Some(session_id) =
+                                    shell.task_drafts.owner().session_id.clone()
+                                {
                                     shell.switch_draft_owner(Some(&session_id));
-                                    shell.send_command(ClientMessage::AttachSession {
-                                        session_id,
-                                        client_kind: mew_protocol::ClientKind::Desktop,
-                                    });
+                                    shell.dispatch_attachment(&session_id);
                                 }
                                 needs_shell_render = true;
                             }
@@ -711,11 +701,40 @@ impl DesktopShell {
     }
 }
 
+fn should_refresh_supervisor(
+    profile: Option<&DesktopConnectionProfile>,
+    supervisor: Option<&DesktopSupervisor>,
+) -> bool {
+    profile.is_none()
+        || (supervisor.is_some()
+            && matches!(
+                profile,
+                Some(DesktopConnectionProfile::LocalWebSocket { .. })
+            ))
+}
+
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
     use futures::future::pending;
     use mew_client_core::{ClientConnection, TransportError};
+
+    #[test]
+    fn supervised_local_retry_is_refreshed_even_after_its_cached_endpoint_is_cleared() {
+        let supervisor = DesktopSupervisor::new(SupervisorConfig::default());
+        assert!(supervisor.endpoint().is_none());
+        let local = DesktopConnectionProfile::LocalWebSocket {
+            url: "ws://127.0.0.1:25566".into(),
+        };
+        assert!(should_refresh_supervisor(Some(&local), Some(&supervisor)));
+        assert!(!should_refresh_supervisor(Some(&local), None));
+        let remote = DesktopConnectionProfile::RemoteIroh {
+            node_id: "remote".into(),
+            pairing_token: None,
+            device_name: "desktop".into(),
+        };
+        assert!(!should_refresh_supervisor(Some(&remote), Some(&supervisor)));
+    }
 
     struct PendingTransport;
 

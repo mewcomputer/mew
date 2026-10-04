@@ -1516,6 +1516,24 @@ impl DesktopShell {
                                         }))
                                         .child("retry")
                                         .into_any_element()
+                                } else if self.session_requests.needs_reconnect() {
+                                    div()
+                                        .id("reconnect-task-client")
+                                        .px(px(7.))
+                                        .py(px(4.))
+                                        .rounded(px(5.))
+                                        .bg(theme_rgb(&self.theme, "card"))
+                                        .text_xs()
+                                        .text_color(theme_rgb(&self.theme, "text.body"))
+                                        .cursor_pointer()
+                                        .role(Role::Button)
+                                        .desktop_focus(theme_rgb(&self.theme, "text.accent"))
+                                        .aria_label("Reconnect client to confirm task attachment")
+                                        .on_click(cx.listener(|shell, _, _, cx| {
+                                            shell.retry_connection(cx);
+                                        }))
+                                        .child("reconnect")
+                                        .into_any_element()
                                 } else {
                                     div()
                                         .id("dismiss-composer-error")

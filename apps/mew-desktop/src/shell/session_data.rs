@@ -309,16 +309,6 @@ impl DesktopShell {
         self.transcript_rows = new_rows;
     }
 
-    pub(super) fn send_pending_prompt(&mut self) {
-        if !self.model.session_is_ready() {
-            return;
-        }
-        if let Some(text) = self.pending_prompt.take() {
-            let attachments = std::mem::take(&mut self.pending_attachments);
-            self.send_command(ClientMessage::Prompt { text, attachments });
-        }
-    }
-
     pub(super) fn request_older_history(&mut self) {
         if self.history_loading {
             return;
@@ -341,6 +331,8 @@ impl DesktopShell {
     }
 
     pub(super) fn add_attachment(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.initial_auto_attach = false;
+        self.session_requests.cancel_initial_prompt();
         if !path.is_file() {
             self.attachment_error = Some("Only files can be attached.".into());
             cx.notify();
@@ -380,6 +372,9 @@ impl DesktopShell {
 
     pub(super) fn pick_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.initial_auto_attach = false;
+        self.session_requests.cancel_initial_prompt();
+        let owner = self.task_drafts.owner().clone();
+        let generation = self.session_requests.generation();
         let paths_receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -394,7 +389,16 @@ impl DesktopShell {
                     _ => return Ok::<(), anyhow::Error>(()),
                 };
                 for path in paths {
-                    shell.update(cx, |shell, cx| shell.add_attachment(path, cx));
+                    shell.update(cx, |shell, cx| {
+                        if shell.session_requests.accepts_source(generation)
+                            && shell.task_drafts.owner() == &owner
+                        {
+                            shell.add_attachment(path, cx);
+                        } else {
+                            shell.attachment_error = Some("The task changed before files were chosen. Select the files again in this task.".into());
+                            cx.notify();
+                        }
+                    });
                 }
                 Ok(())
             })
@@ -402,6 +406,7 @@ impl DesktopShell {
     }
 
     pub(super) fn remove_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.session_requests.cancel_initial_prompt();
         if index < self.attachments.len() {
             self.attachments.remove(index);
             cx.notify();

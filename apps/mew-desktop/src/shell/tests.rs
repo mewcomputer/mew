@@ -1218,10 +1218,10 @@ mod shell_tests {
         let mut history = PromptHistory::default();
         assert_eq!(history.recall_older("draft"), None);
 
-        history.record("first");
-        history.record("second");
-        history.record("second");
-        history.record("  ");
+        history.record("first".into());
+        history.record("second".into());
+        history.record("second".into());
+        history.record("  ".into());
 
         assert_eq!(history.recall_older("draft").as_deref(), Some("second"));
         assert_eq!(history.recall_older("").as_deref(), Some("first"));
@@ -1235,14 +1235,14 @@ mod shell_tests {
     #[test]
     fn prompt_history_recording_resets_recall_and_caps_entries() {
         let mut history = PromptHistory::default();
-        history.record("one");
+        history.record("one".into());
         history.recall_older("");
         assert!(history.is_recalling());
-        history.record("two");
+        history.record("two".into());
         assert!(!history.is_recalling());
 
         for index in 0..PROMPT_HISTORY_LIMIT + 10 {
-            history.record(&format!("prompt-{index}"));
+            history.record(format!("prompt-{index}"));
         }
         let mut oldest = None;
         history.recall_older("");

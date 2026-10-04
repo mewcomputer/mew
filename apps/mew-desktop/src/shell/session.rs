@@ -23,36 +23,33 @@ impl DesktopShell {
         group_id: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if self.session_requests.is_pending() {
+            self.report_pending_attachment();
+            cx.notify();
+            return;
+        }
         self.capture_session_view_state();
         self.close_terminal();
         self.open_new_tab();
         self.reset_unbound_tab_view();
         self.pending_model = None;
         self.awaiting_model_switch = None;
-        self.pending_prompt = None;
-        self.pending_session_request = true;
-        self.pending_session_target = None;
-        let command = match group_id {
-            Some(group_id) => self.model.ui.new_conversation_in_group(cwd, group_id),
-            None => self.model.ui.new_conversation(cwd),
-        };
+        self.create_session(cwd, group_id);
         self.composer_selection = 0..0;
         self.composer_selection_reversed = false;
         self.composer_marked_range = None;
         self.composer_is_selecting = false;
         self.restart_composer_cursor_blink(cx);
-        self.send_command(command);
         cx.notify();
     }
 
     fn reset_unbound_tab_view(&mut self) {
         self.initial_auto_attach = false;
         self.switch_draft_owner(None);
-        self.pending_session_request = false;
-        self.pending_session_target = None;
-        self.model.attached_session = None;
+        self.session_requests.navigate();
+        self.model
+            .prepare_attachment(self.session_requests.needs_reconnect());
         self.model.ui.selected_session = None;
-        self.model.ui.transcript.clear();
         self.reset_browser_for_unattached_tab();
         self.markdown_cache.clear();
         self.tool_text_lists.borrow_mut().clear();
@@ -98,7 +95,7 @@ impl DesktopShell {
 
     pub(super) fn attach_session(&mut self, session_id: String, cx: &mut Context<Self>) {
         self.capture_session_view_state();
-        if let Some(command) = self.model.ui.select_session(&session_id) {
+        if self.model.ui.select_session(&session_id).is_some() {
             self.initial_auto_attach = false;
             self.switch_draft_owner(Some(&session_id));
             self.restore_session_view_state(&session_id, cx);
@@ -107,21 +104,19 @@ impl DesktopShell {
             self.transcript_selection_anchor = None;
             self.transcript_selected_text = None;
             self.transcript_is_selecting = false;
-            self.pending_session_request = true;
-            self.pending_session_target = Some(session_id.clone());
+            self.session_requests.navigate();
             if self.model.attached_session.as_deref() != Some(session_id.as_str()) {
                 self.close_terminal();
             }
             self.open_session_tab(&session_id);
-            self.send_command(command);
+            self.dispatch_attachment(&session_id);
             cx.notify();
         }
     }
 
     fn clear_pending_session_view(&mut self) {
-        self.model.attached_session = None;
-        self.model.last_error = None;
-        self.model.ui.clear_attached_session_projection();
+        self.model
+            .prepare_attachment(self.session_requests.needs_reconnect());
         self.markdown_cache.clear();
         self.tool_text_lists.borrow_mut().clear();
         self.tool_text_cache.borrow_mut().clear();
@@ -489,11 +484,50 @@ impl DesktopShell {
         }
     }
 
-    pub(super) fn send_command(&self, command: ClientMessage) {
+    pub(super) fn send_command(&self, command: ClientMessage) -> bool {
         if let Some(command_tx) = &self.command_tx {
             if let Err(error) = command_tx.send(command) {
                 tracing::warn!(error = %error, "desktop: command channel closed");
+                return false;
             }
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn report_pending_attachment(&mut self) {
+        self.model.last_error = Some(
+            if self.session_requests.needs_reconnect() {
+                "Task attachment could not be confirmed. Reconnect the client to continue."
+            } else {
+                "Still attaching the task. Your draft is saved; submit again when it is ready."
+            }
+            .into(),
+        );
+    }
+
+    pub(super) fn create_session(&mut self, cwd: Option<String>, group_id: Option<String>) -> bool {
+        let accepted = self.session_requests.create(
+            self.command_tx.as_ref(),
+            self.task_drafts.owner().clone(),
+            cwd,
+            group_id,
+        );
+        if !accepted {
+            self.model.last_error =
+                Some("Could not request a new task. Your draft is saved.".into());
+        }
+        accepted
+    }
+
+    pub(super) fn dispatch_attachment(&mut self, session_id: &str) {
+        if !self.session_requests.is_pending()
+            && !self
+                .session_requests
+                .attach(self.command_tx.as_ref(), session_id)
+        {
+            self.model.last_error =
+                Some("Could not request task attachment. Reconnect the client to continue.".into());
         }
     }
 
@@ -512,6 +546,7 @@ impl DesktopShell {
         ) {
             return;
         }
+        self.session_requests.navigate();
         let end = self.model.ui.composer.len();
         self.composer_selection = end..end;
         self.composer_selection_reversed = false;
@@ -1277,13 +1312,30 @@ impl DesktopShell {
             ClientEvent::SessionReady { session_id } => Some(session_id.as_str()),
             _ => None,
         });
-        if let Some(session_id) = ready_session_id {
-            if self.pending_session_request
-                && self.pending_session_target.is_none()
-                && self.task_drafts.owner().session_id.is_none()
-            {
-                let creation = self.task_drafts.owner().clone();
-                self.task_drafts.bind_created_task(&creation, session_id);
+        if events
+            .iter()
+            .any(|event| matches!(event, ClientEvent::Error(_)))
+        {
+            self.session_requests.ambiguous_error();
+        }
+        let ready = ready_session_id.and_then(|session_id| {
+            self.session_requests
+                .acknowledge_from(self.session_requests.generation(), session_id)
+        });
+        let mut initial_prompt = None;
+        if let Some(ready) = ready {
+            if let (Some(owner), Some(session_id)) = (ready.created_for, ready_session_id) {
+                self.task_drafts
+                    .bind_created_task(&owner, session_id, ready.follow_creation);
+                if ready.follow_creation {
+                    self.bind_new_tab_to_session(session_id);
+                    initial_prompt = ready.initial_prompt;
+                }
+            }
+            if let Some(desired) = self.task_drafts.owner().session_id.clone() {
+                if ready_session_id != Some(desired.as_str()) {
+                    self.dispatch_attachment(&desired);
+                }
             }
         }
         let has_browser_event = events.iter().any(|event| {
@@ -1295,11 +1347,12 @@ impl DesktopShell {
                     | ClientEvent::BrowserError { .. }
             )
         });
-        self.model.apply_events(events);
+        self.model
+            .apply_events(events, self.session_requests.needs_reconnect());
         if let Some(session_id) = ready_session_id {
             if should_track_session_ready(
                 self.model.ui.selected_session.as_deref(),
-                self.pending_session_target.as_deref(),
+                self.task_drafts.owner().session_id.as_deref(),
                 session_id,
             ) {
                 self.ensure_session_view_state(session_id);
@@ -1313,6 +1366,10 @@ impl DesktopShell {
                 );
             } else {
                 self.model.sync_client_metadata(state);
+            }
+            if self.session_requests.is_pending() {
+                self.model.attached_session = None;
+                self.model.ui.clear_attached_session_projection();
             }
             self.rebuild_sidebar_rows();
         }
@@ -1355,9 +1412,6 @@ impl DesktopShell {
         }) {
             self.refresh_open_tab_titles();
         }
-        if let Some(target) = self.pending_session_target.as_deref() {
-            self.model.ui.selected_session = Some(target.to_owned());
-        }
         if let Some(session_id) = events.iter().find_map(|event| match event {
             ClientEvent::SessionHistoryPageLoaded { session_id, .. } => Some(session_id),
             _ => None,
@@ -1373,11 +1427,7 @@ impl DesktopShell {
                 .iter()
                 .any(|tab| tab.session_id.as_deref() == Some(session_id.as_str()))
             {
-                if self.pending_session_request && self.pending_session_target.is_none() {
-                    self.bind_new_tab_to_session(&session_id);
-                } else {
-                    self.open_session_tab(&session_id);
-                }
+                self.open_session_tab(&session_id);
             }
         }
         if events.iter().any(client_event_is_text_delta) {
@@ -1435,7 +1485,7 @@ impl DesktopShell {
                 &self.model.ui.composer,
                 &self.attachments,
             )
-            && !self.pending_session_request
+            && !self.session_requests.is_pending()
             && self.model.ui.selected_session.is_none()
         {
             let session_id = self
@@ -1449,13 +1499,9 @@ impl DesktopShell {
                 self.attach_session(session_id, cx);
             }
         }
-        let session_ready = ready_session_id.is_some_and(|session_id| {
-            self.pending_session_request
-                && self
-                    .pending_session_target
-                    .as_deref()
-                    .is_none_or(|target| target == session_id)
-        });
+        let session_ready = ready_session_id.is_some()
+            && !self.session_requests.is_pending()
+            && self.model.session_is_ready();
         if session_ready {
             self.terminal_view.update(cx, |view, cx| view.clear(cx));
             self.terminal_status = "opening".into();
@@ -1464,8 +1510,6 @@ impl DesktopShell {
                 cols: TERMINAL_COLS,
             });
             self.send_command(ClientMessage::ListPersonas);
-            self.pending_session_request = false;
-            self.pending_session_target = None;
             if let Some((provider, model)) = self.pending_model.take() {
                 self.awaiting_model_switch = Some((provider.clone(), model.clone()));
                 self.send_command(ClientMessage::SwitchModel { provider, model });
@@ -1479,10 +1523,21 @@ impl DesktopShell {
                 self.awaiting_model_switch = None;
             }
         }
-        if self.awaiting_model_switch.is_none()
-            && (session_ready || self.model.ui.selected_session.is_some())
-        {
-            self.send_pending_prompt();
+        if let Some(prompt) = initial_prompt {
+            if self.model.session_is_ready() && self.awaiting_model_switch.is_none() {
+                if let Some(accepted) = session_requests::queue_initial_prompt(
+                    prompt,
+                    self.command_tx.as_ref(),
+                    &mut self.model.ui.composer,
+                    &mut self.attachments,
+                    &mut self.prompt_history,
+                ) {
+                    self.finish_prompt_submission(accepted, cx);
+                }
+            } else {
+                self.model.last_error =
+                    Some("Your task draft is saved. Submit it when the model is ready.".into());
+            }
         }
         if self.model.session_is_ready() {
             if let Some(session_id) = self.model.attached_session.clone() {

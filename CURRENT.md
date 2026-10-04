@@ -1476,3 +1476,26 @@ review found and verified the startup owner, last-tab metadata and recall-stash
 fixes. An earlier non-escalated native run hit the loopback sandbox restriction;
 the final escalated suite passed. Deferred prompt submission and attachment
 acknowledgement ordering remain the next separate chunk.
+
+### 2026-10-04: native attachment ordering and safe submission
+
+Native attachment and creation now share one in-flight request. Navigation
+retains its desired conversation and coalesces further switches until the
+current acknowledgement arrives. Creation replies bind to their original draft;
+navigation cancels automatic submission. An initial prompt stays visible until
+the created task is confirmed, and edits or file selection cancel its automatic
+send. Existing tasks still attaching require an explicit resubmit. A closed
+local command queue preserves exact text, files and prompt history. Queue
+acceptance does not guarantee daemon receipt.
+
+Replaced client event batches are rejected before shell or browser mutation.
+An ambiguous daemon error requires client reconnection; later replies and tab
+navigation retain that recovery action. Retry preserves a live app-owned daemon,
+reaps an exited child and remains retryable after a failed relaunch.
+
+Verified all 153 native tests and 11 supervisor tests, strict all-target native
+and supervisor clippy, formatting, architecture and generated themes. Tests use
+real command queues, core event projection, child processes and loopback protocol
+probes. Breaker, simplifier and operator source review caught recovery visibility
+and retry routing gaps; final rechecks found no remaining required findings.
+Live native interaction QA still requires the earlier explicit launch approval.

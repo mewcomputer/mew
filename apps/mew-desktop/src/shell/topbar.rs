@@ -281,7 +281,7 @@ impl DesktopShell {
             )
             .when(
                 self.model.session_is_ready()
-                    && !self.pending_session_request
+                    && !self.session_requests.is_pending()
                     && matches!(
                         self.model.connection,
                         crate::model::ShellConnection::Connected

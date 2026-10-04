@@ -53,6 +53,14 @@ impl ShellModel {
         self.last_error = None;
     }
 
+    pub fn prepare_attachment(&mut self, reconnect_required: bool) {
+        self.attached_session = None;
+        if !reconnect_required {
+            self.last_error = None;
+        }
+        self.ui.clear_attached_session_projection();
+    }
+
     pub fn sync_client_metadata(&mut self, state: &ClientState) {
         self.attached_session = state.attached_session.clone();
         self.ui.sync_client_metadata(state);
@@ -93,7 +101,7 @@ impl ShellModel {
         )
     }
 
-    pub fn apply_events(&mut self, events: &[ClientEvent]) {
+    pub fn apply_events(&mut self, events: &[ClientEvent], reconnect_required: bool) {
         for event in events {
             match event {
                 ClientEvent::ConnectionChanged(status) => {
@@ -111,7 +119,9 @@ impl ShellModel {
                     };
                 }
                 ClientEvent::SessionReady { session_id } => {
-                    self.last_error = None;
+                    if !reconnect_required {
+                        self.last_error = None;
+                    }
                     self.ui.selected_session = Some(session_id.clone());
                 }
                 ClientEvent::SessionHistoryLoaded { session_id }
@@ -132,6 +142,39 @@ impl ShellModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn navigating_with_an_ambiguous_attachment_preserves_its_recovery_message() {
+        let mut model = ShellModel::starting(None);
+        model.connected();
+        model.attached_session = Some("a".into());
+        model.ui.selected_session = Some("b".into());
+        model.ui.composer = "b draft".into();
+        let mut state = ClientState::default();
+        for message in [
+            mew_protocol::ServerMessage::Error {
+                message: "attachment failed".into(),
+            },
+            mew_protocol::ServerMessage::SessionReady {
+                session_id: "a".into(),
+                cwd: None,
+                model: None,
+                provider: None,
+                permission_mode: None,
+            },
+        ] {
+            let events = state.apply_server_message(message);
+            model.apply_events(&events, true);
+            model.sync_client_metadata_for_selection(&state.ui_metadata_snapshot(), Some("b"));
+        }
+        model.prepare_attachment(true);
+        assert_eq!(model.last_error.as_deref(), Some("attachment failed"));
+        assert_eq!(model.ui.composer, "b draft");
+        assert_eq!(model.ui.selected_session.as_deref(), Some("b"));
+        assert!(!model.session_is_ready());
+        model.prepare_attachment(false);
+        assert!(model.last_error.is_none());
+    }
 
     #[test]
     fn explicit_unbound_selection_survives_attached_daemon_activity_and_history() {
@@ -157,7 +200,7 @@ mod tests {
             },
         ] {
             let events = client.apply_server_message(event);
-            model.apply_events(&events);
+            model.apply_events(&events, false);
             model.sync_client_metadata_for_selection(&client.ui_metadata_snapshot(), None);
             assert!(model.ui.selected_session.is_none());
             assert!(model.attached_session.is_none());
@@ -165,9 +208,12 @@ mod tests {
             assert!(!model.ui.running);
             assert_eq!(model.ui.composer, "new task draft");
         }
-        model.apply_events(&[ClientEvent::SessionHistoryLoaded {
-            session_id: "closed-task".into(),
-        }]);
+        model.apply_events(
+            &[ClientEvent::SessionHistoryLoaded {
+                session_id: "closed-task".into(),
+            }],
+            false,
+        );
         model.sync_client_metadata_for_selection(&client.ui_metadata_snapshot(), None);
         assert!(model.ui.selected_session.is_none());
         assert!(!model.session_is_ready());
@@ -201,7 +247,7 @@ mod tests {
         client.apply_server_message(ready("selected"));
         let mut model = ShellModel::starting(None);
         let events = client.apply_server_message(complete("background"));
-        model.apply_events(&events);
+        model.apply_events(&events, false);
         model.sync_client_metadata(&client.ui_metadata_snapshot());
         assert!(model.ui.conversations[0].unread_completion);
         assert!(!model.ui.conversations[1].unread_completion);
@@ -277,7 +323,7 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event, ClientEvent::SessionListChanged)));
-        model.apply_events(&events);
+        model.apply_events(&events, false);
         model.sync_client_metadata(&client.ui_snapshot());
         assert_eq!(model.attached_session.as_deref(), Some("selected"));
         assert!(model.ui.conversations[0].last_turn_failed);
@@ -334,7 +380,7 @@ mod tests {
         let events = client.apply_server_message(ServerMessage::ErrorEvent {
             message: "b's provider failed".into(),
         });
-        model.apply_events(&events);
+        model.apply_events(&events, false);
         client.apply_server_message(ServerMessage::SessionAlert {
             session_id: "b".into(),
             title: "b".into(),
@@ -354,7 +400,7 @@ mod tests {
             provider: None,
             permission_mode: None,
         });
-        model.apply_events(&events);
+        model.apply_events(&events, false);
         model.sync_client_metadata(&client.ui_snapshot());
         assert_eq!(model.ui.selected_session.as_deref(), Some("a"));
         assert!(model.ui.conversations[0].failure_detail.is_none());
@@ -415,12 +461,15 @@ mod tests {
     #[test]
     fn shell_model_tracks_connection_and_session_attachment() {
         let mut model = ShellModel::starting(Some("ws://127.0.0.1:25566".into()));
-        model.apply_events(&[
-            ClientEvent::ConnectionChanged(ConnectionStatus::Connected),
-            ClientEvent::SessionReady {
-                session_id: "session-1".into(),
-            },
-        ]);
+        model.apply_events(
+            &[
+                ClientEvent::ConnectionChanged(ConnectionStatus::Connected),
+                ClientEvent::SessionReady {
+                    session_id: "session-1".into(),
+                },
+            ],
+            false,
+        );
         model.sync_client_metadata(&ClientState {
             attached_session: Some("session-1".into()),
             ..ClientState::default()
@@ -434,13 +483,16 @@ mod tests {
     #[test]
     fn shell_model_surfaces_reconnect_and_error_states() {
         let mut model = ShellModel::starting(None);
-        model.apply_events(&[ClientEvent::ConnectionChanged(ConnectionStatus::Backoff {
-            attempt: 2,
-            error: "closed".into(),
-        })]);
+        model.apply_events(
+            &[ClientEvent::ConnectionChanged(ConnectionStatus::Backoff {
+                attempt: 2,
+                error: "closed".into(),
+            })],
+            false,
+        );
         assert_eq!(model.connection, ShellConnection::Reconnecting);
 
-        model.apply_events(&[ClientEvent::Error("bad handshake".into())]);
+        model.apply_events(&[ClientEvent::Error("bad handshake".into())], false);
         assert_eq!(model.connection, ShellConnection::Reconnecting);
         assert_eq!(model.last_error.as_deref(), Some("bad handshake"));
     }
@@ -449,7 +501,10 @@ mod tests {
     fn daemon_errors_do_not_masquerade_as_connection_failures() {
         let mut model = ShellModel::starting(None);
         model.connected();
-        model.apply_events(&[ClientEvent::Error("provider is not configured".into())]);
+        model.apply_events(
+            &[ClientEvent::Error("provider is not configured".into())],
+            false,
+        );
 
         assert_eq!(model.connection, ShellConnection::Connected);
         assert_eq!(
@@ -461,9 +516,12 @@ mod tests {
     #[test]
     fn permission_mode_change_updates_the_composer_projection() {
         let mut model = ShellModel::starting(None);
-        model.apply_events(&[ClientEvent::PermissionModeChanged {
-            mode: "permissive".into(),
-        }]);
+        model.apply_events(
+            &[ClientEvent::PermissionModeChanged {
+                mode: "permissive".into(),
+            }],
+            false,
+        );
 
         assert_eq!(model.ui.permission_mode.as_deref(), Some("permissive"));
     }
@@ -471,9 +529,12 @@ mod tests {
     #[test]
     fn disconnected_state_surfaces_a_recoverable_error() {
         let mut model = ShellModel::starting(None);
-        model.apply_events(&[ClientEvent::ConnectionChanged(
-            ConnectionStatus::Disconnected,
-        )]);
+        model.apply_events(
+            &[ClientEvent::ConnectionChanged(
+                ConnectionStatus::Disconnected,
+            )],
+            false,
+        );
 
         assert_eq!(model.connection.label(), "connection failed");
         assert_eq!(

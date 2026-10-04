@@ -131,6 +131,16 @@ impl DesktopSupervisor {
     }
 
     pub fn connect_or_launch(&mut self) -> Result<DaemonEndpoint> {
+        if let Some(child) = self.child.as_mut() {
+            if child
+                .try_wait()
+                .context("could not inspect app-owned daemon")?
+                .is_some()
+            {
+                self.child = None;
+                self.endpoint = None;
+            }
+        }
         if let Some(endpoint) = &self.endpoint {
             return Ok(endpoint.clone());
         }
@@ -492,6 +502,114 @@ mod tests {
         assert!(parse_port("65536").is_err());
         assert!(validate_websocket_url("http://127.0.0.1:1").is_err());
         assert!(websocket_address("ws://").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconnect_preserves_a_live_owned_process() {
+        let child = Command::new("sh")
+            .args(["-c", "exec sleep 30"])
+            .spawn()
+            .unwrap();
+        let child_pid = child.id();
+        let endpoint = DaemonEndpoint {
+            websocket_url: "ws://127.0.0.1:43210".into(),
+            mode: DaemonMode::LocalOwned,
+        };
+        let mut supervisor = DesktopSupervisor::new(SupervisorConfig::default());
+        supervisor.child = Some(child);
+        supervisor.endpoint = Some(endpoint.clone());
+
+        assert_eq!(supervisor.connect_or_launch().unwrap(), endpoint);
+        assert_eq!(supervisor.child.as_ref().unwrap().id(), child_pid);
+        assert!(supervisor
+            .child
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconnect_reaps_an_exited_process_and_probes_the_rendezvous() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            assert_eq!(
+                socket.read().unwrap().into_text().unwrap(),
+                r#"{"type":"ping"}"#
+            );
+            socket
+                .send(Message::Text(format!(
+                    r#"{{"type":"pong","version":"test","protocol_version":{}}}"#,
+                    mew_protocol::PROTOCOL_VERSION
+                )))
+                .unwrap();
+        });
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        child.wait().unwrap();
+        let mut supervisor = DesktopSupervisor::new(SupervisorConfig {
+            local_port: address.port(),
+            ..SupervisorConfig::default()
+        });
+        supervisor.child = Some(child);
+        supervisor.endpoint = Some(DaemonEndpoint {
+            websocket_url: websocket_url(address),
+            mode: DaemonMode::LocalOwned,
+        });
+
+        let endpoint = supervisor.connect_or_launch().unwrap();
+
+        assert_eq!(endpoint.mode, DaemonMode::LocalExisting);
+        assert_eq!(endpoint.websocket_url, websocket_url(address));
+        assert!(supervisor.child.is_none());
+        server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_reconnect_does_not_keep_an_exited_process_endpoint() {
+        let address = allocate_local_address(0).unwrap();
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        child.wait().unwrap();
+        let mut supervisor = DesktopSupervisor::new(SupervisorConfig {
+            local_port: address.port(),
+            ..SupervisorConfig::default()
+        });
+        supervisor.child = Some(child);
+        supervisor.endpoint = Some(DaemonEndpoint {
+            websocket_url: websocket_url(address),
+            mode: DaemonMode::LocalOwned,
+        });
+
+        assert!(supervisor.connect_or_launch().is_err());
+        assert!(supervisor.endpoint().is_none());
+        assert!(supervisor.child.is_none());
+
+        let listener = TcpListener::bind(address).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            assert_eq!(
+                socket.read().unwrap().into_text().unwrap(),
+                r#"{"type":"ping"}"#
+            );
+            socket
+                .send(Message::Text(format!(
+                    r#"{{"type":"pong","version":"test","protocol_version":{}}}"#,
+                    mew_protocol::PROTOCOL_VERSION
+                )))
+                .unwrap();
+        });
+
+        let endpoint = supervisor.connect_or_launch().unwrap();
+        assert_eq!(endpoint.mode, DaemonMode::LocalExisting);
+        assert_eq!(endpoint.websocket_url, websocket_url(address));
+        server.join().unwrap();
     }
 
     #[cfg(unix)]

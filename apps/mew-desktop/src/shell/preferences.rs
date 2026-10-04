@@ -116,11 +116,9 @@ impl DesktopShell {
             self.send_command(ClientMessage::SwitchModel { provider, model });
         } else {
             self.pending_model = Some((provider, model));
-            if !self.pending_session_request {
-                self.pending_session_request = true;
-                self.pending_session_target = None;
-                let command = self.model.ui.new_conversation(None);
-                self.send_command(command);
+            if self.task_drafts.owner().session_id.is_none() && !self.session_requests.is_pending()
+            {
+                self.create_session(None, None);
             }
         }
         cx.notify();

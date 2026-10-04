@@ -148,16 +148,13 @@ pub(super) struct DesktopShell {
     pub(super) composer_blink_epoch: usize,
     pub(super) streaming_render_scheduled: bool,
     pub(super) expanded_chat_parts: BTreeSet<String>,
-    pub(super) pending_prompt: Option<String>,
     pub(super) task_drafts: TaskDrafts,
     pub(super) initial_auto_attach: bool,
-    pub(super) pending_attachments: Vec<Attachment>,
     pub(super) attachments: Vec<Attachment>,
     pub(super) attachment_error: Option<String>,
     pub(super) pending_model: Option<(String, String)>,
     pub(super) awaiting_model_switch: Option<(String, String)>,
-    pub(super) pending_session_request: bool,
-    pub(super) pending_session_target: Option<String>,
+    pub(super) session_requests: SessionRequests,
     pub(super) model_picker_open: bool,
     pub(super) persona_picker_open: bool,
     pub(super) permission_picker_open: bool,
@@ -858,16 +855,18 @@ pub(super) struct PromptHistory {
 }
 
 impl PromptHistory {
-    pub(super) fn record(&mut self, text: &str) {
-        let text = text.trim();
+    pub(super) fn record(&mut self, mut text: String) {
+        text.truncate(text.trim_end().len());
+        let prefix = text.len() - text.trim_start().len();
+        text.drain(..prefix);
         self.reset_recall();
         if text.is_empty() {
             return;
         }
-        if self.entries.last().is_some_and(|last| last == text) {
+        if self.entries.last().is_some_and(|last| last == &text) {
             return;
         }
-        self.entries.push(text.to_owned());
+        self.entries.push(text);
         if self.entries.len() > PROMPT_HISTORY_LIMIT {
             let overflow = self.entries.len() - PROMPT_HISTORY_LIMIT;
             self.entries.drain(..overflow);
