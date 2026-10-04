@@ -54,6 +54,7 @@ mod browser;
 mod chat;
 mod chat_render;
 mod composer;
+mod drafts;
 mod helpers;
 mod lifecycle;
 mod platform;
@@ -70,6 +71,7 @@ mod types;
 mod workbench;
 
 use composer::{ComposerElement, TextInputTarget};
+use drafts::{DraftOwner, TaskDrafts};
 use helpers::*;
 pub(crate) use platform::run;
 use types::*;

@@ -58,16 +58,17 @@ impl ShellModel {
         self.ui.sync_client_metadata(state);
     }
 
-    pub fn sync_client_metadata_while_attaching(
+    pub fn sync_client_metadata_for_selection(
         &mut self,
         state: &ClientState,
-        target_session: &str,
+        selection: Option<&str>,
     ) {
         self.sync_client_metadata(state);
-        if self.attached_session.as_deref() != Some(target_session) {
+        if selection.is_none() || self.attached_session.as_deref() != selection {
             self.attached_session = None;
             self.ui.clear_attached_session_projection();
         }
+        self.ui.selected_session = selection.map(str::to_owned);
     }
 
     pub fn sync_client_transcript(&mut self, state: &ClientState) {
@@ -131,6 +132,46 @@ impl ShellModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_unbound_selection_survives_attached_daemon_activity_and_history() {
+        use mew_protocol::{ServerMessage, SessionState};
+        let mut client = ClientState::default();
+        client.apply_server_message(ServerMessage::SessionReady {
+            session_id: "closed-task".into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        });
+        let mut model = ShellModel::starting(None);
+        model.ui.composer = "new task draft".into();
+        for event in [
+            ServerMessage::SessionActivityChanged {
+                session_id: "closed-task".into(),
+                activity: SessionState::Running,
+            },
+            ServerMessage::SessionTitleChanged {
+                session_id: "closed-task".into(),
+                title: "background work".into(),
+            },
+        ] {
+            let events = client.apply_server_message(event);
+            model.apply_events(&events);
+            model.sync_client_metadata_for_selection(&client.ui_metadata_snapshot(), None);
+            assert!(model.ui.selected_session.is_none());
+            assert!(model.attached_session.is_none());
+            assert!(!model.session_is_ready());
+            assert!(!model.ui.running);
+            assert_eq!(model.ui.composer, "new task draft");
+        }
+        model.apply_events(&[ClientEvent::SessionHistoryLoaded {
+            session_id: "closed-task".into(),
+        }]);
+        model.sync_client_metadata_for_selection(&client.ui_metadata_snapshot(), None);
+        assert!(model.ui.selected_session.is_none());
+        assert!(!model.session_is_ready());
+    }
 
     #[test]
     fn background_completion_is_acknowledged_only_by_its_attachment_or_next_turn() {
@@ -470,12 +511,12 @@ mod tests {
             });
         model.ui.set_composer("stale");
 
-        model.sync_client_metadata_while_attaching(
+        model.sync_client_metadata_for_selection(
             &ClientState {
                 attached_session: Some("session-a".into()),
                 ..ClientState::default()
             },
-            "session-b",
+            Some("session-b"),
         );
 
         assert_eq!(model.attached_session, None);

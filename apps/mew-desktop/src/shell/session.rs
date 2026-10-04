@@ -46,6 +46,8 @@ impl DesktopShell {
     }
 
     fn reset_unbound_tab_view(&mut self) {
+        self.initial_auto_attach = false;
+        self.switch_draft_owner(None);
         self.pending_session_request = false;
         self.pending_session_target = None;
         self.model.attached_session = None;
@@ -97,6 +99,8 @@ impl DesktopShell {
     pub(super) fn attach_session(&mut self, session_id: String, cx: &mut Context<Self>) {
         self.capture_session_view_state();
         if let Some(command) = self.model.ui.select_session(&session_id) {
+            self.initial_auto_attach = false;
+            self.switch_draft_owner(Some(&session_id));
             self.restore_session_view_state(&session_id, cx);
             self.clear_pending_session_view();
             self.transcript_selection = None;
@@ -491,6 +495,31 @@ impl DesktopShell {
                 tracing::warn!(error = %error, "desktop: command channel closed");
             }
         }
+    }
+
+    pub(super) fn switch_draft_owner(&mut self, session_id: Option<&str>) {
+        let profile = self
+            .connection_profile
+            .as_ref()
+            .map(DesktopConnectionProfile::endpoint_label)
+            .unwrap_or_default();
+        if !self.task_drafts.activate(
+            profile,
+            session_id,
+            &mut self.model.ui.composer,
+            &mut self.attachments,
+            &mut self.prompt_history,
+        ) {
+            return;
+        }
+        let end = self.model.ui.composer.len();
+        self.composer_selection = end..end;
+        self.composer_selection_reversed = false;
+        self.composer_marked_range = None;
+        self.composer_is_selecting = false;
+        self.attachment_error = None;
+        self.pending_model = None;
+        self.awaiting_model_switch = None;
     }
 
     pub(super) fn yield_control(&mut self, cx: &mut Context<Self>) {
@@ -1248,6 +1277,15 @@ impl DesktopShell {
             ClientEvent::SessionReady { session_id } => Some(session_id.as_str()),
             _ => None,
         });
+        if let Some(session_id) = ready_session_id {
+            if self.pending_session_request
+                && self.pending_session_target.is_none()
+                && self.task_drafts.owner().session_id.is_none()
+            {
+                let creation = self.task_drafts.owner().clone();
+                self.task_drafts.bind_created_task(&creation, session_id);
+            }
+        }
         let has_browser_event = events.iter().any(|event| {
             matches!(
                 event,
@@ -1268,9 +1306,11 @@ impl DesktopShell {
             }
         }
         if client_update_requires_metadata_sync(events) {
-            if let Some(target) = self.pending_session_target.as_deref() {
-                self.model
-                    .sync_client_metadata_while_attaching(state, target);
+            if !self.initial_auto_attach {
+                self.model.sync_client_metadata_for_selection(
+                    state,
+                    self.task_drafts.owner().session_id.as_deref(),
+                );
             } else {
                 self.model.sync_client_metadata(state);
             }
@@ -1390,6 +1430,11 @@ impl DesktopShell {
             .iter()
             .any(|event| matches!(event, ClientEvent::SessionListChanged));
         if session_list_changed
+            && drafts::may_auto_attach(
+                self.initial_auto_attach,
+                &self.model.ui.composer,
+                &self.attachments,
+            )
             && !self.pending_session_request
             && self.model.ui.selected_session.is_none()
         {
@@ -1401,12 +1446,7 @@ impl DesktopShell {
                 .find(|conversation| !conversation.archived)
                 .map(|conversation| conversation.session_id.clone());
             if let Some(session_id) = session_id {
-                if let Some(command) = self.model.ui.select_session(&session_id) {
-                    self.restore_session_view_state(&session_id, cx);
-                    self.pending_session_request = true;
-                    self.pending_session_target = Some(session_id);
-                    self.send_command(command);
-                }
+                self.attach_session(session_id, cx);
             }
         }
         let session_ready = ready_session_id.is_some_and(|session_id| {

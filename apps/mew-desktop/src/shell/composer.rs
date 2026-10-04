@@ -123,6 +123,7 @@ impl DesktopShell {
     /// Used by slash completion and history recall; unlike
     /// `replace_composer_text` this does not reset the recall position.
     pub(super) fn set_composer_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.initial_auto_attach = false;
         self.model.ui.set_composer(text);
         let end = self.model.ui.composer.len();
         self.composer_selection = end..end;
@@ -488,6 +489,7 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) {
         let mut updated = self.model.ui.composer.clone();
+        self.initial_auto_attach = false;
         updated.replace_range(range.clone(), replacement);
         let cursor = range.start + replacement.len();
         self.composer_selection = cursor..cursor;
@@ -508,6 +510,7 @@ impl DesktopShell {
         cx: &mut Context<Self>,
     ) {
         let current = self.model.ui.composer.clone();
+        self.initial_auto_attach = false;
         let range = range_utf16
             .as_ref()
             .map(|range| {

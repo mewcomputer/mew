@@ -1457,3 +1457,22 @@ caught the ineffective filtered collapse control; its behavior is now covered.
 Live rendering and interaction QA remain pending the previously requested
 explicit launch confirmation. Task-owned draft/submission correctness follows
 as a separate change.
+
+### 2026-10-03: conversation-owned native drafts
+
+Native text and attachments now move with their conversation and connection
+profile. Switching tasks restores that task's draft and resets the transient
+prompt-history recall stash. Startup attachment uses the same navigation path;
+entering a draft or opening the file chooser preserves the new-task intent.
+Closing the final tab keeps an unbound composer even when the daemon still has
+its previous attachment and publishes background metadata. Explicit native
+selection controls projection; daemon activity still populates the task list.
+Reconnect retains the selected draft, and navigation cancels deferred model
+choices from the previous task.
+
+Verified 143 native tests, seven focused draft regressions, the real core/model
+unbound-selection trace, strict native all-target clippy and formatting. Source
+review found and verified the startup owner, last-tab metadata and recall-stash
+fixes. An earlier non-escalated native run hit the loopback sandbox restriction;
+the final escalated suite passed. Deferred prompt submission and attachment
+acknowledgement ordering remain the next separate chunk.

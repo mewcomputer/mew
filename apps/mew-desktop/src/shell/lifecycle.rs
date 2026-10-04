@@ -248,6 +248,10 @@ impl DesktopShell {
             });
         });
         let frame_probe = DesktopFrameProbe::from_env();
+        let draft_profile = client_profile
+            .as_ref()
+            .map(DesktopConnectionProfile::endpoint_label)
+            .unwrap_or_default();
         Self {
             model,
             theme,
@@ -361,6 +365,8 @@ impl DesktopShell {
             streaming_render_scheduled: false,
             expanded_chat_parts: BTreeSet::new(),
             pending_prompt: None,
+            task_drafts: TaskDrafts::new(DraftOwner::new_task(&draft_profile)),
+            initial_auto_attach: true,
             pending_attachments: Vec::new(),
             attachments: Vec::new(),
             attachment_error: None,
@@ -471,7 +477,10 @@ impl DesktopShell {
         };
         let selected_session = self.model.ui.selected_session.clone();
         self.connection_profile = Some(profile.clone());
+        self.switch_draft_owner(selected_session.as_deref());
+        let composer = std::mem::take(&mut self.model.ui.composer);
         self.model = ShellModel::starting(Some(profile.endpoint_label()));
+        self.model.ui.composer = composer;
         self.model.ui.selected_session = selected_session.clone();
         self.pending_session_request = selected_session.is_some();
         self.pending_session_target = selected_session;
@@ -551,6 +560,7 @@ impl DesktopShell {
                                 shell.reset_browser_connection();
                                 shell.model.connected();
                                 if let Some(session_id) = shell.pending_session_target.clone() {
+                                    shell.switch_draft_owner(Some(&session_id));
                                     shell.send_command(ClientMessage::AttachSession {
                                         session_id,
                                         client_kind: mew_protocol::ClientKind::Desktop,

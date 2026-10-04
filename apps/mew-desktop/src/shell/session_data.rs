@@ -379,6 +379,7 @@ impl DesktopShell {
     }
 
     pub(super) fn pick_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.initial_auto_attach = false;
         let paths_receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,

@@ -149,6 +149,8 @@ pub(super) struct DesktopShell {
     pub(super) streaming_render_scheduled: bool,
     pub(super) expanded_chat_parts: BTreeSet<String>,
     pub(super) pending_prompt: Option<String>,
+    pub(super) task_drafts: TaskDrafts,
+    pub(super) initial_auto_attach: bool,
     pub(super) pending_attachments: Vec<Attachment>,
     pub(super) attachments: Vec<Attachment>,
     pub(super) attachment_error: Option<String>,
