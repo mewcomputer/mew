@@ -1516,7 +1516,9 @@ impl DesktopShell {
                                         }))
                                         .child("retry")
                                         .into_any_element()
-                                } else if self.session_requests.needs_reconnect() {
+                                } else if self.session_requests.needs_reconnect()
+                                    || self.command_tx.as_ref().is_some_and(UnboundedSender::is_closed)
+                                {
                                     div()
                                         .id("reconnect-task-client")
                                         .px(px(7.))

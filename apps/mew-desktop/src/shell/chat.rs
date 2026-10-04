@@ -645,19 +645,25 @@ impl DesktopShell {
             return;
         }
         if !self.model.session_is_ready() || self.session_requests.is_pending() {
-            if self.task_drafts.owner().session_id.is_none() && !self.session_requests.is_pending()
-            {
-                self.initial_auto_attach = false;
-                self.create_session(None, None);
-            }
-            let snapshot = PromptDraft {
-                text: self.model.ui.composer.clone(),
-                attachments: self.attachments.clone(),
-            };
-            if !self
-                .session_requests
-                .set_initial_prompt(self.task_drafts.owner(), snapshot)
-            {
+            if self.task_drafts.owner().session_id.is_none() {
+                if !self.session_requests.is_pending() {
+                    self.initial_auto_attach = false;
+                    if !self.create_session(None, None) {
+                        self.finish_prompt_submission(false, cx);
+                        return;
+                    }
+                }
+                let snapshot = PromptDraft {
+                    text: self.model.ui.composer.clone(),
+                    attachments: self.attachments.clone(),
+                };
+                if !self
+                    .session_requests
+                    .set_initial_prompt(self.task_drafts.owner(), snapshot)
+                {
+                    self.report_pending_attachment();
+                }
+            } else {
                 self.report_pending_attachment();
             }
             cx.notify();
@@ -708,16 +714,14 @@ impl DesktopShell {
     }
 
     pub(super) fn finish_prompt_submission(&mut self, accepted: bool, cx: &mut Context<Self>) {
+        self.model.finish_prompt_submission(accepted);
         if accepted {
-            self.model.ui.composer.clear();
             self.composer_selection = 0..0;
             self.composer_selection_reversed = false;
             self.composer_marked_range = None;
             self.composer_is_selecting = false;
             self.restart_composer_cursor_blink(cx);
             self.input_animation_id = self.input_animation_id.wrapping_add(1);
-        } else {
-            self.model.last_error = Some("Could not queue the prompt. Your draft is saved; reconnect the client to continue.".into());
         }
         cx.notify();
     }

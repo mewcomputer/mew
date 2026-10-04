@@ -1499,3 +1499,12 @@ real command queues, core event projection, child processes and loopback protoco
 probes. Breaker, simplifier and operator source review caught recovery visibility
 and retry routing gaps; final rechecks found no remaining required findings.
 Live native interaction QA still requires the earlier explicit launch approval.
+
+### 2026-10-04: native submission feedback
+
+A rejected new-task request keeps its queue failure message and draft. Accepted
+prompt submission clears provisional attachment feedback, and a closed command
+sender offers client reconnection. Initial-prompt snapshots are confined to new
+task submission. Verified all 154 native tests, nine focused request/submission
+tests, strict all-target clippy and formatting. The feedback tests use real
+accepted and closed queues; source review confirmed the render and submit routes.

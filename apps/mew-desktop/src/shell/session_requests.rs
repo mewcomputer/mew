@@ -343,7 +343,17 @@ mod tests {
         assert_eq!(attachments[0].path, "image.png");
         assert!(history.recall_older("draft").is_none());
         let mut requests = SessionRequests::default();
-        assert!(!requests.create(Some(&tx), DraftOwner::new_task("local"), None, None));
+        let mut model = crate::model::ShellModel::starting(None);
+        model.ui.composer = "new draft".into();
+        let accepted = requests.create(Some(&tx), DraftOwner::new_task("local"), None, None);
+        assert!(!accepted);
+        model.finish_prompt_submission(accepted);
+        assert_eq!(model.ui.composer, "new draft");
+        assert!(model
+            .last_error
+            .as_deref()
+            .unwrap()
+            .starts_with("Could not queue"));
         assert!(!requests.is_pending());
     }
 
@@ -441,5 +451,35 @@ mod tests {
         assert!(requests.is_pending());
         assert!(requests.accepts_source(new_source));
         assert!(requests.acknowledge_from(new_source, "a").is_some());
+    }
+
+    #[test]
+    fn queue_acceptance_updates_feedback_and_rejection_preserves_a_new_draft() {
+        for closed in [false, true] {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let _receiver = if closed {
+                drop(rx);
+                None
+            } else {
+                Some(rx)
+            };
+            let mut model = crate::model::ShellModel::starting(None);
+            model.ui.composer = "new draft".into();
+            model.last_error = Some("still attaching".into());
+            let accepted = queue_prompt(
+                Some(&tx),
+                &mut model.ui.composer,
+                &mut Vec::new(),
+                &mut PromptHistory::default(),
+            );
+            model.finish_prompt_submission(accepted);
+            if closed {
+                assert_eq!(model.ui.composer, "new draft");
+                assert_eq!(model.last_error.as_deref(), Some("Could not queue the prompt. Your draft is saved; reconnect the client to continue."));
+            } else {
+                assert!(model.ui.composer.is_empty());
+                assert!(model.last_error.is_none());
+            }
+        }
     }
 }

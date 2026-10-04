@@ -53,6 +53,15 @@ impl ShellModel {
         self.last_error = None;
     }
 
+    pub fn finish_prompt_submission(&mut self, accepted: bool) {
+        if accepted {
+            self.ui.composer.clear();
+            self.last_error = None;
+        } else {
+            self.last_error = Some("Could not queue the prompt. Your draft is saved; reconnect the client to continue.".into());
+        }
+    }
+
     pub fn prepare_attachment(&mut self, reconnect_required: bool) {
         self.attached_session = None;
         if !reconnect_required {
