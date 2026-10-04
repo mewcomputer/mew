@@ -267,6 +267,7 @@ impl DesktopShell {
             workspace_open_destinations,
             remembered_editor: persisted_state.desktop_external_editor,
             sidebar_search: String::new(),
+            sidebar_filter: SidebarFilter::All,
             sidebar_search_focus_handle,
             sidebar_focus_handle,
             sidebar_keyboard_session: None,

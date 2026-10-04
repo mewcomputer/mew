@@ -1,3 +1,33 @@
+use super::{AuxiliaryView, DesktopShell};
+
+impl DesktopShell {
+    pub(super) fn open_review(&mut self, cx: &mut gpui::Context<Self>) {
+        if !self.model.session_is_ready()
+            || self.pending_session_request
+            || !matches!(
+                self.model.connection,
+                crate::model::ShellConnection::Connected
+            )
+        {
+            return;
+        }
+        if !self
+            .layout
+            .reveal_workbench(self.window_width, self.sidebar_width)
+        {
+            self.model.last_error = Some("Widen the window to review changes.".into());
+            cx.notify();
+            return;
+        }
+        self.layout.changes_expanded = true;
+        self.select_auxiliary_view(AuxiliaryView::Changes, cx);
+        self.workbench_animation_id = self.workbench_animation_id.wrapping_add(1);
+        self.capture_session_view_state();
+        self.persist_layout();
+        cx.notify();
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ReviewRequest {
     pub session_id: String,

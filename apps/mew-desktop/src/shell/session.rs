@@ -264,19 +264,16 @@ impl DesktopShell {
     }
 
     pub(super) fn toggle_workbench(&mut self, cx: &mut Context<Self>) {
-        if self.layout.workbench_collapsed
-            && !workbench_fits_window(
-                self.window_width,
-                if self.layout.sidebar_collapsed {
-                    SIDEBAR_COLLAPSED_WIDTH
-                } else {
-                    self.sidebar_width
-                },
-            )
-        {
-            return;
+        if self.layout.workbench_collapsed {
+            if !self
+                .layout
+                .reveal_workbench(self.window_width, self.sidebar_width)
+            {
+                return;
+            }
+        } else {
+            self.layout.workbench_collapsed = true;
         }
-        self.layout.workbench_collapsed = !self.layout.workbench_collapsed;
         self.sync_workspace_watch();
         if !self.layout.workbench_collapsed && self.auxiliary_view == AuxiliaryView::Changes {
             self.review_requests.invalidate();
@@ -626,6 +623,7 @@ impl DesktopShell {
             &self.expanded_workspaces,
             &self.sidebar_search,
             self.model.ui.selected_session.as_deref(),
+            self.sidebar_filter,
         );
     }
 

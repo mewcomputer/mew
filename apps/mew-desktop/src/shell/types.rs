@@ -55,6 +55,7 @@ pub(super) struct DesktopShell {
     pub(super) workspace_open_destinations: Vec<WorkspaceOpenDestination>,
     pub(super) remembered_editor: Option<String>,
     pub(super) sidebar_search: String,
+    pub(super) sidebar_filter: SidebarFilter,
     pub(super) sidebar_search_focus_handle: FocusHandle,
     pub(super) sidebar_focus_handle: FocusHandle,
     pub(super) sidebar_keyboard_session: Option<String>,
@@ -541,6 +542,28 @@ pub(super) struct TranscriptTextEntry {
     pub(super) layout: gpui::TextLayout,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum SidebarFilter {
+    #[default]
+    All,
+    Running,
+    Attention,
+}
+
+impl SidebarFilter {
+    pub(super) fn matches(self, conversation: &ConversationItem) -> bool {
+        let running = conversation.state == mew_protocol::SessionState::Running;
+        match self {
+            Self::All => true,
+            Self::Running => running && !conversation.needs_attention,
+            Self::Attention => {
+                conversation.needs_attention
+                    || !running && (conversation.last_turn_failed || conversation.unread_completion)
+            }
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum SidebarRow {
@@ -551,6 +574,7 @@ pub(super) enum SidebarRow {
         pinned: bool,
         count: usize,
         collapsed: bool,
+        collapsible: bool,
     },
     ShowMore {
         workspace_path: String,
@@ -676,6 +700,22 @@ pub(super) struct ShellLayoutState {
 }
 
 impl ShellLayoutState {
+    pub(super) fn reveal_workbench(&mut self, window_width: f32, sidebar_width: f32) -> bool {
+        let width = if self.sidebar_collapsed {
+            SIDEBAR_COLLAPSED_WIDTH
+        } else {
+            sidebar_width
+        };
+        if !workbench_fits_window(window_width, width) {
+            if !workbench_fits_window(window_width, SIDEBAR_COLLAPSED_WIDTH) {
+                return false;
+            }
+            self.sidebar_collapsed = true;
+        }
+        self.workbench_collapsed = false;
+        true
+    }
+
     pub(super) fn from_state(state: &mew_config::State) -> Self {
         let collapsed = |key: &str| state.sidebar_collapsed.get(key).copied().unwrap_or(false);
         Self {

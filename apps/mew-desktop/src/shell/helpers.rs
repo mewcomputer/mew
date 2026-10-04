@@ -899,9 +899,12 @@ pub(super) fn build_workspace_sidebar_rows(
     expanded_workspaces: &BTreeSet<String>,
     query: &str,
     selected_session: Option<&str>,
+    filter: SidebarFilter,
 ) -> Vec<SidebarRow> {
     let query = query.trim().to_lowercase();
     let searching = !query.is_empty();
+    let filtering = filter != SidebarFilter::All;
+    let show_all = searching || filtering;
     let mut project_by_path = projects
         .iter()
         .map(|project| (project.path.clone(), project.clone()))
@@ -943,6 +946,7 @@ pub(super) fn build_workspace_sidebar_rows(
     for project in workspace_projects {
         let mut sessions = conversations
             .iter()
+            .filter(|conversation| filter.matches(conversation))
             .filter(|conversation| {
                 conversation.workspace_path.as_deref() == Some(project.path.as_str())
             })
@@ -950,21 +954,22 @@ pub(super) fn build_workspace_sidebar_rows(
                 searching && project_matches_query(&project, &query)
                     || conversation_matches_query(conversation, &query)
             })
-            .filter(|conversation| searching || !conversation.archived)
+            .filter(|conversation| show_all || !conversation.archived)
             .cloned()
             .collect::<Vec<_>>();
         sessions.sort_by(task_order);
-        if sessions.is_empty() && searching {
+        if sessions.is_empty() && show_all {
             continue;
         }
         let total_count = sessions.len();
-        let collapsed = !searching && collapsed_workspaces.contains(&project.path);
+        let collapsed = !show_all && collapsed_workspaces.contains(&project.path);
         rows.push(SidebarRow::Workspace {
             path: project.path.clone(),
             name: project.display_name.clone(),
             pinned: project.pinned,
             count: total_count,
             collapsed,
+            collapsible: !show_all,
         });
         if collapsed {
             continue;
@@ -972,7 +977,7 @@ pub(super) fn build_workspace_sidebar_rows(
         let (visible, hidden) = visible_tasks(
             &sessions,
             selected_session,
-            searching,
+            show_all,
             expanded_workspaces.contains(&project.path),
         );
         rows.extend(visible.into_iter().map(SidebarRow::Session));
@@ -986,8 +991,9 @@ pub(super) fn build_workspace_sidebar_rows(
 
     for conversation in conversations.iter().filter(|conversation| {
         conversation.workspace_path.is_none()
-            && (searching && conversation_matches_query(conversation, &query)
-                || !searching && !conversation.archived)
+            && filter.matches(conversation)
+            && conversation_matches_query(conversation, &query)
+            && (show_all || !conversation.archived)
     }) {
         other.push(conversation.clone());
     }
@@ -999,11 +1005,12 @@ pub(super) fn build_workspace_sidebar_rows(
             pinned: false,
             count: other.len(),
             collapsed: false,
+            collapsible: false,
         });
         let (visible, hidden) = visible_tasks(
             &other,
             selected_session,
-            searching,
+            show_all,
             expanded_workspaces.contains(""),
         );
         rows.extend(visible.into_iter().map(SidebarRow::Session));
@@ -1015,7 +1022,7 @@ pub(super) fn build_workspace_sidebar_rows(
         }
     }
 
-    if !searching {
+    if !show_all {
         let archived_count = conversations
             .iter()
             .filter(|conversation| conversation.archived)
@@ -1273,6 +1280,7 @@ mod workspace_tests {
             &BTreeSet::new(),
             "",
             None,
+            SidebarFilter::All,
         );
         assert_eq!(
             rows.iter()
@@ -1299,6 +1307,7 @@ mod workspace_tests {
             &BTreeSet::new(),
             "task 1",
             None,
+            SidebarFilter::All,
         );
         assert!(rows
             .iter()
@@ -1321,11 +1330,152 @@ mod workspace_tests {
             &BTreeSet::new(),
             "",
             None,
+            SidebarFilter::All,
         );
         assert!(rows.iter().any(|row| matches!(
             row,
             SidebarRow::Session(item) if item.session_id == "session-0" && item.unread_completion
         )));
+    }
+
+    #[test]
+    fn task_filters_use_current_activity_and_outcomes() {
+        let mut conversation = task(1, None, false);
+        assert!(!SidebarFilter::Running.matches(&conversation));
+        assert!(!SidebarFilter::Attention.matches(&conversation));
+        conversation.last_turn_failed = true;
+        assert!(SidebarFilter::Attention.matches(&conversation));
+        conversation.state = SessionState::Running;
+        assert!(SidebarFilter::Running.matches(&conversation));
+        assert!(!SidebarFilter::Attention.matches(&conversation));
+        conversation.needs_attention = true;
+        assert!(!SidebarFilter::Running.matches(&conversation));
+        assert!(SidebarFilter::Attention.matches(&conversation));
+        conversation.needs_attention = false;
+        conversation.last_turn_failed = false;
+        conversation.state = SessionState::Idle;
+        conversation.unread_completion = true;
+        assert!(SidebarFilter::Attention.matches(&conversation));
+        assert!(SidebarFilter::All.matches(&conversation));
+    }
+
+    #[test]
+    fn workspace_collapse_controls_are_only_available_in_the_all_view() {
+        let mut conversation = task(1, Some("/work/app"), false);
+        conversation.state = SessionState::Running;
+        for (filter, query, expected) in [
+            (SidebarFilter::All, "", true),
+            (SidebarFilter::All, "app", false),
+            (SidebarFilter::Running, "", false),
+        ] {
+            let rows = build_workspace_sidebar_rows(
+                std::slice::from_ref(&conversation),
+                &[],
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                query,
+                None,
+                filter,
+            );
+            assert!(rows.iter().any(|row| matches!(row,
+                SidebarRow::Workspace { collapsible, .. } if *collapsible == expected
+            )));
+        }
+    }
+
+    #[test]
+    fn attention_view_finds_tasks_in_collapsed_projects_and_archives() {
+        let mut tasks = (0..7)
+            .map(|id| task(id, Some("/work/app"), false))
+            .collect::<Vec<_>>();
+        for conversation in &mut tasks {
+            conversation.needs_attention = true;
+        }
+        tasks[0].archived = true;
+        let mut other = task(99, None, false);
+        other.unread_completion = true;
+        tasks.push(other);
+        let rows = build_workspace_sidebar_rows(
+            &tasks,
+            &[project("/work/app", false), project("/work/empty", true)],
+            &BTreeSet::from(["/work/app".into()]),
+            &BTreeSet::new(),
+            "",
+            None,
+            SidebarFilter::Attention,
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Session(_)))
+                .count(),
+            8
+        );
+        assert!(!rows.iter().any(|row| matches!(
+            row,
+            SidebarRow::ShowMore { .. }
+                | SidebarRow::Archived { .. }
+                | SidebarRow::Workspace {
+                    collapsed: true,
+                    ..
+                }
+        )));
+        assert!(!rows.iter().any(|row| matches!(row,
+            SidebarRow::Workspace { path, .. } if path == "/work/empty"
+        )));
+    }
+
+    #[test]
+    fn running_view_intersects_search_and_preserves_project_order() {
+        let mut tasks = vec![
+            task(1, Some("/work/a"), false),
+            task(2, Some("/work/b"), false),
+            task(3, None, false),
+        ];
+        tasks[0].state = SessionState::Running;
+        tasks[1].state = SessionState::Running;
+        tasks[2].needs_attention = true;
+        let rows = build_workspace_sidebar_rows(
+            &tasks,
+            &[project("/work/a", false), project("/work/b", true)],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            "work",
+            None,
+            SidebarFilter::Running,
+        );
+        let ids = rows
+            .iter()
+            .filter_map(|row| match row {
+                SidebarRow::Session(conversation) => Some(conversation.session_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["session-2", "session-1"]);
+        let rows = build_workspace_sidebar_rows(
+            &tasks,
+            &[],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            "task 1",
+            None,
+            SidebarFilter::Running,
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, SidebarRow::Session(_)))
+                .count(),
+            1
+        );
+        let rows = build_workspace_sidebar_rows(
+            &tasks,
+            &[],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            "missing",
+            None,
+            SidebarFilter::Running,
+        );
+        assert!(!rows.iter().any(|row| matches!(row, SidebarRow::Session(_))));
     }
 }
 

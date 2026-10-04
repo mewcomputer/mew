@@ -1434,3 +1434,26 @@ startup and larger task-navigation design stay in the previously triaged queue.
 Live native visual testing still awaits explicit app-launch confirmation after
 its automatic approval rejection. No focus, bounds or native rendering proof is
 claimed by the source and integration gates.
+
+### 2026-10-03: native task navigation and direct review
+
+Added All, Running and Attention sidebar views with live counts from the existing
+conversation projection. Running excludes tasks waiting for input; Attention
+includes pending requests, idle failures and unseen completions. Filtered views
+show every match across projects, including archived tasks with pending work,
+without changing saved collapse preferences or the recent-task cap in All.
+Search intersects the selected view. Filtered/search workspace headers have no
+collapse control, so clicks cannot silently alter the saved All layout.
+
+The attached conversation has a direct Review changes action that selects the
+existing daemon-backed Changes panel and requests fresh review. Opening review
+or the workbench folds the sidebar when needed to preserve the chat's minimum
+width; an impossible review layout reports an error without altering layout.
+Navigation leaves completion acknowledgement with the confirmed attachment.
+
+Verified 135 native tests, strict all-target native clippy, formatting,
+architecture and generated-theme checks. Read-only breaker/simplifier review
+caught the ineffective filtered collapse control; its behavior is now covered.
+Live rendering and interaction QA remain pending the previously requested
+explicit launch confirmation. Task-owned draft/submission correctness follows
+as a separate change.

@@ -1167,6 +1167,41 @@ mod shell_tests {
     }
 
     #[test]
+    fn revealing_workbench_preserves_sidebar_when_it_fits() {
+        let mut layout = ShellLayoutState {
+            workbench_collapsed: true,
+            ..Default::default()
+        };
+        assert!(layout.reveal_workbench(1240., SIDEBAR_EXPANDED_WIDTH));
+        assert!(!layout.sidebar_collapsed);
+        assert!(!layout.workbench_collapsed);
+    }
+
+    #[test]
+    fn revealing_workbench_folds_sidebar_only_when_needed() {
+        let mut layout = ShellLayoutState {
+            workbench_collapsed: true,
+            ..Default::default()
+        };
+        assert!(layout.reveal_workbench(720., SIDEBAR_EXPANDED_WIDTH));
+        assert!(layout.sidebar_collapsed);
+        assert!(!layout.workbench_collapsed);
+        let mut layout = ShellLayoutState {
+            workbench_collapsed: true,
+            ..Default::default()
+        };
+        let original = layout;
+        assert!(!layout.reveal_workbench(
+            CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH - 1.,
+            SIDEBAR_EXPANDED_WIDTH
+        ));
+        assert_eq!(layout, original);
+        assert!(
+            layout.reveal_workbench(CHAT_MIN_WIDTH + WORKBENCH_MIN_WIDTH, SIDEBAR_EXPANDED_WIDTH)
+        );
+    }
+
+    #[test]
     fn metadata_only_updates_are_synced_without_display_events() {
         assert!(client_update_requires_metadata_sync(&[]));
         assert!(!client_update_requires_metadata_sync(&[
