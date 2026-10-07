@@ -476,7 +476,7 @@ async fn model_switch_refreshes_project_templates_and_the_child_provider() {
 
 #[tokio::test]
 async fn review_subagents_can_discover_search_and_read_the_session_codebase() {
-    for name in ["plan-reviewer", "code-reviewer"] {
+    for name in ["researcher", "plan-reviewer", "code-reviewer"] {
         let (_directory, root) = project(name);
         std::fs::create_dir(root.join("src")).unwrap();
         std::fs::write(

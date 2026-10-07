@@ -1539,3 +1539,18 @@ reducer and rendered-scroll regressions. Verified 383 daemon and TUI tests,
 with one existing Chrome-dependent test ignored; strict all-target clippy for
 mew, daemon and TUI, formatting, architecture and generated-theme checks passed.
 The review investigation also passed all 212 agent and subagent tests.
+
+### 2026-10-06: traced the reported reviewer access failure
+
+Located the report in the streamplace latency-branch review session. The parent
+launched all three review lenses as the built-in researcher and reported denied
+reads for the repository, staged diffs and lens instructions. No custom
+researcher definition was found. The historical runner did not inherit workspace
+roots or forward permission requests, which explains that denial pattern; commit
+3a22b63 already fixed both on October 3. The installed ~/.cargo/bin/mew executable
+is dated September 29, pointing to an older runtime. Its daemon status reports no
+active process, so the recorded session's actual executable remains unconfirmed.
+
+Extended the existing real-file review regression to cover researcher as well
+as plan-reviewer and project code-reviewer. Verified all 12 session-workspace
+tests, including child permission forwarding for files outside the project.
