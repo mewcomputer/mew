@@ -1131,25 +1131,39 @@ where
                             variant: thinking_variant,
                         });
 
-                        // Send only the newest history page on attach. Older
-                        // pages are requested by the desktop as the user
-                        // scrolls toward the top of the transcript.
-                        let messages = {
-                            let agent = session.agent.lock().await;
-                            let msgs = agent.messages.lock().await.clone();
-                            msgs
-                        };
-                        let (messages, next_cursor) = history_page(
-                            &messages,
-                            messages.len(),
-                            mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
-                        );
-                        reply(ServerMessage::SessionHistoryPage {
-                            session_id: session_id.clone(),
-                            messages,
-                            next_cursor,
-                            replace: true,
-                        });
+                        // The TUI receives the whole transcript in bounded frames.
+                        // Other clients request older pages through the cursor.
+                        match session.history().await {
+                            Ok(messages) => {
+                                let mut before = messages.len();
+                                let mut replace = true;
+                                loop {
+                                    let (page, next_cursor) = history_page(
+                                        &messages,
+                                        before,
+                                        mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
+                                    );
+                                    reply(ServerMessage::SessionHistoryPage {
+                                        session_id: session_id.clone(),
+                                        messages: page,
+                                        next_cursor,
+                                        replace,
+                                    });
+                                    match next_cursor {
+                                        Some(cursor) if client_kind == ClientKind::Tui => {
+                                            before = cursor;
+                                            replace = false;
+                                        }
+                                        _ => break,
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                reply(ServerMessage::Error {
+                                    message: format!("failed to load session history: {error:#}"),
+                                });
+                            }
+                        }
 
                         // Replay current flagged-files set so the UI has it
                         // immediately after attach.
@@ -1253,10 +1267,14 @@ where
                     });
                     continue;
                 }
-                let messages = {
-                    let agent = session.agent.lock().await;
-                    let messages = agent.messages.lock().await.clone();
-                    messages
+                let messages = match session.history().await {
+                    Ok(messages) => messages,
+                    Err(error) => {
+                        reply(ServerMessage::Error {
+                            message: format!("failed to load session history: {error:#}"),
+                        });
+                        continue;
+                    }
                 };
                 let (messages, next_cursor) = history_page(
                     &messages,

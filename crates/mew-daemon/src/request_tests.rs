@@ -99,6 +99,226 @@ fn hook_call() -> mew_hooks::ToolCall {
 }
 
 #[tokio::test]
+async fn history_pages_preserve_messages_before_compaction_and_live_updates() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let session_id = session.agent.lock().await.session_id;
+    let mut expected = Vec::new();
+    for index in 0..mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT + 2 {
+        let message_id = mew_message::MessageId::new();
+        expected.push(mew_message::Message {
+            id: message_id,
+            session_id,
+            role: mew_message::Role::User,
+            parts: vec![mew_message::Part::Text(mew_message::TextPart {
+                base: mew_message::PartBase {
+                    id: mew_message::PartId::new(),
+                    message_id,
+                    session_id,
+                },
+                text: format!("message {index}"),
+                synthetic: false,
+            })],
+            time: mew_message::Time {
+                created: index as i64,
+                completed: None,
+            },
+            assistant: None,
+        });
+    }
+    let tail_start_id = expected.last().unwrap().id;
+    let mut marker = expected.last().unwrap().clone();
+    marker.id = mew_message::MessageId::new();
+    marker.role = mew_message::Role::System;
+    marker.parts = vec![mew_message::Part::Compaction(mew_message::CompactionPart {
+        base: mew_message::PartBase {
+            id: mew_message::PartId::new(),
+            message_id: marker.id,
+            session_id: marker.session_id,
+        },
+        auto: true,
+        overflow: false,
+        tail_start_id: Some(tail_start_id),
+        summary: None,
+        removed_count: Some(expected.len() as u32 - 1),
+    })];
+    expected.push(marker);
+    let persisted = expected.clone();
+    {
+        let agent = session.agent.lock().await;
+        let mut writer = agent.session.as_ref().unwrap().lock().await;
+        for message in &expected {
+            writer.write_message(message).await.unwrap();
+        }
+        drop(writer);
+        agent.load_messages(expected.clone()).await;
+        let mut context = agent.messages.lock().await;
+        assert_eq!(
+            context.len(),
+            2,
+            "the model retains only the compacted tail"
+        );
+        let retained = context.last_mut().unwrap();
+        retained.parts.clear();
+        retained.time.completed = Some(100);
+        expected[mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT + 1] = retained.clone();
+        let mut live = retained.clone();
+        live.id = mew_message::MessageId::new();
+        live.time.created = 101;
+        context.push(live.clone());
+        expected.push(live);
+    }
+
+    for expected in [expected, persisted] {
+        for client_kind in [ClientKind::Tui, ClientKind::Desktop] {
+            let mut socket = connect(&server).await;
+            send(
+                &mut socket,
+                ClientMessage::AttachSession {
+                    session_id: session.id.clone(),
+                    client_kind,
+                },
+            )
+            .await;
+            let mut recovered = Vec::new();
+            let mut replace_expected = true;
+            loop {
+                let reply = flush(&mut socket).await;
+                let pages = reply
+                    .into_iter()
+                    .filter_map(|message| match message {
+                        ServerMessage::SessionHistoryPage {
+                            messages,
+                            next_cursor,
+                            replace,
+                            ..
+                        } => Some((messages, next_cursor, replace)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    pages.len(),
+                    if client_kind == ClientKind::Tui {
+                        expected
+                            .len()
+                            .div_ceil(mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT)
+                    } else {
+                        1
+                    }
+                );
+                let mut cursor = None;
+                for (messages, next_cursor, replace) in pages {
+                    assert_eq!(replace, replace_expected);
+                    if replace_expected {
+                        assert_eq!(messages.len(), mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT);
+                    }
+                    replace_expected = false;
+                    recovered.splice(..0, messages);
+                    cursor = next_cursor;
+                }
+                let Some(before) = cursor else {
+                    break;
+                };
+                assert_eq!(client_kind, ClientKind::Desktop);
+                send(
+                    &mut socket,
+                    ClientMessage::LoadSessionHistory {
+                        session_id: session.id.clone(),
+                        before,
+                        limit: mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
+                    },
+                )
+                .await;
+            }
+
+            assert_eq!(recovered, expected);
+        }
+        server.session_manager.remove(&session.id).await;
+    }
+}
+
+#[tokio::test]
+async fn history_read_errors_are_reported_on_attach_and_older_page_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let (tx, rx) = oneshot::channel();
+    let pending = publish(
+        &server,
+        &session,
+        AgentEvent::PermissionRequest {
+            call: hook_call(),
+            tx,
+        },
+    )
+    .await;
+    let permission_id = pending.iter().find_map(request_id).unwrap().to_owned();
+    let mut socket = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id: session.id.clone(),
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    flush(&mut socket).await;
+    tokio::fs::write(
+        directory.path().join(&session.id).join("session.jsonl"),
+        "invalid JSON\n",
+    )
+    .await
+    .unwrap();
+
+    send(
+        &mut socket,
+        ClientMessage::LoadSessionHistory {
+            session_id: session.id.clone(),
+            before: 1,
+            limit: mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT,
+        },
+    )
+    .await;
+    let page_reply = flush(&mut socket).await;
+    let mut attaching = connect(&server).await;
+    send(
+        &mut attaching,
+        ClientMessage::AttachSession {
+            session_id: session.id.clone(),
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    let attach_reply = flush(&mut attaching).await;
+    assert!(attach_reply
+        .iter()
+        .any(|message| request_id(message) == Some(permission_id.as_str())));
+
+    for reply in [page_reply, attach_reply] {
+        assert!(reply.iter().any(|message| matches!(message,
+            ServerMessage::Error { message } if message.contains("failed to load session history")
+        )));
+        assert!(!reply
+            .iter()
+            .any(|message| matches!(message, ServerMessage::SessionHistoryPage { .. })));
+    }
+    send(
+        &mut attaching,
+        ClientMessage::PermissionResponse {
+            request_id: permission_id,
+            decision: mew_protocol::PermissionDecision::AllowOnce,
+        },
+    )
+    .await;
+    flush(&mut attaching).await;
+    assert!(matches!(
+        rx.await.unwrap(),
+        mew_hooks::PermissionDecision::AllowOnce
+    ));
+}
+
+#[tokio::test]
 async fn attach_recovers_each_required_action_and_original_response_channel() {
     let directory = tempfile::tempdir().unwrap();
     let server = test_server(directory.path().to_path_buf());

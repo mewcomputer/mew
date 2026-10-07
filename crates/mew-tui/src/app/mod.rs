@@ -865,6 +865,7 @@ impl App {
     pub fn apply_daemon_notification(&mut self, msg: &mew_protocol::ServerMessage) {
         use mew_protocol::ServerMessage;
         match msg {
+            ServerMessage::Error { message } => self.set_alert(message.clone()),
             ServerMessage::SessionList { sessions } => {
                 // Sync the active session's cumulative change stats (gives
                 // the per-file list that `SessionStatsChanged` lacks).
@@ -967,8 +968,29 @@ impl App {
                 self.mark_chat_dirty();
             }
             ServerMessage::SessionHistoryPage {
-                messages, replace, ..
+                session_id,
+                messages,
+                replace,
+                ..
             } => {
+                if session_id != &self.status.session_id {
+                    return;
+                }
+                let scroll_anchor = if !replace && !self.auto_scroll {
+                    self.rendered_chat.as_ref().map(|rendered| {
+                        (
+                            self.rendered_chat_width,
+                            rendered.total_wrapped.saturating_sub(rendered.max_scroll),
+                        )
+                    })
+                } else {
+                    None
+                };
+                let scroll_anchor = scroll_anchor.map(|(width, height)| {
+                    // Measure only the prepend, excluding queued growth at the tail.
+                    self.ensure_chat_rendered(width.saturating_sub(2), width, height);
+                    (width, height, self.max_scroll)
+                });
                 if *replace {
                     self.messages.clear();
                 }
@@ -982,9 +1004,15 @@ impl App {
                 self.md_stream = None;
                 self.md_state = mdstream::DocumentState::new();
                 self.md_render_cache.invalidate();
-                self.auto_scroll = *replace;
+                self.auto_scroll |= *replace;
                 self.pending_md_rerender = self.messages.last().map(|m| m.id);
                 self.mark_chat_dirty();
+                if let Some((width, height, previous_max_scroll)) = scroll_anchor {
+                    self.ensure_chat_rendered(width.saturating_sub(2), width, height);
+                    self.scroll = self
+                        .scroll
+                        .saturating_add(self.max_scroll.saturating_sub(previous_max_scroll));
+                }
             }
             ServerMessage::ModelSwitched {
                 provider, model, ..

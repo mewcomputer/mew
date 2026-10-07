@@ -1,5 +1,110 @@
 use super::*;
 
+#[test]
+fn daemon_session_error_is_visible_without_an_active_prompt() {
+    let mut app = App::new();
+    let message = "failed to load session history";
+
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::Error {
+        message: message.into(),
+    });
+
+    assert_eq!(
+        app.alert.as_ref().map(|(text, _)| text.as_str()),
+        Some(message)
+    );
+}
+
+#[test]
+fn daemon_history_pages_preserve_order_and_follow_latest_messages() {
+    let mut app = App::new();
+    app.status.session_id = "active".into();
+    app.push_user("older".into(), Vec::new());
+    app.push_user("newer".into(), Vec::new());
+    let messages = app.messages().to_vec();
+    app.push_user("previous session".into(), Vec::new());
+    app.auto_scroll = false;
+
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionHistoryPage {
+        session_id: "active".into(),
+        messages: messages[1..].to_vec(),
+        next_cursor: Some(1),
+        replace: true,
+    });
+    assert_eq!(app.messages(), &messages[1..]);
+    assert!(app.auto_scroll);
+    app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionHistoryPage {
+        session_id: "active".into(),
+        messages: messages[..1].to_vec(),
+        next_cursor: None,
+        replace: false,
+    });
+
+    assert_eq!(app.messages(), messages.as_slice());
+    assert!(app.auto_scroll);
+}
+
+#[test]
+fn daemon_older_history_page_preserves_manual_scroll() {
+    for append_before_prepend in [true, false] {
+        let mut app = App::new();
+        app.status.session_id = "active".into();
+        for index in 0..5 {
+            app.push_user(format!("message {index}"), Vec::new());
+        }
+        let messages = app.messages().to_vec();
+        app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionHistoryPage {
+            session_id: "active".into(),
+            messages: messages[2..].to_vec(),
+            next_cursor: Some(2),
+            replace: true,
+        });
+        app.ensure_chat_rendered(42, 44, 4);
+        app.scroll_up(2);
+        let visible = app.chat_rows[app.scroll as usize..app.scroll as usize + 4].to_vec();
+
+        if append_before_prepend {
+            app.push_user("live tail".into(), Vec::new());
+        }
+        app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionHistoryPage {
+            session_id: "active".into(),
+            messages: messages[..2].to_vec(),
+            next_cursor: None,
+            replace: false,
+        });
+        if !append_before_prepend {
+            app.push_user("live tail".into(), Vec::new());
+        }
+        app.ensure_chat_rendered(42, 44, 4);
+
+        assert!(!app.auto_scroll);
+        assert_eq!(
+            &app.chat_rows[app.scroll as usize..app.scroll as usize + 4],
+            visible.as_slice()
+        );
+    }
+}
+
+#[test]
+fn daemon_history_pages_from_another_session_do_not_change_transcript() {
+    let mut app = App::new();
+    app.status.session_id = "active".into();
+    app.push_user("current session".into(), Vec::new());
+    let messages = app.messages().to_vec();
+    app.auto_scroll = false;
+    for replace in [true, false] {
+        app.apply_daemon_notification(&mew_protocol::ServerMessage::SessionHistoryPage {
+            session_id: "previous".into(),
+            messages: Vec::new(),
+            next_cursor: Some(10),
+            replace,
+        });
+
+        assert_eq!(app.messages(), messages.as_slice());
+        assert!(!app.auto_scroll);
+    }
+}
+
 fn daemon_permission(
     tool_name: &str,
 ) -> (

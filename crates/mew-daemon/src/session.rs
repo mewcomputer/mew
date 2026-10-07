@@ -101,6 +101,37 @@ pub struct Session {
 }
 
 impl Session {
+    /// Read the complete transcript, including history removed from model context
+    /// and current message state that has not yet been persisted.
+    pub(crate) async fn history(&self) -> Result<Vec<mew_message::Message>> {
+        let agent = self.agent.lock().await;
+        let Some(writer) = &agent.session else {
+            return Ok(agent.messages.lock().await.clone());
+        };
+        // Serialize with writes so the reader never sees a partial JSONL record.
+        let writer = writer.lock().await;
+        let mut history = mew_session::Reader::load_from(&self.session_dir, &self.id)
+            .await
+            .context("read session transcript")?;
+        drop(writer);
+        let positions = history
+            .iter()
+            .enumerate()
+            .map(|(index, message)| (message.id, index))
+            .collect::<HashMap<_, _>>();
+        let messages = agent.messages.lock().await;
+        for message in messages.iter() {
+            if let Some(&index) = positions.get(&message.id) {
+                if history[index] != *message {
+                    history[index] = message.clone();
+                }
+            } else {
+                history.push(message.clone());
+            }
+        }
+        Ok(history)
+    }
+
     pub(crate) async fn policy(&self, agent: &Agent) -> mew_session::SessionPolicy {
         mew_session::SessionPolicy {
             model: self.model.lock().await.clone(),

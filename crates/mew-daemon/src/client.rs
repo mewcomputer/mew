@@ -221,6 +221,8 @@ impl DaemonClient {
                             break;
                         }
                     }
+                } else if matches!(server_msg, ServerMessage::Error { .. }) {
+                    let _ = state_clone.notify_tx.send(server_msg).await;
                 } else if !events.is_empty() {
                     warn!("daemon client: event without active prompt");
                 }
@@ -993,6 +995,137 @@ mod tests {
         ws.send(Message::Text(mew_protocol::encode_json(&pong).unwrap()))
             .await
             .unwrap();
+    }
+
+    async fn connect_test_daemon(
+        session_dir: &std::path::Path,
+    ) -> (
+        DaemonClient,
+        mpsc::Receiver<ServerMessage>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let daemon = crate::DaemonServer::with_session_dir(
+            Arc::new(|params| {
+                Ok((
+                    mew_agent::Agent::new(
+                        Arc::new(mew_provider_fake::FakeProvider::new(Vec::new())),
+                        Arc::new(mew_hooks::NopDispatcher),
+                        Some(params.writer),
+                        Vec::new(),
+                        None,
+                    ),
+                    None,
+                    None,
+                ))
+            }),
+            session_dir.to_path_buf(),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let connection = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            crate::handle_connection(
+                socket,
+                daemon.session_manager,
+                daemon.groups_store,
+                daemon.thinking_setter,
+                daemon.auto_summary_enabled,
+            )
+            .await
+            .unwrap();
+        });
+        let (client, notifications) = DaemonClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap();
+        (client, notifications, connection)
+    }
+
+    #[tokio::test]
+    async fn session_command_errors_arrive_without_an_active_prompt() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let directory = tempfile::tempdir().unwrap();
+            let (client, mut notifications, connection) =
+                connect_test_daemon(directory.path()).await;
+
+            client.attach_session("missing").await.unwrap();
+
+            assert!(matches!(notifications.recv().await,
+                Some(ServerMessage::Error { message }) if message == "session not found"
+            ));
+            connection.abort();
+        })
+        .await
+        .expect("session command error was lost");
+    }
+
+    #[tokio::test]
+    async fn attaching_replays_complete_persisted_history_across_page_boundaries() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let directory = tempfile::tempdir().unwrap();
+            let (client, mut notifications, connection) =
+                connect_test_daemon(directory.path()).await;
+            let limit = mew_protocol::DEFAULT_HISTORY_PAGE_LIMIT;
+            for count in [0, 1, limit, limit + 1, 2 * limit + 1] {
+                let session_id = mew_message::SessionId::new();
+                let id = session_id.to_string();
+                let mut writer = mew_session::Writer::open_at(directory.path(), &id)
+                    .await
+                    .unwrap();
+                let mut expected = Vec::new();
+                for index in 0..count {
+                    let message_id = mew_message::MessageId::new();
+                    let message = mew_message::Message {
+                        id: message_id,
+                        session_id,
+                        role: mew_message::Role::User,
+                        parts: vec![Part::Text(mew_message::TextPart {
+                            base: mew_message::PartBase {
+                                id: mew_message::PartId::new(),
+                                message_id,
+                                session_id,
+                            },
+                            text: format!("message {index}"),
+                            synthetic: false,
+                        })],
+                        time: mew_message::Time {
+                            created: index as i64,
+                            completed: None,
+                        },
+                        assistant: None,
+                    };
+                    writer.write_message(&message).await.unwrap();
+                    expected.push(message);
+                }
+                writer.close().await.unwrap();
+
+                client.attach_session(&id).await.unwrap();
+                let mut recovered = Vec::new();
+                let mut first_page = true;
+                loop {
+                    let notification = notifications.recv().await.unwrap();
+                    if let ServerMessage::SessionHistoryPage {
+                        session_id,
+                        messages,
+                        next_cursor,
+                        replace,
+                    } = notification
+                    {
+                        assert_eq!(session_id, id);
+                        assert_eq!(replace, first_page);
+                        assert!(messages.len() <= limit);
+                        recovered.splice(..0, messages);
+                        first_page = false;
+                        if next_cursor.is_none() {
+                            break;
+                        }
+                    }
+                }
+                assert_eq!(recovered, expected, "history with {count} messages");
+            }
+            connection.abort();
+        })
+        .await
+        .expect("complete-history replay timed out");
     }
 
     #[tokio::test]

@@ -1521,3 +1521,21 @@ Verified all 12 session-project setup tests. The reported review access failure
 was not reproduced on this branch; the agent name and failure message are still
 needed to distinguish a custom tool configuration from a path or permission
 failure.
+
+### 2026-10-06: complete TUI session resumption
+
+TUI attachment now receives every history page instead of only the newest 24
+messages. History comes from the persisted transcript with current in-memory
+message updates, preserving turns removed from model context by compaction.
+Desktop attachment keeps cursor-based pagination. TUI page handling rejects
+other sessions, follows the latest message on resume and preserves a manually
+scrolled viewport when older messages arrive alongside new tail content.
+
+History-read failures remain visible without an active prompt, and attachment
+still replays pending permission requests after a read failure. Added real
+loopback client and daemon tests across empty, single-page and multi-page
+histories, compaction, active/reloaded sessions and error handling, plus TUI
+reducer and rendered-scroll regressions. Verified 383 daemon and TUI tests,
+with one existing Chrome-dependent test ignored; strict all-target clippy for
+mew, daemon and TUI, formatting, architecture and generated-theme checks passed.
+The review investigation also passed all 212 agent and subagent tests.
