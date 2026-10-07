@@ -475,6 +475,64 @@ async fn model_switch_refreshes_project_templates_and_the_child_provider() {
 }
 
 #[tokio::test]
+async fn review_subagents_can_discover_search_and_read_the_session_codebase() {
+    for name in ["plan-reviewer", "code-reviewer"] {
+        let (_directory, root) = project(name);
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/review.rs"),
+            "pub const REVIEW_MARKER: u32 = 7;\n",
+        )
+        .unwrap();
+        if name == "code-reviewer" {
+            std::fs::write(
+                root.join(".mew/agents/code-reviewer.md"),
+                "---\nname: code-reviewer\ndescription: reviews code\ntools: [read, glob, grep]\n---\nReview the codebase.\n",
+            )
+            .unwrap();
+        }
+        let id = SessionId::new();
+        let writer = SessionWriter::open_at(&root.join("sessions"), &id.to_string())
+            .await
+            .unwrap();
+        let provider = ProjectProvider::new(vec![
+            FakeProvider::tool_call(
+                "subagent_start",
+                "review",
+                serde_json::json!({"name":name, "prompt":"review src/review.rs"}),
+            ),
+            FakeProvider::tool_call("glob", "find", serde_json::json!({"pattern":"**/*.rs"})),
+            FakeProvider::tool_call(
+                "grep",
+                "search",
+                serde_json::json!({"pattern":"REVIEW_MARKER"}),
+            ),
+            FakeProvider::tool_call("read", "read", serde_json::json!({"path":"src/review.rs"})),
+            FakeProvider::text_response("review completed"),
+            FakeProvider::text_response("parent completed"),
+        ]);
+        let agent = build(&root, provider.clone(), &config(), Some(writer), Some(id));
+
+        assert_eq!(run(&agent).await, 0, "review stays inside the project");
+
+        let requests = provider.requests.lock().unwrap();
+        for tool in ["read", "glob", "grep"] {
+            assert!(requests[1].tools.iter().any(|def| def.name == tool));
+        }
+        assert!(!requests[1].tools.iter().any(|def| def.name == "write"));
+        for (request, call_id, expected) in [
+            (&requests[2], "find", "src/review.rs"),
+            (&requests[3], "search", "REVIEW_MARKER"),
+            (&requests[4], "read", "pub const REVIEW_MARKER: u32 = 7;"),
+        ] {
+            assert!(request.messages.iter().flat_map(|message| &message.parts).any(|part| {
+                matches!(part, Part::ToolCall(call) if call.call_id == call_id && call.state.output().is_some_and(|output| output.contains(expected)))
+            }), "{name} must get {call_id} results from its session project");
+        }
+    }
+}
+
+#[tokio::test]
 async fn child_tools_templates_and_transcripts_inherit_the_parent_project() {
     let (_directory, root) = project("child-project");
     let sessions = root.join("sessions");

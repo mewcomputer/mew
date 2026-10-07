@@ -1508,3 +1508,16 @@ sender offers client reconnection. Initial-prompt snapshots are confined to new
 task submission. Verified all 154 native tests, nine focused request/submission
 tests, strict all-target clippy and formatting. The feedback tests use real
 accepted and closed queues; source review confirmed the render and submit routes.
+
+### 2026-10-06: review subagent workspace access coverage
+
+Added an integration test for built-in plan-reviewer and project code-reviewer
+subagents launched through subagent_start. Both receive read-only file tools
+and successfully discover, search and read source files in their parent
+session's project without requesting workspace permission. The test uses real
+tools and temporary projects, with scripted responses at the provider boundary.
+
+Verified all 12 session-project setup tests. The reported review access failure
+was not reproduced on this branch; the agent name and failure message are still
+needed to distinguish a custom tool configuration from a path or permission
+failure.
