@@ -555,3 +555,241 @@ fn a_previous_turns_error_cannot_confirm_or_cancel_a_pending_attachment() {
             |part| matches!(part, Part::Text(text) if text.text.contains("previous turn aborted"))
         ));
 }
+
+#[test]
+fn review_projection_accepts_only_matching_responses_and_refreshes_the_current_workspace() {
+    let mut app = App::new();
+    let mut state = ClientState::default();
+    apply(&mut app, &mut state, ready("a", "/tmp/a"));
+    app.open_review();
+    let Some(mew_tui::events::Action::ReadSessionDiff { request_id, .. }) =
+        app.take_activity_request(std::time::Instant::now())
+    else {
+        panic!("review must request its confirmed session diff");
+    };
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::SessionDiff {
+            session_id: "other".into(),
+            request_id: request_id.clone(),
+            files: vec![],
+        },
+    );
+    assert!(
+        !app.activity_view
+            .as_ref()
+            .unwrap()
+            .review
+            .as_ref()
+            .unwrap()
+            .loaded
+    );
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::SessionDiffError {
+            session_id: "a".into(),
+            request_id: "old-request".into(),
+            message: "wrong response".into(),
+        },
+    );
+    assert!(app
+        .activity_view
+        .as_ref()
+        .unwrap()
+        .review
+        .as_ref()
+        .unwrap()
+        .error
+        .is_none());
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::SessionDiff {
+            session_id: "a".into(),
+            request_id: request_id.clone(),
+            files: vec![],
+        },
+    );
+    assert!(
+        app.activity_view
+            .as_ref()
+            .unwrap()
+            .review
+            .as_ref()
+            .unwrap()
+            .loaded
+    );
+    app.apply_client_update(
+        &[ClientEvent::WorkspaceChanged {
+            session_id: "other".into(),
+        }],
+        &state,
+        None,
+    );
+    assert!(app
+        .take_activity_request(std::time::Instant::now())
+        .is_none());
+    app.apply_client_update(
+        &[ClientEvent::WorkspaceChanged {
+            session_id: "a".into(),
+        }],
+        &state,
+        None,
+    );
+    assert!(
+        matches!(app.take_activity_request(std::time::Instant::now()), Some(mew_tui::events::Action::ReadSessionDiff { session_id, request_id: fresh }) if session_id == "a" && fresh != request_id)
+    );
+}
+
+#[test]
+fn review_projection_shows_read_errors_and_preserves_the_chat_draft() {
+    let mut app = App::new();
+    let mut state = ClientState::default();
+    apply(&mut app, &mut state, ready("a", "/tmp/a"));
+    app.input = "saved draft".into();
+    app.open_review();
+    let Some(mew_tui::events::Action::ReadSessionDiff { request_id, .. }) =
+        app.take_activity_request(std::time::Instant::now())
+    else {
+        panic!("review request");
+    };
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::SessionDiffError {
+            session_id: "a".into(),
+            request_id,
+            message: "workspace is unavailable".into(),
+        },
+    );
+    assert_eq!(
+        app.activity_view
+            .as_ref()
+            .unwrap()
+            .review
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref(),
+        Some("workspace is unavailable")
+    );
+    assert_eq!(app.input, "saved draft");
+}
+
+#[test]
+fn job_output_projection_preserves_owner_request_offsets_and_final_status() {
+    let mut app = App::new();
+    let mut state = ClientState::default();
+    apply(&mut app, &mut state, ready("a", "/tmp/a"));
+    app.open_job("job".into());
+    let Some(mew_tui::events::Action::ReadJobOutput { request_id, .. }) =
+        app.take_activity_request(std::time::Instant::now())
+    else {
+        panic!("job output request");
+    };
+    for (session_id, reply_id) in [("other", request_id.as_str()), ("a", "old")] {
+        apply(
+            &mut app,
+            &mut state,
+            ServerMessage::JobOutput {
+                session_id: session_id.into(),
+                job_id: "job".into(),
+                request_id: reply_id.into(),
+                offset: 0,
+                next_offset: 7,
+                output: "foreign".into(),
+                done: true,
+                incomplete: false,
+            },
+        );
+    }
+    assert!(app
+        .activity_view
+        .as_ref()
+        .unwrap()
+        .job_output
+        .as_ref()
+        .unwrap()
+        .output
+        .is_empty());
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::JobOutput {
+            session_id: "a".into(),
+            job_id: "job".into(),
+            request_id,
+            offset: 0,
+            next_offset: 7,
+            output: "日本\n".into(),
+            done: true,
+            incomplete: true,
+        },
+    );
+    let output = app
+        .activity_view
+        .as_ref()
+        .unwrap()
+        .job_output
+        .as_ref()
+        .unwrap();
+    assert_eq!(output.output, "日本\n");
+    assert_eq!(output.offset, 7);
+    assert!(output.done);
+    assert!(output.incomplete);
+}
+
+#[test]
+fn job_output_projection_shows_matching_read_errors() {
+    let mut app = App::new();
+    let mut state = ClientState::default();
+    apply(&mut app, &mut state, ready("a", "/tmp/a"));
+    app.open_job("job".into());
+    let Some(mew_tui::events::Action::ReadJobOutput { request_id, .. }) =
+        app.take_activity_request(std::time::Instant::now())
+    else {
+        panic!("job output request");
+    };
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::JobOutputError {
+            session_id: "a".into(),
+            job_id: "other-job".into(),
+            request_id: request_id.clone(),
+            message: "foreign".into(),
+        },
+    );
+    assert!(app
+        .activity_view
+        .as_ref()
+        .unwrap()
+        .job_output
+        .as_ref()
+        .unwrap()
+        .error
+        .is_none());
+    apply(
+        &mut app,
+        &mut state,
+        ServerMessage::JobOutputError {
+            session_id: "a".into(),
+            job_id: "job".into(),
+            request_id,
+            message: "job is unavailable".into(),
+        },
+    );
+    assert_eq!(
+        app.activity_view
+            .as_ref()
+            .unwrap()
+            .job_output
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref(),
+        Some("job is unavailable")
+    );
+}

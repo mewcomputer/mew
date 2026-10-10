@@ -489,9 +489,7 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
             MouseEventKind::ScrollDown => KeyCode::Down,
             _ => return None,
         };
-        if let Some(view) = app.activity_view.as_mut() {
-            scroll_decision(&mut view.scroll, &view.view, code);
-        }
+        app.scroll_activity(code);
         return None;
     }
     if app.mode == crate::app::Mode::Help {
@@ -1050,8 +1048,8 @@ fn handle_activity_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Actio
         app.close_activity();
     } else if key.code == KeyCode::Char('r') {
         app.refresh_activity();
-    } else if let Some(view) = app.activity_view.as_mut() {
-        scroll_decision(&mut view.scroll, &view.view, key.code);
+    } else {
+        app.scroll_activity(key.code);
     }
     None
 }
@@ -2036,6 +2034,9 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 } else if kind == "subagent" {
                     app.open_subagent(id);
                     None
+                } else if kind == "tool" {
+                    app.open_tool_selection(&id);
+                    None
                 } else if kind == "job" {
                     app.open_job(id);
                     None
@@ -2184,6 +2185,16 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
 #[derive(Debug, Clone, strum::EnumIter)]
 pub enum Action {
     CloseQuestion {
+        session_id: String,
+        request_id: String,
+    },
+    ReadJobOutput {
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        offset: u64,
+    },
+    ReadSessionDiff {
         session_id: String,
         request_id: String,
     },

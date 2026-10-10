@@ -104,6 +104,38 @@ impl CommandTarget for DaemonTarget {
         )
         .await
     }
+    async fn read_job_output(
+        &mut self,
+        session_id: &str,
+        job_id: &str,
+        request_id: &str,
+        offset: u64,
+    ) -> Result<(), Unsupported> {
+        self.command(
+            ClientMessage::ReadJobOutput {
+                session_id: session_id.into(),
+                job_id: job_id.into(),
+                request_id: request_id.into(),
+                offset,
+            },
+            "could not request job output",
+        )
+        .await
+    }
+    async fn read_session_diff(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<(), Unsupported> {
+        self.command(
+            ClientMessage::ReadSessionDiff {
+                session_id: session_id.into(),
+                request_id: request_id.into(),
+            },
+            "could not request workspace review",
+        )
+        .await
+    }
     async fn read_subagent_history(
         &mut self,
         session_id: &str,

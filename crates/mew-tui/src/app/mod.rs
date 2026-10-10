@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+pub(crate) use activity::RenderedActivity;
 pub use activity::{ActivityTarget, ActivityView, SidebarItem, SubagentTranscript};
 pub(crate) use input::visual_rows;
 pub use mdstream;
@@ -39,6 +40,8 @@ pub enum SlashResult {
     Todo,
     OpenSubagents,
     OpenJobs,
+    OpenTools,
+    OpenReview,
     Rewind(usize),
     PluginCommand {
         name: String,
@@ -2234,7 +2237,9 @@ impl App {
             .filter(|view| view.session_id == self.status.session_id)
             .and_then(|view| match &view.target {
                 ActivityTarget::Subagent(id) => Some(id.as_str()),
-                ActivityTarget::Job(_) => None,
+                ActivityTarget::Job(_) | ActivityTarget::Tool { .. } | ActivityTarget::Review => {
+                    None
+                }
             });
         let ttl = self.finished_ttl();
         self.subagents.retain(|s| {

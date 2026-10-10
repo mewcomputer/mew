@@ -29,6 +29,18 @@ impl App {
                 description: "view background jobs".into(),
             },
             SlashCommand {
+                name: "/tools".into(),
+                description: "inspect tool arguments and results".into(),
+            },
+            SlashCommand {
+                name: "/review".into(),
+                description: "review workspace changes".into(),
+            },
+            SlashCommand {
+                name: "/diff".into(),
+                description: "alias for /review".into(),
+            },
+            SlashCommand {
                 name: "/cost".into(),
                 description: "show cost breakdown".into(),
             },
@@ -137,6 +149,8 @@ impl App {
             "/todo" => SlashResult::Todo,
             "/agents" => SlashResult::OpenSubagents,
             "/jobs" => SlashResult::OpenJobs,
+            "/tools" => SlashResult::OpenTools,
+            "/review" | "/diff" => SlashResult::OpenReview,
             "/cost" => SlashResult::Message(self.build_cost_report()),
             "/help" => SlashResult::OpenHelp,
             "/model" | "/models" => {

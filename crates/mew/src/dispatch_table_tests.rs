@@ -88,6 +88,24 @@ impl runtime::target::CommandTarget for RecordingTarget {
         self.record("compact");
         self.check()
     }
+    async fn read_job_output(
+        &mut self,
+        _session_id: &str,
+        _job_id: &str,
+        _request_id: &str,
+        _offset: u64,
+    ) -> Result<(), runtime::target::Unsupported> {
+        self.record("read_job_output");
+        self.check()
+    }
+    async fn read_session_diff(
+        &mut self,
+        _session_id: &str,
+        _request_id: &str,
+    ) -> Result<(), runtime::target::Unsupported> {
+        self.record("read_session_diff");
+        self.check()
+    }
     async fn read_subagent_history(
         &mut self,
         _session_id: &str,
@@ -1349,4 +1367,86 @@ async fn explicit_project_command_opens_the_picker_without_waiting_for_catalog_r
         app.picker.as_ref().map(|picker| picker.kind.as_str()),
         Some("project")
     );
+}
+
+#[tokio::test]
+async fn activity_read_commands_reject_foreign_or_unconfirmed_session() {
+    for (owner, attaching, should_read) in [
+        ("active", false, true),
+        ("foreign", false, false),
+        ("active", true, false),
+    ] {
+        let mut app = mew_tui::App::new();
+        app.status.session_id = "active".into();
+        app.attaching_session = attaching;
+        let mut target = RecordingTarget::new();
+        let mut should_break = false;
+        let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+            active_persona: None,
+        }));
+        let mut cx = runtime::Ctx {
+            app: &mut app,
+            target: &mut target,
+            should_break: &mut should_break,
+            cat: None,
+            loaded_personas: &[],
+            plugin_info: &plugin_info,
+        };
+        runtime::handle_action(
+            &mut cx,
+            Action::ReadJobOutput {
+                session_id: owner.into(),
+                job_id: "job".into(),
+                request_id: "read".into(),
+                offset: 42,
+            },
+        )
+        .await;
+        runtime::handle_action(
+            &mut cx,
+            Action::ReadSessionDiff {
+                session_id: owner.into(),
+                request_id: "diff".into(),
+            },
+        )
+        .await;
+        if should_read {
+            assert_eq!(
+                cx.target.calls,
+                vec!["read_job_output", "read_session_diff"]
+            );
+        } else {
+            assert!(cx.target.calls.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn tools_and_review_slash_commands_open_details_without_submitting() {
+    for command in ["/tools", "/review", "/diff"] {
+        let mut app = mew_tui::App::new();
+        app.input = "saved draft".into();
+        let mut target = RecordingTarget::new();
+        let mut should_break = false;
+        let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {
+            active_persona: None,
+        }));
+        let mut cx = runtime::Ctx {
+            app: &mut app,
+            target: &mut target,
+            should_break: &mut should_break,
+            cat: None,
+            loaded_personas: &[],
+            plugin_info: &plugin_info,
+        };
+        runtime::handle_action(&mut cx, Action::SlashCommand(command.into())).await;
+        assert_eq!(cx.app.input, "saved draft");
+        assert!(cx.target.calls.is_empty());
+        assert!(cx.app.messages().is_empty());
+        if command == "/tools" {
+            assert_eq!(cx.app.picker.as_ref().unwrap().kind, "tool");
+        } else {
+            assert_eq!(cx.app.mode, mew_tui::app::Mode::Activity);
+        }
+    }
 }

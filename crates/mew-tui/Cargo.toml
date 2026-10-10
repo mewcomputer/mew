@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 mew-message = { workspace = true }
+mew-diff = { workspace = true }
 mew-agent = { workspace = true }
 mew-provider = { workspace = true }
 mew-session = { workspace = true }

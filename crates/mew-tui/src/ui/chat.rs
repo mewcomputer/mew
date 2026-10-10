@@ -1117,7 +1117,7 @@ fn push_tool_edge(width: u16, is_top: bool, tool_bg: Color) -> Option<Line<'stat
 /// width. Returns one `Line` per visual row, each padded to exactly
 /// `width` so the paragraph never wraps a tool line (which would leak
 /// the chat bg on the continuation row's trailing cells).
-fn wrap_tool_line(
+pub(crate) fn wrap_tool_line(
     width: u16,
     line: Line<'static>,
     indent: &str,

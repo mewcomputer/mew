@@ -69,6 +69,22 @@ pub trait CommandTarget: Send {
     /// Force context compaction.
     async fn compact(&mut self) -> Result<(), Unsupported>;
 
+    /// Read the next output chunk from the confirmed session's background job.
+    async fn read_job_output(
+        &mut self,
+        session_id: &str,
+        job_id: &str,
+        request_id: &str,
+        offset: u64,
+    ) -> Result<(), Unsupported>;
+
+    /// Read the confirmed session's workspace changes.
+    async fn read_session_diff(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+    ) -> Result<(), Unsupported>;
+
     /// Read a child transcript without changing the attached conversation.
     async fn read_subagent_history(
         &mut self,

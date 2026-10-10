@@ -3859,3 +3859,77 @@ fn child_question_shows_its_owner_and_escape_preserves_other_pending_questions()
         Err(tokio::sync::oneshot::error::TryRecvError::Closed)
     ));
 }
+#[test]
+fn empty_job_polls_keep_rendered_content_and_refresh_terminal_metadata() {
+    let mut h = crate::harness::Harness::new(128, 40);
+    h.app.status.session_id = "owner".into();
+    h.app.handle_agent_event(AgentEvent::JobUpdate {
+        job_id: "job".into(),
+        command: "cargo test".into(),
+        state: "running".into(),
+    });
+    h.app.open_job("job".into());
+    let now = std::time::Instant::now();
+    let request = |app: &mut App, at| {
+        let Some(crate::events::Action::ReadJobOutput { request_id, .. }) =
+            app.take_activity_request(at)
+        else {
+            panic!("expected job output request");
+        };
+        request_id
+    };
+    let id = request(&mut h.app, now);
+    let output = "cached row\n".repeat(1_000);
+    let offset = output.len() as u64;
+    h.app
+        .apply_job_output("owner", "job", &id, 0, offset, &output, false, false);
+    assert!(h.render().contains("cached row"));
+    let cached_rows = h
+        .app
+        .activity_view
+        .as_ref()
+        .unwrap()
+        .rendered
+        .as_ref()
+        .unwrap()
+        .rows
+        .as_ptr();
+
+    for (tick, done) in [(1, false), (2, true)] {
+        let id = request(&mut h.app, now + std::time::Duration::from_secs(tick));
+        h.app
+            .apply_job_output("owner", "job", &id, offset, offset, "", done, done);
+        let cache = h
+            .app
+            .activity_view
+            .as_ref()
+            .unwrap()
+            .rendered
+            .as_ref()
+            .expect("an empty poll must retain the rendered output");
+        assert_eq!(cache.rows.as_ptr(), cached_rows);
+        h.render();
+    }
+    h.app.handle_agent_event(AgentEvent::JobUpdate {
+        job_id: "job".into(),
+        command: "cargo test".into(),
+        state: "completed".into(),
+    });
+    h.render();
+    h.app.scroll_activity(crossterm::event::KeyCode::End);
+    let frame = h.render();
+    assert!(frame.contains("Job · Completed"), "{frame}");
+    assert!(frame.contains("Output incomplete"), "{frame}");
+    assert_eq!(
+        h.app
+            .activity_view
+            .as_ref()
+            .unwrap()
+            .rendered
+            .as_ref()
+            .unwrap()
+            .rows
+            .as_ptr(),
+        cached_rows
+    );
+}

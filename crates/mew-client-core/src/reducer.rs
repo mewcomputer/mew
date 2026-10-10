@@ -310,6 +310,22 @@ pub enum ClientEvent {
         session_id: String,
         job: JobEntry,
     },
+    JobOutput {
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        offset: u64,
+        next_offset: u64,
+        output: String,
+        done: bool,
+        incomplete: bool,
+    },
+    JobOutputError {
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        message: String,
+    },
     RetryWait {
         session_id: String,
         retry: ProviderRetry,
@@ -1301,6 +1317,36 @@ impl ClientState {
             ServerMessage::FsChanged { session_id, .. } => {
                 vec![ClientEvent::WorkspaceChanged { session_id }]
             }
+            ServerMessage::JobOutput {
+                session_id,
+                job_id,
+                request_id,
+                offset,
+                next_offset,
+                output,
+                done,
+                incomplete,
+            } => vec![ClientEvent::JobOutput {
+                session_id,
+                job_id,
+                request_id,
+                offset,
+                next_offset,
+                output,
+                done,
+                incomplete,
+            }],
+            ServerMessage::JobOutputError {
+                session_id,
+                job_id,
+                request_id,
+                message,
+            } => vec![ClientEvent::JobOutputError {
+                session_id,
+                job_id,
+                request_id,
+                message,
+            }],
             ServerMessage::SessionDiff {
                 session_id,
                 request_id,

@@ -367,6 +367,44 @@ impl App {
                         self.permission_mode = mode;
                     }
                 }
+                ClientEvent::SessionDiff {
+                    session_id,
+                    request_id,
+                    files,
+                } => self.apply_session_diff(session_id, request_id, files, None),
+                ClientEvent::SessionDiffError {
+                    session_id,
+                    request_id,
+                    message,
+                } => self.apply_session_diff(session_id, request_id, &[], Some(message)),
+                ClientEvent::WorkspaceChanged { session_id } => {
+                    self.invalidate_review(session_id);
+                }
+                ClientEvent::JobOutput {
+                    session_id,
+                    job_id,
+                    request_id,
+                    offset,
+                    next_offset,
+                    output,
+                    done,
+                    incomplete,
+                } => self.apply_job_output(
+                    session_id,
+                    job_id,
+                    request_id,
+                    *offset,
+                    *next_offset,
+                    output,
+                    *done,
+                    *incomplete,
+                ),
+                ClientEvent::JobOutputError {
+                    session_id,
+                    job_id,
+                    request_id,
+                    message,
+                } => self.apply_job_output_error(session_id, job_id, request_id, message),
                 ClientEvent::TurnError {
                     session_id,
                     message,

@@ -1877,3 +1877,18 @@ Verified six real shell regressions, the chunk wire roundtrip and all 30 client
 tests. The isolated backend candidate passed the full daemon suite, including
 real idle success/cancellation/exit-7, reconnect, reaper and attach-order tests,
 and compiled the CLI and mobile client without the pending frontend changes.
+
+### 2026-10-10: full output and session review in the terminal companion
+
+The activity panel now opens full background-job output, canonical tool
+arguments/results/errors and workspace diffs. /tools selects recorded tool calls;
+/review and /diff request changes from the confirmed conversation's workspace.
+Chunk replies, errors and review invalidation stay bound to their session and
+request. Long output scrolls beyond 65,535 rows, Unicode chunk boundaries continue
+without delay, and empty polls preserve the cached rendering while refreshing
+status. The existing composer draft and conversation history remain intact.
+
+Verified the exact isolated frontend candidate with eight viewer tests, 19 client
+projection tests, 29 dispatch tests, two shared output-event tests, the actual
+frame/cache regression and command registry parity. The complete current TUI
+suite passed all 462 tests across 18 targets; renderer captures are 1280 by 800.

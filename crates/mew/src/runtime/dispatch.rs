@@ -60,6 +60,40 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             }
             Flow::Continue
         }
+        Action::ReadJobOutput {
+            session_id,
+            job_id,
+            request_id,
+            offset,
+        } => {
+            if session_id == cx.app.status.session_id && !cx.app.attaching_session {
+                if let Err(Unsupported(reason)) = cx
+                    .target
+                    .read_job_output(&session_id, &job_id, &request_id, offset)
+                    .await
+                {
+                    cx.app
+                        .apply_job_output_error(&session_id, &job_id, &request_id, reason);
+                    cx.app.set_alert(reason);
+                }
+            }
+            Flow::Continue
+        }
+        Action::ReadSessionDiff {
+            session_id,
+            request_id,
+        } => {
+            if session_id == cx.app.status.session_id && !cx.app.attaching_session {
+                if let Err(Unsupported(reason)) =
+                    cx.target.read_session_diff(&session_id, &request_id).await
+                {
+                    cx.app
+                        .apply_session_diff(&session_id, &request_id, &[], Some(reason));
+                    cx.app.set_alert(reason);
+                }
+            }
+            Flow::Continue
+        }
         Action::ReadSubagentHistory {
             session_id,
             child_session_id,
@@ -477,6 +511,14 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
         }
         SlashResult::OpenJobs => {
             cx.app.open_job_picker();
+            Flow::Continue
+        }
+        SlashResult::OpenTools => {
+            cx.app.open_tool_picker();
+            Flow::Continue
+        }
+        SlashResult::OpenReview => {
+            cx.app.open_review();
             Flow::Continue
         }
         SlashResult::SwitchModel(spec) => {
