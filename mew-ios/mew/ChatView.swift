@@ -88,9 +88,11 @@ struct ChatView: View {
                 get: { store.pendingAskUser.first { $0.daemon == daemonNodeId && $0.sessionId == sessionId }.map { AskUserSheetItem(ask: $0) } },
                 set: { _ in }
             )) { item in
-                AskUserSheet(ask: item.ask) { answers in
+                AskUserSheet(ask: item.ask, onRespond: { answers in
                     store.respondAskUser(requestId: item.ask.requestId, answers: answers)
-                }
+                }, onCancel: {
+                    store.cancelAskUser(requestId: item.ask.requestId)
+                })
                 .presentationDetents([.medium, .large])
                 .interactiveDismissDisabled()
             }
@@ -557,6 +559,7 @@ private struct AskUserSheetItem: Identifiable {
 private struct AskUserSheet: View {
     let ask: PendingAskUser
     let onRespond: ([String]) -> Void
+    let onCancel: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var answers: [String] = []
@@ -565,7 +568,7 @@ private struct AskUserSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("The agent needs a few answers to continue.")
+                    Text(ask.subagent.map { "\($0.displayName ?? $0.name) (\($0.name)) needs your input." } ?? "The agent needs a few answers to continue.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -583,7 +586,10 @@ private struct AskUserSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button(ask.subagent == nil ? "Cancel" : "Close question") {
+                        if ask.subagent != nil { onCancel() }
+                        dismiss()
+                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Submit") { submit() }

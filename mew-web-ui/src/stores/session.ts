@@ -11,7 +11,9 @@ import type {
   SessionInfo,
   Message,
   Question,
+  SubagentQuestionSource,
   SubagentOutcome,
+  SessionActivitySnapshot,
   TurnManifest,
   Todo as WireTodo,
   GroupInfo,
@@ -126,6 +128,7 @@ export interface SubagentInfo {
 }
 
 export interface PendingAskUser {
+  subagent?: SubagentQuestionSource;
   requestId: string;
   callId: string;
   questions: Question[];
@@ -320,7 +323,7 @@ interface SessionState {
   onSubagentEnd: (data: { parent_call_id: string; child_session_id: string; outcome: SubagentOutcome; manifests?: TurnManifest[] }) => void;
 
   // Ask-user actions
-  onAskUserRequest: (data: { request_id: string; call_id: string; questions: Question[] }) => void;
+  onAskUserRequest: (data: { request_id: string; call_id: string; questions: Question[]; subagent?: SubagentQuestionSource }) => void;
   resolveAskUser: (requestId: string) => void;
   onGoalProposed: (data: { request_id: string; call_id: string; objective: string }) => void;
   resolveGoal: (requestId: string) => void;
@@ -330,6 +333,7 @@ interface SessionState {
 
   // Job actions
   onJobUpdate: (data: { jobId: string; command: string; state: string }) => void;
+  onSessionActivitySnapshot: (data: SessionActivitySnapshot) => void;
 
   // Daemon version
   setDaemonVersion: (version: string) => void;
@@ -1077,6 +1081,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           requestId: data.request_id,
           callId: data.call_id,
           questions: data.questions,
+          subagent: data.subagent,
         },
       ],
     })),
@@ -1126,6 +1131,30 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }, 5000);
       }
       return { jobs };
+    }),
+
+  onSessionActivitySnapshot: (data) =>
+    set((state) => {
+      if (data.session_id !== state.sessionId) return {};
+      const subagents = new Map<string, SubagentInfo>();
+      for (const task of data.subagents) {
+        const previous = state.subagents.get(task.task_id);
+        const sameChild = previous?.childSessionId === task.child_session_id;
+        subagents.set(task.task_id, {
+          parentCallId: task.task_id,
+          childSessionId: task.child_session_id ?? "",
+          name: task.name,
+          displayName: task.display_name,
+          status: task.status as SubagentInfo["status"],
+          lastProgress: task.tool_name ?? (sameChild ? previous.lastProgress : null),
+          outcome: sameChild ? previous.outcome : null,
+          manifests: sameChild ? previous.manifests : [],
+        });
+      }
+      const jobs = new Map(data.jobs.map((job) => [job.job_id, {
+        jobId: job.job_id, command: job.command, state: job.state,
+      }]));
+      return { subagents, jobs };
     }),
 
   setDaemonVersion: (version) => set({ daemonVersion: version }),
@@ -1254,6 +1283,7 @@ export function bridgeClientToStore(client: MewClient) {
   client.on("slash-result", (data) => store.getState().onSlashResult(data.text));
 
   client.on("subagent-start", (data) => store.getState().onSubagentStart(data));
+  client.on("session-activity-snapshot", (data) => store.getState().onSessionActivitySnapshot(data));
   client.on("subagent-status", (data) => store.getState().onSubagentStatus(data));
   client.on("subagent-end", (data) => store.getState().onSubagentEnd(data));
 

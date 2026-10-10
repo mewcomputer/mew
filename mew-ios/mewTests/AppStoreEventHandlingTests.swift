@@ -150,9 +150,21 @@ final class AppStoreEventHandlingTests: XCTestCase {
         XCTAssertEqual(mock.goalResponseCalls.first?.accepted, true)
     }
 
+    func testChildQuestionRetainsIdentityAndCloseKeepsParentRequest() {
+        let source = SubagentQuestionSource(parentCallId: "task", childSessionId: "child", name: "worker", displayName: "Curie")
+        store.handleEvent(.askUserRequested(subagent: nil, daemon: "daemon-1", sessionId: "sess-1", requestId: "parent-q", callId: "parent-ask", questions: ["parent?"]))
+        store.handleEvent(.askUserRequested(subagent: source, daemon: "daemon-1", sessionId: "sess-1", requestId: "child-q", callId: "child-ask", questions: ["child?"]))
+        XCTAssertEqual(store.pendingAskUser.last?.subagent, source)
+        store.cancelAskUser(requestId: "child-q")
+        XCTAssertEqual(mock.askUserCancelCalls.first?.requestId, "child-q")
+        XCTAssertTrue(mock.cancelCalls.isEmpty)
+        store.handleEvent(.requestResolved(daemon: "daemon-1", requestId: "child-q"))
+        XCTAssertEqual(store.pendingAskUser.map(\.requestId), ["parent-q"])
+    }
+
     func testPermissionsAndQuestionsPreserveOriginWhenSelectionChanges() {
         store.handleEvent(.permissionRequested(daemon: "daemon-2", sessionId: "sess-2", requestId: "p", toolName: "shell", input: "{}"))
-        store.handleEvent(.askUserRequested(daemon: "daemon-2", sessionId: "sess-2", requestId: "q", callId: "call", questions: ["which file?"]))
+        store.handleEvent(.askUserRequested(subagent: nil, daemon: "daemon-2", sessionId: "sess-2", requestId: "q", callId: "call", questions: ["which file?"]))
         XCTAssertEqual(store.pendingPermissions.first?.daemon, "daemon-2")
         XCTAssertEqual(store.pendingPermissions.first?.sessionId, "sess-2")
         XCTAssertEqual(store.pendingAskUser.first?.daemon, "daemon-2")
@@ -173,7 +185,7 @@ final class AppStoreEventHandlingTests: XCTestCase {
     func testReadyClearsOnlyOriginActionsWhileHistoryReloadPreservesReplay() {
         func replay(_ daemon: String) {
             store.handleEvent(.permissionRequested(daemon: daemon, sessionId: "sess-1", requestId: "p", toolName: "shell", input: "{}"))
-            store.handleEvent(.askUserRequested(daemon: daemon, sessionId: "sess-1", requestId: "q", callId: "call", questions: ["which file?"]))
+            store.handleEvent(.askUserRequested(subagent: nil, daemon: daemon, sessionId: "sess-1", requestId: "q", callId: "call", questions: ["which file?"]))
             store.handleEvent(.goalProposed(daemon: daemon, sessionId: "sess-1", requestId: "g", callId: "goal", objective: "finish"))
         }
         for daemon in ["daemon-1", "daemon-2"] { replay(daemon); replay(daemon) }

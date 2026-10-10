@@ -860,6 +860,11 @@ public protocol MobileCoreProtocol: AnyObject, Sendable {
     func cancel(id: DaemonId) 
     
     /**
+     * Close a question without cancelling the parent turn.
+     */
+    func cancelAskUser(id: DaemonId, requestId: String) 
+    
+    /**
      * Connect to a daemon. Connection progress is reported via events.
      */
     func connect(id: DaemonId) 
@@ -1144,6 +1149,19 @@ open func cancel(id: DaemonId)  {try! rustCall() {
     uniffi_mew_mobile_core_fn_method_mobilecore_cancel(
             self.uniffiCloneHandle(),
         FfiConverterTypeDaemonId_lower(id),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Close a question without cancelling the parent turn.
+     */
+open func cancelAskUser(id: DaemonId, requestId: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_mew_mobile_core_fn_method_mobilecore_cancel_ask_user(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeDaemonId_lower(id),
+        FfiConverterString.lower(requestId),uniffiCallStatus
     )
 }
 }
@@ -2485,6 +2503,7 @@ public func FfiConverterTypeModelSummary_lower(_ value: ModelSummary) -> RustBuf
  * A pending ask-user request.
  */
 public struct PendingAskUser: Equatable, Hashable {
+    public var subagent: SubagentQuestionSource?
     public var daemon: String
     public var requestId: String
     public var sessionId: String
@@ -2493,7 +2512,8 @@ public struct PendingAskUser: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(daemon: String, requestId: String, sessionId: String, callId: String, questions: [String]) {
+    public init(subagent: SubagentQuestionSource?, daemon: String, requestId: String, sessionId: String, callId: String, questions: [String]) {
+        self.subagent = subagent
         self.daemon = daemon
         self.requestId = requestId
         self.sessionId = sessionId
@@ -2517,6 +2537,7 @@ public struct FfiConverterTypePendingAskUser: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PendingAskUser {
         return
             try PendingAskUser(
+                subagent: FfiConverterOptionTypeSubagentQuestionSource.read(from: &buf), 
                 daemon: FfiConverterString.read(from: &buf), 
                 requestId: FfiConverterString.read(from: &buf), 
                 sessionId: FfiConverterString.read(from: &buf), 
@@ -2526,6 +2547,7 @@ public struct FfiConverterTypePendingAskUser: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: PendingAskUser, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeSubagentQuestionSource.write(value.subagent, into: &buf)
         FfiConverterString.write(value.daemon, into: &buf)
         FfiConverterString.write(value.requestId, into: &buf)
         FfiConverterString.write(value.sessionId, into: &buf)
@@ -2973,6 +2995,68 @@ public func FfiConverterTypeSessionSummary_lower(_ value: SessionSummary) -> Rus
 }
 
 
+public struct SubagentQuestionSource: Equatable, Hashable {
+    public var parentCallId: String
+    public var childSessionId: String
+    public var name: String
+    public var displayName: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(parentCallId: String, childSessionId: String, name: String, displayName: String?) {
+        self.parentCallId = parentCallId
+        self.childSessionId = childSessionId
+        self.name = name
+        self.displayName = displayName
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension SubagentQuestionSource: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSubagentQuestionSource: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SubagentQuestionSource {
+        return
+            try SubagentQuestionSource(
+                parentCallId: FfiConverterString.read(from: &buf), 
+                childSessionId: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                displayName: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SubagentQuestionSource, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.parentCallId, into: &buf)
+        FfiConverterString.write(value.childSessionId, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterOptionString.write(value.displayName, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentQuestionSource_lift(_ buf: RustBuffer) throws -> SubagentQuestionSource {
+    return try FfiConverterTypeSubagentQuestionSource.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSubagentQuestionSource_lower(_ value: SubagentQuestionSource) -> RustBuffer {
+    return FfiConverterTypeSubagentQuestionSource.lower(value)
+}
+
+
 /**
  * A todo item from the agent's todo list.
  * Uses u64 for id/depends_on to match the protocol's `usize` without narrowing.
@@ -3223,7 +3307,7 @@ public enum CoreEvent: Equatable, Hashable {
     /**
      * An ask-user request from the agent.
      */
-    case askUserRequested(daemon: String, sessionId: String, requestId: String, callId: String, questions: [String]
+    case askUserRequested(subagent: SubagentQuestionSource?, daemon: String, sessionId: String, requestId: String, callId: String, questions: [String]
     )
     /**
      * A goal proposal from the agent (`propose_goal`). The UI should present
@@ -3348,7 +3432,7 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
         case 12: return .permissionRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), toolName: try FfiConverterString.read(from: &buf), input: try FfiConverterString.read(from: &buf)
         )
         
-        case 13: return .askUserRequested(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), questions: try FfiConverterSequenceString.read(from: &buf)
+        case 13: return .askUserRequested(subagent: try FfiConverterOptionTypeSubagentQuestionSource.read(from: &buf), daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), questions: try FfiConverterSequenceString.read(from: &buf)
         )
         
         case 14: return .goalProposed(daemon: try FfiConverterString.read(from: &buf), sessionId: try FfiConverterString.read(from: &buf), requestId: try FfiConverterString.read(from: &buf), callId: try FfiConverterString.read(from: &buf), objective: try FfiConverterString.read(from: &buf)
@@ -3489,8 +3573,9 @@ public struct FfiConverterTypeCoreEvent: FfiConverterRustBuffer {
             FfiConverterString.write(input, into: &buf)
             
         
-        case let .askUserRequested(daemon,sessionId,requestId,callId,questions):
+        case let .askUserRequested(subagent,daemon,sessionId,requestId,callId,questions):
             writeInt(&buf, Int32(13))
+            FfiConverterOptionTypeSubagentQuestionSource.write(subagent, into: &buf)
             FfiConverterString.write(daemon, into: &buf)
             FfiConverterString.write(sessionId, into: &buf)
             FfiConverterString.write(requestId, into: &buf)
@@ -4144,6 +4229,30 @@ fileprivate struct FfiConverterOptionTypeMobileTurnManifest: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeSubagentQuestionSource: FfiConverterRustBuffer {
+    typealias SwiftType = SubagentQuestionSource?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSubagentQuestionSource.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSubagentQuestionSource.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceUInt64: FfiConverterRustBuffer {
     typealias SwiftType = [UInt64]
 
@@ -4657,6 +4766,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_cancel() != 47197) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_mew_mobile_core_checksum_method_mobilecore_cancel_ask_user() != 21542) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_mew_mobile_core_checksum_method_mobilecore_connect() != 24074) {

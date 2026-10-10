@@ -620,9 +620,21 @@ impl MobileCore {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
             let _ = conn.send(ClientMessage::AskUserResponse {
-                cancelled: false,
                 request_id,
                 answers,
+                cancelled: false,
+            });
+        }
+    }
+
+    /// Close a question without cancelling the parent turn.
+    pub fn cancel_ask_user(&self, id: DaemonId, request_id: String) {
+        let conns = self.connections.lock().unwrap();
+        if let Some(conn) = conns.get(&id.node_id) {
+            let _ = conn.send(ClientMessage::AskUserResponse {
+                request_id,
+                answers: vec![],
+                cancelled: true,
             });
         }
     }
@@ -866,9 +878,12 @@ impl MobileCore {
                             serde_json::to_string_pretty(input).unwrap_or_default(),
                         )),
                         ActionKind::AskUser {
-                            call_id, questions, ..
+                            call_id,
+                            questions,
+                            subagent,
                         } => {
                             snap.pending_ask_user.push(state::PendingAskUser {
+                                subagent: subagent.as_ref().map(Into::into),
                                 daemon: id.node_id.clone(),
                                 request_id: action.request_id.clone(),
                                 session_id: ss.session_id.clone(),
@@ -1606,7 +1621,7 @@ fn translate_message(
             request_id,
             call_id,
             questions,
-            ..
+            subagent,
         } => {
             let ss_lock = conn_state.session_state.lock().unwrap();
             let session_id = ss_lock
@@ -1614,6 +1629,7 @@ fn translate_message(
                 .map(|s| s.session_id.clone())
                 .unwrap_or_default();
             events.push(CoreEvent::AskUserRequested {
+                subagent: subagent.as_ref().map(Into::into),
                 daemon: d,
                 session_id,
                 request_id: request_id.clone(),
@@ -2480,7 +2496,10 @@ mod tests {
         let conn = Arc::new(ConnState::new());
         let daemon = "node-abc".to_owned();
         let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
-        let (tx, _rx) = mpsc::unbounded_channel();
+        *conn.requested_session.lock().unwrap() = Some(id.into());
+        conn.client_state.lock().unwrap().connection =
+            Some(mew_client_core::ConnectionStatus::Connected);
+        let (tx, mut outbound) = mpsc::unbounded_channel();
         core.connections.lock().unwrap().insert(
             daemon.clone(),
             DaemonConnection {
@@ -2514,7 +2533,12 @@ mod tests {
         );
         translate_message(
             &ServerMessage::AskUserRequest {
-                subagent: None,
+                subagent: Some(mew_protocol::SubagentQuestionSource {
+                    parent_call_id: "task".into(),
+                    child_session_id: "child".into(),
+                    name: "worker".into(),
+                    display_name: Some("Curie".into()),
+                }),
                 request_id: "ask".into(),
                 call_id: "ask-call".into(),
                 questions: vec![mew_protocol::Question {
@@ -2539,6 +2563,24 @@ mod tests {
         assert_eq!(snapshot.pending_ask_user[0].session_id, id);
         assert_eq!(snapshot.pending_ask_user[0].questions, ["which file?"]);
         assert_eq!(snapshot.pending_ask_user[0].daemon, daemon);
+        let source = snapshot.pending_ask_user[0].subagent.as_ref().unwrap();
+        assert_eq!(source.parent_call_id, "task");
+        assert_eq!(source.child_session_id, "child");
+        assert_eq!(source.name, "worker");
+        assert_eq!(source.display_name.as_deref(), Some("Curie"));
+        core.cancel_ask_user(
+            DaemonId {
+                node_id: daemon.clone(),
+            },
+            "ask".into(),
+        );
+        let command = outbound
+            .try_recv()
+            .expect("confirmed attachment should allow closing its child question");
+        assert_eq!(command.session_id.as_deref(), Some(id));
+        assert!(
+            matches!(command.message, ClientMessage::AskUserResponse { request_id, cancelled: true, .. } if request_id == "ask")
+        );
         translate_message(
             &ServerMessage::SessionHistoryPage {
                 session_id: id.into(),

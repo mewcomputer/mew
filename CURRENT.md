@@ -1846,3 +1846,18 @@ The real daemon regression checks offscreen discovery, completed-turn order and
 project catalog timestamps against persisted metadata. Formatting and strict
 all-target CLI/TUI clippy passed. The complete current TUI pass also passed 461
 tests across 18 targets, with architecture and generated-theme checks green.
+
+### 2026-10-10: child question ownership across native clients
+
+Native desktop, mobile and browser question prompts retain the worker name and
+child identity. Closing a child question sends its request's explicit close flag;
+the parent turn and unrelated input requests remain pending. Mobile snapshots
+restore the same source data after reconnect. Browser activity snapshots replace
+stale task and job state only for the confirmed conversation.
+
+Verified the mobile replay/close regression with a real endpoint, all 125 web UI
+tests and its production build, and all 154 native desktop tests across the suite
+and the socket test's permitted rerun. Rebuilt matching iOS device, simulator and
+host libraries; regenerated bindings matched the prepared changes byte for byte.
+All 32 AppStore tests passed on iPhone 17 with iOS 26.4, including child ownership
+and preserving the parent request when closing the child question.

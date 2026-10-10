@@ -19,6 +19,7 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
     var switchPersonaCalls: [(nodeId: String, name: String)] = []
     var switchModelCalls: [(nodeId: String, provider: String, model: String)] = []
     var connectCalls: [String] = []
+    var askUserCancelCalls: [(nodeId: String, requestId: String)] = []
     var cancelCalls: [String] = []
     var attachCalls: [(nodeId: String, sessionId: String)] = []
     var listSessionsCalls: [String] = []
@@ -72,6 +73,9 @@ final class MockMobileCore: @preconcurrency MobileCoreProtocol {
 
     func respondPermission(id: DaemonId, requestId: String, decision: Decision) {
         permissionResponseCalls.append((id.nodeId, requestId, decision))
+    }
+    func cancelAskUser(id: DaemonId, requestId: String) {
+        askUserCancelCalls.append((id.nodeId, requestId))
     }
     func respondAskUser(id: DaemonId, requestId: String, answers: [String]) {
         askUserResponseCalls.append((id.nodeId, requestId, answers))

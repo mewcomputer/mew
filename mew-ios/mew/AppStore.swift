@@ -369,6 +369,14 @@ final class AppStore: ObservableObject {
         core.respondAskUser(id: DaemonId(nodeId: request.daemon), requestId: request.requestId, answers: answers)
     }
 
+    func cancelAskUser(requestId: String) {
+        guard let daemonId = selectedDaemonId, let core,
+              let request = pendingAskUser.first(where: {
+                  $0.daemon == daemonId.nodeId && $0.sessionId == selectedSessionId && $0.requestId == requestId
+              }), request.subagent != nil else { return }
+        core.cancelAskUser(id: DaemonId(nodeId: request.daemon), requestId: request.requestId)
+    }
+
     func listModels() {
         guard let daemonId = selectedDaemonId, let core else { return }
         core.listModels(id: daemonId)
@@ -566,9 +574,10 @@ final class AppStore: ObservableObject {
                 ))
             }
 
-        case .askUserRequested(let daemon, let sessionId, let requestId, let callId, let questions):
+        case .askUserRequested(let subagent, let daemon, let sessionId, let requestId, let callId, let questions):
             if !pendingAskUser.contains(where: { $0.daemon == daemon && $0.sessionId == sessionId && $0.requestId == requestId }) {
                 pendingAskUser.append(PendingAskUser(
+                    subagent: subagent,
                     daemon: daemon,
                     requestId: requestId,
                     sessionId: sessionId,

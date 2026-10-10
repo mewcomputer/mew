@@ -55,6 +55,15 @@ export function AskUserForm({
 
   return (
     <div className="rounded-lg border border-border bg-background p-3">
+      {req.subagent && (
+        <div className="mb-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+          <span>input needed from {req.subagent.display_name ?? req.subagent.name} ({req.subagent.name})</span>
+          <button type="button" onClick={() => {
+            getClient()?.cancelAskUser(req.requestId);
+            resolveAskUser(req.requestId);
+          }}>close question</button>
+        </div>
+      )}
       <div className="space-y-3">
         {req.questions.map((q, qi) => (
           <div key={qi}>

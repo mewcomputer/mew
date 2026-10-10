@@ -261,7 +261,11 @@ impl DesktopShell {
                     ),
                 ]))
                 .into_any_element(),
-            ActionKind::AskUser { questions, .. } => {
+            ActionKind::AskUser {
+                questions,
+                subagent,
+                ..
+            } => {
                 let question_views = questions
                     .iter()
                     .enumerate()
@@ -310,7 +314,33 @@ impl DesktopShell {
                     .border_color(theme_rgb(&self.theme, "accent"))
                     .bg(theme_rgb(&self.theme, "panel.background"))
                     .shadow_md()
-                    .child(div().text_sm().child("input needed"))
+                    .child(
+                        div().text_sm().child(SharedString::from(
+                            subagent
+                                .as_ref()
+                                .map(|source| {
+                                    format!(
+                                        "input needed from {} ({})",
+                                        source.display_name.as_deref().unwrap_or(&source.name),
+                                        source.name
+                                    )
+                                })
+                                .unwrap_or_else(|| "input needed".into()),
+                        )),
+                    )
+                    .when(subagent.is_some(), |element| {
+                        element.child(self.render_action_button(
+                            format!("action-{request_id}-close-question"),
+                            "close question",
+                            ClientMessage::AskUserResponse {
+                                request_id: request_id.clone(),
+                                answers: vec![],
+                                cancelled: true,
+                            },
+                            ActionButtonTone::Secondary,
+                            cx,
+                        ))
+                    })
                     .children(question_views)
                     .when_some(option_views, |element, options| element.child(options))
                     .child(

@@ -34,6 +34,18 @@ describe("pending input recovery", () => {
     expect(store().pendingGoals).toHaveLength(1);
   });
 
+  it("retains child question identity across replay and resolves only that request", () => {
+    const subagent = { parent_call_id: "task", child_session_id: "child", name: "worker", display_name: "Curie" };
+    handlers.get("ask-user-request")?.({ request_id: "parent-q", call_id: "parent-ask", questions: [] });
+    for (let replay = 0; replay < 2; replay++) {
+      handlers.get("ask-user-request")?.({ request_id: "child-q", call_id: "child-ask", questions: [], subagent });
+    }
+    expect(store().pendingAskUser).toHaveLength(2);
+    expect(store().pendingAskUser.find((request) => request.requestId === "child-q")?.subagent).toEqual(subagent);
+    handlers.get("request-resolved")?.({ request_id: "child-q" });
+    expect(store().pendingAskUser.map((request) => request.requestId)).toEqual(["parent-q"]);
+  });
+
   it("clears resolved cards and response callbacks across all input kinds", () => {
     handlers.get("permission-request")?.({ request_id: "p", tool_name: "bash", input: {} }, () => {});
     handlers.get("ask-user-request")?.({ request_id: "q", call_id: "call-q", questions: [] });
@@ -584,5 +596,30 @@ describe("assistant metadata preservation", () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]!.assistantMeta).toBeDefined();
     expect(messages[0]!.assistantMeta!.manifest).toBeDefined();
+  });
+});
+
+describe("authoritative activity recovery", () => {
+  beforeEach(() => store().reset());
+
+  it("replaces stale activity only for the confirmed session", () => {
+    store().setSessionId("active");
+    store().onSubagentStart({ parent_call_id: "stale", child_session_id: "old-child", name: "worker", display_name: null });
+    store().onJobUpdate({ jobId: "stale-job", command: "old", state: "running" });
+    const snapshot = {
+      session_id: "active",
+      subagents: [{ task_id: "task", child_session_id: "child", name: "worker", display_name: "Curie", status: "running", tool_name: "read" }],
+      jobs: [{ job_id: "job", command: "cargo test", state: "running" }],
+    };
+    store().onSessionActivitySnapshot({ ...snapshot, session_id: "other" });
+    expect([...store().subagents.keys()]).toEqual(["stale"]);
+    expect([...store().jobs.keys()]).toEqual(["stale-job"]);
+    store().onSessionActivitySnapshot(snapshot);
+    expect([...store().subagents.keys()]).toEqual(["task"]);
+    expect(store().subagents.get("task")).toMatchObject({ childSessionId: "child", displayName: "Curie", status: "running" });
+    expect([...store().jobs.values()]).toEqual([{ jobId: "job", command: "cargo test", state: "running" }]);
+    store().onSessionActivitySnapshot({ session_id: "active", subagents: [], jobs: [] });
+    expect(store().subagents.size).toBe(0);
+    expect(store().jobs.size).toBe(0);
   });
 });

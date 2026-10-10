@@ -174,9 +174,29 @@ pub struct PendingPermission {
     pub input: String,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct SubagentQuestionSource {
+    pub parent_call_id: String,
+    pub child_session_id: String,
+    pub name: String,
+    pub display_name: Option<String>,
+}
+
+impl From<&mew_protocol::SubagentQuestionSource> for SubagentQuestionSource {
+    fn from(source: &mew_protocol::SubagentQuestionSource) -> Self {
+        Self {
+            parent_call_id: source.parent_call_id.clone(),
+            child_session_id: source.child_session_id.clone(),
+            name: source.name.clone(),
+            display_name: source.display_name.clone(),
+        }
+    }
+}
+
 /// A pending ask-user request.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PendingAskUser {
+    pub subagent: Option<SubagentQuestionSource>,
     pub daemon: String,
     pub request_id: String,
     pub session_id: String,

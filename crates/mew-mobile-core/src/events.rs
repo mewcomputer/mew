@@ -102,6 +102,7 @@ pub enum CoreEvent {
 
     /// An ask-user request from the agent.
     AskUserRequested {
+        subagent: Option<crate::state::SubagentQuestionSource>,
         daemon: String,
         session_id: String,
         request_id: String,

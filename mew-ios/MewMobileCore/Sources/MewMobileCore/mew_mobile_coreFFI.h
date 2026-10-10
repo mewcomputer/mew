@@ -299,6 +299,11 @@ void uniffi_mew_mobile_core_fn_method_mobilecore_attach(uint64_t ptr, RustBuffer
 void uniffi_mew_mobile_core_fn_method_mobilecore_cancel(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_CANCEL_ASK_USER
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_CANCEL_ASK_USER
+void uniffi_mew_mobile_core_fn_method_mobilecore_cancel_ask_user(uint64_t ptr, RustBuffer id, RustBuffer request_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_CONNECT
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_FN_METHOD_MOBILECORE_CONNECT
 void uniffi_mew_mobile_core_fn_method_mobilecore_connect(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
@@ -752,6 +757,12 @@ uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_attach(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_CANCEL
 #define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_CANCEL
 uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_cancel(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_CANCEL_ASK_USER
+#define UNIFFI_FFIDEF_UNIFFI_MEW_MOBILE_CORE_CHECKSUM_METHOD_MOBILECORE_CANCEL_ASK_USER
+uint16_t uniffi_mew_mobile_core_checksum_method_mobilecore_cancel_ask_user(void
     
 );
 #endif
