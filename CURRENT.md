@@ -1753,3 +1753,15 @@ Three independent review lenses found no required issues. The screenshot
 gallery includes expanded commands, overflow at the end, file references,
 short results, landing suggestions and a short terminal. Desktop captures
 remain 1280 by 800 pixels. Live interaction remains pending.
+
+### 2026-10-10: shared question data and option descriptions
+
+Question and option data live in the shared message crate so subagent runners
+can carry them without depending on the agent runtime. Existing agent imports
+continue to work. The actual question tool retains option descriptions,
+including Unicode and multiple lines, while absent descriptions remain empty.
+Selected and freeform answers keep their existing result format.
+
+Verified the new real-tool regression failing on the prior description loss and
+passing after the fix. An isolated staged snapshot passed all 193 agent tests,
+strict agent/message clippy, and CLI, daemon, mobile and shared-core compilation.

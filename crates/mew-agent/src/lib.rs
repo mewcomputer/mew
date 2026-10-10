@@ -3,20 +3,13 @@ use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 
 use mew_hooks::{PermissionDecision, ToolCall as HookToolCall};
+pub use mew_message::{AskUserQuestion, QuestionOption, SubagentQuestionSource};
 use mew_message::{Part, PartId, TurnManifest};
 use mew_provider::ProviderEvent;
 use mew_session::Writer as SessionWriterInner;
 
 /// Alias for the interior-mutability wrapper required by the async agent loop.
 pub type SessionWriter = Arc<Mutex<SessionWriterInner>>;
-
-/// One option within an `ask_user_question` question. The TUI renders each
-/// option as a numbered row, with `description` shown beneath as a hint.
-#[derive(Debug, Clone)]
-pub struct QuestionOption {
-    pub label: String,
-    pub description: String,
-}
 
 /// The user's decision on a `propose_goal` request. Sent back through the
 /// `oneshot` channel carried by `AgentEvent::GoalProposed`. On `Accepted`
@@ -48,15 +41,6 @@ pub struct GoalState {
     pub continuation_count: u32,
     /// Wall-clock timestamp (millis) when the goal was created.
     pub started_at: i64,
-}
-
-/// One question in an `ask_user_question` request. Carried from the tool
-/// through `AgentEvent::AskUser` to the TUI, which renders the options as
-/// a numbered list and returns the selected answer (label or freeform text).
-#[derive(Debug, Clone)]
-pub struct AskUserQuestion {
-    pub prompt: String,
-    pub options: Vec<QuestionOption>,
 }
 
 /// Events emitted by the agent core to the TUI.

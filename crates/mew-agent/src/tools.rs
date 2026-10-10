@@ -1245,27 +1245,32 @@ impl Agent {
         };
 
         // Parse questions. Each must have a prompt and a 2-4 element options
-        // array. The prompts and option labels are kept here for result
+        // array. The prompts and options are kept here for result
         // formatting; the full AskUserQuestion structs move into the event.
-        let parsed: Vec<(String, Vec<String>)> = input
+        let parsed: Vec<(&str, Vec<(&str, &str)>)> = input
             .get("questions")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
                     .filter_map(|q| {
-                        let prompt = q.get("prompt").and_then(|v| v.as_str())?.to_string();
-                        let labels: Vec<String> = q
+                        let prompt = q.get("prompt").and_then(|v| v.as_str())?;
+                        let options: Vec<(&str, &str)> = q
                             .get("options")
                             .and_then(|v| v.as_array())
                             .map(|opts| {
                                 opts.iter()
                                     .filter_map(|o| {
-                                        o.get("label").and_then(|v| v.as_str()).map(String::from)
+                                        Some((
+                                            o.get("label")?.as_str()?,
+                                            o.get("description")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or(""),
+                                        ))
                                     })
                                     .collect()
                             })
                             .unwrap_or_default();
-                        Some((prompt, labels))
+                        Some((prompt, options))
                     })
                     .collect()
             })
@@ -1276,13 +1281,13 @@ impl Agent {
         } else {
             let questions: Vec<crate::AskUserQuestion> = parsed
                 .iter()
-                .map(|(prompt, labels)| crate::AskUserQuestion {
-                    prompt: prompt.clone(),
-                    options: labels
+                .map(|(prompt, options)| crate::AskUserQuestion {
+                    prompt: (*prompt).to_owned(),
+                    options: options
                         .iter()
-                        .map(|l| crate::QuestionOption {
-                            label: l.clone(),
-                            description: String::new(),
+                        .map(|(label, description)| crate::QuestionOption {
+                            label: (*label).to_owned(),
+                            description: (*description).to_owned(),
                         })
                         .collect(),
                 })
@@ -1298,10 +1303,10 @@ impl Agent {
             match rx.await {
                 Ok(answers) => {
                     let mut text = String::new();
-                    for (i, (prompt, labels)) in parsed.iter().enumerate() {
+                    for (i, (prompt, options)) in parsed.iter().enumerate() {
                         let answer = answers.get(i).map(|s| s.as_str()).unwrap_or("(no answer)");
                         let picked = match answer {
-                            a if labels.iter().any(|l| l == a) => "selected",
+                            a if options.iter().any(|(label, _)| *label == a) => "selected",
                             "(no answer)" => "no answer",
                             _ => "freeform",
                         };

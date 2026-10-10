@@ -5,6 +5,32 @@ pub type MessageId = Ulid;
 pub type SessionId = Ulid;
 pub type PartId = Ulid;
 
+/// One option within an `ask_user_question` question. The TUI renders each
+/// option as a numbered row, with `description` shown beneath as a hint.
+#[derive(Debug, Clone)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
+/// One question in an `ask_user_question` request. Carried from the tool
+/// through `AgentEvent::AskUser` to the TUI, which renders the options as
+/// a numbered list and returns the selected answer (label or freeform text).
+#[derive(Debug, Clone)]
+pub struct AskUserQuestion {
+    pub prompt: String,
+    pub options: Vec<QuestionOption>,
+}
+
+/// Identity of the child asking for input through its parent conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubagentQuestionSource {
+    pub parent_call_id: String,
+    pub child_session_id: String,
+    pub name: String,
+    pub display_name: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {

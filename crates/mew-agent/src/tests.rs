@@ -4491,3 +4491,63 @@ async fn test_collected_task_removed_from_registry_file() {
     assert_eq!(records.len(), 1);
     assert_ne!(records[0].task_id, id_a);
 }
+
+#[tokio::test]
+async fn ask_user_question_preserves_option_descriptions_and_answer_types() {
+    let input = serde_json::json!({"questions": [
+        {"prompt": "which file?", "options": [
+            {"label": "source", "description": "implementation\n日本語"},
+            {"label": "test", "description": "regression file"}
+        ]},
+        {"prompt": "anything else?", "options": [{"label": "nothing"}]}
+    ]});
+    let provider = Arc::new(CapturingProvider::new(vec![
+        FakeProvider::tool_call("ask_user_question", "question", input.clone()),
+        FakeProvider::text_response("done"),
+    ]));
+    let agent = Agent::new(provider, Arc::new(NopDispatcher), None, vec![], None);
+    let mut events = agent.run("ask before editing".into());
+    let mut asked = false;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while let Some(event) = events.recv().await {
+            if let AgentEvent::AskUser {
+                call_id,
+                questions,
+                tx,
+            } = event
+            {
+                assert_eq!(call_id, "question");
+                assert_eq!(questions[0].prompt, "which file?");
+                assert_eq!(questions[0].options[0].label, "source");
+                assert_eq!(
+                    questions[0].options[0].description,
+                    "implementation\n日本語"
+                );
+                assert_eq!(questions[0].options[1].description, "regression file");
+                assert_eq!(questions[1].options[0].description, "");
+                tx.send(vec!["test".into(), "free form 日本語".into()])
+                    .unwrap();
+                asked = true;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(asked);
+    let messages = agent.messages.lock().await;
+    let call = messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .find_map(|part| match part {
+            Part::ToolCall(call) if call.call_id == "question" => Some(call),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(call.state.input(), &input);
+    let output = call.state.output().unwrap();
+    assert!(output.contains("A (selected): test"), "{output}");
+    assert!(
+        output.contains("A (freeform): free form 日本語"),
+        "{output}"
+    );
+}
