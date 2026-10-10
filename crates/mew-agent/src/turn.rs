@@ -716,15 +716,7 @@ impl Agent {
                     // The assistant message was already appended at MessageEnd.
                     // Sync the updated state (aborted meta + terminal tool states)
                     // back into self.messages, then append the result message.
-                    {
-                        let mut messages = self.messages.lock().await;
-                        for m in messages.iter_mut() {
-                            if m.id == msg.id {
-                                *m = msg.clone();
-                                break;
-                            }
-                        }
-                    }
+                    self.update_assistant_message(msg).await;
                     let result_msg = Message {
                         id: Ulid::new(),
                         session_id: self.session_id,
@@ -746,13 +738,7 @@ impl Agent {
             // back into self.messages so the next request has the correct state.
             if let Some(ref msg) = assistant_msg {
                 tracing::debug!(msg_id = %msg.id, "syncing assistant message to store");
-                let mut messages = self.messages.lock().await;
-                for m in messages.iter_mut() {
-                    if m.id == msg.id {
-                        *m = msg.clone();
-                        break;
-                    }
-                }
+                self.update_assistant_message(msg).await;
             }
 
             let result_msg = Message {
@@ -773,6 +759,32 @@ impl Agent {
             tokio::spawn(async move {
                 dispatcher.on_turn_end(&messages).await;
             });
+            if assistant_msg.as_ref().is_some_and(|message| {
+                message.parts.iter().any(|part| {
+                    matches!(part, Part::ToolCall(call) if call.tool_name == "exit_tool"
+                        && matches!(call.state, ToolState::Completed(_)))
+                })
+            }) {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Record terminal tool state as a revision of the assistant message.
+    async fn update_assistant_message(&self, message: &Message) {
+        {
+            let mut messages = self.messages.lock().await;
+            if let Some(existing) = messages
+                .iter_mut()
+                .find(|existing| existing.id == message.id)
+            {
+                *existing = message.clone();
+            }
+        }
+        if let Some(session) = &self.session {
+            if let Err(error) = session.lock().await.write_message(message).await {
+                tracing::error!(%error, "session write failed");
+            }
         }
     }
 

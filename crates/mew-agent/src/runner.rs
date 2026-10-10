@@ -413,8 +413,8 @@ impl SubagentRunner for SimpleRunner {
             mew_message::PartId,
             mew_message::ToolCallPart,
         > = std::collections::HashMap::new();
-        // If the subagent called `exit_tool`, capture its output here and
-        // break the loop after the tool completes.
+        // Capture the explicit exit result while draining the rest of the
+        // turn so terminal state is persisted before reporting Finished.
         let mut exit_answer: Option<String> = None;
         // Output-schema enforcement: on the first invalid final output the
         // child gets exactly one corrective turn; a second failure returns
@@ -538,7 +538,6 @@ impl SubagentRunner for SimpleRunner {
                         if tc.tool_name == "exit_tool" {
                             if let Some(answer) = extract_completed_output(&tc.state) {
                                 exit_answer = Some(answer);
-                                break;
                             }
                         }
                     }

@@ -1685,3 +1685,19 @@ build, architecture and generated-theme checks pass. Independent reviews covered
 backend publication and editor interruption/session ownership. The 16-view local
 screenshot gallery is notes/capture/tui-20261010/index.html at 1280 by 800 pixels.
 Shared transport migration and live native cross-client QA remain pending.
+
+### 2026-10-10: subagent event delivery and durable tool traces
+
+The current subagent_start event pump forwards child tool events, progress and
+permission requests instead of dropping them. Permission replies retain their
+original channels. Child text is scoped to the subagent rather than an unmatched
+parent tool ID. Completed, denied and aborted tool states are recorded as
+assistant revisions; session readers keep the latest revision at its original
+position so resuming does not duplicate messages.
+
+An explicit exit_tool now ends the child turn after recording its final tool
+state and result. The runner drains that turn before reporting completion,
+avoiding an extra provider request and a final-trace race. Orphan recovery uses
+the recorded exit result. Verified 192 agent tests, 19 session tests and strict
+all-target clippy. Real tools and temporary files exercised permission decisions
+and saved results. Parent/child mailboxes and worker resume remain absent.

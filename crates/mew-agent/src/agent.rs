@@ -1432,12 +1432,53 @@ impl Agent {
                             manifests,
                         },
                         mew_subagents::SubagentEvent::TextDelta { text } => {
-                            AgentEvent::ToolProgress {
-                                call_id: pump_cid.clone(),
-                                chunk: text,
+                            AgentEvent::SubagentProgress {
+                                parent_call_id: pump_cid.clone(),
+                                child_event: Box::new(AgentEvent::Provider(
+                                    mew_provider::ProviderEvent::PartDelta {
+                                        part_id: ulid::Ulid::new(),
+                                        field: "text",
+                                        delta: text,
+                                    },
+                                )),
                             }
                         }
-                        _ => continue,
+                        mew_subagents::SubagentEvent::ToolStart { call_id, .. } => {
+                            AgentEvent::SubagentProgress {
+                                parent_call_id: pump_cid.clone(),
+                                child_event: Box::new(AgentEvent::ToolStart { call_id }),
+                            }
+                        }
+                        mew_subagents::SubagentEvent::ToolEnd { call_id, success } => {
+                            AgentEvent::SubagentProgress {
+                                parent_call_id: pump_cid.clone(),
+                                child_event: Box::new(AgentEvent::ToolEnd { call_id, success }),
+                            }
+                        }
+                        mew_subagents::SubagentEvent::Progress {
+                            tool_name, message, ..
+                        } => AgentEvent::SubagentStatus {
+                            parent_call_id: pump_cid.clone(),
+                            tool_name,
+                            message,
+                        },
+                        mew_subagents::SubagentEvent::WorkspacePermissionRequest { path, tx } => {
+                            AgentEvent::WorkspacePermissionRequest { path, tx }
+                        }
+                        mew_subagents::SubagentEvent::PermissionRequest {
+                            tool_name,
+                            call_id,
+                            input,
+                            tx,
+                        } => AgentEvent::SubagentPermissionRequest {
+                            parent_call_id: pump_cid.clone(),
+                            call: mew_hooks::ToolCall {
+                                tool_name,
+                                call_id,
+                                input,
+                            },
+                            tx,
+                        },
                     };
                     let _ = ev_tx_clone.send(agent_event).await;
                 }

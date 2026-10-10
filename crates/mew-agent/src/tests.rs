@@ -1078,13 +1078,18 @@ async fn test_cancelled_tool_turn_appends_tool_results() {
     // append a tool result message for every tool call so the next request to
     // the provider is not rejected for missing tool responses.
     let script = FakeProvider::tool_call("echo", "c1", serde_json::json!({"input": "hi"}));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let session_id = mew_message::SessionId::new();
+    let writer = mew_session::Writer::open_at(tmp.path(), &session_id.to_string())
+        .await
+        .unwrap();
     let provider = std::sync::Arc::new(StatefulFakeProvider::new(vec![script]));
     let agent = Agent::new(
         provider,
         std::sync::Arc::new(NopDispatcher),
-        None,
+        Some(writer),
         vec![std::sync::Arc::new(EchoTool::mutating())],
-        None,
+        Some(session_id),
     );
 
     let cancel = tokio_util::sync::CancellationToken::new();
@@ -1114,6 +1119,15 @@ async fn test_cancelled_tool_turn_appends_tool_results() {
     assert!(
         matches!(&msgs[2].parts[0], Part::ToolResult(ref tr) if tr.call_id == "c1"),
         "tool result should reference the call_id"
+    );
+    let expected = msgs.clone();
+    drop(msgs);
+    let persisted = mew_session::Reader::load_from(tmp.path(), &session_id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        persisted, expected,
+        "aborted tool states must survive reload"
     );
 }
 
@@ -3660,6 +3674,375 @@ async fn test_no_fallback_models_means_fatal_error() {
 // ------------------------------------------------------------------
 // Subagent batch-wait tests
 // ------------------------------------------------------------------
+
+fn subagent_with_real_runner(
+    root: &std::path::Path,
+    scripts: Vec<Vec<ProviderEvent>>,
+    tools: Vec<Arc<dyn Tool>>,
+    cwd: std::path::PathBuf,
+    workspace_roots: Vec<std::path::PathBuf>,
+) -> (Agent, Arc<CapturingProvider>) {
+    let provider = Arc::new(CapturingProvider::new(scripts));
+    let mut agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    agent.subagent_defs = vec![mew_subagents::SubagentDef {
+        name: "worker".into(),
+        description: "worker".into(),
+        model: None,
+        tools: None,
+        max_turns: Some(10),
+        max_duration_secs: Some(60),
+        body: String::new(),
+        path: std::path::PathBuf::new(),
+        template: false,
+        can_spawn: false,
+        output_schema: None,
+    }];
+    agent.subagent_runner = Some(Arc::new(
+        crate::runner::SimpleRunner::new(provider.clone(), tools, Arc::new(NopDispatcher))
+            .with_session_root(root.to_path_buf())
+            .with_workspace(cwd, workspace_roots, None),
+    ));
+    (agent, provider)
+}
+
+#[tokio::test]
+async fn subagent_start_preserves_child_progress_text_and_tool_events() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (agent, _provider) = subagent_with_real_runner(
+        tmp.path(),
+        vec![
+            FakeProvider::tool_call(
+                "progress_update",
+                "child-progress",
+                serde_json::json!({"message":"checking session state"}),
+            ),
+            FakeProvider::text_response("child final answer"),
+        ],
+        vec![Arc::new(mew_tools::tools::progress_update::ProgressUpdate)],
+        tmp.path().to_path_buf(),
+        vec![],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let task = agent
+        .start_subagent("worker", "inspect", None, None, &tx)
+        .await
+        .unwrap();
+    let mut status = None;
+    let mut tool_started = false;
+    let mut tool_completed = false;
+    let mut text = String::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::SubagentStatus {
+                    parent_call_id,
+                    tool_name,
+                    message,
+                } => {
+                    assert_eq!(parent_call_id, task);
+                    assert_eq!(tool_name, "progress_update");
+                    status = Some(message);
+                }
+                AgentEvent::SubagentProgress {
+                    parent_call_id,
+                    child_event,
+                } => {
+                    assert_eq!(parent_call_id, task);
+                    match *child_event {
+                        AgentEvent::ToolStart { call_id } => {
+                            assert_eq!(call_id, "child-progress");
+                            tool_started = true;
+                        }
+                        AgentEvent::ToolEnd { call_id, success } => {
+                            assert_eq!(call_id, "child-progress");
+                            tool_completed = success;
+                        }
+                        AgentEvent::Provider(ProviderEvent::PartDelta {
+                            field: "text",
+                            delta,
+                            ..
+                        }) => text.push_str(&delta),
+                        _ => {}
+                    }
+                }
+                AgentEvent::SubagentEnd { parent_call_id, .. } => {
+                    assert_eq!(parent_call_id, task);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("child did not finish");
+    assert_eq!(status.as_deref(), Some("checking session state"));
+    assert!(tool_started && tool_completed);
+    assert_eq!(text, "child final answer");
+    assert!(
+        matches!(agent.wait_subagent(&task).await.unwrap().0, mew_subagents::SubagentResult::Complete { text, .. } if text == "child final answer")
+    );
+}
+
+#[tokio::test]
+async fn subagent_start_permission_reply_controls_real_child_file_write() {
+    for decision in [
+        mew_hooks::PermissionDecision::AllowOnce,
+        mew_hooks::PermissionDecision::Deny,
+    ] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let input = serde_json::json!({"path":"child.txt","content":"approved child output"});
+        let (agent, _provider) = subagent_with_real_runner(
+            tmp.path(),
+            vec![
+                FakeProvider::tool_call("write", "child-write", input.clone()),
+                FakeProvider::text_response("finished"),
+            ],
+            vec![Arc::new(mew_tools::tools::write::Write)],
+            tmp.path().to_path_buf(),
+            vec![tmp.path().to_path_buf()],
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let task = agent
+            .start_subagent("worker", "write the file", None, None, &tx)
+            .await
+            .unwrap();
+        let mut prompted = false;
+        let mut success = None;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    AgentEvent::SubagentPermissionRequest {
+                        parent_call_id,
+                        call,
+                        tx,
+                    } => {
+                        assert_eq!(parent_call_id, task);
+                        assert_eq!(call.call_id, "child-write");
+                        assert_eq!(call.tool_name, "write");
+                        assert_eq!(call.input, input);
+                        prompted = true;
+                        tx.send(decision).unwrap();
+                    }
+                    AgentEvent::SubagentProgress { child_event, .. } => {
+                        if let AgentEvent::ToolEnd {
+                            call_id,
+                            success: completed,
+                        } = *child_event
+                        {
+                            assert_eq!(call_id, "child-write");
+                            success = Some(completed);
+                        }
+                    }
+                    AgentEvent::SubagentEnd { .. } => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("permission reply did not reach the child");
+        assert!(prompted, "child permission was silently dropped");
+        let allowed = decision == mew_hooks::PermissionDecision::AllowOnce;
+        assert_eq!(success, Some(allowed));
+        if allowed {
+            assert_eq!(
+                tokio::fs::read_to_string(tmp.path().join("child.txt"))
+                    .await
+                    .unwrap(),
+                "approved child output"
+            );
+        } else {
+            assert!(!tmp.path().join("child.txt").exists());
+        }
+        agent.wait_subagent(&task).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn subagent_start_workspace_reply_reaches_real_child_reader() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let workspace = tmp.path().join("workspace");
+    let outside = tmp.path().join("outside");
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::create_dir_all(&outside).await.unwrap();
+    let path = outside.join("child.txt");
+    tokio::fs::write(&path, "outside workspace sentinel")
+        .await
+        .unwrap();
+    let (agent, provider) = subagent_with_real_runner(
+        tmp.path(),
+        vec![
+            FakeProvider::tool_call("read", "child-read", serde_json::json!({"path":path})),
+            FakeProvider::text_response("finished"),
+        ],
+        vec![Arc::new(mew_tools::tools::read::Read)],
+        workspace.clone(),
+        vec![workspace],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let task = agent
+        .start_subagent("worker", "read the file", None, None, &tx)
+        .await
+        .unwrap();
+    let mut prompted = false;
+    let mut child_id = None;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::WorkspacePermissionRequest { path, tx } => {
+                    assert_eq!(path, outside);
+                    prompted = true;
+                    tx.send(mew_hooks::PermissionDecision::AllowOnce).unwrap();
+                }
+                AgentEvent::SubagentEnd {
+                    child_session_id, ..
+                } => {
+                    child_id = Some(child_session_id);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("workspace reply did not reach the child");
+    assert!(prompted, "child workspace permission was silently dropped");
+    agent.wait_subagent(&task).await.unwrap();
+    let messages = mew_session::Reader::load_subagent_from(
+        tmp.path(),
+        &agent.session_id.to_string(),
+        &child_id.unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .any(|part| matches!(part, Part::ToolCall(call) if call.call_id == "child-read")));
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part, Part::ToolCall(call) if matches!(&call.state, ToolState::Completed(completed) if completed.output.contains("outside workspace sentinel")))));
+    assert_eq!(
+        messages.len(),
+        4,
+        "child revisions must not duplicate messages"
+    );
+    let requests = provider.captured.lock().unwrap();
+    assert!(requests.last().unwrap().messages.iter().flat_map(|message| &message.parts).any(|part| matches!(part, Part::ToolCall(call) if matches!(&call.state, ToolState::Completed(completed) if completed.output.contains("outside workspace sentinel")))));
+}
+
+#[tokio::test]
+async fn terminal_tool_states_survive_top_level_reload_without_duplicate_messages() {
+    for decision in [
+        mew_hooks::PermissionDecision::AllowOnce,
+        mew_hooks::PermissionDecision::Deny,
+    ] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let session_id = mew_message::SessionId::new();
+        let writer = mew_session::Writer::open_at(tmp.path(), &session_id.to_string())
+            .await
+            .unwrap();
+        let input = serde_json::json!({"path":"output.txt","content":"persisted output"});
+        let provider = Arc::new(StatefulFakeProvider::new(vec![
+            FakeProvider::tool_call("write", "persisted-write", input),
+            FakeProvider::text_response("finished"),
+        ]));
+        let mut agent = Agent::new(
+            provider,
+            Arc::new(NopDispatcher),
+            Some(writer),
+            vec![Arc::new(mew_tools::tools::write::Write)],
+            Some(session_id),
+        );
+        agent.cwd = tmp.path().to_path_buf();
+        agent.workspace_roots = vec![tmp.path().to_path_buf()];
+        let mut rx = agent.run("write output".into());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                if let AgentEvent::PermissionRequest { tx, .. } = event {
+                    tx.send(decision).unwrap();
+                }
+            }
+        })
+        .await
+        .expect("tool did not finish");
+        let expected = agent.messages.lock().await.clone();
+        let history = mew_session::Reader::load_from(tmp.path(), &session_id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            history, expected,
+            "completed/error tool input and output must survive reload"
+        );
+        assert_eq!(history.len(), 4);
+        let resumed = Agent::new(
+            Arc::new(FakeProvider::new(vec![])),
+            Arc::new(NopDispatcher),
+            None,
+            vec![],
+            Some(session_id),
+        );
+        resumed.load_messages(history).await;
+        assert_eq!(*resumed.messages.lock().await, expected);
+    }
+}
+
+#[tokio::test]
+async fn subagent_exit_tool_records_its_final_output_before_reporting_completion() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (agent, provider) = subagent_with_real_runner(
+        tmp.path(),
+        vec![FakeProvider::tool_call(
+            "exit_tool",
+            "child-exit",
+            serde_json::json!({"final_answer":"complete deliverable"}),
+        )],
+        vec![Arc::new(mew_tools::tools::exit_tool::ExitTool)],
+        tmp.path().to_path_buf(),
+        vec![],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let task = agent
+        .start_subagent("worker", "finish the task", None, None, &tx)
+        .await
+        .unwrap();
+    let mut tool_completed = false;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::SubagentProgress { child_event, .. } => {
+                    if let AgentEvent::ToolEnd { call_id, success } = *child_event {
+                        assert_eq!(call_id, "child-exit");
+                        tool_completed = success;
+                    }
+                }
+                AgentEvent::SubagentEnd { child_session_id, .. } => {
+                    let history = mew_session::Reader::load_subagent_from(tmp.path(), &agent.session_id.to_string(), &child_session_id).await.unwrap();
+                    assert!(history.iter().flat_map(|message| &message.parts).any(|part| matches!(part, Part::ToolCall(call) if matches!(&call.state, ToolState::Completed(completed) if completed.output == "complete deliverable"))), "terminal child trace must contain the exit output");
+                    assert_eq!(history.len(), 3, "completed exit must include its tool result");
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }).await.expect("exit did not finish the child");
+    assert!(
+        tool_completed,
+        "terminal child tool event must precede SubagentEnd"
+    );
+    let result = agent.wait_subagent(&task).await.unwrap().0;
+    assert!(
+        matches!(result, mew_subagents::SubagentResult::Complete { text, .. } if text == "complete deliverable")
+    );
+    assert_eq!(
+        provider.captured.lock().unwrap().len(),
+        1,
+        "exit must prevent another provider request"
+    );
+}
 
 /// A stub runner that fails on prompts containing "fail" and completes
 /// otherwise. Reports Started so the task registry gets a child session id.
