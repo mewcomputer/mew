@@ -217,15 +217,19 @@ fn handle_paste_confirm_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
     use crossterm::event::KeyCode;
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            app.mode = crate::app::Mode::Normal;
             if let Some(pending) = app.pending_paste.take() {
                 insert_paste(app, &pending);
             }
-            app.mode = crate::app::Mode::Normal;
         }
         _ => {
             // Any other key cancels the paste.
             app.pending_paste = None;
-            app.mode = crate::app::Mode::Normal;
+            app.mode = if app.input.starts_with('/') {
+                crate::app::Mode::SlashCommand
+            } else {
+                crate::app::Mode::Normal
+            };
         }
     }
     None
@@ -293,6 +297,26 @@ fn handle_persona_confirm_key(app: &mut crate::app::App, key: KeyEvent) -> Optio
 }
 
 fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action> {
+    let text = if text.contains('\r') {
+        let mut normalized = String::with_capacity(text.len());
+        let mut chars = text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\r' {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                normalized.push('\n');
+            } else {
+                normalized.push(ch);
+            }
+        }
+        normalized
+    } else {
+        text
+    };
+    if text.is_empty() {
+        return None;
+    }
     if app.mode == crate::app::Mode::GoalCompose {
         if let Some(goal) = app.goal_compose.as_mut() {
             goal.undo.snapshot(&goal.title, goal.cursor);
@@ -301,11 +325,69 @@ fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action>
         }
         return None;
     }
-    if matches!(
+    if app.mode == crate::app::Mode::UserQuestion {
+        if let Some(question) = app.user_question.as_mut() {
+            let freeform = question
+                .questions
+                .get(question.page)
+                .map(|q| q.options.len())
+                .unwrap_or(0);
+            if !question.review && question.selected == freeform {
+                question
+                    .freeform_undo
+                    .snapshot(&question.freeform_text, question.freeform_cursor);
+                question
+                    .freeform_text
+                    .insert_str(question.freeform_cursor, &text);
+                question.freeform_cursor += text.len();
+            }
+        }
+        return None;
+    }
+    if app.mode == crate::app::Mode::HistorySearch {
+        let query = if text.contains('\n') {
+            text.replace('\n', " ")
+        } else {
+            text
+        };
+        app.history_search_undo
+            .snapshot(&app.history_search_query, app.history_search_cursor);
+        app.history_search_query
+            .insert_str(app.history_search_cursor, &query);
+        app.history_search_cursor += query.len();
+        app.history_search_index = if app.history_search_matches().is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        return None;
+    }
+    if app.mode == crate::app::Mode::CommandPalette
+        && !app
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.is_at_picker())
+    {
+        if let Some(picker) = app.picker.as_mut() {
+            let query = if text.contains('\n') {
+                text.replace('\n', " ")
+            } else {
+                text
+            };
+            picker.filter_undo.snapshot(&picker.filter, picker.cursor);
+            picker.filter.insert_str(picker.cursor, &query);
+            picker.cursor += query.len();
+            picker.selected = 0;
+            picker.scroll = 0;
+            picker.details_scroll = 0;
+        }
+        return None;
+    }
+    if !matches!(
         app.mode,
-        crate::app::Mode::PermissionPrompt
-            | crate::app::Mode::PersonaSwitchConfirm
-            | crate::app::Mode::GoalProposal
+        crate::app::Mode::Normal
+            | crate::app::Mode::SlashCommand
+            | crate::app::Mode::CommandPalette
     ) {
         return None;
     }
@@ -329,7 +411,7 @@ fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action>
 
     // Large paste confirmation: if >2000 chars, ask the user first.
     const PASTE_CONFIRM_THRESHOLD: usize = 2000;
-    if content.len() > PASTE_CONFIRM_THRESHOLD {
+    if content.chars().count() > PASTE_CONFIRM_THRESHOLD {
         app.pending_paste = Some(content);
         app.mode = crate::app::Mode::PasteConfirm;
         return None;
@@ -342,12 +424,20 @@ fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action>
 /// Insert pasted content into the input buffer (single undo entry).
 fn insert_paste(app: &mut crate::app::App, content: &str) {
     app.push_undo();
-    for c in content.chars() {
-        app.input.insert(app.cursor, c);
-        app.cursor += c.len_utf8();
-    }
-    if app.input.starts_with('/') {
-        app.mode = crate::app::Mode::SlashCommand;
+    app.input.insert_str(app.cursor, content);
+    app.cursor += content.len();
+    if app
+        .picker
+        .as_ref()
+        .is_some_and(|picker| picker.is_at_picker())
+    {
+        app.sync_at_picker();
+    } else {
+        app.mode = if app.input.starts_with('/') {
+            crate::app::Mode::SlashCommand
+        } else {
+            crate::app::Mode::Normal
+        };
     }
 }
 
@@ -450,31 +540,24 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
             // Input click → position cursor and clear selection.
             if app.input_area.contains((mouse.column, mouse.row).into()) {
                 app.clear_selection();
-                let rel_x = mouse.column.saturating_sub(app.input_area.x) as usize;
-                let rel_y = mouse.row.saturating_sub(app.input_area.y) as usize;
-                let queue_height = usize::from(!app.queued_messages.is_empty());
-                let content_height = app
-                    .input_area
-                    .height
-                    .saturating_sub(queue_height as u16 + 2);
-                if rel_y <= queue_height || rel_y > queue_height + content_height as usize {
+                let layout = crate::ui::input::InputLayout::new(app, app.input_area);
+                if !layout.content.contains((mouse.column, mouse.row).into()) {
                     return None;
                 }
-                // The input has a 1-cell border on each side and a 2-cell
-                // prefix (`> `) on the first visual row of each logical
-                // line. Convert the mouse cell to a (visual_row, visual_col)
-                // pair in the wrapped content grid.
-                let content_width = app.input_area.width.saturating_sub(4);
                 let first_visual_row = app
-                    .cursor_visual_row_col(content_width)
+                    .cursor_visual_row_col(layout.wrap_width)
                     .0
-                    .saturating_sub(content_height.saturating_sub(1) as usize);
-                let visual_row = rel_y - queue_height - 1 + first_visual_row;
-                let visual_col = rel_x.saturating_sub(1).saturating_sub(2);
-                let total = app.input_visual_line_count(content_width);
+                    .saturating_sub(layout.content.height.saturating_sub(1) as usize);
+                let visual_row =
+                    mouse.row.saturating_sub(layout.content.y) as usize + first_visual_row;
+                let visual_col = mouse
+                    .column
+                    .saturating_sub(layout.content.x + layout.prefix_width)
+                    as usize;
+                let total = app.input_visual_line_count(layout.wrap_width);
                 if visual_row < total {
                     app.cursor = app
-                        .visual_to_byte_offset(visual_row, visual_col, content_width)
+                        .visual_to_byte_offset(visual_row, visual_col, layout.wrap_width)
                         .min(app.input.len());
                 }
                 return None;

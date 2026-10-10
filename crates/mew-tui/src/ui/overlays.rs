@@ -403,12 +403,24 @@ pub(super) fn draw_permission_modal(
         PermissionState::action_rows(area.width),
     );
     layout.clamp_scroll(&mut perm.scroll, &mut perm.view, rows.len());
-    draw_decision_frame(
-        f,
-        &layout,
-        " Allow tool? ",
-        tokens.resolve("text.warning"),
-        tokens,
+    f.render_widget(Clear, layout.popup);
+    f.render_widget(
+        Block::default().style(Style::default().bg(tokens.resolve("panel.overlay"))),
+        layout.popup,
+    );
+    let title = Rect::new(
+        layout.body.x,
+        layout.popup.y,
+        layout.body.width,
+        1.min(layout.popup.height),
+    );
+    f.render_widget(
+        Paragraph::new("Allow tool?").style(
+            Style::default()
+                .fg(tokens.resolve("text.warning"))
+                .add_modifier(Modifier::BOLD),
+        ),
+        title,
     );
     let lines = rows.into_iter().map(Line::from).collect();
     draw_decision_body(f, &layout, lines, perm.scroll, &perm.view, tokens);
@@ -484,12 +496,14 @@ fn draw_user_question_page(
 
     // Wrap the prompt text to the available width.
     let prompt_lines = wrap_text(&question.prompt, prompt_max);
-    let prompt_height = prompt_lines.len() as u16;
-    for (pi, pl) in prompt_lines.iter().enumerate() {
+    let prompt_height = prompt_lines
+        .len()
+        .min(area.height.saturating_sub(3) as usize) as u16;
+    for (pi, pl) in prompt_lines.iter().take(prompt_height as usize).enumerate() {
         let mut line = Line::default();
         line.spans.push(Span::styled(pl.clone(), prompt_style));
         // Append page label on the last prompt line.
-        if n > 1 && pi == prompt_lines.len() - 1 {
+        if n > 1 && pi + 1 == prompt_height as usize {
             let used = display_width(pl) as u16;
             let pad = area.width.saturating_sub(used + label_reserve);
             if pad > 0 {
@@ -508,17 +522,14 @@ fn draw_user_question_page(
     // One line per option + one line for freeform. Each row: number, label,
     // and (if present) the description underneath. Labels and descriptions
     // are wrapped instead of truncated.
-    let mut row_index = 0usize;
     let mut cursor_target: Option<(u16, u16)> = None;
 
-    // Track the y position as we lay out rows.
+    // Keep the answer and cancel hint reachable even when choices wrap.
+    let freeform_y = area.bottom().saturating_sub(2).max(area.y);
     let mut y = area.y + prompt_height + 1; // leave 1 blank line after the prompt
-    if y >= area.y + area.height {
-        return;
-    }
 
-    for (i, opt) in question.options.iter().enumerate() {
-        let selected = row_index == uq.selected;
+    'options: for (i, opt) in question.options.iter().enumerate() {
+        let selected = i == uq.selected;
         let number = format!("{}. ", i + 1);
         let number_style = if selected {
             Style::default()
@@ -545,6 +556,9 @@ fn draw_user_question_page(
         let label_max = area.width.saturating_sub(number.len() as u16) as usize;
         let label_lines = wrap_text(&opt.label, label_max);
         for (li, ll) in label_lines.iter().enumerate() {
+            if y >= freeform_y {
+                break 'options;
+            }
             let mut line = Line::default();
             // Only show the number on the first line.
             if li == 0 {
@@ -556,14 +570,6 @@ fn draw_user_question_page(
             line.spans.push(Span::styled(ll.clone(), label_style));
             f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
             y += 1;
-            if y >= area.y + area.height {
-                return;
-            }
-        }
-        row_index += 1;
-
-        if y >= area.y + area.height {
-            return;
         }
         // Wrap description if present.
         if !opt.description.is_empty() {
@@ -574,23 +580,24 @@ fn draw_user_question_page(
             let desc_max = area.width.saturating_sub(indent.len() as u16) as usize;
             let desc_lines = wrap_text(&opt.description, desc_max);
             for dl in &desc_lines {
+                if y >= freeform_y {
+                    break 'options;
+                }
                 let desc_line = Line::from(Span::styled(format!("{}{}", indent, dl), desc_style));
                 f.render_widget(
                     Paragraph::new(desc_line),
                     Rect::new(area.x, y, area.width, 1),
                 );
                 y += 1;
-                if y >= area.y + area.height {
-                    return;
-                }
             }
         }
     }
 
     // Freeform row: "n. Type your own answer" with optional input field.
+    y = freeform_y;
     if y < area.y + area.height {
         let freeform_index = question.options.len();
-        let selected = row_index == uq.selected;
+        let selected = freeform_index == uq.selected;
         let number = format!("{}. ", freeform_index + 1);
         let number_style = if selected {
             Style::default()
@@ -613,40 +620,83 @@ fn draw_user_question_page(
                 .fg(tokens.resolve("text.placeholder"))
                 .bg(tokens.resolve("panel.overlay"))
         };
-        let line = if selected {
-            let text_max = area
-                .width
-                .saturating_sub(number.len() as u16 + prefix.len() as u16 + 2)
-                as usize;
-            let shown = truncate(&uq.freeform_text, text_max);
-            Line::from(vec![
-                Span::styled(number.clone(), number_style),
-                Span::styled(prefix.to_string(), prefix_style),
-                Span::styled(": ", prefix_style),
-                Span::styled(shown.clone(), prefix_style),
-            ])
-        } else {
-            Line::from(vec![
-                Span::styled(number.clone(), number_style),
-                Span::styled(prefix.to_string(), prefix_style),
-            ])
-        };
-        f.render_widget(Paragraph::new(line), Rect::new(area.x, y, area.width, 1));
         if selected {
-            let col_offset = number.len()
-                + prefix.len()
-                + 2
-                + display_width(&uq.freeform_text[..uq.freeform_cursor]);
-            let col = area.x + col_offset.min(area.width as usize - 1) as u16;
-            cursor_target = Some((col, y));
+            let label = if area.width >= number.len() as u16 + 12 {
+                "answer: "
+            } else {
+                ""
+            };
+            let label_width = (number.len() + label.len()) as u16;
+            let field = Rect::new(
+                area.x + label_width,
+                y,
+                area.width.saturating_sub(label_width),
+                1,
+            );
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(number.clone(), number_style),
+                    Span::styled(label, prefix_style),
+                ])),
+                Rect::new(area.x, y, label_width.min(area.width), 1),
+            );
+            if field.width > 0 {
+                // Keep newlines visible in this single-row field without altering the answer.
+                let display = if uq.freeform_text.contains('\n') {
+                    std::borrow::Cow::Owned(uq.freeform_text.replace('\n', "↵"))
+                } else {
+                    std::borrow::Cow::Borrowed(uq.freeform_text.as_str())
+                };
+                let before = &uq.freeform_text[..uq.freeform_cursor];
+                let cursor_column =
+                    display_width(before) + before.bytes().filter(|byte| *byte == b'\n').count();
+                let minimum_first =
+                    cursor_column.saturating_sub(field.width.saturating_sub(1) as usize);
+                let mut first_byte = display.len();
+                let mut first_column = display_width(&display);
+                let mut column = 0;
+                for (byte, grapheme) in display.grapheme_indices(true) {
+                    if column >= minimum_first {
+                        first_byte = byte;
+                        first_column = column;
+                        break;
+                    }
+                    column += display_width(grapheme);
+                }
+                f.render_widget(
+                    Paragraph::new(Span::styled(&display[first_byte..], prefix_style)),
+                    field,
+                );
+                cursor_target = Some((
+                    field.x
+                        + cursor_column
+                            .saturating_sub(first_column)
+                            .min(field.width as usize - 1) as u16,
+                    y,
+                ));
+            }
+        } else {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(number, number_style),
+                    Span::styled(prefix, prefix_style),
+                ])),
+                Rect::new(area.x, y, area.width, 1),
+            );
         }
         y += 1;
     }
 
     // Hint line at the bottom.
     let hint_y = area.y + area.height.saturating_sub(1);
-    if hint_y > y {
-        let hint = "↑↓ select   1-9 jump   enter next   esc cancel";
+    if hint_y >= y {
+        let hint = if area.width >= 45 {
+            "↑↓ select   1-9 jump   Enter next   Esc cancel"
+        } else if area.width >= 26 {
+            "↑↓ select · Enter next · Esc"
+        } else {
+            "Enter/Esc"
+        };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 hint,
@@ -669,114 +719,106 @@ fn draw_user_question_review(
     area: Rect,
     tokens: &crate::theme::Theme,
 ) {
-    let header_style = Style::default()
+    let muted = Style::default()
+        .fg(tokens.resolve("text.muted"))
+        .bg(tokens.resolve("panel.overlay"));
+    let accent = muted
         .fg(tokens.resolve("text.accent"))
-        .bg(tokens.resolve("panel.overlay"))
         .add_modifier(Modifier::BOLD);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "review your answers",
-            header_style,
-        ))),
+        Paragraph::new(Span::styled("review your answers", accent)),
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    let mut y = area.y + 2;
-    let max_y = area.y + area.height;
-    for (i, q) in uq.questions.iter().enumerate() {
-        if y + 1 >= max_y {
-            break;
-        }
-        let prompt_style = Style::default()
-            .fg(tokens.resolve("text.muted"))
-            .bg(tokens.resolve("panel.overlay"));
-        let answer_style = Style::default()
-            .fg(tokens.resolve("foreground"))
-            .bg(tokens.resolve("panel.overlay"))
-            .add_modifier(Modifier::BOLD);
-        let prompt_max = area.width.saturating_sub(2) as usize;
-        for pl in wrap_text(&q.prompt, prompt_max) {
-            f.render_widget(
-                Paragraph::new(Line::from(Span::styled(pl, prompt_style))),
-                Rect::new(area.x, y, area.width, 1),
-            );
-            y += 1;
-            if y >= max_y {
-                return;
+    let labels = if area.width >= 22 {
+        ["[ Submit ]", "[ Cancel ]"]
+    } else {
+        ["Submit", "Cancel"]
+    };
+    let stacked = area.width < 14;
+    let action_height = (if stacked { 2 } else { 1 }).min(area.height);
+    let hint_height = u16::from(area.height > action_height + 1);
+    let actions_y = area.bottom().saturating_sub(action_height + hint_height);
+    let body_y = (area.y + 2).min(actions_y);
+    let body_height = actions_y.saturating_sub(body_y) as usize;
+    let answer_style = muted
+        .fg(tokens.resolve("foreground"))
+        .add_modifier(Modifier::BOLD);
+    let mut rows = Vec::new();
+    let mut clipped = false;
+    'questions: for (i, question) in uq.questions.iter().enumerate() {
+        for prompt in wrap_text(&question.prompt, area.width as usize) {
+            if rows.len() == body_height {
+                clipped = true;
+                break 'questions;
             }
+            rows.push(Line::from(Span::styled(prompt, muted)));
         }
-        let answer = uq.answers.get(i).map(|s| s.as_str()).unwrap_or("");
-        let answer_max = area.width.saturating_sub(4) as usize;
-        for al in wrap_text(answer, answer_max) {
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(
-                        "  ▸ ",
-                        Style::default()
-                            .fg(tokens.resolve("text.accent"))
-                            .bg(tokens.resolve("panel.overlay")),
-                    ),
-                    Span::styled(al, answer_style),
-                ])),
-                Rect::new(area.x, y, area.width, 1),
-            );
-            y += 1;
-            if y >= max_y {
-                return;
+        let answer = uq.answers.get(i).map(String::as_str).unwrap_or("");
+        for line in wrap_text(answer, area.width.saturating_sub(4) as usize) {
+            if rows.len() == body_height {
+                clipped = true;
+                break 'questions;
             }
+            rows.push(Line::from(vec![
+                Span::styled("  ▸ ", accent),
+                Span::styled(line, answer_style),
+            ]));
         }
-        y += 1; // blank line between pairs
+        if i + 1 < uq.questions.len() && rows.len() < body_height {
+            rows.push(Line::default());
+        }
     }
-
-    // Action row: [ Submit ]  [ Cancel ]
-    if y < max_y {
-        let submit_label = "[ Submit ]";
-        let cancel_label = "[ Cancel ]";
-        let gap = "  ";
-        let submit_w = submit_label.chars().count() as u16;
-        let cancel_w = cancel_label.chars().count() as u16;
-        let gap_w = gap.chars().count() as u16;
-        let total = submit_w + gap_w + cancel_w;
-        let start_x = area.x + area.width.saturating_sub(total) / 2;
-        let submit_style = if uq.review_selected == 0 {
-            Style::default()
-                .fg(tokens.resolve("foreground"))
-                .bg(tokens.resolve("panel.overlay"))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("panel.overlay"))
-        };
-        let cancel_style = if uq.review_selected == 1 {
-            Style::default()
-                .fg(tokens.resolve("foreground"))
-                .bg(tokens.resolve("panel.overlay"))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("panel.overlay"))
-        };
-        let mut line = Line::default();
-        line.spans
-            .push(Span::styled(submit_label.to_string(), submit_style));
-        line.spans.push(Span::styled(gap, submit_style));
-        line.spans
-            .push(Span::styled(cancel_label.to_string(), cancel_style));
-        f.render_widget(Paragraph::new(line), Rect::new(start_x, y, total, 1));
+    if clipped && body_height > 0 {
+        rows[body_height - 1] = Line::from(Span::styled("… preview continues", muted));
     }
-
-    let hint_y = area.y + area.height.saturating_sub(1);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "← → switch   y/n shortcut   enter confirm   esc cancel",
-            Style::default()
-                .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("panel.overlay")),
-        ))),
-        Rect::new(area.x, hint_y, area.width, 1),
+        Paragraph::new(rows),
+        Rect::new(area.x, body_y, area.width, body_height as u16),
     );
+
+    let total_width = labels
+        .iter()
+        .map(|label| display_width(label))
+        .sum::<usize>()
+        + 2;
+    let mut x = area.x + area.width.saturating_sub(total_width as u16) / 2;
+    for (index, label) in labels.iter().enumerate() {
+        let style = if index == uq.review_selected {
+            muted
+                .fg(tokens.resolve("selection.foreground"))
+                .bg(tokens.resolve("selection.background"))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            muted
+        };
+        let y = actions_y + if stacked { index as u16 } else { 0 };
+        if y < area.bottom() {
+            f.render_widget(
+                Paragraph::new(Span::styled(*label, style)),
+                Rect::new(
+                    if stacked { area.x } else { x },
+                    y,
+                    area.width.min(display_width(label) as u16),
+                    1,
+                ),
+            );
+        }
+        x += display_width(label) as u16 + 2;
+    }
+    if hint_height > 0 {
+        let hint = if area.width >= 46 {
+            "Enter confirm · Esc cancel · ← → switch · y/n"
+        } else if area.width >= 26 {
+            "Enter confirm · Esc · ← →"
+        } else {
+            "Enter/Esc"
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(hint, muted)),
+            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+        );
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -887,6 +929,8 @@ pub(super) fn draw_picker(
         "command" => ("Commands", "No commands"),
         "model" => ("Models", "No models"),
         "session" => ("Conversations", "No conversations"),
+        "subagent" => ("Subagents", "No active subagents"),
+        "job" => ("Background jobs", "No active jobs"),
         "project" => ("New conversation in project", "No projects"),
         "theme" => ("Themes", "No themes"),
         "persona" => ("Personas", "No personas"),

@@ -10,6 +10,78 @@ use super::display_width;
 
 use crate::app::{byte_at_display_offset, App, Mode};
 
+/// The editor, queue and auxiliary prompt share the available input slot.
+pub(crate) struct InputLayout {
+    pub input: Rect,
+    pub content: Rect,
+    pub queue: Rect,
+    pub prompt: Rect,
+    pub prefix_width: u16,
+    pub wrap_width: u16,
+}
+
+impl InputLayout {
+    pub fn new(app: &App, area: Rect) -> Self {
+        let prompt_height = u16::from(matches!(app.mode, Mode::HistorySearch | Mode::PasteConfirm))
+            .min(area.height);
+        let queue_height =
+            u16::from(!app.queued_messages.is_empty() && area.height > prompt_height + 1);
+        let input = Rect::new(
+            area.x,
+            area.y + queue_height,
+            area.width,
+            area.height.saturating_sub(queue_height + prompt_height),
+        );
+        let pad_x = u16::from(input.width >= 5);
+        let content_width = input.width.saturating_sub(pad_x * 2);
+        let prefix_width = 2.min(content_width.saturating_sub(1));
+        let wrap_width = content_width.saturating_sub(prefix_width).max(1);
+        let pad_y = u16::from(
+            input.height >= 3 && (input.height > 3 || app.input_visual_line_count(wrap_width) <= 1),
+        );
+        let content = Rect::new(
+            input.x + pad_x,
+            input.y + pad_y,
+            content_width,
+            input.height.saturating_sub(pad_y * 2),
+        );
+        Self {
+            input,
+            content,
+            queue: Rect::new(area.x, area.y, area.width, queue_height),
+            prompt: Rect::new(area.x, input.bottom(), area.width, prompt_height),
+            prefix_width,
+            wrap_width,
+        }
+    }
+}
+
+pub(super) fn desired_height(app: &App, width: u16) -> u16 {
+    if app.mode == Mode::UserQuestion {
+        if app
+            .user_question
+            .as_ref()
+            .is_some_and(|question| question.review)
+        {
+            return 12;
+        }
+        return app
+            .user_question
+            .as_ref()
+            .and_then(|question| question.questions.get(question.page))
+            .map(|question| {
+                (question.options.len().min(u16::MAX as usize) as u16)
+                    .saturating_mul(2)
+                    .saturating_add(6)
+            })
+            .unwrap_or(6);
+    }
+    let layout = InputLayout::new(app, Rect::new(0, 0, width, 14));
+    (app.input_visual_line_count(layout.wrap_width).clamp(1, 12) + 2) as u16
+        + u16::from(!app.queued_messages.is_empty())
+        + u16::from(matches!(app.mode, Mode::HistorySearch | Mode::PasteConfirm))
+}
+
 pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let input_bg = app.theme.resolve("muted");
     let style = match app.mode {
@@ -21,11 +93,10 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             .bg(input_bg),
     };
 
-    // If there are queued messages, render a dimmed preview strip above the
-    // input area showing the oldest queued message with a (+N) badge.
-    let queue_height = u16::from(!app.queued_messages.is_empty()).min(area.height);
+    let layout = InputLayout::new(app, area);
+    let queue_height = layout.queue.height;
     if queue_height > 0 {
-        let queue_area = Rect::new(area.x, area.y, area.width, queue_height);
+        let queue_area = layout.queue;
         let queue_bg = app.theme.resolve("muted");
         let muted_style = Style::default()
             .fg(app.theme.resolve("text.muted"))
@@ -58,29 +129,13 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         f.render_widget(Paragraph::new(line), queue_area);
     }
 
-    let content_width = area.width.saturating_sub(2);
-    // The prefix ("> " or spinner + space) takes 2 columns, so the
-    // effective text width is content_width minus the prefix.
-    let prefix_width = 2usize;
-    let wrap_w = content_width.saturating_sub(prefix_width as u16).max(1) as usize;
-    let visual_line_count = app.input_visual_line_count(wrap_w as u16).max(1);
-    let input_height = (visual_line_count as u16).min(12) + 2;
-    let prompt_height = u16::from(matches!(app.mode, Mode::HistorySearch | Mode::PasteConfirm));
-    let input_area = Rect::new(
-        area.x,
-        area.y + queue_height,
-        area.width,
-        input_height.min(area.height.saturating_sub(queue_height + prompt_height)),
-    );
-
-    let bg_block = Block::default().style(Style::default().bg(input_bg));
-    f.render_widget(bg_block, input_area);
-
-    let content_area = Rect::new(
-        input_area.x + 1,
-        input_area.y + 1,
-        input_area.width.saturating_sub(2),
-        input_area.height.saturating_sub(2),
+    let input_area = layout.input;
+    let content_area = layout.content;
+    let prefix_width = layout.prefix_width as usize;
+    let wrap_w = layout.wrap_width as usize;
+    f.render_widget(
+        Block::default().style(Style::default().bg(input_bg)),
+        input_area,
     );
 
     let prefix = if app.streaming {
@@ -90,20 +145,24 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             .nth(app.spinner_frame % frames.chars().count())
             .unwrap_or(' ');
         Span::styled(
-            format!("{} ", frame),
+            if prefix_width > 1 {
+                format!("{} ", frame)
+            } else {
+                frame.to_string()
+            },
             Style::default()
                 .fg(app.theme.resolve("text.warning"))
                 .bg(input_bg),
         )
     } else {
         Span::styled(
-            "> ",
+            &"> "[..prefix_width],
             Style::default()
                 .fg(app.theme.resolve("text.accent"))
                 .bg(input_bg),
         )
     };
-    let indent = Span::styled("  ", Style::default().bg(input_bg));
+    let indent = Span::styled(&"  "[..prefix_width], Style::default().bg(input_bg));
 
     let (cursor_visual_row, cursor_visual_col) = app.cursor_visual_row_col(wrap_w as u16);
 
@@ -134,8 +193,14 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 
     let cursor_x = content_area.x + prefix_width as u16 + cursor_visual_col.min(wrap_w) as u16;
     let cursor_y = content_area.y + cursor_visual_row.saturating_sub(first_visual_row) as u16;
-    if content_area.height > 0 && cursor_x < input_area.right() {
-        f.set_cursor_position((cursor_x, cursor_y));
+    let editing_composer = matches!(app.mode, Mode::Normal | Mode::SlashCommand)
+        || (app.mode == Mode::CommandPalette
+            && app
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.is_at_picker()));
+    if editing_composer && content_area.height > 0 && input_area.width > 0 {
+        f.set_cursor_position((cursor_x.min(input_area.right() - 1), cursor_y));
     }
 
     // History search prompt (Ctrl+R).
@@ -153,7 +218,7 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             }
         );
         let search_y = input_area.y + input_area.height;
-        let search_area = Rect::new(input_area.x, search_y, input_area.width, 1);
+        let search_area = layout.prompt;
         let search_style = if match_count > 0 {
             Style::default()
                 .fg(app.theme.resolve("text.success"))
@@ -181,9 +246,17 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     // Large paste confirmation prompt.
     if app.mode == Mode::PasteConfirm {
         if let Some(ref pending) = app.pending_paste {
-            let prompt = format!("paste {} chars? [y/N]", pending.len());
-            let confirm_y = input_area.y + input_area.height;
-            let confirm_area = Rect::new(input_area.x, confirm_y, input_area.width, 1);
+            let count = pending.chars().count();
+            let full = format!("paste {} chars? [y/N]", count);
+            let compact = format!("paste {}? y/N", count);
+            let prompt = if display_width(&full) <= layout.prompt.width as usize {
+                full
+            } else if display_width(&compact) <= layout.prompt.width as usize {
+                compact
+            } else {
+                "y/N".into()
+            };
+            let confirm_area = layout.prompt;
             let style = Style::default()
                 .fg(app.theme.resolve("text.warning"))
                 .bg(input_bg);

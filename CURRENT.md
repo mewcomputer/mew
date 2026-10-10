@@ -1646,3 +1646,20 @@ Verified 29 agent todo tests, 63 daemon library tests, four real WebSocket
 regressions, protocol roundtrips, 26 TypeScript client tests and its build.
 Relevant strict clippy passed; mobile/shared clients compile. Protocol revision
 remains 2, with a bounded failure when an older daemon cannot confirm an edit.
+
+### 2026-10-10: visible pasted prompts and question decisions
+
+The composer shares its layout with mouse hit testing and gives long drafts
+priority on short landing screens. Paste normalizes line endings, inserts in one
+undo step, and goes to the visible editor. Large-paste confirmation counts
+characters and preserves command mode. Read-only popovers hide the chat caret.
+
+Questions follow the Unicode answer caret, preserve full multiline answers,
+and reserve the answer and cancel rows under long prompts/choices. Review pins
+submit/cancel below clipped previews. The allow-tool panel is opaque and raised
+without an extra outline.
+
+Verified 14 paste regressions, existing question and surface tests, and the full
+382-test TUI suite. Workspace strict clippy, CLI build and architecture checks
+passed. Deterministic captures were retaken at 128 columns by 40 rows, producing
+1280 by 800 images with normal terminal text.
