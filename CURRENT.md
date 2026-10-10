@@ -2043,3 +2043,16 @@ All 541 TUI tests across 20 targets and 42 markdown-renderer tests passed, with
 22 new regression tests covering copy content, streaming, resizing and mouse
 release. Strict checks passed for both crates. Rendered tables retain their grid
 formatting and interior column spacing. Live interaction remains pending.
+
+### 2026-10-10: remove the composer prompt gutter
+
+The composer no longer reserves two columns for the removed prompt marker.
+Text retains one cell of surface padding, and the streaming spinner uses that
+padding without moving the draft. Rendering, wrapping, mouse positioning and
+vertical keyboard movement all use the same input layout width.
+
+All 543 TUI tests across 20 targets passed, including landing/chat alignment
+across idle and streaming states, the recovered wrap space, Unicode boundaries,
+one-column input, queued drafts and resizing. Existing visual goldens passed.
+Refreshed renderer captures and inspected desktop and short composer views.
+Live interaction remains pending.

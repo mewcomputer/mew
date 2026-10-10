@@ -16,7 +16,6 @@ pub(crate) struct InputLayout {
     pub content: Rect,
     pub queue: Rect,
     pub prompt: Rect,
-    pub prefix_width: u16,
     pub wrap_width: u16,
 }
 
@@ -34,8 +33,7 @@ impl InputLayout {
         );
         let pad_x = u16::from(input.width >= 5);
         let content_width = input.width.saturating_sub(pad_x * 2);
-        let prefix_width = 2.min(content_width.saturating_sub(1));
-        let wrap_width = content_width.saturating_sub(prefix_width).max(1);
+        let wrap_width = content_width.max(1);
         let pad_y = u16::from(
             input.height >= 3 && (input.height > 3 || app.input_visual_line_count(wrap_width) <= 1),
         );
@@ -50,7 +48,6 @@ impl InputLayout {
             content,
             queue: Rect::new(area.x, area.y, area.width, queue_height),
             prompt: Rect::new(area.x, input.bottom(), area.width, prompt_height),
-            prefix_width,
             wrap_width,
         }
     }
@@ -131,44 +128,34 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 
     let input_area = layout.input;
     let content_area = layout.content;
-    let prefix_width = layout.prefix_width as usize;
     let wrap_w = layout.wrap_width as usize;
     f.render_widget(
         Block::default().style(Style::default().bg(input_bg)),
         input_area,
     );
 
-    let prefix = if app.streaming {
+    if app.streaming && content_area.x > input_area.x && content_area.height > 0 {
         let frames = crate::ui::spinner::spinner_frames();
         let frame = frames
             .chars()
             .nth(app.spinner_frame % frames.chars().count())
             .unwrap_or(' ');
-        Span::styled(
-            if prefix_width > 1 {
-                format!("{} ", frame)
-            } else {
-                frame.to_string()
-            },
-            Style::default()
-                .fg(app.theme.resolve("text.warning"))
-                .bg(input_bg),
-        )
-    } else {
-        Span::styled(
-            &"  "[..prefix_width],
-            Style::default()
-                .fg(app.theme.resolve("text.accent"))
-                .bg(input_bg),
-        )
-    };
-    let indent = Span::styled(&"  "[..prefix_width], Style::default().bg(input_bg));
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                frame.to_string(),
+                Style::default()
+                    .fg(app.theme.resolve("text.warning"))
+                    .bg(input_bg),
+            )),
+            Rect::new(content_area.x - 1, content_area.y, 1, 1),
+        );
+    }
 
     let (cursor_visual_row, cursor_visual_col) = app.cursor_visual_row_col(wrap_w as u16);
 
     let first_visual_row =
         cursor_visual_row.saturating_sub(content_area.height.saturating_sub(1) as usize);
-    for (visual_row, (_, text, first)) in app
+    for (visual_row, (_, text, _)) in app
         .input_visual_rows(wrap_w as u16)
         .enumerate()
         .skip(first_visual_row)
@@ -180,18 +167,12 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         } else {
             text
         };
-        let row_prefix = if first {
-            prefix.clone()
-        } else {
-            indent.clone()
-        };
-        let spans = vec![row_prefix, Span::styled(visible, style)];
-        let text = Text::from(Line::from(spans));
+        let text = Line::from(Span::styled(visible, style));
         let row = Rect::new(content_area.x, y, content_area.width, 1);
         f.render_widget(Paragraph::new(text), row);
     }
 
-    let cursor_x = content_area.x + prefix_width as u16 + cursor_visual_col.min(wrap_w) as u16;
+    let cursor_x = content_area.x + cursor_visual_col.min(wrap_w) as u16;
     let cursor_y = content_area.y + cursor_visual_row.saturating_sub(first_visual_row) as u16;
     let editing_composer = matches!(app.mode, Mode::Normal | Mode::SlashCommand)
         || (app.mode == Mode::CommandPalette

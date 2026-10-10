@@ -31,6 +31,47 @@ fn key(app: &mut App, code: KeyCode) {
 }
 
 #[test]
+fn composer_has_no_prompt_gutter_on_landing_or_chat_while_idle_or_streaming() {
+    for landing in [false, true] {
+        let (mut app, mut terminal) = chat(40, 24);
+        if landing {
+            app.rewind_to(0);
+        }
+        app.input = "hello\nworld".into();
+        app.cursor = 0;
+        for streaming in [false, true, false] {
+            app.streaming = streaming;
+            draw(&mut app, &mut terminal);
+            let cursor = terminal.get_cursor_position().unwrap();
+            let buffer = terminal.backend().buffer();
+            assert_eq!(cursor.x, app.input_area.x + 1);
+            assert_eq!(buffer[(cursor.x, cursor.y)].symbol(), "h");
+            assert_eq!(buffer[(cursor.x, cursor.y + 1)].symbol(), "w");
+            assert_eq!(
+                buffer[(cursor.x - 1, cursor.y)].symbol(),
+                if streaming { "⠋" } else { " " }
+            );
+            assert_eq!(
+                buffer[(cursor.x, cursor.y)].bg,
+                app.theme.resolve("chat.user.background")
+            );
+        }
+    }
+}
+
+#[test]
+fn text_that_fits_the_composer_surface_does_not_wrap_into_the_old_prompt_slot() {
+    let (mut app, mut terminal) = chat(20, 24);
+    app.input = "abcdefghijklmnopqr".into();
+    app.cursor = app.input.len();
+    let rows = draw(&mut app, &mut terminal);
+    let cursor = terminal.get_cursor_position().unwrap();
+    assert_eq!(cursor.y, app.input_area.y + 1);
+    assert_eq!(cursor.x, app.input_area.x + 19);
+    assert_eq!(rows[cursor.y as usize].trim(), app.input);
+}
+
+#[test]
 fn queued_follow_up_stays_visible_above_the_editable_prompt() {
     let (mut app, mut terminal) = chat(48, 24);
     app.queued_messages = vec!["check the tests".into(), "then review".into()];
@@ -121,17 +162,17 @@ fn wrapped_up_moves_by_the_composer_text_width() {
 
     key(&mut app, KeyCode::Up);
 
-    assert_eq!(app.cursor, 8);
+    assert_eq!(app.cursor, 6);
     let rows = draw(&mut app, &mut terminal);
     let cursor = terminal.get_cursor_position().unwrap();
-    assert_eq!(cursor.x, app.input_area.x + 3 + 8);
-    assert!(rows[cursor.y as usize].contains("abcdefghijklmnop"));
+    assert_eq!(cursor.x, app.input_area.x + 1 + 6);
+    assert!(rows[cursor.y as usize].contains("abcdefghijklmnopqr"));
 }
 
 #[test]
 fn wide_text_and_empty_trailing_line_have_visible_carets() {
     let (mut app, mut terminal) = chat(20, 30);
-    for (input, expected_x) in [("漢字abc", 10), ("first\n", 3)] {
+    for (input, expected_x) in [("漢字abc", 8), ("first\n", 1)] {
         app.input = input.into();
         app.cursor = app.input.len();
         draw(&mut app, &mut terminal);
@@ -165,7 +206,7 @@ fn clicking_a_scrolled_draft_edits_the_visible_row_and_ignores_the_queue() {
             app,
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
-                column: app.input_area.x + 4,
+                column: app.input_area.x + 2,
                 row,
                 modifiers: KeyModifiers::NONE,
             }),
@@ -186,8 +227,8 @@ fn clicking_a_scrolled_draft_edits_the_visible_row_and_ignores_the_queue() {
 #[test]
 fn a_caret_at_an_exact_wrap_boundary_stays_on_its_logical_line() {
     let (mut app, mut terminal) = chat(20, 30);
-    app.input = "abcdefghijklmnop\nnext".into();
-    app.cursor = 16;
+    app.input = "abcdefghijklmnopqr\nnext".into();
+    app.cursor = 18;
 
     draw(&mut app, &mut terminal);
     let cursor = terminal.get_cursor_position().unwrap();
@@ -218,7 +259,7 @@ fn narrow_reverse_history_search_keeps_the_edited_query_and_caret_visible() {
 #[test]
 fn wrapped_draft_keeps_its_caret_visible_after_a_narrow_short_resize() {
     let (mut app, mut terminal) = chat(24, 30);
-    app.input = "a".repeat(280) + "current";
+    app.input = "a".repeat(270) + "current";
     app.cursor = app.input.len();
     let rows = draw(&mut app, &mut terminal);
     let cursor = terminal.get_cursor_position().unwrap();
@@ -242,14 +283,14 @@ fn wrapped_draft_keeps_its_caret_visible_after_a_narrow_short_resize() {
 #[test]
 fn wide_glyph_wraps_before_the_edge_and_cursor_and_movement_use_that_row() {
     let (mut app, mut terminal) = chat(19, 24);
-    app.input = "a".repeat(14) + "漢b";
+    app.input = "a".repeat(16) + "漢b";
     app.cursor = app.input.len();
 
     let rows = draw(&mut app, &mut terminal);
     let cursor = terminal.get_cursor_position().unwrap();
     assert!(rows[cursor.y as usize].contains("漢b"));
-    assert_eq!(cursor.x, app.input_area.x + 6);
-    assert_eq!(app.visual_to_byte_offset(1, 2, 15), 17);
+    assert_eq!(cursor.x, app.input_area.x + 4);
+    assert_eq!(app.visual_to_byte_offset(1, 2, 17), 19);
     key(&mut app, KeyCode::Up);
     assert_eq!(app.cursor, 3);
     key(&mut app, KeyCode::Down);
@@ -271,7 +312,7 @@ fn wide_glyph_wraps_before_the_edge_and_cursor_and_movement_use_that_row() {
 
 #[test]
 fn one_column_composer_marks_a_wide_glyph_without_losing_the_input() {
-    let (mut app, mut terminal) = chat(5, 24);
+    let (mut app, mut terminal) = chat(1, 24);
     app.input = "漢b".into();
     app.cursor = app.input.len();
 
@@ -279,7 +320,7 @@ fn one_column_composer_marks_a_wide_glyph_without_losing_the_input() {
     assert_eq!(app.input_visual_line_count(1), 2);
     assert!(rows[app.input_area.y as usize + 1].contains('�'));
     let cursor = terminal.get_cursor_position().unwrap();
-    assert_eq!(cursor.x, 4);
+    assert_eq!(cursor.x, 0);
     assert_eq!(cursor.y, app.input_area.y + 2);
     assert_eq!(app.input, "漢b");
 }
@@ -287,34 +328,34 @@ fn one_column_composer_marks_a_wide_glyph_without_losing_the_input() {
 #[test]
 fn up_from_a_full_wrapped_row_moves_to_the_previous_visible_row() {
     let (mut app, mut terminal) = chat(20, 24);
-    app.input = "a".repeat(32);
+    app.input = "a".repeat(36);
     app.cursor = app.input.len();
     draw(&mut app, &mut terminal);
 
     key(&mut app, KeyCode::Up);
 
-    assert_eq!(app.cursor_visual_row_col(16).0, 0);
-    assert_eq!(app.cursor, 15);
+    assert_eq!(app.cursor_visual_row_col(18).0, 0);
+    assert_eq!(app.cursor, 17);
 }
 
 #[test]
 fn joined_emoji_and_combining_marks_wrap_as_displayed_graphemes() {
-    for (suffix, expected_x) in [("👨‍👩‍👧‍👦b", 6), ("e\u{301}b", 4)] {
+    for (suffix, expected_x) in [("👨‍👩‍👧‍👦b", 4), ("e\u{301}b", 2)] {
         let (mut app, mut terminal) = chat(19, 24);
-        app.input = "a".repeat(14) + suffix;
+        app.input = "a".repeat(16) + suffix;
         app.cursor = app.input.len();
 
         let rows = draw(&mut app, &mut terminal);
         let cursor = terminal.get_cursor_position().unwrap();
-        assert_eq!(app.input_visual_line_count(15), 2);
+        assert_eq!(app.input_visual_line_count(17), 2);
         assert_eq!(cursor.x, expected_x);
         assert_eq!(cursor.y, app.input_area.y + 2);
         assert!(rows.join("\n").contains(suffix.strip_suffix('b').unwrap()));
         if suffix.starts_with('👨') {
-            let after_emoji = 14 + suffix.strip_suffix('b').unwrap().len();
-            assert_eq!(app.visual_to_byte_offset(1, 2, 15), after_emoji);
+            let after_emoji = 16 + suffix.strip_suffix('b').unwrap().len();
+            assert_eq!(app.visual_to_byte_offset(1, 2, 17), after_emoji);
         } else {
-            assert_eq!(app.visual_to_byte_offset(0, 15, 15), 14);
+            assert_eq!(app.visual_to_byte_offset(0, 17, 17), 16);
         }
     }
 }
