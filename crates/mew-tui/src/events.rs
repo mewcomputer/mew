@@ -237,6 +237,17 @@ fn handle_paste_confirm_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
 fn handle_persona_confirm_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     use crossterm::event::{KeyCode, KeyModifiers};
     match key.code {
+        KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::Up
+        | KeyCode::Down => {
+            if let Some(state) = app.persona_switch_confirm.as_mut() {
+                scroll_decision(&mut state.scroll, &state.view, key.code);
+            }
+            None
+        }
         KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
             app.persona_switch_confirm = None;
             app.mode = crate::app::Mode::Normal;
@@ -282,6 +293,22 @@ fn handle_persona_confirm_key(app: &mut crate::app::App, key: KeyEvent) -> Optio
 }
 
 fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action> {
+    if app.mode == crate::app::Mode::GoalCompose {
+        if let Some(goal) = app.goal_compose.as_mut() {
+            goal.undo.snapshot(&goal.title, goal.cursor);
+            goal.title.insert_str(goal.cursor, &text);
+            goal.cursor += text.len();
+        }
+        return None;
+    }
+    if matches!(
+        app.mode,
+        crate::app::Mode::PermissionPrompt
+            | crate::app::Mode::PersonaSwitchConfirm
+            | crate::app::Mode::GoalProposal
+    ) {
+        return None;
+    }
     // If the whole paste is a path to an image, turn it into an @mention.
     let candidate = text.trim().strip_prefix("file://").unwrap_or(text.trim());
     let is_image = std::path::Path::new(candidate)
@@ -343,6 +370,24 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
     // The permission modal scrolls with the wheel like the chat view.
     if app.mode == crate::app::Mode::PermissionPrompt {
         return handle_permission_mouse_event(app, mouse);
+    }
+    if matches!(
+        app.mode,
+        crate::app::Mode::PersonaSwitchConfirm | crate::app::Mode::GoalProposal
+    ) {
+        let code = match mouse.kind {
+            MouseEventKind::ScrollUp => KeyCode::Up,
+            MouseEventKind::ScrollDown => KeyCode::Down,
+            _ => return None,
+        };
+        if app.mode == crate::app::Mode::PersonaSwitchConfirm {
+            if let Some(state) = app.persona_switch_confirm.as_mut() {
+                scroll_decision(&mut state.scroll, &state.view, code);
+            }
+        } else if let Some(state) = app.goal_proposal.as_mut() {
+            scroll_decision(&mut state.scroll, &state.view, code);
+        }
+        return None;
     }
     if !matches!(
         app.mode,
@@ -824,6 +869,17 @@ fn confirm_user_question(app: &mut crate::app::App) -> Option<Action> {
 
 fn handle_goal_proposal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     match key.code {
+        KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::Up
+        | KeyCode::Down => {
+            if let Some(state) = app.goal_proposal.as_mut() {
+                scroll_decision(&mut state.scroll, &state.view, key.code);
+            }
+            None
+        }
         KeyCode::Enter => {
             app.goal_proposal_confirm();
             None
@@ -832,7 +888,7 @@ fn handle_goal_proposal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
             app.cancel_goal_proposal();
             None
         }
-        KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+        KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
             app.goal_proposal_toggle();
             None
         }

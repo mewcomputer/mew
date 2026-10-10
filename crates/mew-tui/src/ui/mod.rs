@@ -245,13 +245,13 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.mode == Mode::PersonaSwitchConfirm {
-        if let Some(ref state) = app.persona_switch_confirm {
+        if let Some(ref mut state) = app.persona_switch_confirm {
             overlays::draw_persona_confirm_modal(f, state, area, &app.theme);
         }
     }
 
     if app.mode == Mode::GoalProposal {
-        if let Some(ref state) = app.goal_proposal {
+        if let Some(ref mut state) = app.goal_proposal {
             overlays::draw_goal_proposal(f, state, area, &app.theme);
         }
     }

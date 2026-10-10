@@ -71,12 +71,16 @@ fn modal_padding_uses_the_raised_surface() {
             },
             current: None,
             selected: 0,
+            scroll: 0,
+            view: Default::default(),
         });
         app.goal_proposal = Some(GoalProposalState {
             call_id: "goal".into(),
             objective: "finish the task".into(),
             selected: 0,
             tx: None,
+            scroll: 0,
+            view: Default::default(),
         });
         app.goal_compose = Some(GoalComposeState {
             title: "finish the task".into(),

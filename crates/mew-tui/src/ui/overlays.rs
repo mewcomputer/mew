@@ -1084,334 +1084,206 @@ fn render_picker_list(
 /// diff between the current and target persona, plus [Confirm] [Cancel]
 /// buttons that the user navigates with ←/→/Tab and Enter (or y/n for
 /// shortcuts).
+fn decision_text_rows(text: &str, width: u16) -> Vec<String> {
+    text.split('\n')
+        .flat_map(|line| crate::ui::chat::wrap_text_to_width(line, width))
+        .collect()
+}
+
 pub(super) fn draw_persona_confirm_modal(
     f: &mut Frame,
-    state: &PersonaSwitchConfirmState,
+    state: &mut PersonaSwitchConfirmState,
     area: Rect,
     tokens: &crate::theme::Theme,
 ) {
-    let width = 64u16.min(area.width.saturating_sub(4));
-    let height = 18u16.min(area.height.saturating_sub(4));
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup = Rect::new(x, y, width, height);
-
-    f.render_widget(Clear, popup);
-
-    // Use the target persona's accent color for the border and name.
+    let width = DecisionLayout::content_width(area.width, 64);
+    let muted = Style::default().fg(tokens.resolve("text.muted"));
+    let foreground = Style::default().fg(tokens.resolve("foreground"));
     let accent = crate::theme::persona_accent(&state.target.name, state.target.color.as_deref());
-
-    let block = Block::bordered()
-        .style(Style::default().bg(tokens.resolve("panel.overlay")))
-        .title(Span::styled(
-            " Switch persona ",
-            Style::default()
-                .fg(tokens.resolve("foreground"))
-                .add_modifier(Modifier::BOLD),
-        ))
-        .border_style(Style::default().fg(accent.bg));
-    f.render_widget(block, popup);
-
-    let inner = popup.inner(Margin::new(2, 1));
-    let mut text = Text::default();
-
-    // From → To
     let from = state
         .current
         .as_ref()
         .map(|p| p.name.as_str())
         .unwrap_or("(none)");
-    text.push_line(Line::from(vec![
-        Span::styled(
-            "  from  ",
-            Style::default().fg(tokens.resolve("text.muted")),
-        ),
-        Span::styled(
-            from,
-            Style::default().fg(tokens.resolve("text.placeholder")),
-        ),
-        Span::styled(" → ", Style::default().fg(tokens.resolve("text.muted"))),
-        Span::styled(
-            state.target.name.clone(),
-            Style::default().fg(accent.fg).add_modifier(Modifier::BOLD),
-        ),
-    ]));
-
-    if !state.target.description.is_empty() {
-        let max = inner.width.saturating_sub(8) as usize;
-        let desc_lines = wrap_text(&state.target.description, max);
-        for (di, dl) in desc_lines.iter().enumerate() {
-            text.push_line(Line::from(vec![
-                Span::styled(
-                    if di == 0 { "  desc  " } else { "        " },
-                    Style::default().fg(tokens.resolve("text.muted")),
-                ),
-                Span::styled(
-                    dl.clone(),
-                    Style::default().fg(tokens.resolve("text.placeholder")),
-                ),
-            ]));
-        }
-    }
-
-    text.push_line(Line::from(""));
-
-    // Model
-    let model_str = state
-        .target
-        .model
-        .clone()
-        .unwrap_or_else(|| "(inherit active)".into());
+    let model = state.target.model.as_deref().unwrap_or("(inherit active)");
     let model_changed =
         state.current.as_ref().and_then(|c| c.model.as_ref()) != state.target.model.as_ref();
-    text.push_line(Line::from(vec![
-        Span::styled(
-            "  model ",
-            Style::default().fg(tokens.resolve("text.muted")),
+    let mut rows = Vec::new();
+    for (label, value, style) in [
+        (
+            "from",
+            format!("{} → {}", from, state.target.name),
+            foreground,
         ),
-        Span::styled(
-            model_str,
+        ("description", state.target.description.clone(), foreground),
+        (
+            "model",
+            model.to_owned(),
             if model_changed {
-                Style::default()
-                    .fg(tokens.resolve("text.warning"))
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(tokens.resolve("text.warning"))
             } else {
-                Style::default().fg(tokens.resolve("text.placeholder"))
+                foreground
             },
         ),
-    ]));
-
-    // Tools
-    text.push_line(Line::from(vec![
-        Span::styled(
-            "  tools ",
-            Style::default().fg(tokens.resolve("text.muted")),
-        ),
-        Span::styled(
+        (
+            "tools",
             format_tools(&state.target.tools),
             tools_style(&state.target, &state.current, false, tokens),
         ),
-    ]));
-    text.push_line(Line::from(vec![
-        Span::styled(
-            "  deny  ",
-            Style::default().fg(tokens.resolve("text.muted")),
-        ),
-        Span::styled(
+        (
+            "deny",
             format_tools(&state.target.tools_deny),
             tools_style(&state.target, &state.current, true, tokens),
         ),
-    ]));
-
-    // Skills
-    text.push_line(Line::from(vec![
-        Span::styled(
-            "  skills",
-            Style::default().fg(tokens.resolve("text.muted")),
-        ),
-        Span::styled(" ".to_string(), Style::default()),
-        Span::styled(
+        (
+            "skills",
             format_tools(&state.target.skills),
             skills_style(&state.target, &state.current, tokens),
         ),
-    ]));
-
-    text.push_line(Line::from(""));
-
-    // Buttons
-    let confirm_label = "[ Confirm ]";
-    let cancel_label = "[ Cancel ]";
-    let confirm_style = if state.selected == 0 {
-        Style::default()
-            .bg(tokens.resolve("surface.success"))
-            .fg(tokens.resolve("text.inverse"))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(tokens.resolve("text.placeholder"))
-    };
-    let cancel_style = if state.selected == 1 {
-        Style::default()
-            .bg(tokens.resolve("surface.error"))
-            .fg(tokens.resolve("text.inverse"))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(tokens.resolve("text.placeholder"))
-    };
-    let mut buttons = Text::default();
-    buttons.push_line(Line::from(vec![
-        Span::styled("  ", Style::default()),
-        Span::styled(confirm_label, confirm_style),
-        Span::styled("   ", Style::default()),
-        Span::styled(cancel_label, cancel_style),
-    ]));
-    let para = Paragraph::new(text).wrap(Wrap { trim: true });
-    f.render_widget(para, inner);
-    let buttons_area = Rect::new(
-        inner.x,
-        inner.y + inner.height.saturating_sub(2),
-        inner.width,
-        1,
+    ] {
+        if value.is_empty() {
+            continue;
+        }
+        if !rows.is_empty() {
+            rows.push(Line::default());
+        }
+        rows.push(Line::from(Span::styled(label, muted)));
+        rows.extend(
+            decision_text_rows(&value, width)
+                .into_iter()
+                .map(|row| Line::from(Span::styled(row, style))),
+        );
+    }
+    let action_rows = if width < 29 { 2 } else { 1 };
+    let layout = DecisionLayout::new(area, 64, rows.len(), action_rows);
+    layout.clamp_scroll(&mut state.scroll, &mut state.view, rows.len());
+    draw_decision_frame(f, &layout, " Switch persona ", accent.bg, tokens);
+    draw_decision_body(f, &layout, rows, state.scroll, &state.view, tokens);
+    draw_decision_actions(
+        f,
+        &layout,
+        &["[y] Confirm", "[n] Cancel"],
+        state.selected,
+        state.view.max_scroll > 0,
+        tokens,
     );
-    f.render_widget(Paragraph::new(buttons), buttons_area);
 }
 
-/// Draw the goal proposal modal. A centered modal showing the proposed
-/// objective with an accept/reject toggle.
+/// Proposed objectives scroll separately from their decision controls.
 pub(super) fn draw_goal_proposal(
     f: &mut Frame,
-    state: &GoalProposalState,
+    state: &mut GoalProposalState,
     area: Rect,
     tokens: &crate::theme::Theme,
 ) {
-    let width = 70u16.min(area.width.saturating_sub(4));
-    let height = 9u16.min(area.height.saturating_sub(2));
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup = Rect::new(x, y, width, height);
-
-    f.render_widget(Clear, popup);
-
-    let block = Block::bordered()
-        .style(Style::default().bg(tokens.resolve("panel.overlay")))
-        .title(Span::styled(
-            " Goal proposed ",
-            Style::default()
-                .fg(tokens.resolve("foreground"))
-                .add_modifier(Modifier::BOLD),
-        ))
-        .border_style(Style::default().fg(tokens.resolve("accent")));
-    f.render_widget(block, popup);
-
-    let inner = popup.inner(Margin::new(2, 1));
-
-    let objective_wrapped = crate::ui::chat::wrap_text_to_width(&state.objective, inner.width);
-    let obj_lines: Vec<Line> = objective_wrapped
-        .iter()
-        .map(|c| {
-            Line::from(vec![Span::styled(
-                c.clone(),
-                Style::default().fg(tokens.resolve("foreground")),
-            )])
-        })
-        .collect();
-
-    let accept_selected = state.selected == 0;
-    let accept_style = if accept_selected {
-        Style::default()
-            .bg(tokens.resolve("surface.success"))
-            .fg(tokens.resolve("text.inverse"))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(tokens.resolve("text.placeholder"))
-    };
-    let reject_style = if !accept_selected {
-        Style::default()
-            .bg(tokens.resolve("pill.attention.bg"))
-            .fg(tokens.resolve("text.inverse"))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(tokens.resolve("text.placeholder"))
-    };
-
-    let mut text = Text::default();
-    text.push_line(Line::from(Span::styled(
-        "The agent has proposed a goal:",
-        Style::default().fg(tokens.resolve("text.muted")),
-    )));
-    text.push_line(Line::from(""));
-    for line in obj_lines {
-        text.push_line(line);
-    }
-    text.push_line(Line::from(""));
-    text.push_line(Line::from(vec![
-        Span::styled(" [y] Accept ", accept_style),
-        Span::styled("   ", Style::default()),
-        Span::styled(" [n] Reject ", reject_style),
-    ]));
-    text.push_line(Line::from(Span::styled(
-        "  Tab toggle · Enter confirm · Esc cancel",
-        Style::default().fg(tokens.resolve("text.muted")),
-    )));
-
-    f.render_widget(Paragraph::new(text), inner);
+    let width = DecisionLayout::content_width(area.width, 70);
+    let rows = decision_text_rows(&state.objective, width);
+    let action_rows = if width < 26 { 2 } else { 1 };
+    let layout = DecisionLayout::new(area, 70, rows.len(), action_rows);
+    layout.clamp_scroll(&mut state.scroll, &mut state.view, rows.len());
+    draw_decision_frame(
+        f,
+        &layout,
+        " Goal proposed ",
+        tokens.resolve("accent"),
+        tokens,
+    );
+    draw_decision_body(
+        f,
+        &layout,
+        rows.into_iter().map(Line::from).collect(),
+        state.scroll,
+        &state.view,
+        tokens,
+    );
+    draw_decision_actions(
+        f,
+        &layout,
+        &["[y] Accept", "[n] Reject"],
+        state.selected,
+        state.view.max_scroll > 0,
+        tokens,
+    );
 }
 
-/// Draw the `/goal` compose modal: an editable objective line with
-/// Accept/Cancel, a replace warning when a goal is already active, and an
-/// "edited from" note when the objective changed in the modal.
+/// The goal editor's viewport follows the caret, while confirmation stays pinned.
 pub(super) fn draw_goal_compose(
     f: &mut Frame,
     state: &GoalComposeState,
     area: Rect,
     tokens: &crate::theme::Theme,
 ) {
-    let width = 70u16.min(area.width.saturating_sub(4));
-    let height = 10u16.min(area.height.saturating_sub(2));
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup = Rect::new(x, y, width, height);
-
-    f.render_widget(Clear, popup);
-
-    let block = Block::bordered()
-        .style(Style::default().bg(tokens.resolve("panel.overlay")))
-        .title(Span::styled(
-            " Set goal ",
-            Style::default()
-                .fg(tokens.resolve("foreground"))
-                .add_modifier(Modifier::BOLD),
-        ))
-        .border_style(Style::default().fg(tokens.resolve("accent")));
-    f.render_widget(block, popup);
-
-    let inner = popup.inner(Margin::new(2, 1));
-    let warning = Style::default().fg(tokens.resolve("text.warning"));
-    let muted = Style::default().fg(tokens.resolve("text.muted"));
-
-    let mut text = Text::default();
-    text.push_line(Line::from(Span::styled("Objective:", muted)));
-    let objective_line = inner.y + 1;
-    text.push_line(Line::from(vec![Span::styled(
-        format!("  {}", state.title),
-        Style::default().fg(tokens.resolve("foreground")),
-    )]));
-    if state.original != state.title {
-        text.push_line(Line::from(Span::styled(
-            format!("  edited from: {}", state.original),
-            muted,
-        )));
+    let width = DecisionLayout::content_width(area.width, 70);
+    let rows: Vec<_> = crate::app::visual_rows(&state.title, width.saturating_sub(1)).collect();
+    let cursor = rows
+        .iter()
+        .enumerate()
+        .find_map(|(row, (start, text, _))| {
+            let end = start + text.len();
+            let logical_end = state
+                .title
+                .as_bytes()
+                .get(end)
+                .is_none_or(|byte| *byte == b'\n');
+            (state.cursor < end || (state.cursor == end && logical_end)).then(|| {
+                (
+                    row,
+                    display_width(&text[..state.cursor.saturating_sub(*start)]),
+                )
+            })
+        })
+        .unwrap_or((0, 0));
+    let action_rows = if width < 29 { 2 } else { 1 };
+    let layout = DecisionLayout::new(area, 70, rows.len().max(3), action_rows);
+    draw_decision_frame(f, &layout, " Set goal ", tokens.resolve("accent"), tokens);
+    let first = cursor
+        .0
+        .saturating_sub(layout.body.height.saturating_sub(1) as usize);
+    let lines = rows
+        .iter()
+        .skip(first)
+        .take(layout.body.height as usize)
+        .map(|(_, text, _)| {
+            Line::from(Span::styled(
+                *text,
+                Style::default().fg(tokens.resolve("foreground")),
+            ))
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(Paragraph::new(lines), layout.body);
+    draw_decision_actions(
+        f,
+        &layout,
+        &["[Enter] Set", "[Esc] Cancel"],
+        0,
+        false,
+        tokens,
+    );
+    let hint = if state.replacing.is_some() && layout.hint.width >= 24 {
+        "replaces goal · Enter/Esc"
+    } else if layout.hint.width >= 21 {
+        "Enter set · Esc cancel"
+    } else if layout.hint.width >= 9 {
+        "Enter/Esc"
+    } else {
+        "Esc"
+    };
+    f.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(tokens.resolve(
+            if state.replacing.is_some() {
+                "text.warning"
+            } else {
+                "text.muted"
+            },
+        ))),
+        layout.hint,
+    );
+    if layout.body.width > 0 && layout.body.height > 0 {
+        f.set_cursor_position((
+            layout.body.x + (cursor.1 as u16).min(layout.body.width - 1),
+            layout.body.y + cursor.0.saturating_sub(first) as u16,
+        ));
     }
-    if let Some(ref replacing) = state.replacing {
-        text.push_line(Line::from(vec![
-            Span::styled("  will replace: ", warning),
-            Span::styled(replacing.clone(), warning),
-        ]));
-    }
-    text.push_line(Line::from(""));
-    text.push_line(Line::from(vec![
-        Span::styled(
-            " [Enter] Set ",
-            Style::default()
-                .bg(tokens.resolve("surface.success"))
-                .fg(tokens.resolve("text.inverse"))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("   ", Style::default()),
-        Span::styled(
-            " [Esc] Cancel ",
-            Style::default().fg(tokens.resolve("text.placeholder")),
-        ),
-    ]));
-    text.push_line(Line::from(Span::styled(
-        "  the agent will keep working until this goal is complete",
-        muted,
-    )));
-
-    f.render_widget(Paragraph::new(text), inner);
-
-    // Terminal cursor at the objective edit position.
-    let cursor_col = inner.x + 2 + (display_width(&state.title[..state.cursor]) as u16);
-    f.set_cursor_position((cursor_col.min(inner.x + inner.width - 1), objective_line));
 }
 
 fn format_tools(list: &Option<Vec<String>>) -> String {

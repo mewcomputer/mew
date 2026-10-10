@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+pub(crate) use input::visual_rows;
 pub use mdstream;
 
 pub const SIDEBAR_MIN_WIDTH: u16 = 120;
@@ -711,6 +712,8 @@ pub struct PersonaSwitchConfirmState {
     pub target: PersonaSummary,
     pub current: Option<PersonaSummary>,
     pub selected: usize,
+    pub scroll: u16,
+    pub view: DecisionView,
 }
 
 /// Display-friendly snapshot of a persona's identity + restrictions. Built
@@ -757,6 +760,8 @@ pub struct GoalProposalState {
     /// 0 = accept, 1 = reject.
     pub selected: usize,
     pub tx: Option<tokio::sync::oneshot::Sender<mew_agent::GoalDecision>>,
+    pub scroll: u16,
+    pub view: DecisionView,
 }
 
 /// The user's active goal as shown in the sidebar and status bar. The
@@ -1589,6 +1594,8 @@ impl App {
             target,
             current,
             selected: 0, // default focus is the confirm button
+            scroll: 0,
+            view: Default::default(),
         });
         self.mode = Mode::PersonaSwitchConfirm;
     }
@@ -2540,6 +2547,8 @@ impl App {
                     objective,
                     selected: 0,
                     tx: Some(tx),
+                    scroll: 0,
+                    view: Default::default(),
                 });
             }
         }

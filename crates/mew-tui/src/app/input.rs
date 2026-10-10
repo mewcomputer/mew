@@ -94,42 +94,7 @@ impl App {
         &self,
         content_width: u16,
     ) -> impl Iterator<Item = (usize, &str, bool)> {
-        let width = content_width.max(1) as usize;
-        self.input
-            .split('\n')
-            .scan(0, |offset, line| {
-                let start = *offset;
-                *offset += line.len() + 1;
-                Some((start, line))
-            })
-            .flat_map(move |(line_start, line)| {
-                let mut remaining = line;
-                let mut consumed = 0;
-                let mut empty = line.is_empty();
-                std::iter::from_fn(move || {
-                    if empty {
-                        empty = false;
-                        return Some((line_start, line, true));
-                    }
-                    if remaining.is_empty() {
-                        return None;
-                    }
-                    let mut end = 0;
-                    let mut columns = 0;
-                    for grapheme in remaining.graphemes(true) {
-                        let grapheme_width = unicode_width::UnicodeWidthStr::width(grapheme);
-                        if end > 0 && grapheme_width > 0 && columns + grapheme_width > width {
-                            break;
-                        }
-                        columns += grapheme_width;
-                        end += grapheme.len();
-                    }
-                    let row = (line_start + consumed, &remaining[..end], consumed == 0);
-                    remaining = &remaining[end..];
-                    consumed += end;
-                    Some(row)
-                })
-            })
+        visual_rows(&self.input, content_width)
     }
 
     pub fn input_visual_line_count(&self, content_width: u16) -> usize {
@@ -222,4 +187,46 @@ impl App {
         self.input = self.history[idx].clone();
         self.cursor = self.input.len();
     }
+}
+
+/// Borrowed wrapped rows shared by the chat and goal editors.
+pub(crate) fn visual_rows(
+    text: &str,
+    content_width: u16,
+) -> impl Iterator<Item = (usize, &str, bool)> {
+    let width = content_width.max(1) as usize;
+    text.split('\n')
+        .scan(0, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            Some((start, line))
+        })
+        .flat_map(move |(line_start, line)| {
+            let mut remaining = line;
+            let mut consumed = 0;
+            let mut empty = line.is_empty();
+            std::iter::from_fn(move || {
+                if empty {
+                    empty = false;
+                    return Some((line_start, line, true));
+                }
+                if remaining.is_empty() {
+                    return None;
+                }
+                let mut end = 0;
+                let mut columns = 0;
+                for grapheme in remaining.graphemes(true) {
+                    let grapheme_width = unicode_width::UnicodeWidthStr::width(grapheme);
+                    if end > 0 && grapheme_width > 0 && columns + grapheme_width > width {
+                        break;
+                    }
+                    columns += grapheme_width;
+                    end += grapheme.len();
+                }
+                let row = (line_start + consumed, &remaining[..end], consumed == 0);
+                remaining = &remaining[end..];
+                consumed += end;
+                Some(row)
+            })
+        })
 }
