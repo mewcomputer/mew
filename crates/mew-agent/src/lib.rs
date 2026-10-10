@@ -112,6 +112,13 @@ pub enum AgentEvent {
         questions: Vec<AskUserQuestion>,
         tx: oneshot::Sender<Vec<String>>,
     },
+    /// A child question routed through the parent conversation.
+    SubagentAskUser {
+        source: SubagentQuestionSource,
+        call_id: String,
+        questions: Vec<AskUserQuestion>,
+        tx: oneshot::Sender<Vec<String>>,
+    },
     /// The session's todo list changed (or is being reported). Carries the
     /// full current snapshot so the TUI can render the sidebar pane without
     /// reaching into agent state.
@@ -237,6 +244,17 @@ impl std::fmt::Debug for AgentEvent {
                 call_id, questions, ..
             } => f
                 .debug_struct("AskUser")
+                .field("call_id", call_id)
+                .field("questions", questions)
+                .finish(),
+            AgentEvent::SubagentAskUser {
+                source,
+                call_id,
+                questions,
+                ..
+            } => f
+                .debug_struct("SubagentAskUser")
+                .field("source", source)
                 .field("call_id", call_id)
                 .field("questions", questions)
                 .finish(),

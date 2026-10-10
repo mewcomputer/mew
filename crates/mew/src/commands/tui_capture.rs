@@ -20,7 +20,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
-use mew_protocol::ServerMessage;
 use mew_tui::harness::{Backend, Harness};
 
 /// Run the tui-capture command.
@@ -235,12 +234,10 @@ fn print_frame_harness(harness: &mut Harness, screenshot_dir: Option<&Path>, fra
 
 /// Headless capture backend connected to a real mew daemon.
 pub(crate) struct DaemonBackend {
-    client: Arc<mew_daemon::DaemonClient>,
+    client: Arc<crate::runtime::client::TuiClient>,
     app: mew_tui::App,
     terminal: Terminal<TestBackend>,
-    event_loop: mew_tui::EventLoop,
-    event_rx: tokio::sync::mpsc::Receiver<mew_tui::Event>,
-    notify_rx: tokio::sync::mpsc::Receiver<ServerMessage>,
+    updates: tokio::sync::mpsc::UnboundedReceiver<crate::runtime::client::ClientUpdate>,
     frames: Vec<tiny_skia::Pixmap>,
     recording: bool,
     rasterizer: mew_raster::Rasterizer,
@@ -250,23 +247,50 @@ impl DaemonBackend {
     /// Connect to a daemon, create a session, and prepare a headless TUI.
     pub(crate) async fn connect(url: &str, width: u16, height: u16) -> Result<Self> {
         info!(url, width, height, "connecting to daemon");
-        let (client, mut notify_rx) = mew_daemon::DaemonClient::connect(url).await?;
-        let client = Arc::new(client);
+        let (client, mut updates) = crate::runtime::client::TuiClient::connect(url).await?;
         info!("creating daemon session");
-        client.new_session().await?;
-
-        // Wait for the daemon to assign a session ID and report the active
-        // model/provider so the status bar reflects the real backend.
-        info!("waiting for SessionReady");
-        let (session_id, model, provider) =
-            wait_for_session_ready(&mut notify_rx, Duration::from_secs(5)).await?;
-        info!(%session_id, ?model, ?provider, "session ready");
+        client
+            .send(mew_protocol::ClientMessage::NewSession {
+                cwd: Some(
+                    std::env::current_dir()
+                        .context("resolve terminal workspace")?
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                client_kind: mew_protocol::ClientKind::Tui,
+            })
+            .await?;
 
         let mut app = mew_tui::App::new();
         app.daemon_mode = true;
-        app.status.session_id = session_id;
-        app.status.model = model.unwrap_or_else(|| "daemon".to_string());
-        app.status.provider = provider.unwrap_or_else(|| "mewd".to_string());
+        app.attaching_session = true;
+        // Read all ordered startup updates while waiting for the confirmed owner.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let update = tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                updates.recv(),
+            )
+            .await
+            .context("daemon did not confirm the capture session within 5s")?
+            .context("client driver stopped before confirming the capture session")?;
+            let ready = update
+                .events
+                .iter()
+                .any(|event| matches!(event, mew_client_core::ClientEvent::SessionReady { .. }));
+            app.apply_client_update(
+                &update.events,
+                &update.state,
+                update.changed_message.as_ref(),
+            );
+            if let Some((request_id, event)) = update.required_action {
+                app.handle_daemon_required_action(request_id, event);
+            }
+            if ready {
+                break;
+            }
+        }
+        info!(session_id=%app.status.session_id,"session ready");
 
         let state = mew_config::load_state().unwrap_or_default();
         let cfg = mew_config::load().unwrap_or_default();
@@ -280,19 +304,48 @@ impl DaemonBackend {
         debug!(theme = %app.theme.name, "loaded theme");
 
         // Populate the sidebar session rail.
-        client.list_sessions().await?;
+        client
+            .send(mew_protocol::ClientMessage::ListSessions {})
+            .await?;
+        client
+            .send(mew_protocol::ClientMessage::ListModels {})
+            .await?;
+        let mut listed = false;
+        let mut modeled = false;
+        while !listed || !modeled {
+            let update = tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                updates.recv(),
+            )
+            .await
+            .context("daemon capture metadata did not arrive within 5s")?
+            .context("client driver stopped during capture startup")?;
+            listed |= update
+                .events
+                .iter()
+                .any(|event| matches!(event, mew_client_core::ClientEvent::SessionListChanged));
+            modeled |= update
+                .events
+                .iter()
+                .any(|event| matches!(event, mew_client_core::ClientEvent::ModelListChanged));
+            app.apply_client_update(
+                &update.events,
+                &update.state,
+                update.changed_message.as_ref(),
+            );
+            if let Some((request_id, event)) = update.required_action {
+                app.handle_daemon_required_action(request_id, event);
+            }
+        }
 
         let terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
-        let (event_loop, event_rx) = mew_tui::EventLoop::new();
         info!("daemon backend ready");
 
         Ok(Self {
             client,
             app,
             terminal,
-            event_loop,
-            event_rx,
-            notify_rx,
+            updates,
             frames: Vec::new(),
             recording: false,
             rasterizer: mew_raster::Rasterizer::new(),
@@ -356,7 +409,7 @@ impl DaemonBackend {
     /// While streaming, capture at 60fps. Captures one final frame after
     /// streaming ends so subsequent `pause` verbs hold the completed response.
     pub(crate) async fn wait_turn(&mut self, timeout_ms: u64) -> Result<()> {
-        // Match the real TUI's streaming drain limit: process agent events in
+        // Match the real TUI's streaming drain limit: process client updates in
         // small batches so text/reasoning appears incrementally instead of
         // jumping straight to the final state when a burst of deltas arrives.
         const STREAMING_DRAIN_LIMIT: u32 = 4;
@@ -373,44 +426,21 @@ impl DaemonBackend {
         while self.app.streaming {
             let mut had_event = false;
             let mut agent_count = 0u32;
-            loop {
-                match self.event_rx.try_recv() {
-                    Ok(mew_tui::Event::Agent(ev)) => {
-                        trace!(
-                            variant = agent_event_name(&ev),
-                            "wait_turn: received agent event"
-                        );
-                        self.app.handle_agent_event(ev);
-                        had_event = true;
-                        agent_count += 1;
-                        total_agent_events += 1;
-                        if self.app.streaming && agent_count >= STREAMING_DRAIN_LIMIT {
-                            break;
-                        }
-                    }
-                    Ok(mew_tui::Event::TurnFinished) => {
-                        self.app.finish_turn();
-                        had_event = true;
-                    }
-                    Ok(mew_tui::Event::Tick) => {
-                        self.app.tick();
-                        self.app.clear_expired_alerts();
-                        had_event = true;
-                    }
-                    Ok(mew_tui::Event::Input(_) | mew_tui::Event::Quit) => {}
-                    Err(_) => break,
-                }
-            }
-            while let Ok(msg) = self.notify_rx.try_recv() {
-                trace!(
-                    msg_type = server_message_type(&msg),
-                    "wait_turn: received server message"
+            while let Ok(update) = self.updates.try_recv() {
+                self.app.apply_client_update(
+                    &update.events,
+                    &update.state,
+                    update.changed_message.as_ref(),
                 );
-                self.app.apply_daemon_notification(&msg);
-                if let Some((request_id, event)) = self.client.take_required_action(&msg) {
+                if let Some((request_id, event)) = update.required_action {
                     self.app.handle_daemon_required_action(request_id, event);
                 }
                 had_event = true;
+                agent_count += 1;
+                total_agent_events += 1;
+                if self.app.streaming && agent_count >= STREAMING_DRAIN_LIMIT {
+                    break;
+                }
             }
 
             let now = Instant::now();
@@ -476,26 +506,29 @@ impl DaemonBackend {
     }
 
     fn poll_events(&mut self) {
-        while let Ok(event) = self.event_rx.try_recv() {
-            match event {
-                mew_tui::Event::Agent(ev) => self.app.handle_agent_event(ev),
-                mew_tui::Event::TurnFinished => self.app.finish_turn(),
-                mew_tui::Event::Tick => {
-                    self.app.tick();
-                    self.app.clear_expired_alerts();
-                }
-                mew_tui::Event::Input(_) | mew_tui::Event::Quit => {}
-            }
-        }
-        while let Ok(msg) = self.notify_rx.try_recv() {
-            self.app.apply_daemon_notification(&msg);
-            if let Some((request_id, event)) = self.client.take_required_action(&msg) {
+        while let Ok(update) = self.updates.try_recv() {
+            self.app.apply_client_update(
+                &update.events,
+                &update.state,
+                update.changed_message.as_ref(),
+            );
+            if let Some((request_id, event)) = update.required_action {
                 self.app.handle_daemon_required_action(request_id, event);
             }
         }
     }
 
     async fn refresh_activity(&mut self) {
+        if self.app.pending_queued_send {
+            self.app.pending_queued_send = false;
+            if let Some(text) = self.app.pop_queued_message() {
+                self.dispatch_action(mew_tui::events::Action::SubmitQueued {
+                    session_id: self.app.status.session_id.clone(),
+                    text,
+                })
+                .await;
+            }
+        }
         if let Some(action) = self.app.take_activity_request(Instant::now()) {
             self.dispatch_action(action).await;
         }
@@ -511,7 +544,6 @@ impl DaemonBackend {
         let mut cx = crate::runtime::Ctx {
             app: &mut self.app,
             target: &mut target,
-            event_loop: &self.event_loop,
             should_break: &mut should_break,
             cat: None,
             loaded_personas: &[],
@@ -531,34 +563,6 @@ impl DaemonBackend {
             .rasterize(buf, &mew_raster::RasterOptions::default());
         trace!(frame = self.frames.len(), "captured frame");
         self.frames.push(pixmap);
-    }
-}
-
-async fn wait_for_session_ready(
-    notify_rx: &mut tokio::sync::mpsc::Receiver<ServerMessage>,
-    timeout: Duration,
-) -> Result<(String, Option<String>, Option<String>)> {
-    let deadline = Instant::now() + timeout;
-    debug!(?timeout, "waiting for SessionReady");
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, notify_rx.recv()).await {
-            Ok(Some(ServerMessage::SessionReady {
-                session_id,
-                model,
-                provider,
-                ..
-            })) => {
-                debug!(%session_id, ?model, ?provider, "received SessionReady");
-                return Ok((session_id, model, provider));
-            }
-            Ok(Some(other)) => {
-                trace!(?other, "ignoring non-SessionReady message while waiting");
-                continue;
-            }
-            Ok(None) => bail!("daemon notification channel closed before SessionReady"),
-            Err(_) => bail!("daemon did not send SessionReady within {:?}", timeout),
-        }
     }
 }
 
@@ -1123,113 +1127,6 @@ fn parse_quoted(s: &str) -> Option<&str> {
         Some(&s[1..s.len() - 1])
     } else {
         None
-    }
-}
-
-/// Human-readable name for an `AgentEvent` variant (no sensitive payload).
-fn agent_event_name(ev: &mew_agent::AgentEvent) -> &'static str {
-    match ev {
-        mew_agent::AgentEvent::Provider(_) => "Provider",
-        mew_agent::AgentEvent::PermissionRequest { .. } => "PermissionRequest",
-        mew_agent::AgentEvent::ToolStart { .. } => "ToolStart",
-        mew_agent::AgentEvent::ToolEnd { .. } => "ToolEnd",
-        mew_agent::AgentEvent::PartUpdated { .. } => "PartUpdated",
-        mew_agent::AgentEvent::ToolProgress { .. } => "ToolProgress",
-        mew_agent::AgentEvent::Error(_) => "Error",
-        mew_agent::AgentEvent::WorkspacePermissionRequest { .. } => "WorkspacePermissionRequest",
-        mew_agent::AgentEvent::SubagentStart { .. } => "SubagentStart",
-        mew_agent::AgentEvent::SubagentProgress { .. } => "SubagentProgress",
-        mew_agent::AgentEvent::SubagentStatus { .. } => "SubagentStatus",
-        mew_agent::AgentEvent::SubagentEnd { .. } => "SubagentEnd",
-        mew_agent::AgentEvent::SubagentPermissionRequest { .. } => "SubagentPermissionRequest",
-        mew_agent::AgentEvent::AskUser { .. } => "AskUser",
-        mew_agent::AgentEvent::TodosUpdated { .. } => "TodosUpdated",
-        mew_agent::AgentEvent::JobUpdate { .. } => "JobUpdate",
-        mew_agent::AgentEvent::FileDelta { .. } => "FileDelta",
-        mew_agent::AgentEvent::FlaggedFilesChanged { .. } => "FlaggedFilesChanged",
-        mew_agent::AgentEvent::GoalProposed { .. } => "GoalProposed",
-    }
-}
-
-/// Human-readable type name for a `ServerMessage` variant (no payload).
-fn server_message_type(msg: &mew_protocol::ServerMessage) -> &'static str {
-    match msg {
-        mew_protocol::ServerMessage::PromptReceipt { .. } => "PromptReceipt",
-        mew_protocol::ServerMessage::SessionActivitySnapshot { .. } => "SessionActivitySnapshot",
-        mew_protocol::ServerMessage::TodoUpdated { .. } => "TodoUpdated",
-        mew_protocol::ServerMessage::TodoUpdateError { .. } => "TodoUpdateError",
-        // Remote authentication is a daemon/web concern; the standalone TUI
-        // never renders this handshake acknowledgement.
-        mew_protocol::ServerMessage::RemoteReady { .. } => "RemoteReady",
-        mew_protocol::ServerMessage::SessionReady { .. } => "SessionReady",
-        mew_protocol::ServerMessage::Error { .. } => "Error",
-        mew_protocol::ServerMessage::Provider { .. } => "Provider",
-        mew_protocol::ServerMessage::UserMessage { .. } => "UserMessage",
-        mew_protocol::ServerMessage::ToolStart { .. } => "ToolStart",
-        mew_protocol::ServerMessage::ToolEnd { .. } => "ToolEnd",
-        mew_protocol::ServerMessage::PartUpdated { .. } => "PartUpdated",
-        mew_protocol::ServerMessage::ToolProgress { .. } => "ToolProgress",
-        mew_protocol::ServerMessage::ErrorEvent { .. } => "ErrorEvent",
-        mew_protocol::ServerMessage::PermissionRequest { .. } => "PermissionRequest",
-        mew_protocol::ServerMessage::WorkspacePermissionRequest { .. } => {
-            "WorkspacePermissionRequest"
-        }
-        mew_protocol::ServerMessage::AskUserRequest { .. } => "AskUserRequest",
-        mew_protocol::ServerMessage::GoalProposed { .. } => "GoalProposed",
-        mew_protocol::ServerMessage::SubagentHistory { .. } => "SubagentHistory",
-        mew_protocol::ServerMessage::SubagentStart { .. } => "SubagentStart",
-        mew_protocol::ServerMessage::SubagentStatus { .. } => "SubagentStatus",
-        mew_protocol::ServerMessage::SubagentEnd { .. } => "SubagentEnd",
-        mew_protocol::ServerMessage::SubagentPermissionRequest { .. } => {
-            "SubagentPermissionRequest"
-        }
-        mew_protocol::ServerMessage::TodosUpdated { .. } => "TodosUpdated",
-        mew_protocol::ServerMessage::JobUpdate { .. } => "JobUpdate",
-        mew_protocol::ServerMessage::SessionList { .. } => "SessionList",
-        mew_protocol::ServerMessage::SessionHistory { .. } => "SessionHistory",
-        mew_protocol::ServerMessage::SessionHistoryPage { .. } => "SessionHistoryPage",
-        mew_protocol::ServerMessage::SessionTitleChanged { .. } => "SessionTitleChanged",
-        mew_protocol::ServerMessage::SessionSummaryChanged { .. } => "SessionSummaryChanged",
-        mew_protocol::ServerMessage::SessionAlert { .. } => "SessionAlert",
-        mew_protocol::ServerMessage::ModelSwitched { .. } => "ModelSwitched",
-        mew_protocol::ServerMessage::ThinkingVariantChanged { .. } => "ThinkingVariantChanged",
-        mew_protocol::ServerMessage::PermissionModeChanged { .. } => "PermissionModeChanged",
-        mew_protocol::ServerMessage::SessionMetaChanged { .. } => "SessionMetaChanged",
-        mew_protocol::ServerMessage::FlaggedFilesChanged { .. } => "FlaggedFilesChanged",
-        mew_protocol::ServerMessage::SessionActivityChanged { .. } => "SessionActivityChanged",
-        mew_protocol::ServerMessage::SessionStatsChanged { .. } => "SessionStatsChanged",
-        mew_protocol::ServerMessage::SessionUsageChanged { .. } => "SessionUsageChanged",
-        mew_protocol::ServerMessage::SessionAttentionChanged { .. } => "SessionAttentionChanged",
-        mew_protocol::ServerMessage::ModelList { .. } => "ModelList",
-        mew_protocol::ServerMessage::Pong { .. } => "Pong",
-        mew_protocol::ServerMessage::PersonaList { .. } => "PersonaList",
-        mew_protocol::ServerMessage::PersonaSwitched { .. } => "PersonaSwitched",
-        mew_protocol::ServerMessage::ProjectList { .. } => "ProjectList",
-        mew_protocol::ServerMessage::BrowserSnapshot { .. } => "BrowserSnapshot",
-        mew_protocol::ServerMessage::BrowserScreenshot { .. } => "BrowserScreenshot",
-        mew_protocol::ServerMessage::BrowserState { .. } => "BrowserState",
-        mew_protocol::ServerMessage::BrowserPageRegistration { .. } => "BrowserPageRegistration",
-        mew_protocol::ServerMessage::BrowserError { .. } => "BrowserError",
-        mew_protocol::ServerMessage::GroupList { .. } => "GroupList",
-        mew_protocol::ServerMessage::GroupsChanged { .. } => "GroupsChanged",
-        mew_protocol::ServerMessage::DirListing { .. } => "DirListing",
-        // Folder browsing is a web/desktop concern and has no TUI state.
-        mew_protocol::ServerMessage::FilesystemDirListing { .. } => "FilesystemDirListing",
-        mew_protocol::ServerMessage::FilePreview { .. } => "FilePreview",
-        mew_protocol::ServerMessage::GitStatusResult { .. } => "GitStatusResult",
-        mew_protocol::ServerMessage::FsChanged { .. } => "FsChanged",
-        mew_protocol::ServerMessage::SessionDiff { .. } => "SessionDiff",
-        mew_protocol::ServerMessage::SessionDiffError { .. } => "SessionDiffError",
-        mew_protocol::ServerMessage::SlashResult { .. } => "SlashResult",
-        mew_protocol::ServerMessage::RequestResolved { .. } => "RequestResolved",
-        mew_protocol::ServerMessage::SessionCleared => "SessionCleared",
-        mew_protocol::ServerMessage::ClientAttached { .. } => "ClientAttached",
-        mew_protocol::ServerMessage::ClientDetached { .. } => "ClientDetached",
-        mew_protocol::ServerMessage::ControlYielded { .. } => "ControlYielded",
-        mew_protocol::ServerMessage::TerminalOpened { .. } => "TerminalOpened",
-        mew_protocol::ServerMessage::TerminalOutput { .. } => "TerminalOutput",
-        mew_protocol::ServerMessage::TerminalExited { .. } => "TerminalExited",
-        mew_protocol::ServerMessage::TerminalError { .. } => "TerminalError",
     }
 }
 

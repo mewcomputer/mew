@@ -504,6 +504,15 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
         }
         return None;
     }
+    if matches!(
+        app.mode,
+        crate::app::Mode::Normal | crate::app::Mode::SlashCommand
+    ) && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        && app.bell_area.contains((mouse.column, mouse.row).into())
+    {
+        app.open_attention_picker();
+        return None;
+    }
     let inline_picker = app.mode == crate::app::Mode::CommandPalette
         && app
             .picker
@@ -639,6 +648,11 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
                     .find(|(row, _)| *row == mouse.row)
                 {
                     match item.clone() {
+                        crate::app::SidebarItem::Sessions => app.open_session_picker(),
+                        crate::app::SidebarItem::Attention => app.open_attention_picker(),
+                        crate::app::SidebarItem::Session(id) => {
+                            return Some(Action::AttachSession(id))
+                        }
                         crate::app::SidebarItem::Todo(id) => app.open_todos(Some(id)),
                         crate::app::SidebarItem::Subagent(id) => app.open_subagent(id),
                         crate::app::SidebarItem::Job(id) => app.open_job(id),
@@ -1226,9 +1240,22 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
 }
 
 fn cancel_user_question(app: &mut crate::app::App) -> Option<Action> {
-    let cancel_daemon_turn = app.daemon_request_id.is_some();
+    let action = app.daemon_request_id.as_ref().map(|request_id| {
+        if app
+            .user_question
+            .as_ref()
+            .is_some_and(|question| question.subagent.is_some())
+        {
+            Action::CloseQuestion {
+                session_id: app.status.session_id.clone(),
+                request_id: request_id.clone(),
+            }
+        } else {
+            Action::Cancel
+        }
+    });
     app.cancel_user_question();
-    cancel_daemon_turn.then_some(Action::Cancel)
+    action
 }
 
 fn confirm_user_question(app: &mut crate::app::App) -> Option<Action> {
@@ -1339,6 +1366,10 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
 
     // Global shortcuts.
     match key.code {
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.open_attention_picker();
+            return None;
+        }
         KeyCode::Esc => {
             // If there's an active selection, clear it on Esc.
             if app.sel_anchor_row.is_some() {
@@ -1441,7 +1472,10 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         // of waiting for the turn to end (the Up-Up fallback).
         KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if let Some(text) = app.pop_queued_message() {
-                return Some(Action::GuideQueued(text));
+                return Some(Action::GuideQueued {
+                    session_id: app.status.session_id.clone(),
+                    text,
+                });
             }
             return None;
         }
@@ -1675,7 +1709,10 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     if count >= 2 {
                         app.up_press = None;
                         if let Some(text) = app.pop_queued_message() {
-                            return Some(Action::SendQueuedNow(text));
+                            return Some(Action::SendQueuedNow {
+                                session_id: app.status.session_id.clone(),
+                                text,
+                            });
                         }
                     } else {
                         app.up_press = Some((count, std::time::Instant::now()));
@@ -1909,6 +1946,17 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         }
     }
 
+    if key.code == KeyCode::Tab
+        && app.picker.as_ref().is_some_and(|picker| {
+            matches!(
+                picker.kind.as_str(),
+                "session" | "session_attention" | "session_archived"
+            )
+        })
+    {
+        app.toggle_session_picker_archive();
+        return None;
+    }
     // Ctrl+P in the thinking variant picker cycles to the next variant.
     if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
         if let Some(ref mut picker) = app.picker {
@@ -1920,7 +1968,10 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 if let Some(variant) = item {
                     return Some(Action::SetThinkingVariant(variant));
                 }
-            } else if picker.kind == "session" {
+            } else if matches!(
+                picker.kind.as_str(),
+                "session" | "session_attention" | "session_archived"
+            ) {
                 // ^P toggles pinned on the highlighted session row.
                 let id = picker.selected_item().map(|i| i.id.clone());
                 if let Some(id) = id {
@@ -1933,7 +1984,10 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
     // ^A in the session picker toggles archived on the highlighted row.
     if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
         if let Some(ref picker) = app.picker {
-            if picker.kind == "session" {
+            if matches!(
+                picker.kind.as_str(),
+                "session" | "session_attention" | "session_archived"
+            ) {
                 let id = picker.selected_item().map(|i| i.id.clone());
                 if let Some(id) = id {
                     return Some(Action::ToggleSessionArchived(id));
@@ -1993,7 +2047,10 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     mew_hooks::PermissionMode::from_id(&id).map(Action::SetPermissionMode)
                 } else if kind == "at" {
                     at_mention_action(&label)
-                } else if kind == "session" {
+                } else if matches!(
+                    kind.as_str(),
+                    "session" | "session_attention" | "session_archived"
+                ) {
                     Some(Action::AttachSession(id))
                 } else if kind == "project" {
                     Some(Action::NewSessionInProject(id))
@@ -2126,6 +2183,10 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
 /// High-level actions produced by input handling.
 #[derive(Debug, Clone, strum::EnumIter)]
 pub enum Action {
+    CloseQuestion {
+        session_id: String,
+        request_id: String,
+    },
     ReadSubagentHistory {
         session_id: String,
         child_session_id: String,
@@ -2137,6 +2198,8 @@ pub enum Action {
     },
     /// Submit a user message.
     Submit(String),
+    /// Submit a queued follow-up owned by the confirmed conversation.
+    SubmitQueued { session_id: String, text: String },
     /// Execute a slash command.
     SlashCommand(String),
     /// Cancel the current streaming turn.
@@ -2180,11 +2243,11 @@ pub enum Action {
     AttachSession(String),
     /// Cancel the current turn and immediately submit the given text as a
     /// new turn. Fires from Up-Up when there are queued messages.
-    SendQueuedNow(String),
+    SendQueuedNow { session_id: String, text: String },
     /// Inject the given text as guidance into the running turn's *next*
     /// provider request (even a tool-call continuation), without cancelling.
     /// Fires from Ctrl+Up when there are queued messages.
-    GuideQueued(String),
+    GuideQueued { session_id: String, text: String },
     /// Paste image data from the system clipboard (Ctrl+Shift+V). If the
     /// clipboard contains a PNG image, it is saved to a temp file and
     /// inserted as an @-mention so the existing image attachment pipeline

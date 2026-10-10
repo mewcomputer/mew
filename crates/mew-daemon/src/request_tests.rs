@@ -720,6 +720,176 @@ async fn delayed_todo_events_publish_canonical_state_instead_of_old_snapshots() 
     assert_eq!(todos[0].status, "blocked");
 }
 
+#[tokio::test]
+async fn child_question_replays_and_resolves_only_its_original_channel() {
+    for mode in 0..3 {
+        let cancelled = mode != 0;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        let mut script = mew_provider_fake::FakeProvider::tool_call(
+            "ask_user_question",
+            "child-ask",
+            serde_json::json!({
+                "questions": [{"prompt":"which file?", "options":[{"label":"source", "description":"implementation"}, {"label":"test", "description":"regression"}]}]
+            }),
+        );
+        script.pop();
+        script.extend(mew_provider_fake::FakeProvider::tool_call(
+            "exit_tool",
+            "child-exit",
+            serde_json::json!({"final_answer":"child done"}),
+        ));
+        let child_provider = Arc::new(mew_provider_fake::FakeProvider::new(script));
+        let runner = Arc::new(
+            mew_agent::runner::SimpleRunner::new(
+                child_provider,
+                vec![Arc::new(mew_tools::tools::exit_tool::ExitTool)],
+                Arc::new(mew_hooks::NopDispatcher),
+            )
+            .with_session_root(root.clone()),
+        );
+        let server = DaemonServer::with_session_dir(
+            Arc::new(move |params| {
+                let mut agent = Agent::new(
+                    Arc::new(mew_provider_fake::FakeProvider::new(vec![])),
+                    Arc::new(mew_hooks::NopDispatcher),
+                    Some(params.writer),
+                    vec![],
+                    None,
+                );
+                agent.subagent_defs = vec![mew_subagents::SubagentDef {
+                    name: "worker".into(),
+                    description: "worker".into(),
+                    model: None,
+                    tools: None,
+                    max_turns: Some(10),
+                    max_duration_secs: Some(60),
+                    body: String::new(),
+                    path: PathBuf::new(),
+                    template: false,
+                    can_spawn: false,
+                    output_schema: None,
+                }];
+                agent.subagent_runner = Some(runner.clone());
+                Ok((agent, None, None))
+            }),
+            root.clone(),
+        );
+        let session = server.session_manager.create(None).await.unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = session
+            .agent
+            .lock()
+            .await
+            .start_subagent("worker", "ask", None, None, &tx)
+            .await
+            .unwrap();
+        let request = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let event = rx.recv().await.unwrap();
+                if matches!(event, AgentEvent::SubagentAskUser { .. }) {
+                    break publish(&server, &session, event)
+                        .await
+                        .into_iter()
+                        .find(|message| request_id(message).is_some())
+                        .unwrap();
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let ServerMessage::AskUserRequest {
+            subagent: Some(source),
+            questions,
+            ..
+        } = &request
+        else {
+            panic!("missing child identity: {request:?}");
+        };
+        assert_eq!(source.parent_call_id, task);
+        assert_eq!(source.name, "worker");
+        assert_eq!(questions[0].options[1].description, "regression");
+        let child_id = source.child_session_id.clone();
+        let (parent_tx, mut parent_rx) = oneshot::channel();
+        publish(
+            &server,
+            &session,
+            AgentEvent::AskUser {
+                call_id: "parent-ask".into(),
+                questions: vec![mew_agent::AskUserQuestion {
+                    prompt: "parent?".into(),
+                    options: vec![],
+                }],
+                tx: parent_tx,
+            },
+        )
+        .await;
+        let mut socket = connect(&server).await;
+        send(
+            &mut socket,
+            ClientMessage::AttachSession {
+                session_id: session.id.clone(),
+                client_kind: ClientKind::Tui,
+            },
+        )
+        .await;
+        let replay = flush(&mut socket).await;
+        assert!(replay
+            .iter()
+            .any(|message| serde_json::to_value(message).unwrap()
+                == serde_json::to_value(&request).unwrap()));
+        let id = request_id(&request).unwrap().to_owned();
+        if mode == 2 {
+            assert!(session.agent.lock().await.cancel_subagent(&task).await);
+        } else {
+            send(
+                &mut socket,
+                ClientMessage::AskUserResponse {
+                    request_id: id.clone(),
+                    answers: vec!["test".into()],
+                    cancelled,
+                },
+            )
+            .await;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = rx.recv().await {
+                if matches!(event, AgentEvent::SubagentEnd { .. }) {
+                    publish(&server, &session, event).await;
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let resolved = flush(&mut socket).await;
+        assert!(resolved.iter().any(|message| matches!(message, ServerMessage::RequestResolved { request_id } if request_id == &id)), "missing resolution for mode {mode}: {resolved:?}");
+        assert_eq!(session.pending_questions_count().await, 1);
+        assert!(matches!(
+            parent_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        let parent_id = session.agent.lock().await.session_id.to_string();
+        let messages = mew_session::Reader::load_subagent_from(&root, &parent_id, &child_id)
+            .await
+            .unwrap();
+        assert!(messages
+            .iter()
+            .flat_map(|message| &message.parts)
+            .any(|part| match part {
+                mew_message::Part::ToolCall(call) if call.call_id == "child-ask" =>
+                    match &call.state {
+                        mew_message::ToolState::Completed(state) =>
+                            !cancelled && state.output.contains("A (selected): test"),
+                        mew_message::ToolState::Error(state) =>
+                            cancelled && state.error.contains("cancelled"),
+                        _ => false,
+                    },
+                _ => false,
+            }));
+    }
+}
+
 async fn receipt(
     socket: &mut TestSocket,
     request: &str,

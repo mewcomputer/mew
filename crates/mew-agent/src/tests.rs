@@ -3843,6 +3843,85 @@ async fn subagent_start_preserves_child_progress_text_and_tool_events() {
 }
 
 #[tokio::test]
+async fn subagent_question_reaches_parent_and_preserves_answer_in_child_history() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (agent, _) = subagent_with_real_runner(
+        tmp.path(),
+        vec![
+            FakeProvider::tool_call(
+                "ask_user_question",
+                "child-question",
+                serde_json::json!({
+                    "questions": [{"prompt": "which file?", "options": [
+                        {"label": "source", "description": "implementation file"},
+                        {"label": "test", "description": "regression file"}
+                    ]}]
+                }),
+            ),
+            FakeProvider::text_response("finished"),
+        ],
+        vec![],
+        tmp.path().to_path_buf(),
+        vec![],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let task = agent
+        .start_subagent("worker", "ask before editing", None, None, &tx)
+        .await
+        .unwrap();
+    let mut child_id = None;
+    let mut asked = false;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::SubagentStart {
+                    child_session_id, ..
+                } => child_id = Some(child_session_id),
+                AgentEvent::SubagentAskUser {
+                    source,
+                    call_id,
+                    questions,
+                    tx,
+                } => {
+                    assert_eq!(source.parent_call_id, task);
+                    assert_eq!(source.child_session_id, *child_id.as_ref().unwrap());
+                    assert_eq!(source.name, "worker");
+                    assert!(source.display_name.is_some());
+                    assert_eq!(call_id, "child-question");
+                    assert_eq!(questions[0].options[1].description, "regression file");
+                    assert_eq!(questions[0].prompt, "which file?");
+                    asked = true;
+                    tx.send(vec!["test".into()]).unwrap();
+                }
+                AgentEvent::SubagentEnd { parent_call_id, .. } => {
+                    assert_eq!(parent_call_id, task);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        asked,
+        "child question was dropped before reaching the parent"
+    );
+    let messages = mew_session::Reader::load_subagent_from(
+        tmp.path(),
+        &agent.session_id.to_string(),
+        &child_id.unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(
+        part, mew_message::Part::ToolCall(call) if matches!(
+            &call.state, mew_message::ToolState::Completed(state) if state.output.contains("A (selected): test")
+        )
+    )), "answer did not reach the real child tool");
+}
+
+#[tokio::test]
 async fn subagent_start_permission_reply_controls_real_child_file_write() {
     for decision in [
         mew_hooks::PermissionDecision::AllowOnce,
@@ -4543,6 +4622,69 @@ async fn test_collected_task_removed_from_registry_file() {
         .unwrap();
     assert_eq!(records.len(), 1);
     assert_ne!(records[0].task_id, id_a);
+}
+
+#[tokio::test]
+async fn cancelling_a_child_waiting_for_input_closes_the_question_and_persists_cancellation() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut script = FakeProvider::tool_call(
+        "ask_user_question",
+        "cancelled-ask",
+        serde_json::json!({"questions":[{"prompt":"continue?","options":[]}]}),
+    );
+    script.pop();
+    script.extend(FakeProvider::tool_call(
+        "write",
+        "after-question",
+        serde_json::json!({"path":"should-not-exist.txt","content":"unexpected"}),
+    ));
+    let (agent, _) = subagent_with_real_runner(
+        tmp.path(),
+        vec![script],
+        vec![Arc::new(mew_tools::tools::write::Write)],
+        tmp.path().to_path_buf(),
+        vec![tmp.path().to_path_buf()],
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let task = agent
+        .start_subagent("worker", "ask", None, None, &tx)
+        .await
+        .unwrap();
+    let (source, question_tx) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let AgentEvent::SubagentAskUser { source, tx, .. } = rx.recv().await.unwrap() {
+                break (source, tx);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(agent.cancel_subagent(&task).await);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while let Some(event) = rx.recv().await {
+            if let AgentEvent::SubagentEnd { outcome, .. } = event {
+                assert!(matches!(outcome, mew_subagents::SubagentOutcome::Cancelled));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("pending child question ignored task cancellation");
+    assert!(
+        question_tx.is_closed(),
+        "cancelled child still waits for an answer"
+    );
+    assert!(!tmp.path().join("should-not-exist.txt").exists());
+    let messages = mew_session::Reader::load_subagent_from(
+        tmp.path(),
+        &agent.session_id.to_string(),
+        &source.child_session_id,
+    )
+    .await
+    .unwrap();
+    assert!(messages.iter().flat_map(|message| &message.parts).any(|part| matches!(
+        part, mew_message::Part::ToolCall(call) if matches!(&call.state, mew_message::ToolState::Error(state) if state.error.contains("cancelled"))
+    )), "cancelled tool state must be durable before the child finishes");
 }
 
 #[tokio::test]

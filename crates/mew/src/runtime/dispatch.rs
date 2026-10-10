@@ -33,7 +33,6 @@ pub enum Flow {
 pub struct Ctx<'a, T: CommandTarget> {
     pub app: &'a mut mew_tui::App,
     pub target: &'a mut T,
-    pub event_loop: &'a mew_tui::EventLoop,
     pub should_break: &'a mut bool,
     pub cat: Option<&'a Catalog>,
     pub loaded_personas: &'a [mew_personas::Persona],
@@ -49,6 +48,18 @@ pub struct Ctx<'a, T: CommandTarget> {
 /// always maintained.
 pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action) -> Flow {
     match action {
+        Action::CloseQuestion {
+            session_id,
+            request_id,
+        } => {
+            if session_id != cx.app.status.session_id || cx.app.attaching_session {
+                cx.app
+                    .set_alert("conversation changed; reopen the question");
+            } else if let Err(error) = cx.target.close_question(&session_id, &request_id).await {
+                cx.app.set_alert(error.to_string());
+            }
+            Flow::Continue
+        }
         Action::ReadSubagentHistory {
             session_id,
             child_session_id,
@@ -85,17 +96,32 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             Flow::Continue
         }
         Action::Submit(text) => {
-            handle_submit(cx, text).await;
+            handle_submit(cx, text, false).await;
+            Flow::Continue
+        }
+        Action::SubmitQueued { session_id, text } => {
+            if session_id == cx.app.status.session_id {
+                handle_submit(cx, text, true).await;
+            } else {
+                cx.app.restore_queued_for_session(&session_id, text);
+            }
             Flow::Continue
         }
         Action::SlashCommand(text) => handle_slash_command(cx, text).await,
         Action::Cancel => {
-            cx.target.cancel().await;
+            if cx.app.attaching_session {
+                cx.app
+                    .set_alert("waiting for the conversation to be confirmed");
+                return Flow::Continue;
+            }
             // Keep `streaming` true until the turn actually ends (the turn is
             // still winding down). This is the turn-alive guard: submits in
             // this window are queued instead of racing the daemon's
             // "turn in progress" window. TurnFinished clears both flags.
-            cx.app.cancelling = true;
+            match cx.target.cancel(&cx.app.status.session_id).await {
+                Ok(()) => cx.app.cancelling = true,
+                Err(error) => cx.app.set_alert(error.to_string()),
+            }
             Flow::Continue
         }
         Action::Quit => {
@@ -182,28 +208,43 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             handle_attach_session(cx, &id).await;
             Flow::Continue
         }
-        Action::SendQueuedNow(text) => {
+        Action::SendQueuedNow { session_id, text } => {
+            if session_id != cx.app.status.session_id || cx.app.attaching_session {
+                cx.app.restore_queued_for_session(&session_id, text);
+                return Flow::Continue;
+            }
             if cx.app.streaming {
                 // Prioritize this message, but wait for cancellation to finish
                 // before opening another turn's event stream.
                 cx.app.queued_messages.insert(0, text);
                 cx.app.mark_chat_dirty();
-                cx.target.cancel().await;
-                cx.app.cancelling = true;
+                match cx.target.cancel(&session_id).await {
+                    Ok(()) => cx.app.cancelling = true,
+                    Err(error) => cx.app.set_alert(error.to_string()),
+                }
             } else {
-                handle_submit(cx, text).await;
+                handle_submit(cx, text, true).await;
             }
             Flow::Continue
         }
-        Action::GuideQueued(text) => {
+        Action::GuideQueued { session_id, text } => {
+            if session_id != cx.app.status.session_id || cx.app.attaching_session {
+                cx.app.restore_queued_for_session(&session_id, text);
+                return Flow::Continue;
+            }
             // Steer the running turn: inject the queued message as guidance
             // into its next provider request without cancelling. Show it in
             // the transcript so the user sees what was injected.
             if text.trim().is_empty() {
                 return Flow::Continue;
             }
-            cx.app.push_guidance(text.clone());
-            cx.target.guide(text).await;
+            match cx.target.guide(&session_id, text.clone()).await {
+                Ok(()) => cx.app.push_guidance(text),
+                Err(error) => {
+                    cx.app.restore_queued_for_session(&session_id, text);
+                    cx.app.set_alert(error.to_string());
+                }
+            }
             Flow::Continue
         }
         Action::PasteClipboardImage => {
@@ -211,17 +252,18 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
             Flow::Continue
         }
         Action::NewSessionInProject(path) => {
+            if cx.app.attaching_session {
+                cx.app
+                    .set_alert("waiting for the conversation to be confirmed");
+                return Flow::Continue;
+            }
+            cx.app.attaching_session = true;
             match cx.target.new_session_in(&path).await {
-                Ok(()) => {
-                    // The daemon attaches the client to the new session and
-                    // pushes its history; clear the stale display.
-                    cx.app.clear_messages();
-                    cx.app
-                        .push_synthetic_message(format!("new session in {}", path));
-                    cx.app.auto_scroll = true;
-                    cx.app.scroll = cx.app.max_scroll;
+                Ok(()) => {}
+                Err(Unsupported(reason)) => {
+                    cx.app.attaching_session = false;
+                    cx.app.set_alert(reason);
                 }
-                Err(Unsupported(reason)) => cx.app.set_alert(reason),
             }
             Flow::Continue
         }
@@ -285,19 +327,29 @@ pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action
 }
 
 /// Handle `Action::Submit` — process mentions, push user message, start the turn.
-async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String) {
+async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String, queued: bool) {
+    if cx.app.attaching_session || cx.app.submission_pending() || !cx.app.client_connected() {
+        if queued {
+            cx.app
+                .restore_queued_for_session(&cx.app.status.session_id.clone(), text);
+        }
+        cx.app
+            .set_alert("waiting for the conversation to be confirmed");
+        return;
+    }
     if cx.app.streaming {
         // Queue the message instead of rejecting it. It will be sent
         // automatically when the current turn finishes. Up-Up requests
         // cancellation and prioritizes it as the next turn.
         if !text.trim().is_empty() {
-            cx.app.queued_messages.push(text);
+            cx.app.queued_messages.push(text.clone());
+            cx.app.accept_editor_input(&text);
             cx.app.mark_chat_dirty();
         }
         return;
     }
     let text = cx.target.intercept_user_input(text).await;
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = cx.app.project_cwd();
     let (enriched, display, attachments) = process_mentions(
         &text,
         &cwd,
@@ -306,10 +358,23 @@ async fn handle_submit<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String) {
         &cx.app.subagent_catalog,
     )
     .await;
-    cx.app.push_user(display, attachments.clone());
-    cx.app.streaming = true;
-    let rx = cx.target.prompt(enriched, attachments);
-    cx.event_loop.forward_agent_events(rx);
+    let session_id = cx.app.status.session_id.clone();
+    let request_id = ulid::Ulid::new().to_string();
+    cx.app
+        .begin_submission(request_id.clone(), display, attachments.clone(), queued);
+    match cx
+        .target
+        .prompt(&session_id, &request_id, enriched, attachments)
+        .await
+    {
+        Ok(()) => cx.app.resolve_submission(
+            &session_id,
+            &request_id,
+            mew_protocol::PromptStatus::Accepted,
+            None,
+        ),
+        Err(error) => cx.app.set_alert(error.to_string()),
+    }
 }
 
 /// Handle `Action::PasteClipboardImage` — read image data from the system
@@ -365,10 +430,13 @@ async fn manage_goal<T: CommandTarget>(
 /// Handle `Action::SlashCommand` — parse and route the slash command.
 async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: String) -> Flow {
     let result = cx.app.handle_slash(&text);
+    if !matches!(result, SlashResult::Continue) {
+        cx.app.accept_editor_input(&text);
+    }
     match result {
         SlashResult::Continue => {
             // Unknown commands are normal prompts, including queue behavior.
-            handle_submit(cx, text).await;
+            handle_submit(cx, text, false).await;
             Flow::Continue
         }
         SlashResult::Quit => {
@@ -601,10 +669,8 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
             Flow::Continue
         }
         SlashResult::OpenProjectPicker => {
-            // The picker opens when the daemon's `ProjectList` response
-            // arrives on the notify channel.
             match cx.target.list_projects().await {
-                Ok(()) => {}
+                Ok(()) => cx.app.open_project_picker(),
                 Err(Unsupported(reason)) => {
                     cx.app.set_alert(reason);
                 }
@@ -887,18 +953,18 @@ async fn handle_rewind<T: CommandTarget>(cx: &mut Ctx<'_, T>, n: usize) {
 
 /// Handle `AttachSession` — daemon-mode session switching.
 async fn handle_attach_session<T: CommandTarget>(cx: &mut Ctx<'_, T>, id: &str) {
+    if cx.app.attaching_session {
+        cx.app
+            .set_alert("waiting for the conversation to be confirmed");
+        return;
+    }
+    cx.app.attaching_session = true;
     match cx.target.attach_session(id).await {
-        Ok(()) => {
-            // Clear the display — the daemon will push new messages
-            // for the attached session. Without this, the old session's
-            // messages persist and look stale.
-            cx.app.clear_messages();
-            cx.app
-                .push_synthetic_message(format!("attached to session {}", id));
-            cx.app.auto_scroll = true;
-            cx.app.scroll = cx.app.max_scroll;
+        Ok(()) => {}
+        Err(Unsupported(reason)) => {
+            cx.app.attaching_session = false;
+            cx.app.set_alert(reason);
         }
-        Err(Unsupported(reason)) => cx.app.set_alert(reason),
     }
 }
 

@@ -719,7 +719,7 @@ async fn translate_server_message(
             request_id,
             call_id,
             questions,
-            ..
+            subagent,
         } => {
             let (tx, rx) = oneshot::channel();
             state
@@ -729,6 +729,7 @@ async fn translate_server_message(
                 .insert(request_id.clone(), rx);
 
             let request_id = request_id.clone();
+            let child_question = subagent.is_some();
             let state = state.clone();
             tokio::spawn(async move {
                 let rx = {
@@ -736,11 +737,12 @@ async fn translate_server_message(
                     guard.remove(&request_id)
                 };
                 if let Some(rx) = rx {
-                    if let Ok(answers) = rx.await {
+                    let answer = rx.await;
+                    if answer.is_ok() || child_question {
                         let msg = ClientMessage::AskUserResponse {
-                            cancelled: false,
                             request_id,
-                            answers,
+                            cancelled: answer.is_err(),
+                            answers: answer.unwrap_or_default(),
                         };
                         if let Ok(json) = mew_protocol::encode_json(&msg) {
                             let _ = state.ws_out.send(json).await;
@@ -749,23 +751,33 @@ async fn translate_server_message(
                 }
             });
 
-            vec![AgentEvent::AskUser {
-                call_id: call_id.clone(),
-                questions: questions
-                    .iter()
-                    .map(|q| AskUserQuestion {
-                        prompt: q.prompt.clone(),
-                        options: q
-                            .options
-                            .iter()
-                            .map(|o| AgentQuestionOption {
-                                label: o.label.clone(),
-                                description: o.description.clone(),
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-                tx,
+            let questions = questions
+                .iter()
+                .map(|q| AskUserQuestion {
+                    prompt: q.prompt.clone(),
+                    options: q
+                        .options
+                        .iter()
+                        .map(|o| AgentQuestionOption {
+                            label: o.label.clone(),
+                            description: o.description.clone(),
+                        })
+                        .collect(),
+                })
+                .collect();
+            vec![if let Some(source) = subagent {
+                AgentEvent::SubagentAskUser {
+                    source: source.clone(),
+                    call_id: call_id.clone(),
+                    questions,
+                    tx,
+                }
+            } else {
+                AgentEvent::AskUser {
+                    call_id: call_id.clone(),
+                    questions,
+                    tx,
+                }
             }]
         }
 
@@ -1264,6 +1276,9 @@ mod tests {
                         ServerMessage::WorkspacePermissionRequest { request_id: "w".into(), path: "/elsewhere".into() },
                         ServerMessage::SubagentPermissionRequest { request_id: "s".into(), parent_call_id: "parent".into(), tool_name: "write".into(), input: serde_json::json!({}) },
                         ServerMessage::AskUserRequest { subagent: None, request_id: "q".into(), call_id: "call-q".into(), questions: vec![mew_protocol::Question { prompt: "pick".into(), options: vec![] }] },
+                        ServerMessage::AskUserRequest { subagent: Some(mew_protocol::SubagentQuestionSource {
+                            parent_call_id: "task".into(), child_session_id: "child".into(), name: "worker".into(), display_name: Some("Curie".into()),
+                        }), request_id: "child-q".into(), call_id: "child-ask".into(), questions: vec![] },
                         ServerMessage::GoalProposed { request_id: "g".into(), call_id: "call-g".into(), objective: "finish".into() },
                     ];
                     for request in requests {
@@ -1274,8 +1289,10 @@ mod tests {
                             ClientMessage::PermissionResponse { request_id, decision } => {
                                 assert_eq!(decision, WirePermissionDecision::AllowOnce); request_id
                             }
-                            ClientMessage::AskUserResponse { request_id, answers, .. } => {
-                                assert_eq!(answers, vec!["answer"]); request_id
+                            ClientMessage::AskUserResponse { request_id, answers, cancelled } => {
+                                if request_id == "child-q" { assert!(cancelled); assert!(answers.is_empty()); }
+                                else { assert!(!cancelled); assert_eq!(answers, vec!["answer"]); }
+                                request_id
                             }
                             ClientMessage::GoalResponse { request_id, accepted } => {
                                 assert!(accepted); request_id
@@ -1293,7 +1310,7 @@ mod tests {
                 let (client, mut notifications) = DaemonClient::connect(&format!("ws://{addr}")).await.unwrap();
                 assert!(matches!(notifications.recv().await, Some(ServerMessage::SessionReady { .. })));
                 let mut prompt = if active_prompt { Some(client.prompt("go".into(), vec![]).await) } else { None };
-                for expected_id in ["p", "w", "s", "q", "g"] {
+                for expected_id in ["p", "w", "s", "q", "child-q", "g"] {
                     let request = notifications.recv().await.unwrap();
                     let (request_id, action) = client.take_required_action(&request).unwrap();
                     assert_eq!(request_id, expected_id);
@@ -1301,6 +1318,11 @@ mod tests {
                     match action {
                         AgentEvent::PermissionRequest { tx, .. } | AgentEvent::WorkspacePermissionRequest { tx, .. } | AgentEvent::SubagentPermissionRequest { tx, .. } => { tx.send(PermissionDecision::AllowOnce).unwrap(); }
                         AgentEvent::AskUser { tx, .. } => { tx.send(vec!["answer".into()]).unwrap(); }
+                        AgentEvent::SubagentAskUser { source, tx, .. } => {
+                            assert_eq!(source.child_session_id, "child");
+                            assert_eq!(source.display_name.as_deref(), Some("Curie"));
+                            drop(tx);
+                        }
                         AgentEvent::GoalProposed { tx, .. } => { tx.send(GoalDecision::Accepted).unwrap(); }
                         other => panic!("unexpected action: {other:?}"),
                     }

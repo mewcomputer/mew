@@ -145,6 +145,9 @@ impl App {
             return None;
         }
         let result = text.to_string();
+        if self.daemon_mode {
+            return Some(result);
+        }
         self.history.push(result.clone());
         self.history_index = None;
         self.input.clear();

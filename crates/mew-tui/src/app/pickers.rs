@@ -79,56 +79,211 @@ impl App {
         });
     }
 
-    pub fn open_session_picker(&mut self) {
-        let active_id = &self.status.session_id;
-        let items: Vec<PickerItem> = self
+    pub fn session_attention_count(&self) -> usize {
+        self.daemon_sessions
+            .iter()
+            .filter(|session| self.session_needs_attention(session))
+            .count()
+            + self.unlisted_attention_ids().len()
+    }
+
+    fn unlisted_attention_ids(&self) -> std::collections::BTreeSet<&str> {
+        self.session_attention
+            .iter()
+            .filter(|(_, (permissions, questions))| *permissions > 0 || *questions > 0)
+            .map(|(id, _)| id.as_str())
+            .chain(self.unread_completions.iter().map(String::as_str))
+            .filter(|id| {
+                *id != self.status.session_id
+                    && !self
+                        .daemon_sessions
+                        .iter()
+                        .any(|session| session.session_id == *id)
+            })
+            .collect()
+    }
+
+    fn session_needs_attention(&self, session: &mew_protocol::SessionInfo) -> bool {
+        if session.session_id == self.status.session_id {
+            return false;
+        }
+        let (permissions, questions) = self
+            .session_attention
+            .get(&session.session_id)
+            .copied()
+            .unwrap_or((session.pending_permissions, session.pending_questions));
+        permissions > 0 || questions > 0 || self.unread_completions.contains(&session.session_id)
+    }
+
+    pub(crate) fn session_label_and_status(
+        &self,
+        session: &mew_protocol::SessionInfo,
+    ) -> (String, String) {
+        let id = &session.session_id;
+        let title = self
+            .session_titles
+            .get(id)
+            .cloned()
+            .or_else(|| session.summary.clone())
+            .or_else(|| session.first_message.clone())
+            .unwrap_or_else(|| id.chars().take(8).collect());
+        let (permissions, questions) = self
+            .session_attention
+            .get(id)
+            .copied()
+            .unwrap_or((session.pending_permissions, session.pending_questions));
+        let marker = if permissions > 0 || questions > 0 {
+            "?"
+        } else {
+            match self.session_turn_outcomes.get(id) {
+                Some(mew_client_core::TurnOutcome::Completed) => "✓",
+                Some(mew_client_core::TurnOutcome::Failed { .. }) => "✗",
+                None if session.last_turn_failed => "✗",
+                None if session.state == mew_protocol::SessionState::Running => "▶",
+                None => "○",
+            }
+        };
+        let unread = if self.unread_completions.contains(id) {
+            "● "
+        } else {
+            ""
+        };
+        let mut status = Vec::new();
+        if permissions > 0 {
+            status.push(format!(
+                "{permissions} {}",
+                if permissions == 1 {
+                    "approval"
+                } else {
+                    "approvals"
+                }
+            ));
+        }
+        if questions > 0 {
+            status.push(format!(
+                "{questions} {}",
+                if questions == 1 {
+                    "question"
+                } else {
+                    "questions"
+                }
+            ));
+        }
+        if status.is_empty() {
+            status.push(
+                match self.session_turn_outcomes.get(id) {
+                    Some(mew_client_core::TurnOutcome::Completed) => "Completed",
+                    Some(mew_client_core::TurnOutcome::Failed { .. }) => "Failed",
+                    None if session.last_turn_failed => "Failed",
+                    None => match session.state {
+                        mew_protocol::SessionState::Running => "Working",
+                        mew_protocol::SessionState::Active => "Ready",
+                        mew_protocol::SessionState::Idle => "Idle",
+                    },
+                }
+                .into(),
+            );
+        }
+        if self.unread_completions.contains(id) {
+            status.push("unread".into());
+        }
+        if session.archived {
+            status.push("Archived".into());
+        }
+        if session.pinned {
+            status.push("Pinned".into());
+        }
+        if id == &self.status.session_id {
+            status.push("current".into());
+        }
+        let status = status.join(" · ");
+        (format!("{unread}{marker} {title} · {status}"), status)
+    }
+
+    pub(crate) fn session_picker_item(&self, session: &mew_protocol::SessionInfo) -> PickerItem {
+        let id = &session.session_id;
+        let (label, status) = self.session_label_and_status(session);
+        let last = session
+            .last_message_at
+            .map(|ts| {
+                chrono::DateTime::from_timestamp_millis(ts)
+                    .map(|dt| dt.format("%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "—".to_string())
+            })
+            .unwrap_or_else(|| "—".to_string());
+        let mut description = format!(
+            "{status}\ncwd: {} · last: {last}",
+            session.cwd.as_deref().unwrap_or("—")
+        );
+        if let Some(usage) = &session.usage {
+            description.push_str(&format!(" · cost: ${:.2}", usage.cost));
+        }
+        if let Some(mew_client_core::TurnOutcome::Failed {
+            detail: Some(detail),
+        }) = self.session_turn_outcomes.get(id)
+        {
+            description.push('\n');
+            description.push_str(detail);
+        }
+        PickerItem {
+            id: id.clone(),
+            label,
+            description,
+            ..Default::default()
+        }
+    }
+
+    fn session_picker_items(&self, kind: &str) -> Vec<PickerItem> {
+        let mut items: Vec<_> = self
             .daemon_sessions
             .iter()
-            .filter(|s| !s.archived)
-            .map(|s| {
+            .filter(|session| match kind {
+                "session_attention" => self.session_needs_attention(session),
+                "session_archived" => session.archived,
+                _ => !session.archived,
+            })
+            .map(|session| self.session_picker_item(session))
+            .collect();
+        if kind == "session_attention" {
+            items.extend(self.unlisted_attention_ids().into_iter().map(|id| {
                 let title = self
                     .session_titles
-                    .get(&s.session_id)
+                    .get(id)
                     .cloned()
-                    .or_else(|| s.summary.clone())
-                    .unwrap_or_else(|| s.session_id.chars().take(8).collect());
-                let glyph = match s.state {
-                    mew_protocol::SessionState::Running => "▶",
-                    mew_protocol::SessionState::Active => "●",
-                    mew_protocol::SessionState::Idle => "○",
+                    .unwrap_or_else(|| id.chars().take(12).collect());
+                let (permissions, questions) =
+                    self.session_attention.get(id).copied().unwrap_or_default();
+                let status = if permissions > 0 || questions > 0 {
+                    "Needs your attention"
+                } else {
+                    "Unread update"
                 };
-                let cost = s
-                    .usage
-                    .as_ref()
-                    .map(|u| format!("${:.2}", u.cost))
-                    .unwrap_or_default();
-                let is_active = &s.session_id == active_id;
-                let marker = if is_active { " ● active" } else { "" };
-                let label = format!("{} {} {}{}", glyph, title, cost, marker);
-
-                let cwd_str = s.cwd.as_deref().unwrap_or("—");
-                let last = s
-                    .last_message_at
-                    .map(|ts| {
-                        chrono::DateTime::from_timestamp(ts, 0)
-                            .map(|dt| dt.format("%m-%d %H:%M").to_string())
-                            .unwrap_or_else(|| "—".to_string())
-                    })
-                    .unwrap_or_else(|| "—".to_string());
-                let desc = format!("cwd: {}  ·  last: {}", cwd_str, last);
-
                 PickerItem {
-                    id: s.session_id.clone(),
-                    label,
-                    description: desc,
+                    id: id.into(),
+                    label: format!("{title} · {status}"),
+                    description:
+                        "Session metadata not loaded yet; Enter attaches to this conversation."
+                            .into(),
                     ..Default::default()
                 }
-            })
-            .collect();
+            }));
+        }
+        items
+    }
+
+    pub fn open_session_picker(&mut self) {
+        self.open_session_picker_kind("session");
+    }
+
+    pub fn open_attention_picker(&mut self) {
+        self.open_session_picker_kind("session_attention");
+    }
+
+    fn open_session_picker_kind(&mut self, kind: &str) {
         self.mode = Mode::CommandPalette;
         self.picker = Some(PickerState {
-            kind: "session".into(),
-            items,
+            kind: kind.into(),
+            items: self.session_picker_items(kind),
             filter: String::new(),
             selected: 0,
             cursor: 0,
@@ -137,19 +292,55 @@ impl App {
             details_scroll: 0,
             visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
-            hint: Some("⏎ attach · ^A archive · ^P pin".into()),
+            hint: Some(
+                match kind {
+                    "session_attention" => "Tab all conversations · ^A archive/restore · ^P pin",
+                    "session_archived" => "Tab recent · ^A restore · ^P pin",
+                    _ => "Tab archived · ^A archive · ^P pin",
+                }
+                .into(),
+            ),
             budget: None,
         });
     }
 
-    pub fn open_project_picker(&mut self) {
-        let items: Vec<PickerItem> = self
-            .projects
+    pub fn toggle_session_picker_archive(&mut self) {
+        let Some(picker) = self.picker.as_ref() else {
+            return;
+        };
+        let kind = if picker.kind == "session" {
+            "session_archived"
+        } else {
+            "session"
+        };
+        self.open_session_picker_kind(kind);
+    }
+
+    pub fn refresh_session_picker(&mut self) {
+        let Some(picker) = self.picker.as_ref().filter(|picker| {
+            matches!(
+                picker.kind.as_str(),
+                "session" | "session_attention" | "session_archived"
+            )
+        }) else {
+            return;
+        };
+        let selected = picker.selected_item().map(|item| item.id.clone());
+        let items = self.session_picker_items(&picker.kind);
+        let picker = self.picker.as_mut().unwrap();
+        picker.items = items;
+        picker.selected = selected
+            .and_then(|id| picker.filtered().iter().position(|item| item.id == id))
+            .unwrap_or(0);
+    }
+
+    fn project_picker_items(&self) -> Vec<PickerItem> {
+        self.projects
             .iter()
             .map(|p| {
                 let last = p
                     .last_used_at
-                    .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                    .and_then(chrono::DateTime::from_timestamp_millis)
                     .map(|dt| dt.format("%m-%d %H:%M").to_string())
                     .unwrap_or_else(|| "—".to_string());
                 PickerItem {
@@ -162,7 +353,28 @@ impl App {
                     ..Default::default()
                 }
             })
-            .collect();
+            .collect()
+    }
+
+    pub fn refresh_project_picker(&mut self) {
+        let Some(picker) = self
+            .picker
+            .as_ref()
+            .filter(|picker| picker.kind == "project")
+        else {
+            return;
+        };
+        let selected = picker.selected_item().map(|item| item.id.clone());
+        let items = self.project_picker_items();
+        let picker = self.picker.as_mut().unwrap();
+        picker.items = items;
+        picker.selected = selected
+            .and_then(|id| picker.filtered().iter().position(|item| item.id == id))
+            .unwrap_or(0);
+    }
+
+    pub fn open_project_picker(&mut self) {
+        let items = self.project_picker_items();
         self.mode = Mode::CommandPalette;
         self.picker = Some(PickerState {
             kind: "project".into(),
@@ -535,7 +747,7 @@ impl App {
     /// [`App::sync_at_picker`]; files are fuzzy-searched with fff once the
     /// background index is ready.
     pub fn open_at_picker(&mut self) {
-        self.at_file_items = file_mention_items();
+        self.at_file_items = file_mention_items(&self.project_cwd());
         self.at_reference_items = self.build_reference_items();
         self.fff_file_results = None;
         self.pending_file_query = None;
@@ -690,6 +902,16 @@ impl App {
             .unwrap_or(false)
     }
 
+    pub(super) fn invalidate_file_catalog(&mut self) {
+        self.file_search_gen = self.file_search_gen.wrapping_add(1);
+        self.file_index = None;
+        self.file_index_building = false;
+        self.fff_file_results = None;
+        self.pending_file_query = None;
+        self.file_query_deadline = None;
+        self.at_file_items.clear();
+    }
+
     fn schedule_file_index_build(&mut self) {
         if self.file_index.is_some() || self.file_index_building {
             return;
@@ -700,10 +922,11 @@ impl App {
         }
         self.file_index_building = true;
         let tx = self.file_search_tx.clone();
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = self.project_cwd();
+        let generation = self.file_search_gen;
         tokio::task::spawn_blocking(move || {
             let result = build_file_index(&cwd);
-            let _ = tx.blocking_send(FileSearchEvent::IndexReady(result));
+            let _ = tx.blocking_send(FileSearchEvent::IndexReady { generation, result });
         });
     }
 
@@ -732,17 +955,20 @@ impl App {
     pub fn poll_file_search(&mut self) {
         while let Ok(event) = self.file_search_rx.try_recv() {
             match event {
-                FileSearchEvent::IndexReady(Ok(index)) => {
-                    self.file_index = Some(index);
+                FileSearchEvent::IndexReady { generation, result } => {
+                    if generation != self.file_search_gen {
+                        continue;
+                    }
                     self.file_index_building = false;
+                    let Ok(index) = result else {
+                        continue;
+                    };
+                    self.file_index = Some(index);
                     if let Some(q) = self.pending_file_query.clone() {
                         self.pending_file_query = None;
                         self.file_query_deadline = None;
                         self.schedule_file_search(q);
                     }
-                }
-                FileSearchEvent::IndexReady(Err(_)) => {
-                    self.file_index_building = false;
                 }
                 FileSearchEvent::Results {
                     generation,
@@ -851,11 +1077,10 @@ impl App {
 /// truncated to 50 entries sorted by modification time (newest first), with
 /// shortest path breaking ties. The fff index, when ready, supersedes this
 /// walk for non-empty plain queries.
-fn file_mention_items() -> Vec<PickerItem> {
-    let cwd = std::env::current_dir().unwrap_or_default();
+fn file_mention_items(cwd: &Path) -> Vec<PickerItem> {
     let mut entries: Vec<(PickerItem, std::time::SystemTime)> = Vec::new();
 
-    let walker = ignore::WalkBuilder::new(&cwd)
+    let walker = ignore::WalkBuilder::new(cwd)
         .max_depth(Some(4))
         .hidden(false)
         .git_ignore(true)
@@ -873,7 +1098,7 @@ fn file_mention_items() -> Vec<PickerItem> {
             continue;
         }
         let rel = path
-            .strip_prefix(&cwd)
+            .strip_prefix(cwd)
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();

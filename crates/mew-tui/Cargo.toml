@@ -12,6 +12,7 @@ mew-provider = { workspace = true }
 mew-session = { workspace = true }
 mew-hooks = { workspace = true }
 mew-protocol = { workspace = true }
+mew-client-core = { workspace = true }
 mew-raster = { path = "../mew-raster" }
 tiny-skia = "0.12"
 tokio = { workspace = true }

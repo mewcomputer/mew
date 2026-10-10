@@ -1823,3 +1823,26 @@ formatting and strict all-target shared-core, UI-model and mobile clippy. The
 native activity snapshot projection regression passed with the installed CEF
 SDK. Thirteen actor tests passed separately, including real daemon offscreen
 conversation and completed-turn ordering against persisted metadata.
+
+### 2026-10-10: persistent terminal conversations and child questions
+
+The TUI and daemon capture now use one persistent shared-core client and typed
+commands. Confirmed conversations own their drafts, queued follow-ups, undo
+history and workspace discovery. Prompt presentation waits for exact acceptance
+and user-message provenance. Reconnect restores activity and pending questions,
+checks uncertain receipts without resubmission, and keeps transport failures
+visible. Passive updates use canonical history with incremental display parts.
+
+Conversation links and notifications show current work and unread outcomes,
+retain archived recovery, and use authoritative activity order. Conversation and
+project details format the daemon's millisecond timestamps. Child questions keep
+their actual owner through forwarding and reconnect; explicitly closing one
+resolves its channel without cancelling the parent turn. Noninteractive handling
+and the native answer constructor follow the same protocol contract.
+
+Verified an isolated foundation snapshot with its own build target: 13 persistent
+client tests, 27 dispatch tests and 52 client/draft/navigation/todo tests passed.
+The real daemon regression checks offscreen discovery, completed-turn order and
+project catalog timestamps against persisted metadata. Formatting and strict
+all-target CLI/TUI clippy passed. The complete current TUI pass also passed 461
+tests across 18 targets, with architecture and generated-theme checks green.

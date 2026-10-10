@@ -22,6 +22,11 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let mut visual_row = area.y + 1;
     let mut text = Text::default();
 
+    if app.daemon_mode {
+        draw_conversations(&mut text, &mut visual_row, app, area.width);
+        push_divider(&mut text, &mut visual_row, app, area.width);
+    }
+
     // Current task state leads the activity list.
     draw_session_header(&mut text, &mut visual_row, app, area.width);
 
@@ -135,6 +140,54 @@ fn push_divider(text: &mut Text, visual_row: &mut u16, app: &mut App, width: u16
         Style::default().fg(app.theme.resolve("divider")),
     )));
     *visual_row += 1;
+}
+
+fn draw_conversations(text: &mut Text, visual_row: &mut u16, app: &mut App, width: u16) {
+    let max = width.saturating_sub(2) as usize;
+    app.sidebar_item_rows
+        .push((*visual_row, SidebarItem::Sessions));
+    text.push_line(Line::from(Span::styled(
+        "Conversations",
+        Style::default()
+            .fg(app.theme.resolve("text.body"))
+            .add_modifier(Modifier::BOLD),
+    )));
+    *visual_row += 1;
+    let count = app.session_attention_count();
+    app.sidebar_item_rows
+        .push((*visual_row, SidebarItem::Attention));
+    text.push_line(Line::from(Span::styled(
+        truncate_to_fit(
+            &format!(
+                "🔔 {count} {} · ^N",
+                if count == 1 { "update" } else { "updates" }
+            ),
+            max,
+        ),
+        Style::default().fg(app.theme.resolve(if count > 0 {
+            "text.warning"
+        } else {
+            "text.muted"
+        })),
+    )));
+    *visual_row += 1;
+    for session in app
+        .daemon_sessions
+        .iter()
+        .filter(|session| !session.archived)
+        .take(3)
+    {
+        let (label, _) = app.session_label_and_status(session);
+        app.sidebar_item_rows.push((
+            *visual_row,
+            SidebarItem::Session(session.session_id.clone()),
+        ));
+        text.push_line(Line::from(Span::styled(
+            truncate_to_fit(&label, max),
+            Style::default().fg(app.theme.resolve("text.body")),
+        )));
+        *visual_row += 1;
+    }
 }
 
 /// Current task identity, state, and the work or decision in progress.

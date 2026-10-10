@@ -1462,6 +1462,22 @@ impl Agent {
                             tool_name,
                             message,
                         },
+                        mew_subagents::SubagentEvent::AskUser {
+                            mut source,
+                            call_id,
+                            questions,
+                            tx,
+                        } => {
+                            // Link nested questions to the visible root task while
+                            // retaining the actual child that owns the answer channel.
+                            source.parent_call_id = pump_cid.clone();
+                            AgentEvent::SubagentAskUser {
+                                source,
+                                call_id,
+                                questions,
+                                tx,
+                            }
+                        }
                         mew_subagents::SubagentEvent::WorkspacePermissionRequest { path, tx } => {
                             AgentEvent::WorkspacePermissionRequest { path, tx }
                         }

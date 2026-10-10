@@ -8,42 +8,39 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Maximum agent events processed per drain batch during streaming.
-/// Prevents a burst of deltas from blocking the frame — text appears
-/// incrementally instead of all at once.
-const STREAMING_DRAIN_LIMIT: u32 = 4;
-
 /// How long to wait for a spawned daemon to become healthy before giving up.
 const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Run the TUI connected to a mew daemon. The daemon owns the agent;
-/// the TUI is a pure frontend that sends prompts and receives AgentEvents.
+/// the TUI is a pure frontend that sends commands and projects shared client state.
 pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) -> Result<()> {
-    let (client, mut notify_rx) = mew_daemon::DaemonClient::connect(connect_url).await?;
-    let client = Arc::new(client);
+    let (client, mut updates) = crate::runtime::client::TuiClient::connect(connect_url).await?;
 
     if let Some(session_id) = attach {
-        client.attach_session(session_id).await?;
+        client
+            .send(mew_protocol::ClientMessage::AttachSession {
+                session_id: session_id.into(),
+                client_kind: mew_protocol::ClientKind::Tui,
+            })
+            .await?;
     } else {
-        client.new_session().await?;
+        client
+            .send(mew_protocol::ClientMessage::NewSession {
+                cwd: Some(
+                    std::env::current_dir()
+                        .context("resolve terminal workspace")?
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                client_kind: mew_protocol::ClientKind::Tui,
+            })
+            .await?;
     }
 
     let mut app = mew_tui::App::new();
     app.daemon_mode = true;
-    // Load skills for autocomplete and inline skill-reference resolution.
-    // Uses the same standard locations as the daemon's skill loader.
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let skill_loader = mew_skills::Loader::new(cwd.clone());
-    app.skill_catalog = skill_loader.load().unwrap_or_default();
-    // Load subagent definitions for autocomplete and inline reference
-    // resolution.
-    let subagent_loader = mew_subagents::Loader::new(cwd);
-    app.subagent_catalog = subagent_loader.load().unwrap_or_default();
-    // Set the session ID from the daemon client.
-    if let Some(sid) = client.session_id().await {
-        app.status.session_id = sid;
-    }
+    app.attaching_session = true;
     // Load theme from state/config (best-effort; daemon client may not
     // have full config available).
     let state = mew_config::load_state().unwrap_or_default();
@@ -60,10 +57,14 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
     app.recent_models = state.recent_models.clone();
 
     // Request the session list so the sidebar rail is populated immediately.
-    client.list_sessions().await?;
+    client
+        .send(mew_protocol::ClientMessage::ListSessions {})
+        .await?;
     // Request the model list so the model picker and thinking-variant
     // picker are populated in daemon mode.
-    client.list_models().await?;
+    client
+        .send(mew_protocol::ClientMessage::ListModels {})
+        .await?;
 
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -78,7 +79,6 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
 
     let (event_loop, mut event_rx) = mew_tui::EventLoop::new();
     event_loop.spawn();
-    let event_loop = Arc::new(event_loop);
 
     let mut last_event_was_tick = false;
 
@@ -100,16 +100,13 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
                 Some(e) => e,
                 None => break Ok(()),
             },
-            msg = notify_rx.recv() => {
-                // Daemon session-management notification. Update App state
-                // via the reducer, then continue the loop (don't block on
-                // input).
-                if let Some(msg) = msg {
-                    app.apply_daemon_notification(&msg);
-                    if let Some((request_id, event)) = client.take_required_action(&msg) {
-                        app.handle_daemon_required_action(request_id, event);
-                    }
+            update = updates.recv() => {
+                let Some(update) = update else { break Err(anyhow::anyhow!("client driver stopped")); };
+                app.apply_client_update(&update.events,&update.state,update.changed_message.as_ref());
+                if let Some((request_id,event)) = update.required_action {
+                    app.handle_daemon_required_action(request_id,event);
                 }
+                last_event_was_tick = false;
                 continue;
             }
         };
@@ -125,7 +122,6 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
                     let mut cx = crate::runtime::Ctx {
                         app: &mut app,
                         target: &mut target,
-                        event_loop: &event_loop,
                         should_break: &mut should_break,
                         cat: None,
                         loaded_personas: &[],
@@ -134,12 +130,7 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
                     let _flow = crate::runtime::handle_action(&mut cx, action).await;
                 }
             }
-            mew_tui::Event::Agent(agent_event) => {
-                app.handle_agent_event(agent_event);
-            }
-            mew_tui::Event::TurnFinished => {
-                app.finish_turn();
-            }
+            mew_tui::Event::Agent(_) | mew_tui::Event::TurnFinished => {}
             mew_tui::Event::Quit => should_break = true,
             mew_tui::Event::Tick => {
                 app.tick();
@@ -152,9 +143,6 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
         }
 
         // Drain remaining events before next render (coalesces rapid input).
-        // When streaming, limit agent events per drain batch so text
-        // appears incrementally instead of all at once after a burst.
-        let mut agent_drain_count = 0u32;
         let mut queued_actions: Vec<mew_tui::events::Action> = Vec::new();
         'drain: while let Ok(event) = event_rx.try_recv() {
             if !matches!(event, mew_tui::Event::Tick) {
@@ -168,16 +156,7 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
                         queued_actions.push(action);
                     }
                 }
-                mew_tui::Event::Agent(event) => {
-                    app.handle_agent_event(event);
-                    agent_drain_count += 1;
-                    if app.streaming && agent_drain_count >= STREAMING_DRAIN_LIMIT {
-                        break 'drain;
-                    }
-                }
-                mew_tui::Event::TurnFinished => {
-                    app.finish_turn();
-                }
+                mew_tui::Event::Agent(_) | mew_tui::Event::TurnFinished => {}
                 mew_tui::Event::Tick => {
                     app.tick();
                 }
@@ -193,7 +172,10 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
         if app.pending_queued_send {
             app.pending_queued_send = false;
             if let Some(text) = app.pop_queued_message() {
-                queued_actions.push(mew_tui::events::Action::Submit(text));
+                queued_actions.push(mew_tui::events::Action::SubmitQueued {
+                    session_id: app.status.session_id.clone(),
+                    text,
+                });
             }
         }
 
@@ -207,7 +189,6 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
             let mut cx = crate::runtime::Ctx {
                 app: &mut app,
                 target: &mut target,
-                event_loop: &event_loop,
                 should_break: &mut should_break,
                 cat: None,
                 loaded_personas: &[],
@@ -269,8 +250,12 @@ fn allocate_loopback_port() -> Result<std::net::SocketAddr> {
 /// Probe whether a daemon is already healthy at the given WebSocket URL. A
 /// successful connect (and immediate drop) means it's up.
 async fn probe_daemon(url: &str) -> bool {
-    match mew_daemon::DaemonClient::connect(url).await {
-        Ok((_client, _notify)) => true,
+    let transport = mew_client_local::LocalWebSocketTransport::new(url);
+    match mew_client_core::ClientEngine::connect(&transport).await {
+        Ok(mut engine) => {
+            let _ = engine.close().await;
+            true
+        }
         Err(_) => false,
     }
 }

@@ -392,7 +392,7 @@ impl SubagentRunner for SimpleRunner {
             .await;
 
         // Run the prompt through the agent.
-        let mut rx = agent.run(prompt);
+        let mut rx = agent.run_with_parts(prompt, vec![], Some(cancel.clone()));
         let mut result_text = String::new();
         let mut turns_used: u32 = 0;
         let mut last_error: Option<String> = None;
@@ -425,17 +425,6 @@ impl SubagentRunner for SimpleRunner {
 
         'runs: loop {
             while let Some(event) = rx.recv().await {
-                if cancel.is_cancelled() {
-                    let manifests = extract_manifests(&agent).await;
-                    let _ = event_tx
-                        .send(SubagentEvent::Finished {
-                            child_session_id: session_id.to_string(),
-                            outcome: SubagentOutcome::Cancelled,
-                            manifests,
-                        })
-                        .await;
-                    return Ok(SubagentResult::Cancelled);
-                }
                 match event {
                     crate::AgentEvent::Provider(mew_provider::ProviderEvent::PartStart {
                         part: mew_message::Part::ToolCall(tc),
@@ -541,6 +530,40 @@ impl SubagentRunner for SimpleRunner {
                             }
                         }
                     }
+                    crate::AgentEvent::AskUser {
+                        call_id,
+                        questions,
+                        tx,
+                    } => {
+                        let _ = event_tx
+                            .send(SubagentEvent::AskUser {
+                                source: mew_message::SubagentQuestionSource {
+                                    parent_call_id: opts.parent_call_id.clone(),
+                                    child_session_id: session_id.to_string(),
+                                    name: def.name.clone(),
+                                    display_name: Some(display_name.to_string()),
+                                },
+                                call_id,
+                                questions,
+                                tx,
+                            })
+                            .await;
+                    }
+                    crate::AgentEvent::SubagentAskUser {
+                        source,
+                        call_id,
+                        questions,
+                        tx,
+                    } => {
+                        let _ = event_tx
+                            .send(SubagentEvent::AskUser {
+                                source,
+                                call_id,
+                                questions,
+                                tx,
+                            })
+                            .await;
+                    }
                     crate::AgentEvent::WorkspacePermissionRequest { path, tx } => {
                         let _ = event_tx
                             .send(SubagentEvent::WorkspacePermissionRequest { path, tx })
@@ -565,6 +588,9 @@ impl SubagentRunner for SimpleRunner {
                 }
             }
 
+            if cancel.is_cancelled() {
+                break 'runs;
+            }
             // The run's stream ended (normally, or via a cap/exit/error
             // break). Validate the effective final output against the def's
             // output schema, if any, and give the child one corrective turn.
@@ -589,7 +615,7 @@ impl SubagentRunner for SimpleRunner {
                              schema — no prose, no code fences:\n{}",
                             serde_json::to_string_pretty(schema).unwrap_or_default()
                         );
-                        rx = agent.run(correction);
+                        rx = agent.run_with_parts(correction, vec![], Some(cancel.clone()));
                         continue 'runs;
                     }
                     SchemaCheck::InvalidSchema(err) => {
@@ -608,6 +634,18 @@ impl SubagentRunner for SimpleRunner {
 
         if let Some(answer) = exit_answer {
             result_text = answer;
+        }
+
+        if cancel.is_cancelled() {
+            let manifests = extract_manifests(&agent).await;
+            let _ = event_tx
+                .send(SubagentEvent::Finished {
+                    child_session_id: session_id.to_string(),
+                    outcome: SubagentOutcome::Cancelled,
+                    manifests,
+                })
+                .await;
+            return Ok(SubagentResult::Cancelled);
         }
 
         if let Some(reason) = last_error {

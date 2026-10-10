@@ -248,7 +248,8 @@ pub(crate) async fn build_and_run(
                 // Non-interactive mode: auto-allow workspace access.
                 let _ = tx.send(mew_hooks::PermissionDecision::AllowOnce);
             }
-            mew_agent::AgentEvent::AskUser { tx, .. } => {
+            mew_agent::AgentEvent::AskUser { tx, .. }
+            | mew_agent::AgentEvent::SubagentAskUser { tx, .. } => {
                 // Non-interactive mode: no TUI to answer. Dropping `tx`
                 // cancels the call so the model gets a clear "cancelled"
                 // result instead of hanging.

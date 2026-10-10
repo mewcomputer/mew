@@ -3591,6 +3591,21 @@ async fn translate_event(
             )
             .await
         }
+        AgentEvent::SubagentAskUser {
+            source,
+            call_id,
+            questions,
+            tx,
+        } => {
+            let request = ServerMessage::AskUserRequest {
+                request_id: session.next_request_id(),
+                subagent: Some(source),
+                call_id,
+                questions: wire_questions(questions),
+            };
+            publish_pending_request(session, session_mgr, &session.pending_ask_user, tx, request)
+                .await
+        }
         AgentEvent::AskUser {
             call_id,
             questions,
@@ -3635,6 +3650,30 @@ async fn translate_event(
             outcome,
             manifests,
         } => {
+            let _actions = session.pending_action_lock.lock().await;
+            let mut pending = session.pending_ask_user.lock().await;
+            let mut resolved = Vec::new();
+            pending.retain(|request_id, request| {
+                let belongs_to_task = matches!(&request.message,
+                    ServerMessage::AskUserRequest { subagent: Some(source), .. }
+                        if source.parent_call_id == parent_call_id
+                );
+                if belongs_to_task && request.sender.is_closed() {
+                    resolved.push(request_id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            drop(pending);
+            if !resolved.is_empty() {
+                for request_id in resolved {
+                    session
+                        .broadcast(ServerMessage::RequestResolved { request_id })
+                        .await;
+                }
+                broadcast_attention(session, session_mgr).await;
+            }
             vec![ServerMessage::SubagentEnd {
                 parent_call_id,
                 child_session_id,

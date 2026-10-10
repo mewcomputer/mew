@@ -29,6 +29,9 @@ pub struct SubagentTranscript {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarItem {
+    Sessions,
+    Attention,
+    Session(String),
     Todo(usize),
     Subagent(String),
     Job(String),

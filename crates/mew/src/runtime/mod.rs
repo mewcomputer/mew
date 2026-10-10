@@ -5,6 +5,7 @@
 //! through `handle_action`. The daemon is the only runtime path: the TUI talks
 //! to a `mew` daemon via `daemon::DaemonTarget`, which owns the `DaemonClient`.
 
+pub mod client;
 pub mod daemon;
 pub mod dispatch;
 pub mod mentions;

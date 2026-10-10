@@ -522,7 +522,15 @@ fn draw_user_question_page(
     let prompt_max = area.width.saturating_sub(label_reserve) as usize;
 
     // Wrap the prompt text to the available width.
-    let prompt_lines = wrap_text(&question.prompt, prompt_max);
+    let prompt = uq.subagent.as_ref().map(|source| {
+        format!(
+            "{} ({}): {}",
+            source.display_name.as_deref().unwrap_or(&source.name),
+            source.name,
+            question.prompt
+        )
+    });
+    let prompt_lines = wrap_text(prompt.as_deref().unwrap_or(&question.prompt), prompt_max);
     let prompt_height = prompt_lines
         .len()
         .min(area.height.saturating_sub(3) as usize) as u16;
@@ -753,7 +761,19 @@ fn draw_user_question_review(
         .fg(tokens.resolve("text.accent"))
         .add_modifier(Modifier::BOLD);
     f.render_widget(
-        Paragraph::new(Span::styled("review your answers", accent)),
+        Paragraph::new(Span::styled(
+            uq.subagent
+                .as_ref()
+                .map(|source| {
+                    format!(
+                        "review answers for {} ({})",
+                        source.display_name.as_deref().unwrap_or(&source.name),
+                        source.name
+                    )
+                })
+                .unwrap_or_else(|| "review your answers".into()),
+            accent,
+        )),
         Rect::new(area.x, area.y, area.width, 1),
     );
 
@@ -957,6 +977,8 @@ pub(super) fn draw_picker(
         "command" => ("Commands", "No commands"),
         "model" => ("Models", "No models"),
         "session" => ("Conversations", "No conversations"),
+        "session_attention" => ("Notifications", "No unread updates"),
+        "session_archived" => ("Archived conversations", "No archived conversations"),
         "subagent" => ("Subagents", "No active subagents"),
         "job" => ("Background jobs", "No active jobs"),
         "project" => ("New conversation in project", "No projects"),
@@ -1600,6 +1622,10 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut App, area: Rect) {
         Line::from(vec![
             Span::styled("  Ctrl+P     ", key_style),
             Span::styled("command palette", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+N     ", key_style),
+            Span::styled("conversation notifications", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  ?          ", key_style),

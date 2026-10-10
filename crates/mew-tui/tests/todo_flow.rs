@@ -338,6 +338,15 @@ fn confirmed_session_change_clears_old_sidebar_work() {
     assert!(h.app.todos.is_empty());
     assert!(h.app.subagents.is_empty());
     assert!(h.app.background_jobs.is_empty());
+    assert!(h.app.input.is_empty());
+    h.app
+        .apply_daemon_notification(&mew_protocol::ServerMessage::SessionReady {
+            session_id: "session-a".into(),
+            cwd: None,
+            model: None,
+            provider: None,
+            permission_mode: None,
+        });
     assert_eq!(h.app.input, "chat draft");
 }
 

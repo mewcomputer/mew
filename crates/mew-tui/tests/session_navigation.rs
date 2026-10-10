@@ -1,0 +1,430 @@
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use mew_tui::{
+    app::Mode,
+    events::{handle_input_event, handle_key_event, Action},
+    ui, App,
+};
+use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+fn session(id: &str, title: &str, archived: bool) -> mew_protocol::SessionInfo {
+    serde_json::from_value(serde_json::json!({"session_id":id,"state":"idle","created_at":10,"client_count":0,"summary":title,"archived":archived})).unwrap()
+}
+fn draw(app: &mut App, width: u16, height: u16) -> Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+    terminal.backend().buffer().clone()
+}
+fn row(buffer: &Buffer, needle: &str) -> u16 {
+    (0..buffer.area.height)
+        .find(|&y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains(needle)
+        })
+        .unwrap()
+}
+fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+    handle_key_event(app, KeyEvent::new(code, modifiers))
+}
+
+#[test]
+fn bell_counts_conversations_once_and_opens_archived_attention_without_losing_the_draft() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.status.session_id = "active".into();
+    app.input = "saved draft".into();
+    app.cursor = app.input.len();
+    app.daemon_sessions = vec![
+        session("active", "current", false),
+        session("approval", "approval work", false),
+        session("done", "finished work", false),
+        session("failed", "failed work", true),
+        session("quiet", "quiet work", false),
+    ];
+    app.session_attention.insert("active".into(), (1, 0));
+    app.session_attention.insert("approval".into(), (2, 1));
+    app.unread_completions
+        .extend(["done".into(), "failed".into()]);
+    app.session_turn_outcomes
+        .insert("done".into(), mew_client_core::TurnOutcome::Completed);
+    app.session_turn_outcomes.insert(
+        "failed".into(),
+        mew_client_core::TurnOutcome::Failed {
+            detail: Some("provider unavailable".into()),
+        },
+    );
+    assert_eq!(app.session_attention_count(), 3);
+    let buffer = draw(&mut app, 120, 30);
+    let y = row(&buffer, "3 updates");
+    let x = app.sidebar_rect.x + 2;
+    handle_input_event(
+        &mut app,
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }),
+    );
+    assert_eq!(app.mode, Mode::CommandPalette);
+    let picker = app.picker.as_ref().unwrap();
+    assert_eq!(picker.kind, "session_attention");
+    assert_eq!(
+        picker
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["approval", "done", "failed"]
+    );
+    assert!(
+        picker.items[0].description.contains("2 approvals")
+            && picker.items[0].description.contains("1 question")
+    );
+    assert!(
+        picker.items[1].label.contains("Completed") && picker.items[1].label.contains("unread")
+    );
+    assert!(
+        picker.items[2].description.contains("provider unavailable")
+            && picker.items[2].label.contains("Archived")
+    );
+    app.picker.as_mut().unwrap().selected = 2;
+    assert!(
+        matches!(key(&mut app,KeyCode::Enter,KeyModifiers::NONE),Some(Action::AttachSession(id)) if id=="failed")
+    );
+    assert_eq!(app.input, "saved draft");
+}
+#[test]
+fn session_picker_toggle_recovers_archived_sessions_and_preserves_query_when_lists_refresh() {
+    let mut app = App::new();
+    app.daemon_sessions = vec![
+        session("new", "needle recent", false),
+        session("old", "needle archived", true),
+    ];
+    app.open_session_picker();
+    assert_eq!(app.picker.as_ref().unwrap().items.len(), 1);
+    key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    let picker = app.picker.as_ref().unwrap();
+    assert_eq!(picker.kind, "session_archived");
+    assert_eq!(picker.items[0].id, "old");
+    key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+    app.daemon_sessions
+        .insert(0, session("oldest", "not a match", true));
+    app.refresh_session_picker();
+    let picker = app.picker.as_ref().unwrap();
+    assert_eq!(picker.filter, "n");
+    assert_eq!(picker.selected_item().unwrap().id, "old");
+    assert!(
+        matches!(key(&mut app,KeyCode::Char('a'),KeyModifiers::CONTROL),Some(Action::ToggleSessionArchived(id)) if id=="old")
+    );
+    key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.picker.as_ref().unwrap().kind, "session");
+}
+#[test]
+fn attention_is_keyboard_reachable_without_a_sidebar_and_empty_is_truthful() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.input = "draft".into();
+    app.cursor = 5;
+    key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+    assert_eq!(app.mode, Mode::CommandPalette);
+    assert_eq!(app.picker.as_ref().unwrap().kind, "session_attention");
+    let buffer = draw(&mut app, 40, 16);
+    row(&buffer, "No unread updates");
+    key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.picker.as_ref().unwrap().kind, "session");
+    key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(app.input, "draft");
+}
+
+#[test]
+fn global_help_exposes_the_attention_shortcut() {
+    let mut app = App::new();
+    key(&mut app, KeyCode::Char('?'), KeyModifiers::NONE);
+    assert_eq!(app.mode, Mode::Help);
+    let buffer = draw(&mut app, 100, 40);
+    let y = row(&buffer, "conversation notifications");
+    assert!((0..buffer.area.width)
+        .map(|x| buffer[(x, y)].symbol())
+        .collect::<String>()
+        .contains("Ctrl+N"));
+}
+
+#[test]
+fn connection_state_stays_visible_after_the_toast_and_precedes_turn_status() {
+    use mew_client_core::ConnectionStatus;
+
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.cancelling = true;
+    app.retry_status = Some("provider retry".into());
+    for (connection, expected) in [
+        (ConnectionStatus::Connecting, "connecting"),
+        (ConnectionStatus::Disconnected, "disconnected"),
+        (
+            ConnectionStatus::Backoff {
+                attempt: 3,
+                error: "connection lost".into(),
+            },
+            "reconnecting (3)",
+        ),
+    ] {
+        app.connection = Some(connection);
+        app.alert = None;
+        let buffer = draw(&mut app, 80, 24);
+        let status = (0..buffer.area.width)
+            .map(|x| buffer[(x, 23)].symbol())
+            .collect::<String>();
+        assert!(status.contains(expected), "{status}");
+        assert!(!status.contains("provider retry") && !status.contains("cancelling"));
+    }
+    app.connection = Some(ConnectionStatus::Connected);
+    app.attaching_session = true;
+    app.alert = None;
+    let buffer = draw(&mut app, 80, 24);
+    assert_eq!(row(&buffer, "opening conversation"), 23);
+
+    let mut state = mew_client_core::ClientState::default();
+    let events = state.apply_server_message(mew_protocol::ServerMessage::SessionReady {
+        session_id: "ready".into(),
+        cwd: None,
+        model: Some("ready-model".into()),
+        provider: Some("fake".into()),
+        permission_mode: None,
+    });
+    app.apply_client_update(&events, &state, None);
+    app.alert = None;
+    app.cancelling = false;
+    let buffer = draw(&mut app, 80, 24);
+    assert_eq!(row(&buffer, "fake/ready-model"), 23);
+    assert!(!app.attaching_session);
+}
+#[test]
+fn attention_refresh_preserves_selected_identity_and_removes_acknowledged_rows() {
+    let mut app = App::new();
+    app.daemon_sessions = vec![session("a", "first", false), session("b", "second", false)];
+    app.unread_completions.extend(["a".into(), "b".into()]);
+    app.open_attention_picker();
+    app.picker.as_mut().unwrap().selected = 1;
+    app.daemon_sessions.reverse();
+    app.refresh_session_picker();
+    assert_eq!(
+        app.picker.as_ref().unwrap().selected_item().unwrap().id,
+        "b"
+    );
+    app.unread_completions.remove("b");
+    app.refresh_session_picker();
+    assert_eq!(
+        app.picker.as_ref().unwrap().selected_item().unwrap().id,
+        "a"
+    );
+    app.unread_completions.remove("a");
+    app.refresh_session_picker();
+    assert!(app.picker.as_ref().unwrap().items.is_empty());
+    draw(&mut app, 40, 16);
+    assert!(app.picker_mouse.rows.is_empty());
+}
+
+#[test]
+fn attention_arriving_before_session_metadata_remains_reachable() {
+    let mut app = App::new();
+    app.session_attention
+        .insert("not-yet-listed".into(), (1, 0));
+    assert_eq!(app.session_attention_count(), 1);
+    app.open_attention_picker();
+    let picker = app.picker.as_ref().unwrap();
+    assert_eq!(picker.items.len(), 1);
+    assert_eq!(picker.items[0].id, "not-yet-listed");
+    assert!(picker.items[0].description.contains("metadata"));
+}
+#[test]
+fn canonical_completion_and_ready_ack_drive_the_bell() {
+    let mut app = App::new();
+    app.status.session_id = "active".into();
+    let mut state = mew_client_core::ClientState::default();
+    let events = state.apply_server_message(mew_protocol::ServerMessage::SessionList {
+        sessions: vec![session("done", "finished work", false)],
+    });
+    app.apply_client_update(&events, &state, None);
+    let events = state.apply_server_message(mew_protocol::ServerMessage::SessionAlert {
+        session_id: "done".into(),
+        kind: mew_protocol::AlertKind::TurnComplete,
+        title: "finished".into(),
+        detail: None,
+    });
+    app.apply_client_update(&events, &state, None);
+    assert_eq!(app.session_attention_count(), 1);
+    app.open_attention_picker();
+    assert_eq!(app.picker.as_ref().unwrap().items.len(), 1);
+    assert!(
+        matches!(key(&mut app,KeyCode::Enter,KeyModifiers::NONE),Some(Action::AttachSession(id)) if id=="done")
+    );
+    assert_eq!(app.session_attention_count(), 1);
+    let events = state.apply_server_message(mew_protocol::ServerMessage::SessionReady {
+        session_id: "done".into(),
+        cwd: None,
+        model: None,
+        provider: None,
+        permission_mode: None,
+    });
+    app.apply_client_update(&events, &state, None);
+    assert_eq!(app.session_attention_count(), 0);
+    assert!(app.picker.is_none());
+}
+
+#[test]
+fn canonical_failed_alert_is_unread_until_ready_and_keeps_its_failure_detail() {
+    let mut app = App::new();
+    app.status.session_id = "active".into();
+    let mut state = mew_client_core::ClientState::default();
+    for _ in 0..2 {
+        let events = state.apply_server_message(mew_protocol::ServerMessage::SessionAlert {
+            session_id: "failed".into(),
+            kind: mew_protocol::AlertKind::TurnFailed,
+            title: "turn failed".into(),
+            detail: Some("provider unavailable".into()),
+        });
+        app.apply_client_update(&events, &state, None);
+    }
+    assert_eq!(app.session_attention_count(), 1);
+    let events = state.apply_server_message(mew_protocol::ServerMessage::SessionList {
+        sessions: vec![session("failed", "failed work", true)],
+    });
+    app.apply_client_update(&events, &state, None);
+    app.open_attention_picker();
+    let item = &app.picker.as_ref().unwrap().items[0];
+    assert!(item.label.contains("● ✗") && item.label.contains("Archived"));
+    assert!(item.description.contains("provider unavailable"));
+    let events = state.apply_server_message(mew_protocol::ServerMessage::SessionReady {
+        session_id: "failed".into(),
+        cwd: None,
+        model: None,
+        provider: None,
+        permission_mode: None,
+    });
+    app.apply_client_update(&events, &state, None);
+    assert_eq!(app.session_attention_count(), 0);
+    app.open_session_picker();
+    key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    let item = &app.picker.as_ref().unwrap().items[0];
+    assert!(!item.label.contains("●") && item.label.contains("Failed"));
+    assert!(item.description.contains("provider unavailable"));
+}
+
+#[test]
+fn narrow_status_keeps_a_clickable_bell_visible_and_clears_its_hit_bounds_on_resize() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.input = "saved draft".into();
+    app.cursor = app.input.len();
+    app.daemon_sessions = vec![session("done", "finished work", false)];
+    app.unread_completions.insert("done".into());
+    let buffer = draw(&mut app, 80, 24);
+    let y = 23;
+    let x = (0..80)
+        .find(|&x| buffer[(x, y)].symbol() == "🔔")
+        .expect("pinned bell on narrow status");
+    handle_input_event(
+        &mut app,
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }),
+    );
+    assert_eq!(app.picker.as_ref().unwrap().kind, "session_attention");
+    key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    draw(&mut app, 1, 1);
+    handle_input_event(
+        &mut app,
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }),
+    );
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.input, "saved draft");
+}
+
+#[test]
+fn unread_failure_marker_survives_a_long_sidebar_title_and_routes_by_id() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.daemon_sessions = vec![session(
+        "failed",
+        &"long conversation title ".repeat(5),
+        false,
+    )];
+    app.unread_completions.insert("failed".into());
+    app.session_turn_outcomes.insert(
+        "failed".into(),
+        mew_client_core::TurnOutcome::Failed { detail: None },
+    );
+    let buffer = draw(&mut app, 120, 30);
+    let y = row(&buffer, "● ✗");
+    let x = app.sidebar_rect.x + 2;
+    let action = handle_input_event(
+        &mut app,
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }),
+    );
+    assert!(matches!(action,Some(Action::AttachSession(id)) if id=="failed"));
+}
+#[test]
+fn core_recency_order_reaches_both_the_sidebar_and_picker_without_grouping() {
+    let mut state = mew_client_core::ClientState::default();
+    let mut app = App::new();
+    app.daemon_mode = true;
+    let mut older = session("older", "older work", false);
+    older.created_at = 10;
+    older.state = mew_protocol::SessionState::Running;
+    let mut newer = session("newer", "newer work", false);
+    newer.created_at = 20;
+    let events = state.apply_server_message(mew_protocol::ServerMessage::SessionList {
+        sessions: vec![older, newer],
+    });
+    app.apply_client_update(&events, &state, None);
+    app.open_session_picker();
+    assert_eq!(app.picker.as_ref().unwrap().items[0].id, "newer");
+    key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    let buffer = draw(&mut app, 120, 30);
+    assert!(row(&buffer, "newer work") < row(&buffer, "older work"));
+}
+
+#[test]
+fn conversation_details_format_the_daemons_millisecond_timestamp() {
+    let mut app = App::new();
+    let mut item = session("conversation", "recent work", false);
+    item.last_message_at = Some(1_728_556_200_000);
+    app.daemon_sessions = vec![item];
+    app.open_session_picker();
+    assert!(app.picker.as_ref().unwrap().items[0]
+        .description
+        .contains("last: 10-10 10:30"));
+}
+
+#[test]
+fn project_details_format_the_daemons_millisecond_timestamp() {
+    let mut app = App::new();
+    app.projects = vec![mew_protocol::ProjectInfo {
+        path: "/tmp/project".into(),
+        display_name: "project".into(),
+        session_count: 1,
+        last_used_at: Some(1_728_556_200_000),
+        pinned: false,
+    }];
+    app.open_project_picker();
+    assert!(app.picker.as_ref().unwrap().items[0]
+        .description
+        .contains("last: 10-10 10:30"));
+}

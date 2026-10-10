@@ -6,11 +6,9 @@
 //! `Unsupported` is the only sanctioned way to not implement an operation.
 //! It produces a visible alert, never a swallowed keypress.
 
-use mew_agent::AgentEvent;
 use mew_hooks::PermissionMode;
 use mew_message::Part;
 use mew_personas::Persona;
-use tokio::sync::mpsc::Receiver;
 
 /// Returned by `CommandTarget` methods that are not meaningful for a given
 /// backend. Rendered as a visible alert — never silently dropped.
@@ -39,8 +37,14 @@ pub struct PersonaApplied {
 /// all backends. `Err(Unsupported(reason))` renders a visible alert.
 #[async_trait::async_trait]
 pub trait CommandTarget: Send {
-    /// Submit a prompt. Returns the event receiver for streaming.
-    fn prompt(&mut self, enriched: String, parts: Vec<Part>) -> Receiver<AgentEvent>;
+    /// Submit to an explicit conversation and wait for its acceptance receipt.
+    async fn prompt(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+        enriched: String,
+        parts: Vec<Part>,
+    ) -> anyhow::Result<()>;
 
     /// Intercept user input before it reaches the model (e.g. for plugin hooks).
     /// Default implementation is a passthrough.
@@ -49,12 +53,15 @@ pub trait CommandTarget: Send {
     }
 
     /// Cancel the current streaming turn.
-    async fn cancel(&mut self);
+    async fn cancel(&mut self, session_id: &str) -> anyhow::Result<()>;
+
+    /// Close one question without cancelling the conversation's turn.
+    async fn close_question(&mut self, session_id: &str, request_id: &str) -> anyhow::Result<()>;
 
     /// Inject a short user message as guidance into the running turn's next
     /// provider request (even a tool-call continuation), without starting a
     /// new turn. If no turn is running, the guidance is picked up next turn.
-    async fn guide(&mut self, text: String);
+    async fn guide(&mut self, session_id: &str, text: String) -> anyhow::Result<()>;
 
     /// Clear the conversation context.
     async fn clear(&mut self) -> Result<(), Unsupported>;

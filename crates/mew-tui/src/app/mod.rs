@@ -167,6 +167,9 @@ pub struct App {
     /// The main loop checks this after processing agent events and, if set,
     /// submits the oldest queued message.
     pub pending_queued_send: bool,
+    session_drafts: HashMap<String, drafts::ConversationDraft>,
+    submissions: HashMap<String, drafts::Submission>,
+    pub attaching_session: bool,
     pub picker: Option<PickerState>,
     /// Cached fff file index for fuzzy `@` file search. Built lazily on a
     /// background thread on first picker open; `None` until it is ready.
@@ -229,6 +232,7 @@ pub struct App {
     pub chat_content_area: Rect,
     pub chat_rendered_scroll: usize,
     pub chat_scrollbar: MouseScrollbar,
+    pub bell_area: Rect,
     pub picker_mouse: PickerMouseView,
     pub mouse_scroll_drag: Option<(MouseScrollTarget, u16)>,
     pub input_area: Rect,
@@ -247,6 +251,8 @@ pub struct App {
     pub git_branch: Option<String>,
     pub git_branch_resolved: bool,
     pub short_cwd: String,
+    pub session_cwd: Option<std::path::PathBuf>,
+    pub connection: Option<mew_client_core::ConnectionStatus>,
     pub subagents: Vec<SubagentState>,
     /// How long failed activity remains visible in the sidebar (seconds).
     /// Set from `tui.sidebar_finished_ttl_secs`; completed activity hides immediately.
@@ -268,6 +274,8 @@ pub struct App {
     // is the single gate — UI surfaces check it before rendering.
     pub daemon_mode: bool,
     pub daemon_sessions: Vec<mew_protocol::SessionInfo>,
+    pub session_turn_outcomes: std::collections::BTreeMap<String, mew_client_core::TurnOutcome>,
+    pub unread_completions: std::collections::BTreeSet<String>,
     pub session_titles: std::collections::HashMap<String, String>,
     pub session_summaries: std::collections::HashMap<String, String>,
     pub session_attention: std::collections::HashMap<String, (u32, u32)>,
@@ -594,9 +602,11 @@ impl PickerState {
 /// debounced fuzzy searches) and consumed by [`App::poll_file_search`].
 pub enum FileSearchEvent {
     /// A lazy fff index finished building (or failed).
-    IndexReady(
-        Result<std::sync::Arc<std::sync::Mutex<fff_search::file_picker::FilePicker>>, String>,
-    ),
+    IndexReady {
+        generation: u64,
+        result:
+            Result<std::sync::Arc<std::sync::Mutex<fff_search::file_picker::FilePicker>>, String>,
+    },
     /// A fuzzy file search finished. `generation` discards stale results when
     /// the user has typed again before an older search returned.
     Results {
@@ -780,6 +790,7 @@ pub struct PersonaSummary {
 /// and an implicit "type your own" final option.
 #[derive(Debug)]
 pub struct UserQuestionState {
+    pub subagent: Option<mew_message::SubagentQuestionSource>,
     pub call_id: String,
     pub questions: Vec<AskUserQuestion>,
     pub answers: Vec<String>,
@@ -901,6 +912,9 @@ impl App {
             queued_messages: Vec::new(),
             up_press: None,
             pending_queued_send: false,
+            session_drafts: HashMap::new(),
+            submissions: HashMap::new(),
+            attaching_session: false,
             picker: None,
             file_index: None,
             file_index_building: false,
@@ -945,6 +959,7 @@ impl App {
             chat_content_area: Rect::ZERO,
             chat_rendered_scroll: 0,
             chat_scrollbar: MouseScrollbar::default(),
+            bell_area: Rect::default(),
             picker_mouse: PickerMouseView::default(),
             mouse_scroll_drag: None,
             input_area: Rect::ZERO,
@@ -963,6 +978,8 @@ impl App {
             git_branch: None,
             git_branch_resolved: false,
             short_cwd: short_cwd(),
+            session_cwd: None,
+            connection: None,
             subagents: Vec::new(),
             sidebar_finished_ttl: 180,
             background_jobs: Vec::new(),
@@ -975,6 +992,8 @@ impl App {
             pending_paste: None,
             daemon_mode: false,
             daemon_sessions: Vec::new(),
+            session_turn_outcomes: std::collections::BTreeMap::new(),
+            unread_completions: std::collections::BTreeSet::new(),
             session_titles: std::collections::HashMap::new(),
             session_summaries: std::collections::HashMap::new(),
             session_attention: std::collections::HashMap::new(),
@@ -1181,9 +1200,7 @@ impl App {
             }
             ServerMessage::ProjectList { projects } => {
                 self.projects = projects.clone();
-                // The project list is only requested in response to
-                // `/project`, so its arrival opens the picker.
-                self.open_project_picker();
+                self.refresh_project_picker();
             }
             ServerMessage::GroupList { groups } | ServerMessage::GroupsChanged { groups } => {
                 self.groups = groups.clone();
@@ -1239,11 +1256,13 @@ impl App {
             } => {
                 self.clear_daemon_required_actions();
                 if self.status.session_id != *session_id {
+                    self.switch_conversation_draft(session_id);
                     self.todos.clear();
                     self.subagents.clear();
                     self.background_jobs.clear();
                 }
                 self.status.session_id = session_id.clone();
+                self.attaching_session = false;
                 // On attach, update the active model/provider from the
                 // daemon's session state. Fields may be empty if the
                 // session hasn't been used yet.
@@ -2407,6 +2426,7 @@ impl App {
                 let answers = vec![String::new(); questions.len()];
                 self.mode = Mode::UserQuestion;
                 self.user_question = Some(UserQuestionState {
+                    subagent: None,
                     call_id,
                     questions,
                     answers,
@@ -2419,6 +2439,21 @@ impl App {
                     review_selected: 0,
                     tx: Some(tx),
                 });
+            }
+            AgentEvent::SubagentAskUser {
+                source,
+                call_id,
+                questions,
+                tx,
+            } => {
+                self.handle_agent_event(AgentEvent::AskUser {
+                    call_id,
+                    questions,
+                    tx,
+                });
+                if let Some(question) = self.user_question.as_mut() {
+                    question.subagent = Some(source);
+                }
             }
             AgentEvent::TodosUpdated { todos } => {
                 self.todos = todos;
@@ -2863,14 +2898,21 @@ impl App {
         self.finish_daemon_required_action();
     }
 
-    /// Cancel the question prompt. Dropping `tx` without sending makes the
-    /// agent's `rx.await` return `Err`, which the handler turns into a
-    /// cancelled tool result.
+    /// Dismiss the question locally. Daemon cancellation is an explicit
+    /// input action so replacing UI state does not answer a pending request.
     pub fn cancel_user_question(&mut self) {
+        let child_question = self
+            .user_question
+            .as_ref()
+            .is_some_and(|question| question.subagent.is_some());
         self.user_question = None;
         self.mode = Mode::Normal;
-        self.clear_daemon_required_actions();
-        self.show_next_daemon_required_action();
+        if child_question {
+            self.finish_daemon_required_action();
+        } else {
+            self.clear_daemon_required_actions();
+            self.show_next_daemon_required_action();
+        }
     }
 
     /// Toggle between accept (0) and reject (1) in the goal proposal modal.
@@ -2970,9 +3012,14 @@ fn append_to_part(part: &mut Part, delta: &str) {
 /// Current dir with `$HOME` collapsed to `~`, for the status pill.
 fn short_cwd() -> String {
     let cwd = match std::env::current_dir() {
-        Ok(p) => p.display().to_string(),
+        Ok(p) => p,
         Err(_) => return String::new(),
     };
+    format_cwd(&cwd)
+}
+
+fn format_cwd(path: &std::path::Path) -> String {
+    let cwd = path.display().to_string();
     if let Some(home) = std::env::var_os("HOME") {
         let home = home.to_string_lossy().into_owned();
         if let Some(rest) = cwd.strip_prefix(&home) {
@@ -2985,10 +3032,25 @@ fn short_cwd() -> String {
 /// Walk up from cwd to find a `.git/HEAD` and parse the branch name.
 /// Returns `None` outside a repo. Used for the status pill.
 pub fn current_git_branch() -> Option<String> {
-    let mut dir = std::env::current_dir().ok()?;
+    git_branch_in(&std::env::current_dir().ok()?)
+}
+
+fn git_branch_in(cwd: &std::path::Path) -> Option<String> {
+    let mut dir = cwd.to_path_buf();
     loop {
-        let head = dir.join(".git").join("HEAD");
-        if let Ok(content) = std::fs::read_to_string(&head) {
+        let git = dir.join(".git");
+        let metadata = if git.is_file() {
+            std::fs::read_to_string(&git).ok().and_then(|content| {
+                content
+                    .trim()
+                    .strip_prefix("gitdir: ")
+                    .map(|path| dir.join(path))
+            })
+        } else {
+            Some(git)
+        };
+        let head = metadata.map(|path| path.join("HEAD"));
+        if let Some(Ok(content)) = head.map(std::fs::read_to_string) {
             let content = content.trim();
             if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
                 return Some(branch.to_string());
@@ -3096,6 +3158,8 @@ pub fn parse_namespace_refs(text: &str) -> Vec<NamespaceRef> {
 mod tests;
 
 pub mod activity;
+mod client;
+mod drafts;
 pub mod editor;
 pub mod input;
 pub mod pickers;

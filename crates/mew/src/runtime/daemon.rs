@@ -1,102 +1,125 @@
-//! `DaemonTarget` — `CommandTarget` impl for daemon-connected TUI mode.
-//!
-//! Wraps a `DaemonClient` and forwards operations to the daemon over the
-//! WebSocket protocol. Operations that aren't meaningful in daemon mode
-//! (rewind, plugin commands) return `Unsupported`.
+//! Typed daemon commands over the TUI's persistent shared-core client.
 
-use std::sync::Arc;
-
-use mew_agent::AgentEvent;
-use mew_hooks::PermissionMode;
-use mew_message::Part;
-use mew_personas::Persona;
-use tokio::sync::mpsc::Receiver;
-
+use crate::runtime::client::TuiClient;
 use crate::runtime::target::{
     CommandTarget, GoalAction, PersonaApplied, SwitchedModel, Unsupported,
 };
+use mew_hooks::PermissionMode;
+use mew_message::Part;
+use mew_personas::Persona;
+use mew_protocol::{ClientKind, ClientMessage};
+use std::sync::Arc;
 
-/// The daemon-connected command target. Wraps an `Arc<DaemonClient>` and
-/// forwards operations over the WebSocket protocol.
 pub struct DaemonTarget {
-    pub client: Arc<mew_daemon::DaemonClient>,
+    pub client: Arc<TuiClient>,
 }
 
 impl DaemonTarget {
-    pub fn new(client: Arc<mew_daemon::DaemonClient>) -> Self {
+    pub fn new(client: Arc<TuiClient>) -> Self {
         Self { client }
+    }
+
+    async fn command(
+        &self,
+        message: ClientMessage,
+        reason: &'static str,
+    ) -> Result<(), Unsupported> {
+        self.client
+            .send(message)
+            .await
+            .map_err(|_| Unsupported(reason))
+    }
+
+    async fn refresh_sessions(&self) -> Result<(), Unsupported> {
+        self.command(
+            ClientMessage::ListSessions {},
+            "failed to refresh daemon sessions",
+        )
+        .await
     }
 }
 
 #[async_trait::async_trait]
 impl CommandTarget for DaemonTarget {
-    fn prompt(&mut self, enriched: String, parts: Vec<Part>) -> Receiver<AgentEvent> {
-        // Convert Part::File attachments to protocol Attachment structs.
-        // Other part types (Text, Reasoning, etc.) are inlined into the
-        // prompt text by process_mentions and don't need separate attachment.
-        let attachments: Vec<mew_protocol::Attachment> = parts
-            .iter()
-            .filter_map(|p| match p {
-                Part::File(fp) => Some(mew_protocol::Attachment {
-                    path: fp.url.clone(),
-                    mime: Some(fp.mime.clone()),
+    async fn prompt(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+        enriched: String,
+        parts: Vec<Part>,
+    ) -> anyhow::Result<()> {
+        let attachments = parts
+            .into_iter()
+            .filter_map(|part| match part {
+                Part::File(file) => Some(mew_protocol::Attachment {
+                    path: file.url,
+                    mime: Some(file.mime),
                 }),
                 _ => None,
             })
             .collect();
-
-        // Bridge the async client.prompt() into the sync fn prompt() signature
-        // by spawning a forwarding task that drains the client's receiver into
-        // a channel.
-        let (tx, rx) = tokio::sync::mpsc::channel(128);
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            let mut recv = client.prompt(enriched, attachments).await;
-            while let Some(event) = recv.recv().await {
-                if tx.send(event).await.is_err() {
-                    break;
-                }
-            }
-        });
-        rx
+        self.client
+            .submit(session_id, request_id, enriched, attachments)
+            .await
     }
 
-    async fn cancel(&mut self) {
-        self.client.cancel().await;
+    async fn cancel(&mut self, session_id: &str) -> anyhow::Result<()> {
+        self.client
+            .send_to_session(session_id, ClientMessage::Cancel)
+            .await
     }
-
-    async fn guide(&mut self, text: String) {
-        self.client.guide(text).await;
+    async fn close_question(&mut self, session_id: &str, request_id: &str) -> anyhow::Result<()> {
+        self.client
+            .send_to_session(
+                session_id,
+                ClientMessage::AskUserResponse {
+                    request_id: request_id.into(),
+                    answers: Vec::new(),
+                    cancelled: true,
+                },
+            )
+            .await
+    }
+    async fn guide(&mut self, session_id: &str, text: String) -> anyhow::Result<()> {
+        self.client
+            .send_to_session(session_id, ClientMessage::Guide { text })
+            .await
     }
 
     async fn clear(&mut self) -> Result<(), Unsupported> {
-        let client = self.client.clone();
-        client
-            .slash_command("/clear".into())
-            .await
-            .map_err(|_| Unsupported("daemon connection failed during clear"))
+        self.command(
+            ClientMessage::SlashCommand {
+                command: "/clear".into(),
+            },
+            "daemon connection failed during clear",
+        )
+        .await
     }
-
     async fn compact(&mut self) -> Result<(), Unsupported> {
-        let client = self.client.clone();
-        client
-            .slash_command("/compact".into())
-            .await
-            .map_err(|_| Unsupported("daemon connection failed during compact"))
+        self.command(
+            ClientMessage::SlashCommand {
+                command: "/compact".into(),
+            },
+            "daemon connection failed during compact",
+        )
+        .await
     }
-
     async fn read_subagent_history(
         &mut self,
         session_id: &str,
         child_session_id: &str,
         request_id: &str,
     ) -> Result<(), Unsupported> {
-        self.client
-            .read_subagent_history(session_id, child_session_id, request_id)
-            .await
-            .map_err(|_| Unsupported("could not request subagent trace"))
+        self.command(
+            ClientMessage::ReadSubagentHistory {
+                session_id: session_id.into(),
+                child_session_id: child_session_id.into(),
+                request_id: request_id.into(),
+            },
+            "could not request subagent trace",
+        )
+        .await
     }
-
     async fn update_todo(
         &mut self,
         session_id: &str,
@@ -104,217 +127,181 @@ impl CommandTarget for DaemonTarget {
     ) -> anyhow::Result<Vec<mew_agent::Todo>> {
         self.client.update_todo(session_id, edit).await
     }
-
     async fn switch_model(&mut self, spec: &str) -> Result<SwitchedModel, Unsupported> {
         let (provider_id, model_id) = crate::setup::providers::split_provider_model(spec, "");
-        let client = self.client.clone();
-        let msg = mew_protocol::ClientMessage::SwitchModel {
-            provider: provider_id.clone(),
-            model: model_id.clone(),
-        };
-        match mew_protocol::encode_json(&msg) {
-            Ok(json) => match client.send_raw(&json).await {
-                Ok(()) => Ok(SwitchedModel {
-                    provider_id,
-                    model_id,
-                    display: spec.to_string(),
-                }),
-                Err(_) => Err(Unsupported("daemon connection failed during model switch")),
+        self.command(
+            ClientMessage::SwitchModel {
+                provider: provider_id.clone(),
+                model: model_id.clone(),
             },
-            Err(_) => Err(Unsupported("failed to encode model switch message")),
-        }
+            "daemon connection failed during model switch",
+        )
+        .await?;
+        Ok(SwitchedModel {
+            provider_id,
+            model_id,
+            display: spec.into(),
+        })
     }
-
     async fn set_permission_mode(&mut self, mode: PermissionMode) -> Result<(), Unsupported> {
-        let client = self.client.clone();
-        let msg = mew_protocol::ClientMessage::SetPermissionMode {
-            mode: mode.id().to_string(),
-        };
-        match mew_protocol::encode_json(&msg) {
-            Ok(json) => match client.send_raw(&json).await {
-                Ok(()) => Ok(()),
-                Err(_) => Err(Unsupported(
-                    "daemon connection failed during permission mode change",
-                )),
+        self.command(
+            ClientMessage::SetPermissionMode {
+                mode: mode.id().into(),
             },
-            Err(_) => Err(Unsupported("failed to encode permission mode message")),
-        }
+            "daemon connection failed during permission mode change",
+        )
+        .await
     }
-
     async fn set_thinking(&mut self, variant: &str) -> Result<(), Unsupported> {
-        let client = self.client.clone();
-        let msg = mew_protocol::ClientMessage::SetThinkingVariant {
-            variant: variant.to_string(),
-        };
-        match mew_protocol::encode_json(&msg) {
-            Ok(json) => match client.send_raw(&json).await {
-                Ok(()) => Ok(()),
-                Err(_) => Err(Unsupported(
-                    "daemon connection failed during thinking variant change",
-                )),
+        self.command(
+            ClientMessage::SetThinkingVariant {
+                variant: variant.into(),
             },
-            Err(_) => Err(Unsupported("failed to encode thinking variant message")),
-        }
+            "daemon connection failed during thinking variant change",
+        )
+        .await
     }
-
     async fn attach_session(&mut self, id: &str) -> Result<(), Unsupported> {
-        let client = self.client.clone();
-        match client.attach_session(id).await {
-            Ok(()) => {
-                client
-                    .list_sessions()
-                    .await
-                    .map_err(|_| Unsupported("failed to refresh daemon sessions"))?;
-                Ok(())
-            }
-            Err(_) => Err(Unsupported("failed to attach to daemon session")),
-        }
+        self.command(
+            ClientMessage::AttachSession {
+                session_id: id.into(),
+                client_kind: ClientKind::Tui,
+            },
+            "failed to attach to daemon session",
+        )
+        .await?;
+        self.refresh_sessions().await
     }
-
     async fn resume(&mut self, id: &str) -> Result<(), Unsupported> {
-        // In daemon mode, resume is the same as attach.
         self.attach_session(id).await
     }
-
     async fn rewind(&mut self, _n: usize) -> Result<(), Unsupported> {
         Err(Unsupported("rewind not available in daemon mode"))
     }
-
     async fn switch_persona(
         &mut self,
         name: &str,
         _personas: &[Persona],
     ) -> Result<PersonaApplied, Unsupported> {
-        let client = self.client.clone();
-        let msg = mew_protocol::ClientMessage::SwitchPersona {
-            name: name.to_string(),
-        };
-        match mew_protocol::encode_json(&msg) {
-            Ok(json) => match client.send_raw(&json).await {
-                Ok(()) => Ok(PersonaApplied {
-                    pinned_model: None,
-                    display: format!("switched to persona: {}", name),
-                }),
-                Err(_) => Err(Unsupported(
-                    "daemon connection failed during persona switch",
-                )),
-            },
-            Err(_) => Err(Unsupported("failed to encode persona switch message")),
-        }
+        self.command(
+            ClientMessage::SwitchPersona { name: name.into() },
+            "daemon connection failed during persona switch",
+        )
+        .await?;
+        Ok(PersonaApplied {
+            pinned_model: None,
+            display: format!("switched to persona: {name}"),
+        })
     }
-
     async fn plugin_command(&mut self, _name: &str, _args: &str) -> Result<String, Unsupported> {
         Err(Unsupported("plugin commands not available in daemon mode"))
     }
-
     async fn cancel_subagent(&mut self, _task_id: &str) -> Result<bool, Unsupported> {
         Err(Unsupported(
             "subagent cancellation not available in daemon mode",
         ))
     }
-
     async fn manage_goal(&mut self, action: GoalAction) -> Result<String, Unsupported> {
-        // Send the goal command to the daemon as a slash command. The
-        // daemon's slash-command handler recognizes /goal and manages the
-        // agent's goal state server-side, returning a status string.
-        let cmd = match action {
+        let text = match action {
             GoalAction::Set(text) => format!("/goal {text}"),
-            GoalAction::Status => "/goal status".to_string(),
-            GoalAction::Pause => "/goal pause".to_string(),
-            GoalAction::Resume => "/goal resume".to_string(),
-            GoalAction::Clear => "/goal clear".to_string(),
-            GoalAction::Complete => "/goal complete".to_string(),
+            GoalAction::Status => "/goal status".into(),
+            GoalAction::Pause => "/goal pause".into(),
+            GoalAction::Resume => "/goal resume".into(),
+            GoalAction::Clear => "/goal clear".into(),
+            GoalAction::Complete => "/goal complete".into(),
         };
-        match self.client.slash_command(cmd).await {
-            Ok(()) => Ok("goal command sent".to_string()),
-            Err(_) => Err(Unsupported("daemon goal command failed")),
-        }
+        self.command(
+            ClientMessage::SlashCommand { command: text },
+            "daemon goal command failed",
+        )
+        .await?;
+        Ok("goal command sent".into())
     }
-
     async fn set_auto_title(&mut self, enabled: bool) -> Result<(), Unsupported> {
-        self.client
-            .set_auto_title(enabled)
-            .await
-            .map_err(|_| Unsupported("failed to update daemon auto-title setting"))
+        self.command(
+            ClientMessage::SetAutoTitle { enabled },
+            "failed to update daemon auto-title setting",
+        )
+        .await
     }
-
     async fn set_auto_summary(&mut self, enabled: bool) -> Result<(), Unsupported> {
-        self.client
-            .set_auto_summary(enabled)
-            .await
-            .map_err(|_| Unsupported("failed to update daemon auto-summary setting"))
+        self.command(
+            ClientMessage::SetAutoSummary { enabled },
+            "failed to update daemon auto-summary setting",
+        )
+        .await
     }
-
     async fn yield_control(&mut self) -> Result<(), Unsupported> {
-        let msg = mew_protocol::ClientMessage::YieldControl {};
-        match mew_protocol::encode_json(&msg) {
-            Ok(json) => match self.client.send_raw(&json).await {
-                Ok(()) => Ok(()),
-                Err(_) => Err(Unsupported("daemon connection failed during yield")),
-            },
-            Err(_) => Err(Unsupported("failed to encode yield message")),
-        }
+        self.command(
+            ClientMessage::YieldControl {},
+            "daemon connection failed during yield",
+        )
+        .await
     }
-
     async fn unflag_file(&mut self, path: &str) -> Result<(), Unsupported> {
-        match self.client.session_id().await {
-            Some(id) => self
-                .client
-                .unflag_file(&id, path)
-                .await
-                .map_err(|_| Unsupported("failed to unflag daemon file")),
-            None => Err(Unsupported("no active daemon session")),
-        }
+        let id = self
+            .client
+            .session_id()
+            .await
+            .ok_or(Unsupported("no active daemon session"))?;
+        self.command(
+            ClientMessage::UnflagFile {
+                session_id: id,
+                path: path.into(),
+            },
+            "failed to unflag daemon file",
+        )
+        .await
     }
-
     async fn list_projects(&mut self) -> Result<(), Unsupported> {
-        self.client
-            .list_projects()
-            .await
-            .map_err(|_| Unsupported("failed to list daemon projects"))
+        self.command(
+            ClientMessage::ListProjects {},
+            "failed to list daemon projects",
+        )
+        .await
     }
-
     async fn new_session_in(&mut self, path: &str) -> Result<(), Unsupported> {
-        self.client
-            .new_session_in(path)
-            .await
-            .map_err(|_| Unsupported("failed to create daemon session"))?;
-        self.client
-            .list_sessions()
-            .await
-            .map_err(|_| Unsupported("failed to refresh daemon sessions"))
+        self.command(
+            ClientMessage::NewSession {
+                cwd: Some(path.into()),
+                client_kind: ClientKind::Tui,
+            },
+            "failed to create daemon session",
+        )
+        .await?;
+        self.refresh_sessions().await
     }
-
     async fn archive_session(&mut self, id: &str, archived: bool) -> Result<(), Unsupported> {
-        self.client
-            .archive_session(id, archived)
-            .await
-            .map_err(|_| Unsupported("failed to archive daemon session"))?;
-        self.client
-            .list_sessions()
-            .await
-            .map_err(|_| Unsupported("failed to refresh daemon sessions"))
+        self.command(
+            ClientMessage::ArchiveSession {
+                session_id: id.into(),
+                archived,
+            },
+            "failed to archive daemon session",
+        )
+        .await?;
+        self.refresh_sessions().await
     }
-
     async fn pin_session(&mut self, id: &str, pinned: bool) -> Result<(), Unsupported> {
-        self.client
-            .pin_session(id, pinned)
-            .await
-            .map_err(|_| Unsupported("failed to pin daemon session"))?;
-        self.client
-            .list_sessions()
-            .await
-            .map_err(|_| Unsupported("failed to refresh daemon sessions"))
+        self.command(
+            ClientMessage::PinSession {
+                session_id: id.into(),
+                pinned,
+            },
+            "failed to pin daemon session",
+        )
+        .await?;
+        self.refresh_sessions().await
     }
-
     async fn rename_session(&mut self, id: &str, title: &str) -> Result<(), Unsupported> {
-        self.client
-            .rename_session(id, title)
-            .await
-            .map_err(|_| Unsupported("failed to rename daemon session"))?;
-        self.client
-            .list_sessions()
-            .await
-            .map_err(|_| Unsupported("failed to refresh daemon sessions"))
+        self.command(
+            ClientMessage::RenameSession {
+                session_id: id.into(),
+                title: title.into(),
+            },
+            "failed to rename daemon session",
+        )
+        .await?;
+        self.refresh_sessions().await
     }
 }

@@ -179,6 +179,9 @@ impl Agent {
             }
         };
         for tc in pending {
+            if self.cancel_token.is_cancelled() {
+                break;
+            }
             let call_id = tc.call_id.clone();
             let part_id = tc.base.id;
 
@@ -980,6 +983,22 @@ impl Agent {
                         })
                         .await;
                 }
+                mew_subagents::SubagentEvent::AskUser {
+                    mut source,
+                    call_id: child_call_id,
+                    questions,
+                    tx,
+                } => {
+                    source.parent_call_id = call_id.clone();
+                    let _ = ev_tx_clone
+                        .send(AgentEvent::SubagentAskUser {
+                            source,
+                            call_id: child_call_id,
+                            questions,
+                            tx,
+                        })
+                        .await;
+                }
                 mew_subagents::SubagentEvent::WorkspacePermissionRequest { path, tx } => {
                     let _ = ev_tx_clone
                         .send(AgentEvent::WorkspacePermissionRequest { path, tx })
@@ -1300,8 +1319,13 @@ impl Agent {
                     tx,
                 })
                 .await;
-            match rx.await {
-                Ok(answers) => {
+            let answer = tokio::select! {
+                biased;
+                _ = self.cancel_token.cancelled() => None,
+                answer = rx => answer.ok(),
+            };
+            match answer {
+                Some(answers) => {
                     let mut text = String::new();
                     for (i, (prompt, options)) in parsed.iter().enumerate() {
                         let answer = answers.get(i).map(|s| s.as_str()).unwrap_or("(no answer)");
@@ -1317,7 +1341,7 @@ impl Agent {
                     }
                     (text, true)
                 }
-                Err(_) => (
+                None => (
                     "ask_user_question cancelled (no response received)".to_string(),
                     false,
                 ),

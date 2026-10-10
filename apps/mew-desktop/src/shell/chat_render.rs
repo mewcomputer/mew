@@ -289,6 +289,7 @@ impl DesktopShell {
                                     format!("action-{request_id}-option-{index}"),
                                     answer.clone(),
                                     ClientMessage::AskUserResponse {
+                                        cancelled: false,
                                         request_id: request_id.clone(),
                                         answers: vec![answer],
                                     },

@@ -2909,7 +2909,7 @@ fn ctrl_up_guides_oldest_queued_message() {
         crossterm::event::KeyModifiers::CONTROL,
     );
     let action = crate::events::handle_key_event(&mut app, ctrl_up);
-    assert!(matches!(action, Some(Action::GuideQueued(text)) if text == "first"));
+    assert!(matches!(action, Some(Action::GuideQueued {text,..}) if text == "first"));
     // The guided message is popped from the queue; the rest remain.
     assert_eq!(app.queued_messages, vec!["second".to_string()]);
 }
@@ -3754,4 +3754,108 @@ fn sidebar_subagent_restart_replaces_terminal_run() {
     assert!(matches!(app.subagents[0].status, SubagentStatus::Running));
     assert!(app.subagents[0].finished_at.is_none());
     assert!(app.subagents[0].last_progress.is_none());
+}
+
+#[test]
+fn child_question_shows_its_owner_and_escape_preserves_other_pending_questions() {
+    let mut app = App::new();
+    app.daemon_mode = true;
+    app.status.session_id = "parent-session".into();
+    app.push_synthetic_message("conversation".into());
+    let (child_tx, mut child_rx) = tokio::sync::oneshot::channel();
+    app.handle_daemon_required_action(
+        "child-q".into(),
+        AgentEvent::SubagentAskUser {
+            source: mew_message::SubagentQuestionSource {
+                parent_call_id: "task".into(),
+                child_session_id: "child".into(),
+                name: "worker".into(),
+                display_name: Some("Curie".into()),
+            },
+            call_id: "ask".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "which file?".into(),
+                options: vec![],
+            }],
+            tx: child_tx,
+        },
+    );
+    let (parent_tx, mut parent_rx) = tokio::sync::oneshot::channel();
+    app.handle_daemon_required_action(
+        "parent-q".into(),
+        AgentEvent::AskUser {
+            call_id: "parent-ask".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "parent question".into(),
+                options: vec![],
+            }],
+            tx: parent_tx,
+        },
+    );
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(
+        rendered.contains("Curie (worker): which file?"),
+        "{rendered}"
+    );
+    let action = crate::events::handle_key_event(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
+    assert!(
+        matches!(action, Some(crate::events::Action::CloseQuestion { session_id, request_id })
+        if session_id == "parent-session" && request_id == "child-q"),
+        "closing a child question must carry its explicit session and request"
+    );
+    assert!(matches!(
+        child_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
+    assert!(matches!(
+        parent_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(app.daemon_request_id.as_deref(), Some("parent-q"));
+    assert_eq!(app.user_question.as_ref().unwrap().call_id, "parent-ask");
+    app.user_question.as_mut().unwrap().freeform_text = "answer".into();
+    app.user_question_confirm();
+    assert_eq!(parent_rx.try_recv().unwrap(), vec!["answer"]);
+
+    let (parent_tx, mut parent_rx) = tokio::sync::oneshot::channel();
+    app.handle_daemon_required_action(
+        "next-parent-q".into(),
+        AgentEvent::AskUser {
+            call_id: "next-parent-ask".into(),
+            questions: vec![AskUserQuestion {
+                prompt: "continue?".into(),
+                options: vec![],
+            }],
+            tx: parent_tx,
+        },
+    );
+    let action = crate::events::handle_key_event(
+        &mut app,
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    );
+    assert!(matches!(action, Some(crate::events::Action::Cancel)));
+    assert!(matches!(
+        parent_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+    ));
 }
