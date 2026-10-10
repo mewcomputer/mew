@@ -7,6 +7,16 @@ use super::*;
 use unicode_segmentation::UnicodeSegmentation;
 
 impl App {
+    pub fn edit_input(&mut self, key: crossterm::event::KeyEvent) -> editor::EditResult {
+        editor::handle_key_with_undo(
+            &mut self.input,
+            &mut self.cursor,
+            key,
+            &mut self.undo_history,
+            &mut self.kill_ring,
+        )
+    }
+
     pub fn push_undo(&mut self) {
         self.undo_history.snapshot(&self.input, self.cursor);
     }
@@ -162,6 +172,8 @@ impl App {
         if self.history.is_empty() {
             return;
         }
+        self.undo_history.break_coalescing();
+        self.kill_ring.end_sequence();
         let idx = match self.history_index {
             Some(i) if i > 0 => i - 1,
             Some(_) => return,
@@ -176,6 +188,8 @@ impl App {
     }
 
     pub fn history_down(&mut self) {
+        self.undo_history.break_coalescing();
+        self.kill_ring.end_sequence();
         let idx = match self.history_index {
             Some(i) if i + 1 < self.history.len() => i + 1,
             Some(_) => {

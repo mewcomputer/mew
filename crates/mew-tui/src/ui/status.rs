@@ -347,7 +347,7 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     let mut left_area = chunks[0];
     if app.daemon_mode && left_area.width >= 2 && area.height > 0 {
         let count = app.session_attention_count();
-        let label = format!("🔔 {count} · ^N");
+        let label = format!("🔔 {count} · ^Alt+N");
         let width = (display_width(&label) as u16).min(left_area.width);
         let text = if width >= 7 {
             truncate_pill(&label, width as usize)

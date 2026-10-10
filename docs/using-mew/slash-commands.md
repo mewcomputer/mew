@@ -58,7 +58,7 @@ See [Permissions](/docs/using-mew/permissions/) for mode details, rules, and san
 | `/mouse` `/m` | Toggle mouse capture for text selection |
 | `/quit` `/q` | Exit mew |
 
-The sidebar bell and `Ctrl+N` open conversations with pending questions,
+The sidebar bell and `Ctrl+Alt+N` open conversations with pending questions,
 permissions or unread outcomes. `Tab` switches between attention and all
 conversations. Each conversation keeps its draft, attachments and queued
 follow-ups when you switch. Submitted input stays visible until the daemon

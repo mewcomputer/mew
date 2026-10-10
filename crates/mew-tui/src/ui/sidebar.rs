@@ -159,7 +159,7 @@ fn draw_conversations(text: &mut Text, visual_row: &mut u16, app: &mut App, widt
     text.push_line(Line::from(Span::styled(
         truncate_to_fit(
             &format!(
-                "🔔 {count} {} · ^N",
+                "🔔 {count} {} · ^Alt+N",
                 if count == 1 { "update" } else { "updates" }
             ),
             max,

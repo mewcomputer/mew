@@ -114,12 +114,16 @@ impl App {
                     let delta = if key.code == KeyCode::BackTab { 3 } else { 1 };
                     draft.status = statuses[(index + delta) % statuses.len()];
                 }
-                KeyCode::Enter => editor::insert_with_undo(
-                    &mut draft.content,
-                    &mut draft.cursor,
-                    '\n',
-                    &mut draft.undo,
-                ),
+                _ if (key.code == KeyCode::Enter && key.modifiers.is_empty())
+                    || editor::is_newline(key) =>
+                {
+                    editor::insert_with_undo(
+                        &mut draft.content,
+                        &mut draft.cursor,
+                        '\n',
+                        &mut draft.undo,
+                    )
+                }
                 KeyCode::Up | KeyCode::Down => {
                     let width = state.body.width.saturating_sub(1).max(1);
                     let mut position = None;
@@ -164,6 +168,7 @@ impl App {
                         &mut draft.cursor,
                         key,
                         &mut draft.undo,
+                        &mut self.kill_ring,
                     );
                 }
             }

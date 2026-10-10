@@ -175,6 +175,7 @@ impl App {
     }
 
     pub(super) fn switch_conversation_draft(&mut self, session_id: &str) {
+        self.kill_ring.end_sequence();
         let current = ConversationDraft {
             input: std::mem::take(&mut self.input),
             cursor: std::mem::take(&mut self.cursor),

@@ -764,15 +764,28 @@ impl SettingsState {
     // ------------------------------------------------------------------
 
     /// Handle a key in settings mode. Returns true while settings stays open.
-    pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
-        match self.edit_mode {
+    pub fn handle_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        ring: &mut crate::app::editor::KillRing,
+    ) -> bool {
+        let previous = self.edit_mode;
+        let open = match self.edit_mode {
             EditMode::Normal => self.handle_normal_key(key),
             EditMode::Editing => {
-                self.handle_edit_key(key);
+                self.handle_edit_key(key, ring);
                 true
             }
-            EditMode::Naming => self.handle_naming_key(key),
+            EditMode::Naming => self.handle_naming_key(key, ring),
+        };
+        if self.edit_mode != previous {
+            ring.end_sequence();
+            if self.edit_mode != EditMode::Normal {
+                self.buf_cursor = self.buf.len();
+                self.buf_undo = Default::default();
+            }
         }
+        open
     }
 
     fn handle_normal_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
@@ -817,7 +830,7 @@ impl SettingsState {
                 self.move_cursor(1)
             }
 
-            crossterm::event::KeyCode::Enter => self.handle_enter(),
+            crossterm::event::KeyCode::Enter if key.modifiers.is_empty() => self.handle_enter(),
             crossterm::event::KeyCode::Char('n') if self.active == Panel::Left => {
                 self.handle_add_item()
             }
@@ -829,14 +842,18 @@ impl SettingsState {
         true
     }
 
-    fn handle_edit_key(&mut self, key: crossterm::event::KeyEvent) {
+    fn handle_edit_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        ring: &mut crate::app::editor::KillRing,
+    ) {
         match key.code {
             crossterm::event::KeyCode::Esc => {
                 self.edit_mode = EditMode::Normal;
                 self.buf.clear();
                 self.buf_cursor = 0;
             }
-            crossterm::event::KeyCode::Enter => {
+            crossterm::event::KeyCode::Enter if key.modifiers.is_empty() => {
                 if let Some(field) = self.selected_field() {
                     let val = self.buf.clone();
                     field.apply(self, &val);
@@ -854,19 +871,24 @@ impl SettingsState {
                     &mut self.buf_cursor,
                     key,
                     &mut self.buf_undo,
+                    ring,
                 );
             }
         }
     }
 
-    fn handle_naming_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+    fn handle_naming_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        ring: &mut crate::app::editor::KillRing,
+    ) -> bool {
         match key.code {
             crossterm::event::KeyCode::Esc => {
                 self.edit_mode = EditMode::Normal;
                 self.buf.clear();
                 self.buf_cursor = 0;
             }
-            crossterm::event::KeyCode::Enter => {
+            crossterm::event::KeyCode::Enter if key.modifiers.is_empty() => {
                 let name = self.buf.trim().to_string();
                 if !name.is_empty() && !self.config.providers.contains_key(&name) {
                     self.config
@@ -893,6 +915,7 @@ impl SettingsState {
                     &mut self.buf_cursor,
                     key,
                     &mut self.buf_undo,
+                    ring,
                 );
             }
         }
@@ -1497,4 +1520,55 @@ impl SettingsState {
 /// Helper used by the TUI overlay system to render the settings screen.
 pub fn draw_settings(f: &mut Frame, state: &SettingsState, area: Rect, tokens: &Theme) {
     state.draw(f, area, tokens);
+}
+
+#[cfg(test)]
+mod readline_tests {
+    use super::*;
+    use crate::{app::Mode, events::handle_key_event, App};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+        assert!(handle_key_event(app, KeyEvent::new(code, modifiers)).is_none());
+    }
+
+    fn settings_app() -> App {
+        let mut app = App::new();
+        let config = mew_config::Config {
+            default_model: "provider/模型".into(),
+            default_persona: "研究者".into(),
+            ..Default::default()
+        };
+        app.settings = Some(SettingsState::new(config, vec![]));
+        app.mode = Mode::Settings;
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        app
+    }
+
+    #[test]
+    fn opening_an_existing_unicode_value_places_the_caret_at_the_end() {
+        let mut app = settings_app();
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let state = app.settings.as_ref().unwrap();
+        assert_eq!(state.edit_mode, EditMode::Editing);
+        assert_eq!(state.buf_cursor, "provider/模型".len());
+        key(&mut app, KeyCode::Char('界'), KeyModifiers::NONE);
+        assert_eq!(app.settings.as_ref().unwrap().buf, "provider/模型界");
+    }
+
+    #[test]
+    fn undo_from_a_canceled_field_cannot_replace_the_next_fields_value() {
+        let mut app = settings_app();
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+        key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut app, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        let state = app.settings.as_ref().unwrap();
+        assert_eq!(state.buf, "研究者");
+        assert_eq!(state.buf_cursor, "研究者".len());
+        assert_eq!(state.config.default_model, "provider/模型");
+        assert!(!state.dirty);
+    }
 }

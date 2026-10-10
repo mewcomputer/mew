@@ -262,6 +262,8 @@ pub struct App {
     pub sidebar_finished_ttl: u64,
     pub background_jobs: Vec<BackgroundJobState>,
     pub undo_history: editor::UndoHistory,
+    pub kill_ring: editor::KillRing,
+    pub(crate) kill_ring_mode: Mode,
     pub history_search_query: String,
     /// Cursor into `history_search_query`, shared with the editor module.
     pub history_search_cursor: usize,
@@ -1019,6 +1021,8 @@ impl App {
             sidebar_finished_ttl: 180,
             background_jobs: Vec::new(),
             undo_history: editor::UndoHistory::default(),
+            kill_ring: editor::KillRing::default(),
+            kill_ring_mode: Mode::Normal,
             history_search_query: String::new(),
             history_search_cursor: 0,
             history_search_undo: editor::UndoHistory::default(),
@@ -1512,6 +1516,8 @@ impl App {
     pub fn start_history_search(&mut self) {
         self.history_search_saved = Some((self.input.clone(), self.cursor));
         self.history_search_query.clear();
+        self.history_search_cursor = 0;
+        self.history_search_undo = Default::default();
         self.history_search_index = None;
         self.mode = Mode::HistorySearch;
     }

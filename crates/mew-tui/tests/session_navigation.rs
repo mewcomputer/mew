@@ -127,7 +127,7 @@ fn session_picker_toggle_recovers_archived_sessions_and_preserves_query_when_lis
     assert_eq!(picker.filter, "n");
     assert_eq!(picker.selected_item().unwrap().id, "old");
     assert!(
-        matches!(key(&mut app,KeyCode::Char('a'),KeyModifiers::CONTROL),Some(Action::ToggleSessionArchived(id)) if id=="old")
+        matches!(key(&mut app,KeyCode::Char('a'),KeyModifiers::CONTROL | KeyModifiers::ALT),Some(Action::ToggleSessionArchived(id)) if id=="old")
     );
     key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
     assert_eq!(app.picker.as_ref().unwrap().kind, "session");
@@ -138,7 +138,11 @@ fn attention_is_keyboard_reachable_without_a_sidebar_and_empty_is_truthful() {
     app.daemon_mode = true;
     app.input = "draft".into();
     app.cursor = 5;
-    key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+    key(
+        &mut app,
+        KeyCode::Char('n'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    );
     assert_eq!(app.mode, Mode::CommandPalette);
     assert_eq!(app.picker.as_ref().unwrap().kind, "session_attention");
     let buffer = draw(&mut app, 40, 16);
@@ -159,7 +163,7 @@ fn global_help_exposes_the_attention_shortcut() {
     assert!((0..buffer.area.width)
         .map(|x| buffer[(x, y)].symbol())
         .collect::<String>()
-        .contains("Ctrl+N"));
+        .contains("Ctrl+Alt+N"));
 }
 
 #[test]
@@ -489,7 +493,9 @@ fn conversation_details_keep_context_without_repeating_quiet_state_or_cost() {
     assert!(!text.contains("choices") && !text.contains("choice"));
     assert!(!text.contains("move") && !text.contains("choose") && !text.contains("close"));
     assert!(
-        text.contains("Tab archived") && text.contains("^A archive") && text.contains("^P pin")
+        text.contains("Tab archived")
+            && text.contains("Ctrl+Alt+A archive")
+            && text.contains("Ctrl+Alt+P pin")
     );
 }
 

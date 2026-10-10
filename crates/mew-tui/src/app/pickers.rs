@@ -314,9 +314,11 @@ impl App {
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: Some(
                 match kind {
-                    "session_attention" => "Tab all conversations · ^A archive/restore · ^P pin",
-                    "session_archived" => "Tab recent · ^A restore · ^P pin",
-                    _ => "Tab archived · ^A archive · ^P pin",
+                    "session_attention" => {
+                        "Tab all conversations · Ctrl+Alt+A archive/restore · Ctrl+Alt+P pin"
+                    }
+                    "session_archived" => "Tab recent · Ctrl+Alt+A restore · Ctrl+Alt+P pin",
+                    _ => "Tab archived · Ctrl+Alt+A archive · Ctrl+Alt+P pin",
                 }
                 .into(),
             ),

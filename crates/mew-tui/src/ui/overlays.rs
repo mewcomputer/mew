@@ -1753,11 +1753,11 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut App, area: Rect) {
     let lines = vec![
         Line::from(Span::styled("Global", header_style)),
         Line::from(vec![
-            Span::styled("  Ctrl+P     ", key_style),
+            Span::styled("  Ctrl+Space ", key_style),
             Span::styled("command palette", desc_style),
         ]),
         Line::from(vec![
-            Span::styled("  Ctrl+N     ", key_style),
+            Span::styled("  Ctrl+Alt+N ", key_style),
             Span::styled("conversation notifications", desc_style),
         ]),
         Line::from(vec![
@@ -1783,8 +1783,8 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut App, area: Rect) {
         Line::from(""),
         Line::from(Span::styled("Input Editing", header_style)),
         Line::from(vec![
-            Span::styled("  Alt+Enter  ", key_style),
-            Span::styled("insert newline (multi-line)", desc_style),
+            Span::styled("  Shift/Alt+Enter ", key_style),
+            Span::styled("insert newline (also Ctrl+J)", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  Ctrl+A/E   ", key_style),
@@ -1804,11 +1804,35 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut App, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled("  Ctrl+U     ", key_style),
-            Span::styled("clear input", desc_style),
+            Span::styled("kill to start of this line", desc_style),
         ]),
         Line::from(vec![
-            Span::styled("  Ctrl+Z     ", key_style),
+            Span::styled("  Ctrl+Y     ", key_style),
+            Span::styled("yank killed text", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Alt+Y      ", key_style),
+            Span::styled("replace yank with previous kill", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Alt+B/F/D  ", key_style),
+            Span::styled("word back / forward / kill forward", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+T     ", key_style),
+            Span::styled("transpose characters", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+Z/_   ", key_style),
             Span::styled("undo", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+P/N   ", key_style),
+            Span::styled("previous / next input history", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+R     ", key_style),
+            Span::styled("search input history", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  Ctrl+Shift+Z  ", key_style),
@@ -1833,7 +1857,7 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled("expand/collapse bash output", desc_style),
         ]),
         Line::from(vec![
-            Span::styled("  Ctrl+T     ", key_style),
+            Span::styled("  Ctrl+Alt+T ", key_style),
             Span::styled("toggle reasoning blocks", desc_style),
         ]),
         Line::from(vec![

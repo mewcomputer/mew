@@ -75,7 +75,7 @@ define custom ones.
 | `todo_delete` | ReadOnly | Delete a todo. Refused if another todo depends on it. |
 | `todo_list` | ReadOnly | List all todos with their IDs, statuses, and dependencies. |
 
-The todo list renders in a panel below the chat. Press `Ctrl+P` and
+The todo list renders in a panel below the chat. Press `Ctrl+Space` and
 select "Todo" to toggle its visibility, or use `/todo` to print it as
 text.
 

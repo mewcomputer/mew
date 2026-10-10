@@ -5,16 +5,24 @@ description: Power-user features and workflows for mew.
 
 ## Input editing
 
-- **Multi-line input**: press `Alt+Enter` to insert a newline without
+- **Multi-line input**: press `Shift+Enter`, `Alt+Enter` or `Ctrl+J` to insert a newline without
   submitting. Useful for writing code snippets or structured prompts.
-- **Undo/redo**: `Ctrl+Z` undoes the last edit. `Ctrl+Shift+Z` or `Ctrl+Y`
-  redoes. Edits within a 500ms window coalesce into one undo entry.
+- **Undo/redo**: `Ctrl+Z` or `Ctrl+_` undoes the last edit. `Ctrl+Shift+Z`
+  redoes. Rapid typing coalesces into one undo entry; movement and kill/yank
+  commands separate edits.
+- **History recall**: `Ctrl+P` / `Ctrl+N` browse previous / next prompts,
+  restoring your unsent draft when you return past the newest entry.
 - **History search**: `Ctrl+R` searches backward through input history.
-  `Ctrl+S` searches forward. Type to filter, Enter to insert.
-- **Word navigation**: `Alt+Left` / `Alt+Right` jump word boundaries.
-  `Alt+Backspace` deletes a word backward.
+  `Ctrl+S` searches forward within that search. Type to filter, Enter to insert.
+- **Word navigation**: `Alt+B` / `Alt+F` or `Alt+Left` / `Alt+Right` jump word
+  boundaries. `Alt+Backspace` / `Alt+D` kill a word backward / forward.
+  `Ctrl+W` kills backward using whitespace boundaries, useful for paths.
 - **Line editing**: `Ctrl+A` / `Ctrl+E` jump to start / end. `Ctrl+K`
-  kills to end of line. `Ctrl+U` clears everything.
+  kills to this line's end. `Ctrl+U` kills to this line's beginning, preserving
+  other lines. `Ctrl+T` transposes the characters around the cursor.
+- **Kill/yank**: `Ctrl+Y` inserts the most recently killed text. `Alt+Y`
+  immediately afterward replaces it with an older kill. The ring is shared
+  across text fields, while undo remains local to each field.
 
 ## Chat interaction
 
@@ -25,7 +33,7 @@ description: Power-user features and workflows for mew.
   re-attaches auto-scroll to the bottom.
 - **Cancel streaming**: press `Esc` twice. The first `Esc` shows a hint in
   the status bar ("esc again to stop agent"). The second cancels immediately.
-- **Toggle reasoning**: `Ctrl+T` expands/collapses reasoning/thinking blocks.
+- **Toggle reasoning**: `Ctrl+Alt+T` expands/collapses reasoning/thinking blocks.
   `Ctrl+O` expands/collapses bash output.
 
 ## Session management
@@ -45,8 +53,8 @@ session, that approval survives `/clear`.
 - **Quick switch**: `/model deepseek-v4-flash` switches without leaving
   the keyboard. `/model` alone opens the picker.
 - **Thinking variants**: `/thinking high` sets the reasoning effort.
-  `/thinking off` disables it. Or use `Ctrl+P` and select "Thinking
-  Variant", then press `Ctrl+P` repeatedly to cycle through options.
+  `/thinking off` disables it. Or use `Ctrl+Space` and select "Thinking
+  Variant", then press `Ctrl+Alt+P` repeatedly to cycle through options.
 - **Cost tracking**: `/cost` shows accumulated token counts and estimated
   cost for the session.
 

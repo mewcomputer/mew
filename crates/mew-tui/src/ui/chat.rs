@@ -738,7 +738,7 @@ pub(crate) fn build_chat_lines(
                             }
                         });
                         let header = if is_expanded {
-                            "\u{25bc} thinking  [click or Ctrl-T to collapse]".to_string()
+                            "\u{25bc} thinking  [click or Ctrl-Alt-T to collapse]".to_string()
                         } else if let Some(dur) = dur_text {
                             format!(
                                 "\u{25b8} thought for {} \u{00b7} {}",

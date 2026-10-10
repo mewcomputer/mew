@@ -484,7 +484,7 @@ fn undo_and_redo_reset_details_when_query_length_stays_the_same() {
     let mut harness = Harness::new(40, 24);
     harness.app.open_model_picker();
     let picker = harness.app.picker.as_mut().unwrap();
-    picker.items = ["foo", "bar"]
+    picker.items = ["foo", "ofo"]
         .into_iter()
         .map(|label| PickerItem {
             id: label.into(),
@@ -494,9 +494,8 @@ fn undo_and_redo_reset_details_when_query_length_stays_the_same() {
         })
         .collect();
     picker.filter = "foo".into();
-    picker.cursor = 3;
-    harness.send_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-    harness.type_str("bar");
+    picker.cursor = 1;
+    harness.send_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
     harness.render();
     harness.send_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
     assert!(harness.app.picker.as_ref().unwrap().details_scroll > 0);
@@ -505,10 +504,13 @@ fn undo_and_redo_reset_details_when_query_length_stays_the_same() {
     assert_eq!(harness.app.picker.as_ref().unwrap().filter, "foo");
     assert!(frame.contains("start foo"), "{frame}");
     harness.send_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-    harness.send_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+    harness.send_key(KeyEvent::new(
+        KeyCode::Char('Z'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
     let frame = harness.render();
-    assert_eq!(harness.app.picker.as_ref().unwrap().filter, "bar");
-    assert!(frame.contains("start bar"), "{frame}");
+    assert_eq!(harness.app.picker.as_ref().unwrap().filter, "ofo");
+    assert!(frame.contains("start ofo"), "{frame}");
 }
 
 #[test]

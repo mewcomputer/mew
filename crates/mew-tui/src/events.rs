@@ -111,6 +111,22 @@ pub fn handle_input_event(app: &mut crate::app::App, event: CrosstermEvent) -> O
 
 /// Process a crossterm key event and return an action.
 pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    let editor_mode = if matches!(
+        app.mode,
+        crate::app::Mode::Normal | crate::app::Mode::SlashCommand
+    ) || app
+        .picker
+        .as_ref()
+        .is_some_and(|picker| picker.is_at_picker())
+    {
+        crate::app::Mode::Normal
+    } else {
+        app.mode
+    };
+    if app.kill_ring_mode != editor_mode || !crate::app::editor::is_kill_or_yank(key) {
+        app.kill_ring.end_sequence();
+    }
+    app.kill_ring_mode = editor_mode;
     match app.mode {
         crate::app::Mode::Activity => handle_activity_key(app, key),
         crate::app::Mode::PermissionPrompt => handle_permission_key(app, key),
@@ -127,7 +143,7 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
         // Settings mode is handled by the in-app SettingsState.
         crate::app::Mode::Settings => {
             if let Some(settings) = app.settings.as_mut() {
-                if !settings.handle_key(key) {
+                if !settings.handle_key(key, &mut app.kill_ring) {
                     // Closing settings.
                     if settings.is_dirty() {
                         app.set_alert("Settings closed (unsaved changes discarded)");
@@ -177,7 +193,7 @@ fn handle_history_search_key(app: &mut crate::app::App, key: KeyEvent) -> Option
         KeyCode::Esc => {
             app.history_search_cancel();
         }
-        KeyCode::Enter => {
+        KeyCode::Enter if key.modifiers.is_empty() => {
             app.history_search_confirm();
         }
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -196,14 +212,16 @@ fn handle_history_search_key(app: &mut crate::app::App, key: KeyEvent) -> Option
         }
         _ => {}
     }
-    // Editing keys (chars, backspace, cursor + word moves, ^A/^E/^F/^B/
-    // ^D/^K/^U/^W, ^Z/^Y undo) route through the shared readline editor.
+    // Editing keys use the shared editor; cursor movement keeps the selected match.
     if crate::app::editor::handle_key_with_undo(
         &mut app.history_search_query,
         &mut app.history_search_cursor,
         key,
         &mut app.history_search_undo,
-    ) {
+        &mut app.kill_ring,
+    )
+    .changed()
+    {
         // Reset to first match on any edit.
         app.history_search_index = if app.history_search_matches().is_empty() {
             None
@@ -299,6 +317,7 @@ fn handle_persona_confirm_key(app: &mut crate::app::App, key: KeyEvent) -> Optio
 }
 
 fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action> {
+    app.kill_ring.end_sequence();
     let text = if text.contains('\r') {
         let mut normalized = String::with_capacity(text.len());
         let mut chars = text.chars().peekable();
@@ -448,6 +467,7 @@ fn insert_paste(app: &mut crate::app::App, content: &str) {
 }
 
 pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
+    app.kill_ring.end_sequence();
     // A release consumed by a modal must not leave an old scrollbar grab alive.
     if !matches!(
         app.mode,
@@ -1122,8 +1142,19 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
                     .unwrap_or(0)
     });
     if freeform_active {
+        if crate::app::editor::is_newline(key) {
+            if let Some(uq) = app.user_question.as_mut() {
+                crate::app::editor::insert_with_undo(
+                    &mut uq.freeform_text,
+                    &mut uq.freeform_cursor,
+                    '\n',
+                    &mut uq.freeform_undo,
+                );
+            }
+            return None;
+        }
         return match key.code {
-            KeyCode::Enter => confirm_user_question(app),
+            KeyCode::Enter if key.modifiers.is_empty() => confirm_user_question(app),
             KeyCode::Esc => cancel_user_question(app),
             KeyCode::Tab => {
                 app.user_question_select_next();
@@ -1142,14 +1173,14 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
                 None
             }
             _ => {
-                // All editing keys (chars, arrows, ^A/^E/^F/^B/^D/^K/^U/^W,
-                // word moves, ^Z/^Y undo) go through the shared readline editor.
+                // Freeform answers use the same editor as the composer.
                 if let Some(uq) = app.user_question.as_mut() {
                     crate::app::editor::handle_key_with_undo(
                         &mut uq.freeform_text,
                         &mut uq.freeform_cursor,
                         key,
                         &mut uq.freeform_undo,
+                        &mut app.kill_ring,
                     );
                 }
                 None
@@ -1164,7 +1195,7 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
         .unwrap_or(false);
 
     match key.code {
-        KeyCode::Enter => confirm_user_question(app),
+        KeyCode::Enter if key.modifiers.is_empty() => confirm_user_question(app),
         KeyCode::Esc => cancel_user_question(app),
         KeyCode::Tab => {
             if on_review {
@@ -1231,7 +1262,7 @@ fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
             }
             None
         }
-        KeyCode::Char(c) => {
+        KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
             if !on_review {
                 app.user_question_type_char(c);
             }
@@ -1317,8 +1348,14 @@ fn handle_goal_proposal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<
 }
 
 fn handle_goal_compose_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    if crate::app::editor::is_newline(key) {
+        if let Some(g) = app.goal_compose.as_mut() {
+            crate::app::editor::insert_with_undo(&mut g.title, &mut g.cursor, '\n', &mut g.undo);
+        }
+        return None;
+    }
     match key.code {
-        KeyCode::Enter => {
+        KeyCode::Enter if key.modifiers.is_empty() => {
             let text = app
                 .goal_compose
                 .as_ref()
@@ -1341,14 +1378,14 @@ fn handle_goal_compose_key(app: &mut crate::app::App, key: KeyEvent) -> Option<A
             None
         }
         _ => {
-            // The objective is a text field: all editing keys route through
-            // the shared readline editor (incl. ^Z/^Y undo).
+            // Objectives use the same editor as the composer.
             if let Some(g) = app.goal_compose.as_mut() {
                 crate::app::editor::handle_key_with_undo(
                     &mut g.title,
                     &mut g.cursor,
                     key,
                     &mut g.undo,
+                    &mut app.kill_ring,
                 );
             }
             None
@@ -1368,7 +1405,7 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
 
     // Global shortcuts.
     match key.code {
-        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('n') if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             app.open_attention_picker();
             return None;
         }
@@ -1437,12 +1474,12 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             }
         }
         KeyCode::Char('d')
-            if key.modifiers.contains(KeyModifiers::CONTROL) && app.input.is_empty() =>
+            if key.modifiers == KeyModifiers::CONTROL && app.input.is_empty() && !app.streaming =>
         {
             app.should_quit = true;
             return Some(Action::Quit);
         }
-        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Null | KeyCode::Char(' ') if key.modifiers == KeyModifiers::CONTROL => {
             app.open_command_palette();
             return None;
         }
@@ -1456,7 +1493,7 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.toggle_bash_expanded();
             return None;
         }
-        KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('t') if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             app.toggle_reasoning_expanded();
             return None;
         }
@@ -1481,7 +1518,7 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             }
             return None;
         }
-        KeyCode::Char('x') if app.input.is_empty() => {
+        KeyCode::Char('x') if key.modifiers.is_empty() && app.input.is_empty() => {
             // Cancel the most recently started running subagent. Only
             // triggers when the input is empty so it doesn't shadow the
             // literal character in chat messages.
@@ -1493,12 +1530,34 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         _ => {}
     }
 
+    let edit = app.edit_input(key);
+    if edit.handled() {
+        if edit.changed() {
+            app.mode = if app.input.starts_with('/') {
+                crate::app::Mode::SlashCommand
+            } else {
+                crate::app::Mode::Normal
+            };
+            app.slash_selected = 0;
+            app.slash_scroll = 0;
+            if key.code == KeyCode::Char('@') {
+                let before = &app.input[..app.cursor.saturating_sub(1)];
+                if before.is_empty() || before.ends_with(' ') {
+                    app.open_at_picker();
+                }
+            }
+        }
+        return None;
+    }
+
     // Input handling.
     match key.code {
         KeyCode::Enter => {
-            // Alt+Enter inserts a newline (multiline input).
-            if key.modifiers.contains(KeyModifiers::ALT) {
+            if matches!(key.modifiers, KeyModifiers::ALT | KeyModifiers::SHIFT) {
                 app.insert_newline();
+                return None;
+            }
+            if !key.modifiers.is_empty() {
                 return None;
             }
             // While the slash autocomplete is open, Enter runs the highlighted
@@ -1526,164 +1585,30 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             }
             None
         }
-        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cursor_home();
-            None
-        }
-        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cursor_end();
-            None
-        }
-        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cursor_right();
-            None
-        }
-        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.cursor_left();
-            None
-        }
-        // Ctrl+R: reverse search through input history.
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => {
             app.start_history_search();
             None
         }
-        // Ctrl+Z: undo. Coalesces consecutive edits within 500ms.
-        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.undo();
+        KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => {
+            app.insert_newline();
             None
         }
-        // Ctrl+Shift+Z (or Ctrl+Y): redo.
-        KeyCode::Char('Z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.redo();
+        KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+            app.history_up();
             None
         }
-        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.redo();
+        KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => {
+            app.history_down();
             None
         }
-        // Ctrl+U: clear to beginning of line (macOS Cmd+Backspace sends this).
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.push_undo();
-            app.input.clear();
-            app.cursor = 0;
-            app.mode = crate::app::Mode::Normal;
-            None
-        }
-        // Ctrl+W: delete word backward (macOS Option+Delete sends this).
-        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.push_undo();
-            // Delete back to the previous word boundary.
-            let before = &app.input[..app.cursor];
-            let new_cursor = before
-                .trim_end_matches(|c: char| c.is_whitespace())
-                .rfind(|c: char| c.is_whitespace())
-                .map(|i| i + 1)
-                .unwrap_or(0);
-            app.input.replace_range(new_cursor..app.cursor, "");
-            app.cursor = new_cursor;
-            if !app.input.starts_with('/') {
-                app.mode = crate::app::Mode::Normal;
-            }
-            None
-        }
-        // Ctrl+K: kill from cursor to end of line (readline convention).
-        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.cursor < app.input.len() {
-                app.push_undo();
-                app.input.truncate(app.cursor);
-                if !app.input.starts_with('/') {
-                    app.mode = crate::app::Mode::Normal;
-                }
-            }
-            None
-        }
-        // Ctrl+D: delete char forward (readline convention). Also quits
-        // on empty input when not streaming (matching shell behavior).
-        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.input.is_empty() && !app.streaming {
-                app.should_quit = true;
-                return Some(Action::Quit);
-            }
-            app.delete_char();
-            None
-        }
-        KeyCode::Char(c) => {
-            app.insert_char(c);
-            if app.input.starts_with('/') {
-                app.mode = crate::app::Mode::SlashCommand;
-                app.slash_selected = 0;
-                app.slash_scroll = 0;
-            }
-            // Auto-open the reference picker when @ is typed at start or
-            // after a space.
-            if c == '@' {
-                let before = &app.input[..app.cursor.saturating_sub(1)];
-                if before.is_empty() || before.ends_with(' ') {
-                    app.open_at_picker();
-                }
-            }
-            None
-        }
-        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
-            app.push_undo();
-            app.delete_word_left();
-            if !app.input.starts_with('/') {
-                app.mode = crate::app::Mode::Normal;
-            }
-            None
-        }
-        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::META) => {
-            app.push_undo();
-            app.input.clear();
-            app.cursor = 0;
-            app.mode = crate::app::Mode::Normal;
-            None
-        }
-        KeyCode::Backspace => {
-            app.backspace();
-            if !app.input.starts_with('/') {
-                app.mode = crate::app::Mode::Normal;
-            }
-            app.slash_selected = 0;
-            app.slash_scroll = 0;
-            None
-        }
-        KeyCode::Delete => {
-            app.delete_char();
-            None
-        }
-        KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
-            app.cursor_word_left();
-            None
-        }
-        KeyCode::Left => {
-            app.cursor_left();
-            None
-        }
-        KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
-            app.cursor_word_right();
-            None
-        }
-        KeyCode::Right => {
-            app.cursor_right();
-            None
-        }
-        KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Home if key.modifiers == KeyModifiers::CONTROL => {
             app.auto_scroll = false;
             app.scroll = 0;
             None
         }
-        KeyCode::Home => {
-            app.cursor_home();
-            None
-        }
-        KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::End if key.modifiers == KeyModifiers::CONTROL => {
             app.auto_scroll = true;
             app.scroll = app.max_scroll;
-            None
-        }
-        KeyCode::End => {
-            app.cursor_end();
             None
         }
         KeyCode::Tab if app.mode == crate::app::Mode::SlashCommand => {
@@ -1819,129 +1744,25 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
     // after the last `@`. Navigation/selection/close fall through to the
     // shared picker handling below.
     if app.picker.as_ref().is_some_and(|p| p.is_at_picker()) {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-        let meta = key.modifiers.contains(KeyModifiers::META);
+        if crate::app::editor::is_newline(key) {
+            app.insert_newline();
+            app.sync_at_picker();
+            return None;
+        }
+        if app.edit_input(key).handled() {
+            app.sync_at_picker();
+            return None;
+        }
+    }
+
+    if key.modifiers == KeyModifiers::CONTROL {
         match key.code {
-            KeyCode::Char(c) if !ctrl && !alt && !meta => {
-                app.insert_char(c);
-                app.sync_at_picker();
+            KeyCode::Char('p') => {
+                app.picker_up();
                 return None;
             }
-            KeyCode::Backspace if meta => {
-                app.push_undo();
-                app.input.clear();
-                app.cursor = 0;
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Backspace if alt => {
-                app.push_undo();
-                app.delete_word_left();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Backspace => {
-                app.backspace();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Delete => {
-                app.delete_char();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Left if alt => {
-                app.cursor_word_left();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Left => {
-                app.cursor_left();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Right if alt => {
-                app.cursor_word_right();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Right => {
-                app.cursor_right();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Home => {
-                app.cursor_home();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::End => {
-                app.cursor_end();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('a') if ctrl => {
-                app.cursor_home();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('e') if ctrl => {
-                app.cursor_end();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('f') if ctrl => {
-                app.cursor_right();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('b') if ctrl => {
-                app.cursor_left();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('w') if ctrl => {
-                app.push_undo();
-                let before = &app.input[..app.cursor];
-                let new_cursor = before
-                    .trim_end_matches(|c: char| c.is_whitespace())
-                    .rfind(|c: char| c.is_whitespace())
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
-                app.input.replace_range(new_cursor..app.cursor, "");
-                app.cursor = new_cursor;
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('k') if ctrl => {
-                if app.cursor < app.input.len() {
-                    app.push_undo();
-                    app.input.truncate(app.cursor);
-                }
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('u') if ctrl => {
-                app.push_undo();
-                app.input.clear();
-                app.cursor = 0;
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('z') if ctrl => {
-                app.undo();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('Z') if ctrl => {
-                app.redo();
-                app.sync_at_picker();
-                return None;
-            }
-            KeyCode::Char('y') if ctrl => {
-                app.redo();
-                app.sync_at_picker();
+            KeyCode::Char('n') => {
+                app.picker_down();
                 return None;
             }
             _ => {}
@@ -1959,8 +1780,10 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         app.toggle_session_picker_archive();
         return None;
     }
-    // Ctrl+P in the thinking variant picker cycles to the next variant.
-    if key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    // Ctrl+Alt+P in the thinking variant picker cycles to the next variant.
+    if key.code == KeyCode::Char('p')
+        && key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
         if let Some(ref mut picker) = app.picker {
             if picker.kind == "thinking_variant" {
                 picker.move_selection(1);
@@ -1974,7 +1797,7 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 picker.kind.as_str(),
                 "session" | "session_attention" | "session_archived"
             ) {
-                // ^P toggles pinned on the highlighted session row.
+                // Ctrl+Alt+P toggles pinned on the highlighted session row.
                 let id = picker.selected_item().map(|i| i.id.clone());
                 if let Some(id) = id {
                     return Some(Action::ToggleSessionPinned(id));
@@ -1983,8 +1806,10 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         }
         return None;
     }
-    // ^A in the session picker toggles archived on the highlighted row.
-    if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    // Ctrl+Alt+A in the session picker toggles archived on the highlighted row.
+    if key.code == KeyCode::Char('a')
+        && key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
         if let Some(ref picker) = app.picker {
             if matches!(
                 picker.kind.as_str(),
@@ -2003,7 +1828,7 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.close_picker();
             None
         }
-        KeyCode::Enter => {
+        KeyCode::Enter if key.modifiers.is_empty() => {
             let picker_data = app.picker.as_ref().and_then(|p| {
                 p.selected_item()
                     .map(|item| (item.id.clone(), p.kind.clone(), item.label.clone()))
@@ -2100,25 +1925,25 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             if let Some(p) = app.picker.as_mut() {
                 if budget_row_selected(p) {
                     let handled = match key.code {
-                        KeyCode::Char(c) if c.is_ascii_digit() => {
+                        KeyCode::Char(c) if c.is_ascii_digit() && key.modifiers.is_empty() => {
                             if let Some(b) = p.budget.as_mut() {
                                 b.type_digit(c);
                             }
                             true
                         }
-                        KeyCode::Backspace => {
+                        KeyCode::Backspace if key.modifiers.is_empty() => {
                             if let Some(b) = p.budget.as_mut() {
                                 b.backspace();
                             }
                             true
                         }
-                        KeyCode::Left => {
+                        KeyCode::Left if key.modifiers.is_empty() => {
                             if let Some(b) = p.budget.as_mut() {
                                 b.step(-b.info.step);
                             }
                             true
                         }
-                        KeyCode::Right => {
+                        KeyCode::Right if key.modifiers.is_empty() => {
                             if let Some(b) = p.budget.as_mut() {
                                 b.step(b.info.step);
                             }
@@ -2151,31 +1976,20 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     }
                 }
             }
-            // Everything else edits the filter through the shared readline
-            // editor (chars, backspace, cursor + word moves, ^A/^E/^F/^B/
-            // ^D/^K/^U/^W, ^Z/^Y undo). Mutations reset the selection like
-            // the previous insert/backspace arms did.
+            // Editing a filter resets the result selection; movement does not.
             if let Some(p) = app.picker.as_mut() {
-                let before = p.filter.len();
-                let restores_filter = key.modifiers.contains(KeyModifiers::CONTROL)
-                    && match key.code {
-                        KeyCode::Char('z') => !p.filter_undo.undo_is_empty(),
-                        KeyCode::Char('y') => !p.filter_undo.redo_is_empty(),
-                        _ => false,
-                    };
-                if crate::app::editor::handle_key_with_undo(
+                let edit = crate::app::editor::handle_key_with_undo(
                     &mut p.filter,
                     &mut p.cursor,
                     key,
                     &mut p.filter_undo,
-                ) {
-                    if p.filter.len() != before || restores_filter {
+                    &mut app.kill_ring,
+                );
+                if edit.handled() {
+                    if edit.changed() {
                         p.details_scroll = 0;
-                        if p.filter.len() > before {
-                            p.selected = 0;
-                        } else {
-                            p.selected = p.selected.min(p.filtered().len().saturating_sub(1));
-                        }
+                        p.scroll = 0;
+                        p.selected = 0;
                     }
                     return None;
                 }
@@ -2251,7 +2065,7 @@ pub enum Action {
     /// from the permission-mode picker.
     SetPermissionMode(mew_hooks::PermissionMode),
     /// Set or clear the thinking variant. Fires from `/thinking <variant>`,
-    /// the thinking variant picker, or Ctrl+P cycling.
+    /// the thinking variant picker, or Ctrl+Alt+P cycling.
     SetThinkingVariant(String),
     /// Attach to a different daemon session (switch chat). Only meaningful
     /// in daemon mode; local `run_tui` handles it as a no-op with an alert.
@@ -2271,9 +2085,9 @@ pub enum Action {
     /// Create and attach to a new daemon session in the given project
     /// directory (project picker selection). Daemon mode only.
     NewSessionInProject(String),
-    /// Toggle the archived flag on a daemon session (session picker ^A).
+    /// Toggle the archived flag on a daemon session (session picker Ctrl+Alt+A).
     ToggleSessionArchived(String),
-    /// Toggle the pinned flag on a daemon session (session picker ^P).
+    /// Toggle the pinned flag on a daemon session (session picker Ctrl+Alt+P).
     ToggleSessionPinned(String),
 }
 
@@ -2452,13 +2266,13 @@ mod tests {
         let uq = app.user_question.as_ref().expect("question stored");
         assert_eq!(uq.freeform_text, "aXb");
         assert_eq!(uq.freeform_cursor, 2);
-        // ^U clears the whole line.
+        // ^U kills only the text before the cursor.
         handle_key_event(
             &mut app,
             KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
         );
         let uq = app.user_question.as_ref().expect("question stored");
-        assert!(uq.freeform_text.is_empty());
+        assert_eq!(uq.freeform_text, "b");
         assert_eq!(uq.freeform_cursor, 0);
     }
 
@@ -2469,7 +2283,7 @@ mod tests {
         for c in ['h', 'i'] {
             handle_key_event(&mut app, char_key(c));
         }
-        // ^Z undoes the coalesced typing, ^Y redoes it.
+        // ^Z undoes the coalesced typing, ^Shift+Z redoes it.
         handle_key_event(
             &mut app,
             KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
@@ -2478,7 +2292,10 @@ mod tests {
         assert_eq!(uq.freeform_text, "");
         handle_key_event(
             &mut app,
-            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            KeyEvent::new(
+                KeyCode::Char('Z'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
         );
         let uq = app.user_question.as_ref().expect("question stored");
         assert_eq!(uq.freeform_text, "hi");

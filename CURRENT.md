@@ -2000,3 +2000,29 @@ pending.
 Follow-up found during capture: `/theme` replaces the theme without invalidating
 transcript or markdown caches, which can retain colors from the previous theme.
 This needs a separate pass; the capture fixture clears those caches explicitly.
+
+### 2026-10-10: shared Unix input editing
+
+The composer and inline reference picker now use the same editor as picker
+filters, question answers, goals, todo drafts, history search and settings.
+Line kills preserve other lines, word movement skips separators, Ctrl+W uses
+whitespace boundaries, and movement/deletion/transpose preserve whole graphemes.
+A shared twenty-entry kill ring supports Ctrl+Y yank and Alt+Y rotation;
+consecutive kills combine without crossing fields. Undo remains local to each
+field, and cursor movement separates typing groups without copying the buffer.
+
+Ctrl+P/N recall composer history and navigate picker results; Ctrl+T transposes.
+The palette uses Ctrl+Space, the bell Ctrl+Alt+N, reasoning Ctrl+Alt+T, and
+conversation archive/pin actions Ctrl+Alt+A/P. Help, visible hints, the reasoning
+golden and shortcut documentation match those bindings. Shift/Alt+Enter and
+Ctrl+J insert newlines in multiline editors; modified Enter cannot accidentally
+confirm filters or dialogs. Unknown modified characters do not become prompt
+text, and modified digits cannot replace thinking budgets.
+
+Regression fixes cover Unicode-whitespace Ctrl+W panics, inline-reference
+Ctrl+D editing the wrong buffer, stale history-search cursors, settings caret
+initialization and undo leaking between fields. Empty Ctrl+D keeps an active
+turn open; Ctrl+X cannot trigger the unmodified child-cancellation shortcut.
+All 531 TUI tests across 19 targets passed, including 45 added behavior tests;
+focused clippy passed. Refreshed renderer captures and added three desktop and
+narrow help images to the gallery. Live interaction remains pending.
