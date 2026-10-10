@@ -34,30 +34,13 @@ fn draw_autocomplete(
     scroll: usize,
     area: Rect,
 ) {
-    // Match the input field's surface so the list reads as an extension of
-    // the text field it docks above.
-    let surface = tokens.resolve("muted");
+    let surface = tokens.resolve("panel.overlay");
     // Clear any content behind the list (e.g. the landing logo) before
     // painting the surface. A `Block` only sets the background color; the
     // foreground glyphs underneath would otherwise stay visible.
     f.render_widget(Clear, area);
     let bg = Block::default().style(Style::default().bg(surface));
     f.render_widget(bg, area);
-
-    // A one-row hairline of the page background along the bottom edge
-    // separates the list from the input field below (both use `muted`).
-    if area.height > 0 {
-        let bottom = Rect::new(
-            area.x,
-            area.y.saturating_add(area.height.saturating_sub(1)),
-            area.width,
-            1,
-        );
-        f.render_widget(
-            Block::default().style(Style::default().bg(tokens.resolve("background"))),
-            bottom,
-        );
-    }
 
     let inner = Rect::new(
         area.x + 1,
@@ -194,7 +177,8 @@ pub(super) fn draw_alert(f: &mut Frame, app: &App, area: Rect) {
             .fg(tokens.resolve("text.inverse"))
             .bg(tokens.resolve("text.success"))
             .add_modifier(Modifier::BOLD);
-        let para = Paragraph::new(Line::from(Span::styled(format!(" {} ", text), style)));
+        let para =
+            Paragraph::new(Line::from(Span::styled(format!(" {} ", text), style))).style(style);
         f.render_widget(Clear, popup);
         f.render_widget(para, popup);
     }
@@ -226,7 +210,8 @@ fn draw_toasts(f: &mut Frame, app: &App, area: Rect) {
                 .bg(tokens.resolve("text.success"))
                 .add_modifier(Modifier::BOLD)
         };
-        let para = Paragraph::new(Line::from(Span::styled(format!(" {} ", text), style)));
+        let para =
+            Paragraph::new(Line::from(Span::styled(format!(" {} ", text), style))).style(style);
         f.render_widget(Clear, popup);
         f.render_widget(para, popup);
     }
@@ -248,7 +233,7 @@ pub(super) fn draw_permission_modal(
 
     f.render_widget(Clear, popup);
 
-    let bg = Block::default().style(Style::default().bg(tokens.resolve("status_bar.background")));
+    let bg = Block::default().style(Style::default().bg(tokens.resolve("panel.overlay")));
     f.render_widget(bg, popup);
 
     let inner = Rect::new(
@@ -265,13 +250,13 @@ pub(super) fn draw_permission_modal(
             "tool  ",
             Style::default()
                 .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("status_bar.background")),
+                .bg(tokens.resolve("panel.overlay")),
         ),
         Span::styled(
             &perm.tool_name,
             Style::default()
                 .fg(tokens.resolve("foreground"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
@@ -280,14 +265,14 @@ pub(super) fn draw_permission_modal(
         "input",
         Style::default()
             .fg(tokens.resolve("text.muted"))
-            .bg(tokens.resolve("status_bar.background")),
+            .bg(tokens.resolve("panel.overlay")),
     )]));
     // Pre-wrap the pretty-printed JSON to the content width. Lines are exact
     // display rows (no ratatui `Wrap`), so `max_scroll` — computed from the
     // same wrapping — can reach the true bottom of the content.
     let json_style = Style::default()
         .fg(tokens.resolve("text.placeholder"))
-        .bg(tokens.resolve("status_bar.background"));
+        .bg(tokens.resolve("panel.overlay"));
     for raw in tool_input.lines() {
         for wrapped in wrap_text(raw, inner.width as usize) {
             content.push_line(Line::from(Span::styled(wrapped, json_style)));
@@ -298,7 +283,7 @@ pub(super) fn draw_permission_modal(
         "choose:",
         Style::default()
             .fg(tokens.resolve("text.muted"))
-            .bg(tokens.resolve("status_bar.background")),
+            .bg(tokens.resolve("panel.overlay")),
     )));
     let content_height = inner.height.saturating_sub(2).max(3);
     let paragraph = Paragraph::new(content).scroll((perm.scroll, 0));
@@ -322,7 +307,7 @@ pub(super) fn draw_permission_modal(
         } else {
             Style::default()
                 .fg(tokens.resolve("text.placeholder"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
         };
         option_lines.push(Span::styled(format!(" [{}] {}  ", key, label), style));
     }
@@ -336,15 +321,18 @@ pub(super) fn draw_permission_modal(
     f.render_widget(Paragraph::new(Line::from(option_lines)), option_area);
 }
 
-/// Render the ask_user overlay into the input slot. The caller passes a rect
-/// large enough to fit the current page; the slot is already painted with
-/// tokens.resolve("status_bar.background"), so this function only emits the text content.
+/// Render the ask_user prompt on a raised surface in the input slot.
 pub(super) fn draw_user_question(
     f: &mut Frame,
     uq: &UserQuestionState,
     area: Rect,
     tokens: &crate::theme::Theme,
 ) {
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Block::default().style(Style::default().bg(tokens.resolve("panel.overlay"))),
+        area,
+    );
     // Re-derive the rect exactly like draw_input does: 1-cell padding on every
     // side. Matches the visual weight of the regular input box.
     let padded = Rect::new(
@@ -384,11 +372,11 @@ fn draw_user_question_page(
     // Line 0+: prompt (cyan, bold), wrapped + optional page label on the right.
     let prompt_style = Style::default()
         .fg(tokens.resolve("text.accent"))
-        .bg(tokens.resolve("status_bar.background"))
+        .bg(tokens.resolve("panel.overlay"))
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default()
         .fg(tokens.resolve("text.muted"))
-        .bg(tokens.resolve("status_bar.background"));
+        .bg(tokens.resolve("panel.overlay"));
     let label_w = display_width(&page_label) as u16;
     let label_reserve = if n > 1 { label_w + 1 } else { 0 };
     let prompt_max = area.width.saturating_sub(label_reserve) as usize;
@@ -434,22 +422,22 @@ fn draw_user_question_page(
         let number_style = if selected {
             Style::default()
                 .fg(tokens.resolve("text.accent"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
                 .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
         };
         let label_style = if selected {
             Style::default()
                 .fg(tokens.resolve("foreground"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
                 .fg(tokens.resolve("text.placeholder"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
         };
 
         // Wrap the label to the available width (minus number prefix).
@@ -480,7 +468,7 @@ fn draw_user_question_page(
         if !opt.description.is_empty() {
             let desc_style = Style::default()
                 .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("status_bar.background"));
+                .bg(tokens.resolve("panel.overlay"));
             let indent = "    ";
             let desc_max = area.width.saturating_sub(indent.len() as u16) as usize;
             let desc_lines = wrap_text(&opt.description, desc_max);
@@ -506,23 +494,23 @@ fn draw_user_question_page(
         let number_style = if selected {
             Style::default()
                 .fg(tokens.resolve("text.accent"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
                 .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
         };
         let prefix = "Type your own answer";
         let prefix_style = if selected {
             Style::default()
                 .fg(tokens.resolve("foreground"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
                 .fg(tokens.resolve("text.placeholder"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
         };
         let line = if selected {
             let text_max = area
@@ -563,7 +551,7 @@ fn draw_user_question_page(
                 hint,
                 Style::default()
                     .fg(tokens.resolve("text.muted"))
-                    .bg(tokens.resolve("status_bar.background")),
+                    .bg(tokens.resolve("panel.overlay")),
             ))),
             Rect::new(area.x, hint_y, area.width, 1),
         );
@@ -582,7 +570,7 @@ fn draw_user_question_review(
 ) {
     let header_style = Style::default()
         .fg(tokens.resolve("text.accent"))
-        .bg(tokens.resolve("status_bar.background"))
+        .bg(tokens.resolve("panel.overlay"))
         .add_modifier(Modifier::BOLD);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -600,10 +588,10 @@ fn draw_user_question_review(
         }
         let prompt_style = Style::default()
             .fg(tokens.resolve("text.muted"))
-            .bg(tokens.resolve("status_bar.background"));
+            .bg(tokens.resolve("panel.overlay"));
         let answer_style = Style::default()
             .fg(tokens.resolve("foreground"))
-            .bg(tokens.resolve("status_bar.background"))
+            .bg(tokens.resolve("panel.overlay"))
             .add_modifier(Modifier::BOLD);
         let prompt_max = area.width.saturating_sub(2) as usize;
         for pl in wrap_text(&q.prompt, prompt_max) {
@@ -625,7 +613,7 @@ fn draw_user_question_review(
                         "  ▸ ",
                         Style::default()
                             .fg(tokens.resolve("text.accent"))
-                            .bg(tokens.resolve("status_bar.background")),
+                            .bg(tokens.resolve("panel.overlay")),
                     ),
                     Span::styled(al, answer_style),
                 ])),
@@ -652,22 +640,22 @@ fn draw_user_question_review(
         let submit_style = if uq.review_selected == 0 {
             Style::default()
                 .fg(tokens.resolve("foreground"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
                 .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
         };
         let cancel_style = if uq.review_selected == 1 {
             Style::default()
                 .fg(tokens.resolve("foreground"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
                 .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
         };
         let mut line = Line::default();
         line.spans
@@ -684,7 +672,7 @@ fn draw_user_question_review(
             "← → switch   y/n shortcut   enter confirm   esc cancel",
             Style::default()
                 .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("status_bar.background")),
+                .bg(tokens.resolve("panel.overlay")),
         ))),
         Rect::new(area.x, hint_y, area.width, 1),
     );
@@ -735,7 +723,7 @@ fn budget_track_line(
     let filled = ((value - budget.info.min) as f64 / total * BUDGET_TRACK_WIDTH as f64)
         .round()
         .clamp(0.0, BUDGET_TRACK_WIDTH as f64) as usize;
-    let bg = tokens.resolve("status_bar.background");
+    let bg = tokens.resolve("panel.overlay");
     let muted = Style::default().fg(tokens.resolve("text.muted")).bg(bg);
     let value_style = if selected {
         Style::default()
@@ -768,6 +756,35 @@ pub(super) fn draw_picker(
     // centered popup; the inline `@`-mention list is rendered by
     // `draw_reference_autocomplete` above the input instead.
     let width = 60u16.min(area.width.saturating_sub(4));
+    let (title, empty_message) = match picker.kind.as_str() {
+        "command" => ("Commands", "No commands"),
+        "model" => ("Models", "No models"),
+        "session" => ("Conversations", "No conversations"),
+        "project" => ("New conversation in project", "No projects"),
+        "theme" => ("Themes", "No themes"),
+        "persona" => ("Personas", "No personas"),
+        "permission_mode" => ("Permissions", "No permission modes"),
+        "thinking_variant" => ("Thinking", "No thinking variants"),
+        "rewind" => ("Rewind conversation", "No earlier messages"),
+        _ => ("Select", "No options"),
+    };
+    let inner_width = width.saturating_sub(4);
+    let footer_style = Style::default()
+        .fg(tokens.resolve("text.muted"))
+        .bg(tokens.resolve("panel.overlay"));
+    let mut footer: Vec<Line<'static>> =
+        wrap_text("↑↓ move  Enter choose  Esc close", inner_width as usize)
+            .into_iter()
+            .map(|line| Line::from(Span::styled(line, footer_style)))
+            .collect();
+    if let Some(hint) = &picker.hint {
+        if area.height.saturating_sub(4) > 6 + footer.len() as u16 {
+            footer.push(Line::from(Span::styled(
+                truncate(hint, inner_width as usize),
+                footer_style,
+            )));
+        }
+    }
 
     // `filtered` is cloned to owned items so the budget-track bookkeeping
     // below can mutate the picker while iterating the rows.
@@ -796,7 +813,7 @@ pub(super) fn draw_picker(
             // Section headers render as a non-selectable muted label.
             let style = Style::default()
                 .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("status_bar.background"))
+                .bg(tokens.resolve("panel.overlay"))
                 .add_modifier(Modifier::DIM);
             wrap_text(&item.label, list_width)
                 .into_iter()
@@ -820,7 +837,7 @@ pub(super) fn draw_picker(
             } else {
                 Style::default()
                     .fg(tokens.resolve("text.body"))
-                    .bg(tokens.resolve("status_bar.background"))
+                    .bg(tokens.resolve("panel.overlay"))
             };
             let desc_style = if is_selected {
                 Style::default()
@@ -829,7 +846,7 @@ pub(super) fn draw_picker(
             } else {
                 Style::default()
                     .fg(tokens.resolve("text.muted"))
-                    .bg(tokens.resolve("status_bar.background"))
+                    .bg(tokens.resolve("panel.overlay"))
             };
             let mut rows: Vec<Line<'static>> = wrap_text(&item.label, list_width)
                 .into_iter()
@@ -856,9 +873,14 @@ pub(super) fn draw_picker(
     // Cap the popup at a bounded row budget so long lists don't fill the
     // screen; longer content is reached by scrolling.
     let content_height = total_rows.clamp(1, PICKER_VISIBLE_ITEMS * 2) as u16;
-    // Filter row + divider add four rows of chrome around the list.
-    let chrome = 4;
-    let height = (chrome + content_height).min(area.height.saturating_sub(4));
+    // Title, filter, divider, footer, and top/bottom padding surround the list.
+    let footer_height = footer.len() as u16;
+    let chrome = 5 + footer_height;
+    let max_height = area
+        .height
+        .saturating_sub(4)
+        .max((chrome + 1).min(area.height));
+    let height = (chrome + content_height).min(max_height);
     let list_area_height = height.saturating_sub(chrome);
     let visible_rows = list_area_height.max(1) as usize;
     picker.visible_items = visible_rows;
@@ -885,7 +907,7 @@ pub(super) fn draw_picker(
 
     f.render_widget(Clear, popup);
 
-    let bg = Block::default().style(Style::default().bg(tokens.resolve("status_bar.background")));
+    let bg = Block::default().style(Style::default().bg(tokens.resolve("panel.overlay")));
     f.render_widget(bg, popup);
 
     let inner = Rect::new(
@@ -895,65 +917,74 @@ pub(super) fn draw_picker(
         popup.height.saturating_sub(2),
     );
 
-    let filter_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            truncate(title, inner.width as usize),
+            Style::default()
+                .fg(tokens.resolve("text.body"))
+                .bg(tokens.resolve("panel.overlay"))
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let filter_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
     let prefix = Span::styled(
         "> ",
         Style::default()
             .fg(tokens.resolve("text.accent"))
-            .bg(tokens.resolve("status_bar.background")),
+            .bg(tokens.resolve("panel.overlay")),
     );
     let filter_text = Span::styled(
         &picker.filter,
         Style::default()
             .fg(tokens.resolve("text.body"))
-            .bg(tokens.resolve("status_bar.background")),
+            .bg(tokens.resolve("panel.overlay")),
     );
     let filter_para = Paragraph::new(Line::from(vec![prefix, filter_text]));
     f.render_widget(filter_para, filter_area);
 
-    // Show hint when filter is empty and a hint is set.
-    if picker.filter.is_empty() {
-        if let Some(ref hint) = picker.hint {
-            let hint_span = Span::styled(
-                format!("  {}", hint),
-                Style::default()
-                    .fg(tokens.resolve("text.muted"))
-                    .bg(tokens.resolve("status_bar.background")),
-            );
-            let hint_para = Paragraph::new(Line::from(vec![hint_span]));
-            let hint_area = Rect::new(
-                filter_area.x + 2 + picker.filter.len() as u16,
-                filter_area.y,
-                filter_area
-                    .width
-                    .saturating_sub(2 + picker.filter.len() as u16),
-                1,
-            );
-            f.render_widget(hint_para, hint_area);
-        }
-    }
-
     let cursor_x = filter_area.x
         + 2
-        + (display_width(&picker.filter[..picker.cursor]).min(filter_area.width as usize - 2)
-            as u16);
-    f.set_cursor_position((cursor_x, filter_area.y));
+        + (display_width(&picker.filter[..picker.cursor])
+            .min(filter_area.width.saturating_sub(2) as usize) as u16);
+    if filter_area.width > 2 && filter_area.y < f.area().bottom() {
+        f.set_cursor_position((cursor_x.min(filter_area.right() - 1), filter_area.y));
+    }
 
-    let div_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+    let div_area = Rect::new(inner.x, inner.y + 2, inner.width, 1);
     let div_line = Line::from(Span::styled(
         "─".repeat(inner.width as usize),
-        Style::default().fg(tokens.resolve("divider")),
+        Style::default()
+            .fg(tokens.resolve("divider"))
+            .bg(tokens.resolve("panel.overlay")),
     ));
     f.render_widget(Paragraph::new(div_line), div_area);
 
     let list_area = Rect::new(
         inner.x,
-        inner.y + 2,
+        inner.y + 3,
         inner.width.saturating_sub(1),
-        inner.height.saturating_sub(2),
+        list_area_height,
     );
 
-    render_picker_list(f, picker, &filtered, &flat_items, flat_rows, list_area);
+    if filtered.is_empty() {
+        let message = if picker.filter.is_empty() {
+            empty_message
+        } else {
+            "No matches"
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(message, footer_style))),
+            list_area,
+        );
+    } else {
+        render_picker_list(f, picker, &filtered, &flat_items, flat_rows, list_area);
+    }
+    f.render_widget(
+        Paragraph::new(footer),
+        Rect::new(inner.x, list_area.bottom(), inner.width, footer_height),
+    );
 }
 
 /// Render the picker's item list (and scrollbar) into `list_area`.
@@ -1032,6 +1063,7 @@ pub(super) fn draw_persona_confirm_modal(
     let accent = crate::theme::persona_accent(&state.target.name, state.target.color.as_deref());
 
     let block = Block::bordered()
+        .style(Style::default().bg(tokens.resolve("panel.overlay")))
         .title(Span::styled(
             " Switch persona ",
             Style::default()
@@ -1201,6 +1233,7 @@ pub(super) fn draw_goal_proposal(
     f.render_widget(Clear, popup);
 
     let block = Block::bordered()
+        .style(Style::default().bg(tokens.resolve("panel.overlay")))
         .title(Span::styled(
             " Goal proposed ",
             Style::default()
@@ -1282,6 +1315,7 @@ pub(super) fn draw_goal_compose(
     f.render_widget(Clear, popup);
 
     let block = Block::bordered()
+        .style(Style::default().bg(tokens.resolve("panel.overlay")))
         .title(Span::styled(
             " Set goal ",
             Style::default()

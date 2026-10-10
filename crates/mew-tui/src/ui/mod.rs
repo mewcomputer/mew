@@ -35,6 +35,10 @@ pub(super) fn display_width(s: &str) -> usize {
 /// Render the full UI.
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+    f.render_widget(
+        Block::default().style(Style::default().bg(app.theme.resolve("chat.surface.background"))),
+        area,
+    );
 
     let show_sidebar = area.width >= SIDEBAR_MIN_WIDTH + SIDEBAR_WIDTH;
 
@@ -107,14 +111,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             main_area.width,
             main_area.height.saturating_sub(1),
         );
-
-        // Match the chat layout: paint the chat surface color behind the hero
-        // and centered input so the landing screen reads as the same canvas.
-        {
-            let landing_bg = Block::default()
-                .style(Style::default().bg(app.theme.resolve("chat.surface.background")));
-            f.render_widget(landing_bg, hero_area);
-        }
 
         let input_rect = welcome::draw_landing(f, app, hero_area);
         if app.mode == Mode::UserQuestion {
@@ -196,14 +192,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             Constraint::Length(1), // status
         ])
         .split(main_area);
-
-    // Optional chat surface background. The chat widget itself is transparent
-    // so this block fills the area behind the conversation.
-    {
-        let chat_bg = Block::default()
-            .style(Style::default().bg(app.theme.resolve("chat.surface.background")));
-        f.render_widget(chat_bg, vert[0]);
-    }
 
     chat::draw_chat(f, app, vert[0]);
 

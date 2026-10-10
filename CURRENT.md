@@ -1568,3 +1568,17 @@ Verified all 14 composer behavior tests with red/green regressions, all 309 TUI
 tests including the doc test, strict all-target TUI clippy and the CLI build.
 Source review caught the odd-width wrapping mismatch; the shared row geometry
 resolved it. Headless captures confirmed the long-draft viewport.
+
+### 2026-10-10: opaque TUI surfaces and contextual pickers
+
+Modals and autocomplete use the raised panel overlay token, backed by each
+theme's popover. Default dark and light popovers differ from the canvas. The
+full frame is painted, tool half-block edges inherit the conversation surface,
+and question slots and toast padding no longer expose terminal background.
+
+Centered pickers identify their purpose, retain navigation hints during search,
+and explain empty results without clearing the query. Short layouts keep an
+item row visible; tiny layouts never place the picker caret outside the frame.
+Verified five surface tests and five picker behavior tests, the 309-test TUI
+gate, strict all-target clippy, CLI build, architecture and generated themes.
+Reviewed headless captures and resolved the tiny-caret regression before commit.

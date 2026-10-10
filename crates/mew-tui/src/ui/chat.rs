@@ -47,7 +47,7 @@ impl<'t> ChatLineCtx<'t> {
         // inconsistently past the second wrapped line.
         //
         // Spans that already carry an explicit bg (tool blocks, code
-        // fences, selection, tool edges with Color::Reset) are left
+        // fences, selection) are left
         // untouched.
         for span in &mut line.spans {
             if span.style.bg.is_none() {
@@ -1069,7 +1069,7 @@ fn push_tool_edge(width: u16, is_top: bool, tool_bg: Color) -> Option<Line<'stat
         return None;
     }
     let ch = if is_top { '▄' } else { '▀' };
-    let style = Style::default().fg(tool_bg).bg(Color::Reset);
+    let style = Style::default().fg(tool_bg);
     Some(Line::from(vec![Span::styled(
         ch.to_string().repeat(width as usize),
         style,
