@@ -641,7 +641,7 @@ impl ClientState {
                     replace,
                 }]
             }
-            ServerMessage::UserMessage { text } => {
+            ServerMessage::UserMessage { text, .. } => {
                 let Some(session_id) = self.attached_session.clone() else {
                     return Vec::new();
                 };
@@ -704,6 +704,7 @@ impl ClientState {
                 request_id,
                 call_id,
                 questions,
+                ..
             } => self.add_action(ActionKind::AskUser { call_id, questions }, request_id),
             ServerMessage::GoalProposed {
                 request_id,
@@ -1269,6 +1270,7 @@ mod tests {
             "provider completion leaves tools busy"
         );
         state.apply_server_message(ServerMessage::AskUserRequest {
+            subagent: None,
             request_id: "question".into(),
             call_id: "ask".into(),
             questions: vec![],
@@ -1401,6 +1403,7 @@ mod tests {
 
         let events = state.apply_server_message(ServerMessage::UserMessage {
             text: "hello".into(),
+            request_id: None,
         });
         assert!(events.is_empty());
         assert_eq!(state.session(&id).unwrap().messages.len(), before);
@@ -1593,6 +1596,7 @@ mod tests {
                 input: serde_json::json!({}),
             },
             ServerMessage::AskUserRequest {
+                subagent: None,
                 request_id: "question".into(),
                 call_id: "call".into(),
                 questions: vec![],

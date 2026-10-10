@@ -697,6 +697,7 @@ impl DesktopShell {
                 .collect::<Vec<_>>();
             answers.resize(questions.len(), String::new());
             self.send_command(ClientMessage::AskUserResponse {
+                cancelled: false,
                 request_id: action.request_id.clone(),
                 answers,
             })

@@ -640,7 +640,9 @@ async fn translate_server_message(
             }
         }
 
-        ServerMessage::UserMessage { .. } => Vec::new(),
+        ServerMessage::UserMessage { .. } | ServerMessage::SessionActivitySnapshot { .. } => {
+            Vec::new()
+        }
 
         ServerMessage::ToolStart { call_id } => {
             vec![AgentEvent::ToolStart {
@@ -717,6 +719,7 @@ async fn translate_server_message(
             request_id,
             call_id,
             questions,
+            ..
         } => {
             let (tx, rx) = oneshot::channel();
             state
@@ -735,6 +738,7 @@ async fn translate_server_message(
                 if let Some(rx) = rx {
                     if let Ok(answers) = rx.await {
                         let msg = ClientMessage::AskUserResponse {
+                            cancelled: false,
                             request_id,
                             answers,
                         };
@@ -954,6 +958,7 @@ async fn translate_server_message(
         }
 
         ServerMessage::BrowserPageRegistration { .. }
+        | ServerMessage::PromptReceipt { .. }
         | ServerMessage::ModelList { .. }
         | ServerMessage::ModelSwitched { .. }
         | ServerMessage::RequestResolved { .. }
@@ -1258,7 +1263,7 @@ mod tests {
                         ServerMessage::PermissionRequest { request_id: "p".into(), tool_name: "bash".into(), input: serde_json::json!({"command":"pwd"}) },
                         ServerMessage::WorkspacePermissionRequest { request_id: "w".into(), path: "/elsewhere".into() },
                         ServerMessage::SubagentPermissionRequest { request_id: "s".into(), parent_call_id: "parent".into(), tool_name: "write".into(), input: serde_json::json!({}) },
-                        ServerMessage::AskUserRequest { request_id: "q".into(), call_id: "call-q".into(), questions: vec![mew_protocol::Question { prompt: "pick".into(), options: vec![] }] },
+                        ServerMessage::AskUserRequest { subagent: None, request_id: "q".into(), call_id: "call-q".into(), questions: vec![mew_protocol::Question { prompt: "pick".into(), options: vec![] }] },
                         ServerMessage::GoalProposed { request_id: "g".into(), call_id: "call-g".into(), objective: "finish".into() },
                     ];
                     for request in requests {
@@ -1269,7 +1274,7 @@ mod tests {
                             ClientMessage::PermissionResponse { request_id, decision } => {
                                 assert_eq!(decision, WirePermissionDecision::AllowOnce); request_id
                             }
-                            ClientMessage::AskUserResponse { request_id, answers } => {
+                            ClientMessage::AskUserResponse { request_id, answers, .. } => {
                                 assert_eq!(answers, vec!["answer"]); request_id
                             }
                             ClientMessage::GoalResponse { request_id, accepted } => {
@@ -1326,6 +1331,7 @@ mod tests {
                         permission_mode: None,
                     },
                     ServerMessage::AskUserRequest {
+                        subagent: None,
                         request_id: "q".into(),
                         call_id: "c".into(),
                         questions: vec![],

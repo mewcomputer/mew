@@ -50,6 +50,7 @@ struct BrowserRegistration {
     session: Arc<session::Session>,
 }
 
+mod activity;
 pub mod browser;
 #[cfg(test)]
 mod browser_tests;
@@ -375,6 +376,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::SetAutoTitle { .. }
                 | ClientMessage::SetAutoSummary { .. }
                 | ClientMessage::Prompt { .. }
+                | ClientMessage::SubmitPrompt { .. }
                 | ClientMessage::Cancel
                 | ClientMessage::PermissionResponse { .. }
                 | ClientMessage::AskUserResponse { .. }
@@ -397,6 +399,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::GitStatus { .. }
                 | ClientMessage::ReadSessionDiff { .. }
                 | ClientMessage::ReadSubagentHistory { .. }
+                | ClientMessage::ReadPromptReceipt { .. }
                 | ClientMessage::UpdateTodo { .. }
                 | ClientMessage::WatchWorkspace { .. }
                 | ClientMessage::OpenPath { .. }
@@ -436,6 +439,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
             | ClientMessage::GitStatus { .. }
             | ClientMessage::ReadSessionDiff { .. }
             | ClientMessage::ReadSubagentHistory { .. }
+            | ClientMessage::ReadPromptReceipt { .. }
             | ClientMessage::WatchWorkspace { .. }
     );
     if observe {
@@ -446,6 +450,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
         && matches!(
             message,
             ClientMessage::Prompt { .. }
+                | ClientMessage::SubmitPrompt { .. }
                 | ClientMessage::Cancel
                 | ClientMessage::PermissionResponse { .. }
                 | ClientMessage::AskUserResponse { .. }
@@ -1033,6 +1038,7 @@ where
                             },
                         });
                         drop(running);
+                        session.send_activity(&client_tx).await;
                         session.send_todos(&client_tx).await;
                         // Report the new session's active thinking variant so
                         // the frontend renders the pill immediately.
@@ -1128,6 +1134,7 @@ where
                             },
                         });
                         drop(running);
+                        session.send_activity(&client_tx).await;
                         session.send_todos(&client_tx).await;
                         // Report the session's current thinking variant so the
                         // frontend renders the pill immediately on attach instead
@@ -1426,6 +1433,125 @@ where
                 auto_summary_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
                 tracing::info!(auto_summary = enabled, "auto-summary setting changed");
             }
+            ClientMessage::ReadPromptReceipt {
+                session_id,
+                request_id,
+            } => {
+                let session = session_manager
+                    .active
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .cloned();
+                let receipt = match session {
+                    Some(session) => session
+                        .prompt_receipts
+                        .lock()
+                        .await
+                        .get(&request_id)
+                        .cloned(),
+                    None => None,
+                };
+                let (status, message) = receipt.unwrap_or((mew_protocol::PromptStatus::Unknown, Some("submission could not be confirmed; inspect the conversation before retrying".into())));
+                reply(ServerMessage::PromptReceipt {
+                    session_id,
+                    request_id,
+                    status,
+                    message,
+                });
+            }
+            ClientMessage::SubmitPrompt {
+                session_id,
+                request_id,
+                text,
+                attachments,
+            } => {
+                let Some(session) = attached_session
+                    .clone()
+                    .filter(|session| session.id == session_id)
+                else {
+                    reply(ServerMessage::PromptReceipt {
+                        session_id,
+                        request_id,
+                        status: mew_protocol::PromptStatus::Rejected,
+                        message: Some("the requested conversation is not attached".into()),
+                    });
+                    continue;
+                };
+                let client_tx = client_tx.clone();
+                let session_mgr = session_manager.clone();
+                tokio::spawn(async move {
+                    let mut receipts = session.prompt_receipts.lock().await;
+                    if let Some((status, message)) = receipts.get(&request_id) {
+                        let _ = client_tx.send(ServerMessage::PromptReceipt {
+                            session_id,
+                            request_id,
+                            status: *status,
+                            message: message.clone(),
+                        });
+                        return;
+                    }
+                    let guard = match session.turn_lock.try_lock() {
+                        Ok(guard) => Ok(guard),
+                        Err(error) if *session.is_running.lock().await => Err(error),
+                        Err(_) => Ok(session.turn_lock.lock().await),
+                    };
+                    let error = if text.trim().is_empty() {
+                        Some("the prompt is empty")
+                    } else if request_id.is_empty() || request_id.len() > 128 {
+                        Some("invalid submission request ID")
+                    } else if guard.is_err() {
+                        Some("a turn is already running; your draft is preserved")
+                    } else {
+                        None
+                    };
+                    if let Some(error) = error {
+                        let message = Some(error.to_owned());
+                        if !request_id.is_empty() && request_id.len() <= 128 {
+                            receipts.insert(
+                                request_id.clone(),
+                                (mew_protocol::PromptStatus::Rejected, message.clone()),
+                            );
+                        }
+                        let _ = client_tx.send(ServerMessage::PromptReceipt {
+                            session_id,
+                            request_id,
+                            status: mew_protocol::PromptStatus::Rejected,
+                            message,
+                        });
+                        return;
+                    }
+                    let _guard = guard.expect("validated turn lock");
+                    let token = register_turn(&session).await;
+                    receipts.insert(
+                        request_id.clone(),
+                        (mew_protocol::PromptStatus::Accepted, None),
+                    );
+                    drop(receipts);
+                    let _ = client_tx.send(ServerMessage::PromptReceipt {
+                        session_id,
+                        request_id: request_id.clone(),
+                        status: mew_protocol::PromptStatus::Accepted,
+                        message: None,
+                    });
+                    session
+                        .broadcast(ServerMessage::UserMessage {
+                            text: text.clone(),
+                            request_id: Some(request_id),
+                        })
+                        .await;
+                    finish_prompt_turn(
+                        &session,
+                        &session_mgr,
+                        text,
+                        attachments,
+                        auto_title_enabled,
+                        _guard,
+                        token,
+                    )
+                    .await;
+                });
+            }
             ClientMessage::Prompt { text, attachments } => {
                 let Some(session) = attached_session.clone() else {
                     reply(ServerMessage::Error {
@@ -1436,7 +1562,10 @@ where
                 // Broadcast the user message to all attached clients.
                 // The sending client deduplicates by matching text content.
                 session
-                    .broadcast(ServerMessage::UserMessage { text: text.clone() })
+                    .broadcast(ServerMessage::UserMessage {
+                        text: text.clone(),
+                        request_id: None,
+                    })
                     .await;
                 let client_tx = client_tx.clone();
                 let session_mgr = session_manager.clone();
@@ -1449,38 +1578,17 @@ where
                         });
                         return;
                     }
-                    let agent = session.agent.lock().await.clone();
-                    let prompt_text = text.clone();
-                    let auto_title = auto_title_enabled;
-                    let had_error =
-                        run_turn(&session, &session_mgr, &agent, text, attachments).await;
-
-                    // Generate a session title from the first user message
-                    // if we haven't already. Uses a lightweight LLM call;
-                    // falls back to text truncation on error. Skipped if the
-                    // user has disabled auto-title generation.
-                    if auto_title && !had_error {
-                        let has_existing_title = agent
-                            .session_meta()
-                            .await
-                            .and_then(|meta| meta.custom_title)
-                            .is_some();
-                        let mut generated = session.title_generated.lock().await;
-                        if !*generated && !has_existing_title {
-                            *generated = true;
-                            drop(generated);
-
-                            let title = generate_session_title(&agent, &prompt_text).await;
-                            if let Ok(Some(mut meta)) =
-                                mew_session::Meta::read(&session.session_dir, &session.id).await
-                            {
-                                let _ = meta
-                                    .set_custom_title(&session.session_dir, title.clone())
-                                    .await;
-                            }
-                            session_mgr.broadcast_title(&session.id, title).await;
-                        }
-                    }
+                    let token = register_turn(&session).await;
+                    finish_prompt_turn(
+                        &session,
+                        &session_mgr,
+                        text,
+                        attachments,
+                        auto_title_enabled,
+                        _guard,
+                        token,
+                    )
+                    .await;
                 });
             }
             ClientMessage::Cancel => {
@@ -1508,7 +1616,12 @@ where
                 agent.enqueue_guidance(text.clone()).await;
                 drop(agent);
                 // Broadcast so all attached clients render the guidance.
-                session.broadcast(ServerMessage::UserMessage { text }).await;
+                session
+                    .broadcast(ServerMessage::UserMessage {
+                        text,
+                        request_id: None,
+                    })
+                    .await;
             }
             ClientMessage::TerminalOpen { rows, cols } => {
                 let Some(session) = attached_session.clone() else {
@@ -1693,12 +1806,15 @@ where
             ClientMessage::AskUserResponse {
                 request_id,
                 answers,
+                cancelled,
             } => {
                 if let Some(session) = &attached_session {
                     let _actions = session.pending_action_lock.lock().await;
                     let request = session.pending_ask_user.lock().await.remove(&request_id);
                     if let Some(request) = request {
-                        let _ = request.sender.send(answers);
+                        if !cancelled {
+                            let _ = request.sender.send(answers);
+                        }
                         session
                             .broadcast(ServerMessage::RequestResolved { request_id })
                             .await;
@@ -1742,12 +1858,17 @@ where
                 let session_manager_clone = session_manager.clone();
                 tokio::spawn(async move {
                     let _guard = session.turn_lock.lock().await;
+                    let (cmd, _arg) = match command.split_once(' ') {
+                        Some((c, a)) => (c, Some(a)),
+                        None => (command.as_str(), None),
+                    };
+                    let token = if cmd == "/wiki" {
+                        Some(register_turn(&session).await)
+                    } else {
+                        None
+                    };
                     let result = {
                         let agent = session.agent.lock().await;
-                        let (cmd, _arg) = match command.split_once(' ') {
-                            Some((c, a)) => (c, Some(a)),
-                            None => (command.as_str(), None),
-                        };
                         match cmd {
                             "/clear" => {
                                 agent.clear_context().await;
@@ -1835,15 +1956,19 @@ where
                                     Keep it concise (under 200 lines). Use the write tool to create .mew/wiki.md.";
                                 drop(agent);
                                 let wiki_agent = session.agent.lock().await.clone();
+                                let token = token.expect("wiki turn registered");
                                 let had_error = run_turn(
                                     &session,
                                     &session_manager_clone,
                                     &wiki_agent,
                                     wiki_prompt.to_string(),
                                     vec![],
+                                    token.clone(),
                                 )
                                 .await;
-                                if had_error {
+                                if token.is_cancelled() {
+                                    Some("wiki generation cancelled".to_string())
+                                } else if had_error {
                                     Some("wiki generation failed".to_string())
                                 } else {
                                     Some("wiki generated at .mew/wiki.md".to_string())
@@ -2642,25 +2767,78 @@ where
 
 type WsSink<S> = futures::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>;
 
-/// Read AgentEvents from the receiver and broadcast them to every client
-/// attached to the session. This consumes events until the receiver is drained
-/// (i.e. the agent turn has ended).
-/// Run an agent turn with full turn management: cancel token, is_running,
-/// activity broadcasts, forward_events, meta updates, usage broadcast, and
-/// session alert. Returns `had_error`.
-///
-/// Does NOT do: user message broadcast, title generation — those are
-/// Prompt-handler-specific.
+/// Register cancellation before accepting work or waiting for the agent lock.
+async fn register_turn(session: &Session) -> CancellationToken {
+    let token = session
+        .current_turn_cancel
+        .lock()
+        .await
+        .get_or_insert_with(CancellationToken::new)
+        .clone();
+    *session.is_running.lock().await = true;
+    token
+}
+
+/// Complete the serialized turn before generating its optional title.
+async fn finish_prompt_turn(
+    session: &Arc<Session>,
+    session_mgr: &Arc<SessionManager>,
+    text: String,
+    attachments: Vec<mew_protocol::Attachment>,
+    auto_title: bool,
+    guard: tokio::sync::MutexGuard<'_, ()>,
+    token: CancellationToken,
+) {
+    let agent = session.agent.lock().await.clone();
+    let prompt_text = text.clone();
+    let had_error = run_turn(
+        session,
+        session_mgr,
+        &agent,
+        text,
+        attachments,
+        token.clone(),
+    )
+    .await;
+    drop(guard);
+
+    // Generate a session title from the first user message
+    // if we haven't already. Uses a lightweight LLM call;
+    // falls back to text truncation on error. Skipped if the
+    // user has disabled auto-title generation.
+    if auto_title && !had_error && !token.is_cancelled() {
+        let has_existing_title = agent
+            .session_meta()
+            .await
+            .and_then(|meta| meta.custom_title)
+            .is_some();
+        let mut generated = session.title_generated.lock().await;
+        if !*generated && !has_existing_title {
+            *generated = true;
+            drop(generated);
+
+            let title = generate_session_title(&agent, &prompt_text).await;
+            if let Ok(Some(mut meta)) =
+                mew_session::Meta::read(&session.session_dir, &session.id).await
+            {
+                let _ = meta
+                    .set_custom_title(&session.session_dir, title.clone())
+                    .await;
+            }
+            session_mgr.broadcast_title(&session.id, title).await;
+        }
+    }
+}
+
+/// Run and persist a turn, then publish its idle state and outcome.
 async fn run_turn(
     session: &Arc<Session>,
     session_mgr: &Arc<SessionManager>,
     agent: &Agent,
     prompt_text: String,
     attachments: Vec<mew_protocol::Attachment>,
+    token: CancellationToken,
 ) -> bool {
-    let token = CancellationToken::new();
-    *session.current_turn_cancel.lock().await = Some(token.clone());
-    *session.is_running.lock().await = true;
     session_mgr
         .broadcast_activity(&session.id, SessionState::Running)
         .await;
@@ -3278,6 +3456,23 @@ async fn publish_pending_request<T>(
     Vec::new()
 }
 
+fn wire_questions(questions: Vec<mew_agent::AskUserQuestion>) -> Vec<Question> {
+    questions
+        .into_iter()
+        .map(|question| Question {
+            prompt: question.prompt,
+            options: question
+                .options
+                .into_iter()
+                .map(|option| QuestionOption {
+                    label: option.label,
+                    description: option.description,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// Translate a single `AgentEvent` (owned) into zero or more `ServerMessage`s.
 /// Channel-bearing events are converted to wire requests with fresh IDs;
 /// the `oneshot::Sender` is stashed in the `Session` for later response.
@@ -3402,22 +3597,10 @@ async fn translate_event(
             tx,
         } => {
             let request = ServerMessage::AskUserRequest {
+                subagent: None,
                 request_id: session.next_request_id(),
                 call_id,
-                questions: questions
-                    .into_iter()
-                    .map(|q| Question {
-                        prompt: q.prompt,
-                        options: q
-                            .options
-                            .into_iter()
-                            .map(|o| QuestionOption {
-                                label: o.label,
-                                description: o.description,
-                            })
-                            .collect(),
-                    })
-                    .collect(),
+                questions: wire_questions(questions),
             };
             publish_pending_request(session, session_mgr, &session.pending_ask_user, tx, request)
                 .await

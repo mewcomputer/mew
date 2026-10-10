@@ -57,6 +57,7 @@ export type ClientMessage = {
     type: "ask_user_response";
     request_id: string;
     answers: string[];
+    cancelled?: boolean;
 } | {
     type: "goal_response";
     request_id: string;
@@ -284,6 +285,30 @@ export type ErrorKind = "provider_auth" | "rate_limit" | "invalid_request" | "to
 export interface MessageError {
     kind: ErrorKind;
     message: string;
+}
+export interface SubagentQuestionSource {
+    parent_call_id: string;
+    child_session_id: string;
+    name: string;
+    display_name: string | null;
+}
+export interface SubagentActivity {
+    task_id: string;
+    child_session_id: string | null;
+    name: string;
+    display_name: string | null;
+    status: string;
+    tool_name: string | null;
+}
+export interface JobActivity {
+    job_id: string;
+    command: string;
+    state: string;
+}
+export interface SessionActivitySnapshot {
+    session_id: string;
+    subagents: SubagentActivity[];
+    jobs: JobActivity[];
 }
 export interface QuestionOption {
     label: string;
@@ -513,6 +538,7 @@ export type ServerMessage = {
 } | {
     type: "user_message";
     text: string;
+    request_id?: string;
 } | {
     type: "tool_start";
     call_id: string;
@@ -542,6 +568,7 @@ export type ServerMessage = {
     path: string;
 } | {
     type: "ask_user_request";
+    subagent?: SubagentQuestionSource;
     request_id: string;
     call_id: string;
     questions: Question[];
@@ -591,7 +618,9 @@ export type ServerMessage = {
     job_id: string;
     command: string;
     state: string;
-} | {
+} | ({
+    type: "session_activity_snapshot";
+} & SessionActivitySnapshot) | {
     type: "slash_result";
     text: string;
 } | {
@@ -802,6 +831,7 @@ export interface MewClientEvents {
         path: string;
     }, respond: (decision: PermissionDecision) => void) => void;
     "ask-user-request": (data: {
+        subagent?: SubagentQuestionSource;
         request_id: string;
         call_id: string;
         questions: Question[];
@@ -846,6 +876,7 @@ export interface MewClientEvents {
         command: string;
         state: string;
     }) => void;
+    "session-activity-snapshot": (data: SessionActivitySnapshot) => void;
     "slash-result": (data: {
         text: string;
     }) => void;
@@ -1067,6 +1098,8 @@ export declare class MewClient {
     /** Respond to an `ask_user_request`. The UI calls this after the user
      *  submits answers to the questions. */
     respondToAskUser(request_id: string, answers: string[]): void;
+    /** Close one question while leaving the parent turn and other questions active. */
+    cancelAskUser(request_id: string): void;
     /** Accept or reject a proposed goal using its original request ID. */
     respondToGoal(request_id: string, accepted: boolean): void;
     /** Attach to an existing session (active or idle). If the session is idle,

@@ -620,6 +620,7 @@ impl MobileCore {
         let conns = self.connections.lock().unwrap();
         if let Some(conn) = conns.get(&id.node_id) {
             let _ = conn.send(ClientMessage::AskUserResponse {
+                cancelled: false,
                 request_id,
                 answers,
             });
@@ -1547,7 +1548,7 @@ fn translate_message(
             }
         }
 
-        ServerMessage::UserMessage { text } => {
+        ServerMessage::UserMessage { text, .. } => {
             // Dedup: daemon echoes our prompt back (spec note #9).
             if let Some(ref last) = last_sent_prompt {
                 if last == text {
@@ -1603,6 +1604,7 @@ fn translate_message(
             request_id,
             call_id,
             questions,
+            ..
         } => {
             let ss_lock = conn_state.session_state.lock().unwrap();
             let session_id = ss_lock
@@ -1939,6 +1941,7 @@ fn translate_message(
         | ServerMessage::SubagentStart { .. }
         | ServerMessage::SubagentStatus { .. }
         | ServerMessage::JobUpdate { .. }
+        | ServerMessage::SessionActivitySnapshot { .. }
         | ServerMessage::ClientAttached { .. }
         | ServerMessage::ClientDetached { .. }
         | ServerMessage::ControlYielded { .. }
@@ -1967,7 +1970,8 @@ fn translate_message(
         | ServerMessage::TerminalOpened { .. }
         | ServerMessage::TerminalOutput { .. }
         | ServerMessage::TerminalExited { .. }
-        | ServerMessage::TerminalError { .. } => {}
+        | ServerMessage::TerminalError { .. }
+        | ServerMessage::PromptReceipt { .. } => {}
     }
 
     if !matches!(msg, ServerMessage::Provider { .. }) {
@@ -2108,6 +2112,7 @@ mod tests {
                 input: serde_json::json!({}),
             },
             ServerMessage::AskUserRequest {
+                subagent: None,
                 request_id: "ask".into(),
                 call_id: "ask-call".into(),
                 questions: vec![],
@@ -2365,6 +2370,7 @@ mod tests {
         translate_message(
             &ServerMessage::UserMessage {
                 text: "first".into(),
+                request_id: None,
             },
             &state,
             &mut echoed,
@@ -2506,6 +2512,7 @@ mod tests {
         );
         translate_message(
             &ServerMessage::AskUserRequest {
+                subagent: None,
                 request_id: "ask".into(),
                 call_id: "ask-call".into(),
                 questions: vec![mew_protocol::Question {

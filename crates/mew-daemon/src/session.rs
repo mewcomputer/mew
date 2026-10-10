@@ -67,6 +67,9 @@ pub struct Session {
     pub browser_access: mew_tools::browser::BrowserAccess,
     /// Ensures only one turn or model switch runs at a time.
     pub turn_lock: Mutex<()>,
+    pub(crate) activity: Mutex<crate::activity::SessionActivity>,
+    pub(crate) prompt_receipts:
+        Mutex<HashMap<String, (mew_protocol::PromptStatus, Option<String>)>>,
     /// Broadcast targets: (client_id, sender, kind) per attached client.
     pub clients: Mutex<
         Vec<(
@@ -271,6 +274,8 @@ impl Session {
             browser_access: agent.browser_access.clone(),
             agent: Mutex::new(agent),
             turn_lock: Mutex::new(()),
+            activity: Mutex::new(crate::activity::SessionActivity::default()),
+            prompt_receipts: Mutex::new(HashMap::new()),
             clients: Mutex::new(Vec::new()),
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
@@ -350,6 +355,20 @@ impl Session {
 
     /// Broadcast a message to all attached clients. Removes any sender that fails.
     pub async fn broadcast(&self, msg: ServerMessage) {
+        let mut activity = if matches!(
+            &msg,
+            ServerMessage::SubagentStart { .. }
+                | ServerMessage::SubagentStatus { .. }
+                | ServerMessage::SubagentEnd { .. }
+                | ServerMessage::JobUpdate { .. }
+        ) {
+            Some(self.activity.lock().await)
+        } else {
+            None
+        };
+        if let Some(activity) = activity.as_mut() {
+            activity.apply(&msg);
+        }
         let mut clients = self.clients.lock().await;
         clients.retain(|(_, sender, _)| sender.send(msg.clone()).is_ok());
     }

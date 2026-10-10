@@ -168,6 +168,10 @@ impl Agent {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut turn_count: u32 = 0;
         loop {
+            if self.cancel_token.is_cancelled() {
+                let _ = ev_tx.send(AgentEvent::Error("aborted".into())).await;
+                return Ok(());
+            }
             if let Some(max) = self.max_turns {
                 if turn_count >= max {
                     tracing::info!(turn_count, max, "max turns reached");

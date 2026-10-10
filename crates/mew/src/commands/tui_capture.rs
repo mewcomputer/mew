@@ -1154,6 +1154,8 @@ fn agent_event_name(ev: &mew_agent::AgentEvent) -> &'static str {
 /// Human-readable type name for a `ServerMessage` variant (no payload).
 fn server_message_type(msg: &mew_protocol::ServerMessage) -> &'static str {
     match msg {
+        mew_protocol::ServerMessage::PromptReceipt { .. } => "PromptReceipt",
+        mew_protocol::ServerMessage::SessionActivitySnapshot { .. } => "SessionActivitySnapshot",
         mew_protocol::ServerMessage::TodoUpdated { .. } => "TodoUpdated",
         mew_protocol::ServerMessage::TodoUpdateError { .. } => "TodoUpdateError",
         // Remote authentication is a daemon/web concern; the standalone TUI

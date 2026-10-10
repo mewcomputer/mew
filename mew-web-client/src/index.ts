@@ -51,7 +51,7 @@ export type ClientMessage =
       request_id: string;
       decision: PermissionDecision;
     }
-  | { type: "ask_user_response"; request_id: string; answers: string[] }
+  | { type: "ask_user_response"; request_id: string; answers: string[]; cancelled?: boolean }
   | { type: "goal_response"; request_id: string; accepted: boolean }
   | { type: "slash_command"; command: string }
   | { type: "list_models" }
@@ -200,6 +200,34 @@ export type ErrorKind =
 export interface MessageError {
   kind: ErrorKind;
   message: string;
+}
+
+export interface SubagentQuestionSource {
+  parent_call_id: string;
+  child_session_id: string;
+  name: string;
+  display_name: string | null;
+}
+
+export interface SubagentActivity {
+  task_id: string;
+  child_session_id: string | null;
+  name: string;
+  display_name: string | null;
+  status: string;
+  tool_name: string | null;
+}
+
+export interface JobActivity {
+  job_id: string;
+  command: string;
+  state: string;
+}
+
+export interface SessionActivitySnapshot {
+  session_id: string;
+  subagents: SubagentActivity[];
+  jobs: JobActivity[];
 }
 
 export interface QuestionOption {
@@ -443,7 +471,7 @@ export type ServerMessage =
   | { type: "session_ready"; session_id: string; cwd?: string; model?: string; provider?: string; permission_mode?: string }
   | { type: "error"; message: string }
   | { type: "provider"; event: ProviderEventWire }
-  | { type: "user_message"; text: string }
+  | { type: "user_message"; text: string; request_id?: string }
   | { type: "tool_start"; call_id: string }
   | { type: "tool_end"; call_id: string; success: boolean }
   | { type: "part_updated"; part_id: string; part: Part }
@@ -458,6 +486,7 @@ export type ServerMessage =
   | { type: "workspace_permission_request"; request_id: string; path: string }
   | {
       type: "ask_user_request";
+      subagent?: SubagentQuestionSource;
       request_id: string;
       call_id: string;
       questions: Question[];
@@ -494,6 +523,7 @@ export type ServerMessage =
   | { type: "todo_updated"; session_id: string; request_id: string; todos: Todo[] }
   | { type: "todo_update_error"; session_id: string; request_id: string; message: string }
   | { type: "job_update"; job_id: string; command: string; state: string }
+  | ({ type: "session_activity_snapshot" } & SessionActivitySnapshot)
   | { type: "slash_result"; text: string }
   | { type: "request_resolved"; request_id: string }
   | { type: "session_cleared" }
@@ -644,6 +674,7 @@ export interface MewClientEvents {
     respond: (decision: PermissionDecision) => void,
   ) => void;
   "ask-user-request": (data: {
+    subagent?: SubagentQuestionSource;
     request_id: string;
     call_id: string;
     questions: Question[];
@@ -675,6 +706,7 @@ export interface MewClientEvents {
     command: string;
     state: string;
   }) => void;
+  "session-activity-snapshot": (data: SessionActivitySnapshot) => void;
   "slash-result": (data: { text: string }) => void;
   "request-resolved": (data: { request_id: string }) => void;
   "session-cleared": () => void;
@@ -998,6 +1030,11 @@ export class MewClient {
    *  submits answers to the questions. */
   respondToAskUser(request_id: string, answers: string[]): void {
     this.send({ type: "ask_user_response", request_id, answers });
+  }
+
+  /** Close one question while leaving the parent turn and other questions active. */
+  cancelAskUser(request_id: string): void {
+    this.send({ type: "ask_user_response", request_id, answers: [], cancelled: true });
   }
 
   /** Accept or reject a proposed goal using its original request ID. */
@@ -1343,6 +1380,7 @@ export class MewClient {
         break;
       case "ask_user_request":
         this.emit("ask-user-request", {
+          ...(msg.subagent ? { subagent: msg.subagent } : {}),
           request_id: msg.request_id,
           call_id: msg.call_id,
           questions: msg.questions,
@@ -1403,6 +1441,13 @@ export class MewClient {
           job_id: msg.job_id,
           command: msg.command,
           state: msg.state,
+        });
+        break;
+      case "session_activity_snapshot":
+        this.emit("session-activity-snapshot", {
+          session_id: msg.session_id,
+          subagents: msg.subagents,
+          jobs: msg.jobs,
         });
         break;
       case "slash_result":

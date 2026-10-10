@@ -635,3 +635,40 @@ test("subagent history preserves viewer identity and never replaces session hist
   assert.deepEqual(replies, [{ session_id: "parent", child_session_id: "child", request_id: "request", messages: [], error: "missing transcript" }]);
   assert.equal(sessionHistory, false);
 });
+
+test("child questions retain source identity and can close only their request", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  setImmediate(() => latest().open());
+  await connected;
+  const requests: unknown[] = [];
+  client.on("ask-user-request", (request) => requests.push(request));
+  const subagent = {
+    parent_call_id: "parent-task",
+    child_session_id: "child-session",
+    name: "worker",
+    display_name: "Curie",
+  };
+  latest().peerSend({ type: "ask_user_request", request_id: "child-q", call_id: "ask", questions: [], subagent });
+  assert.deepEqual(requests, [{ request_id: "child-q", call_id: "ask", questions: [], subagent }]);
+  client.cancelAskUser("child-q");
+  assert.deepEqual(latest().sent, [{ type: "ask_user_response", request_id: "child-q", answers: [], cancelled: true }]);
+});
+
+test("activity snapshots preserve their session and exact task identity", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  const snapshots: unknown[] = [];
+  client.on("session-activity-snapshot", (snapshot) => snapshots.push(snapshot));
+  const snapshot = {
+    session_id: "active",
+    subagents: [{ task_id: "task", child_session_id: "child", name: "worker", display_name: "Curie", status: "running", tool_name: "read" }],
+    jobs: [{ job_id: "job", command: "cargo test", state: "running" }],
+  };
+  latest().peerSend({ type: "session_activity_snapshot", ...snapshot });
+  assert.deepEqual(snapshots, [snapshot]);
+});

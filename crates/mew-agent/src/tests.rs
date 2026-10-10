@@ -109,6 +109,59 @@ impl Provider for CapturingProvider {
 }
 
 #[tokio::test]
+async fn pre_cancelled_turn_persists_input_without_requesting_provider() {
+    let directory = tempfile::tempdir().unwrap();
+    let session_id = mew_message::SessionId::new();
+    let writer = mew_session::Writer::open_at(directory.path(), &session_id.to_string())
+        .await
+        .unwrap();
+    let provider = Arc::new(CapturingProvider::new(vec![FakeProvider::text_response(
+        "next turn succeeds",
+    )]));
+    let agent = Agent::new(
+        provider.clone(),
+        Arc::new(NopDispatcher),
+        Some(writer),
+        vec![],
+        Some(session_id),
+    );
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    let mut events = agent.run_with_parts("accepted input".into(), vec![], Some(token));
+    let mut aborted = false;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while let Some(event) = events.recv().await {
+            if matches!(event, AgentEvent::Error(message) if message == "aborted") {
+                aborted = true;
+            }
+        }
+    })
+    .await
+    .expect("cancelled turn must finish");
+
+    assert!(aborted, "cancelled turn must report its terminal outcome");
+    assert!(provider.captured.lock().unwrap().is_empty());
+    let history = mew_session::Reader::load_from(directory.path(), &session_id.to_string())
+        .await
+        .unwrap();
+    assert_eq!(history, *agent.messages.lock().await);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].role, Role::User);
+    assert!(matches!(&history[0].parts[0], Part::Text(part) if part.text == "accepted input"));
+
+    let mut events = agent.run("follow up".into());
+    while events.recv().await.is_some() {}
+    assert_eq!(provider.captured.lock().unwrap().len(), 1);
+    assert!(agent.messages.lock().await.iter().any(|message| {
+        message.role == Role::Assistant
+            && message
+                .parts
+                .iter()
+                .any(|part| matches!(part, Part::Text(part) if part.text == "next turn succeeds"))
+    }));
+}
+
+#[tokio::test]
 async fn model_changes_refresh_the_request_prompt_without_mutating_saved_agent_state() {
     let provider = Arc::new(CapturingProvider::new(vec![
         FakeProvider::text_response("first"),

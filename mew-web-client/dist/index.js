@@ -251,6 +251,10 @@ export class MewClient {
     respondToAskUser(request_id, answers) {
         this.send({ type: "ask_user_response", request_id, answers });
     }
+    /** Close one question while leaving the parent turn and other questions active. */
+    cancelAskUser(request_id) {
+        this.send({ type: "ask_user_response", request_id, answers: [], cancelled: true });
+    }
     /** Accept or reject a proposed goal using its original request ID. */
     respondToGoal(request_id, accepted) {
         this.send({ type: "goal_response", request_id, accepted });
@@ -548,6 +552,7 @@ export class MewClient {
                 break;
             case "ask_user_request":
                 this.emit("ask-user-request", {
+                    ...(msg.subagent ? { subagent: msg.subagent } : {}),
                     request_id: msg.request_id,
                     call_id: msg.call_id,
                     questions: msg.questions,
@@ -604,6 +609,13 @@ export class MewClient {
                     job_id: msg.job_id,
                     command: msg.command,
                     state: msg.state,
+                });
+                break;
+            case "session_activity_snapshot":
+                this.emit("session-activity-snapshot", {
+                    session_id: msg.session_id,
+                    subagents: msg.subagents,
+                    jobs: msg.jobs,
                 });
                 break;
             case "slash_result":

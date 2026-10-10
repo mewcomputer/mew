@@ -11,10 +11,12 @@
 //! sends a `PermissionRequest` or `AskUserRequest` with an ID; the frontend
 //! responds with `PermissionResponse` or `AskUserResponse` using the same ID.
 
+pub use mew_message::SubagentQuestionSource;
+
 use serde::{Deserialize, Serialize};
 
 /// Wire revision required by native clients. Increment for incompatible changes.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub const DEFAULT_HISTORY_PAGE_LIMIT: usize = 24;
 
@@ -114,6 +116,19 @@ pub enum ClientMessage {
         #[serde(default)]
         attachments: Vec<Attachment>,
     },
+    /// Submit to an explicit attached session and await its receipt.
+    SubmitPrompt {
+        session_id: String,
+        request_id: String,
+        text: String,
+        #[serde(default)]
+        attachments: Vec<Attachment>,
+    },
+    /// Reconcile an uncertain submission without starting another turn.
+    ReadPromptReceipt {
+        session_id: String,
+        request_id: String,
+    },
 
     /// Cancel the current turn.
     Cancel,
@@ -135,6 +150,9 @@ pub enum ClientMessage {
     /// Respond to an `AskUserRequest` from the daemon.
     AskUserResponse {
         request_id: String,
+        /// Close this question without supplying answers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancelled: bool,
         /// One answer per question, in order.
         answers: Vec<String>,
     },
@@ -614,6 +632,14 @@ impl From<PermissionDecision> for mew_hooks::PermissionDecision {
 // Daemon → Frontend messages
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptStatus {
+    Accepted,
+    Rejected,
+    Unknown,
+}
+
 /// A message from the daemon to the frontend.
 ///
 /// This is the wire representation of `AgentEvent`. The variants that carry
@@ -622,6 +648,13 @@ impl From<PermissionDecision> for mew_hooks::PermissionDecision {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
+    PromptReceipt {
+        session_id: String,
+        request_id: String,
+        status: PromptStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     /// Confirms the scope granted to an authenticated remote connection.
     RemoteReady {
         scope: RemoteScope,
@@ -656,9 +689,11 @@ pub enum ServerMessage {
 
     /// A user message was sent to this session. Broadcast to all
     /// attached clients so multi-device clients see the prompt.
-    /// The sending client can deduplicate by matching text content.
+    /// Acknowledged submissions carry their exact request identity.
     UserMessage {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
 
     /// A tool execution has started.
@@ -707,6 +742,8 @@ pub enum ServerMessage {
     /// Ask the user one to four free-text questions.
     AskUserRequest {
         request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent: Option<SubagentQuestionSource>,
         call_id: String,
         questions: Vec<Question>,
     },
@@ -763,6 +800,13 @@ pub enum ServerMessage {
         session_id: String,
         request_id: String,
         message: String,
+    },
+
+    /// Authoritative task activity when attaching to a session.
+    SessionActivitySnapshot {
+        session_id: String,
+        subagents: Vec<SubagentActivity>,
+        jobs: Vec<JobActivity>,
     },
 
     /// A background shell job state changed.
@@ -1136,6 +1180,24 @@ pub enum SubagentOutcome {
     Completed,
     Cancelled,
     Failed { reason: String },
+}
+
+/// An active subagent task, keyed by its parent tool call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentActivity {
+    pub task_id: String,
+    pub child_session_id: Option<String>,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub status: String,
+    pub tool_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobActivity {
+    pub job_id: String,
+    pub command: String,
+    pub state: String,
 }
 
 /// A todo item, mirroring `mew_agent::Todo` but serializable.
@@ -1933,6 +1995,7 @@ mod tests {
     #[test]
     fn client_message_ask_user_response_multiple_answers_roundtrip() {
         let m = ClientMessage::AskUserResponse {
+            cancelled: false,
             request_id: "uuid-5".into(),
             answers: vec!["alpha".into(), "beta".into(), "gamma".into()],
         };
@@ -1940,6 +2003,7 @@ mod tests {
             ClientMessage::AskUserResponse {
                 request_id,
                 answers,
+                ..
             } => {
                 assert_eq!(request_id, "uuid-5");
                 assert_eq!(answers, vec!["alpha", "beta", "gamma"]);
@@ -2347,6 +2411,7 @@ mod tests {
     #[test]
     fn server_message_ask_user_request_multiple_questions_roundtrip() {
         let m = ServerMessage::AskUserRequest {
+            subagent: None,
             request_id: "uuid-3".into(),
             call_id: "ask_1".into(),
             questions: vec![
@@ -2377,6 +2442,7 @@ mod tests {
                 request_id,
                 call_id,
                 questions,
+                ..
             } => {
                 assert_eq!(request_id, "uuid-3");
                 assert_eq!(call_id, "ask_1");
@@ -2664,6 +2730,7 @@ mod tests {
             (
                 "ask_user_response",
                 ClientMessage::AskUserResponse {
+                    cancelled: false,
                     request_id: "uuid-0".into(),
                     answers: vec![],
                 },

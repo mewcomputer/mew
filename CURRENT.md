@@ -1779,3 +1779,24 @@ Verified 17 actual-frame mouse regressions, rendered budget and picker wheel
 fixtures, related picker, autocomplete and activity behavior tests, and strict
 all-target TUI clippy. The tests cover narrow and resized terminals, Unicode,
 wrapped text, sidebar widths, landing and chat composers, and modal ownership.
+
+### 2026-10-10: scoped submissions and retained daemon activity
+
+Wire revision 3 accepts prompts with explicit session and request identities.
+Duplicate submissions return their existing receipt, and reconnects can query
+the original session before deciding whether to retry. Busy sessions reject
+without echoing the draft. Cancellation is registered before acceptance and
+agent locking; cancelled accepted input persists without requesting a provider
+or generating a title. Follow-ups wait for turn bookkeeping, while optional
+title generation releases that turn's lock. Receipts remain runtime metadata.
+
+Session attachment restores authoritative subagent and shell-job activity,
+including child identity, current status and missed completions. Snapshot
+publication is serialized with activity updates. The wire also retains optional
+child-question source data and an explicit close flag, with legacy constructor
+and match compatibility and TypeScript event forwarding.
+
+Verified the isolated commit snapshot: 194 agent tests, 73 daemon tests, 122
+protocol tests and 29 TypeScript client tests passed. One existing daemon browser
+test requires Chrome and remains ignored. Formatting and all-target daemon,
+mobile, shared-core and UI-model compilation passed with a separate build target.
