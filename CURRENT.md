@@ -1976,3 +1976,27 @@ Generated themes are up to date. Refreshed eight desktop captures with several
 projects and added a 400 by 320 pixel short-terminal view to the screenshot
 gallery. Visually checked conversation, attention and narrow views using the
 actual renderer with sample state; paired live interaction remains pending.
+
+### 2026-10-10: shaded user messages and composer
+
+User messages use an opaque full-width surface instead of a `>` prefix. The
+composer uses the same `chat.user.background` token without its idle marker;
+cursor layout, multiline editing and the active-turn spinner retain their
+existing geometry. Attachments share the user surface, while guidance keeps its
+steering arrow. Selection colors remain visible over user messages.
+
+Wide glyphs now paint their covered cells with their leading cell's style so
+message and selection backgrounds remain continuous in rendered frames. The new
+theme token aliases `muted`, with palette overrides for Catppuccin Latte and
+Tokyo Night to maintain at least 4.5:1 body-text contrast in every built-in theme.
+Theme outputs were regenerated from the manifest and documentation updated.
+
+All 486 TUI tests across 18 targets passed, including new surface, attachment,
+guidance, wide-character selection and palette contrast checks. Refreshed the
+text goldens and renderer captures, adding dark, light and short user-message
+views to the gallery. Generated theme checks passed; live interaction remains
+pending.
+
+Follow-up found during capture: `/theme` replaces the theme without invalidating
+transcript or markdown caches, which can retain colors from the previous theme.
+This needs a separate pass; the capture fixture clears those caches explicitly.

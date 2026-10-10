@@ -29,7 +29,7 @@ struct ChatLineCtx<'t> {
     end_col: usize,
     sel_fg: Color,
     sel_bg: Color,
-    chat_bg: Color,
+    surface_bg: Color,
     chat_width: u16,
 }
 
@@ -68,9 +68,9 @@ impl<'t> ChatLineCtx<'t> {
         } else {
             line
         };
-        // Fill bg-less spans with the chat surface background so that
+        // Fill bg-less spans with the message surface background so that
         // wrapped continuation rows (and trailing cells on any row)
-        // carry the chat bg rather than relying on ratatui's
+        // carry their surface rather than relying on ratatui's
         // Paragraph/Block to propagate it — which it does
         // inconsistently past the second wrapped line.
         //
@@ -79,16 +79,16 @@ impl<'t> ChatLineCtx<'t> {
         // untouched.
         for span in &mut line.spans {
             if span.style.bg.is_none() {
-                span.style = span.style.bg(self.chat_bg);
+                span.style = span.style.bg(self.surface_bg);
             }
         }
-        // Pad to full chat width with the chat surface bg so every
+        // Pad to full chat width with the message surface so every
         // visual row fills the entire width.
         let used = line.width() as u16;
         if used < self.chat_width {
             line.spans.push(Span::styled(
                 " ".repeat((self.chat_width - used) as usize),
-                Style::default().bg(self.chat_bg),
+                Style::default().bg(self.surface_bg),
             ));
         }
         let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -256,11 +256,29 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     // time, `WordWrapper` returns immediately per line (1 iteration), so this
     // stays O(visible). The visible-window slice already eliminated ratatui's
     // O(scroll.y) skip — `scroll` is 0 here.
+    let visible_rows = visible.len() as u16;
     let paragraph = Paragraph::new(Text::from(visible))
         .wrap(Wrap { trim: false })
         .scroll((0, 0));
 
     f.render_widget(paragraph, chat_inner);
+    // Paragraph styles the leading cell of wide glyphs. Paint covered cells
+    // too so background surfaces and selections fill the rendered frame.
+    for y in chat_inner.y..chat_inner.y + visible_rows {
+        let mut x = chat_inner.x;
+        while x < chat_inner.right() {
+            let cell = &f.buffer_mut()[(x, y)];
+            let width = display_width(cell.symbol()).max(1) as u16;
+            if width > 1 {
+                let style = cell.style();
+                f.buffer_mut().set_style(
+                    Rect::new(x + 1, y, (width - 1).min(chat_inner.right() - x - 1), 1),
+                    style,
+                );
+            }
+            x += width;
+        }
+    }
 
     if total_lines > chat_inner.height {
         // ratatui's ScrollbarState only puts the thumb at the track end when
@@ -345,7 +363,7 @@ pub(crate) fn build_chat_lines(
         end_col: app.sel_end_col.unwrap_or(0),
         sel_fg: app.theme.resolve("selection.foreground"),
         sel_bg: app.theme.resolve("selection.background"),
-        chat_bg: app.theme.resolve("chat.surface.background"),
+        surface_bg: app.theme.resolve("chat.surface.background"),
         chat_width,
     };
 
@@ -357,8 +375,12 @@ pub(crate) fn build_chat_lines(
         }
         let is_last = msg_idx + 1 == msg_count;
         let is_streaming = app.streaming && is_last;
-        // A guided user message (steering the current turn) renders with a
-        // distinct arrow prefix instead of the normal ">" prompt marker.
+        sel_ctx.surface_bg = app.theme.resolve(if msg.role == Role::User {
+            "chat.user.background"
+        } else {
+            "chat.surface.background"
+        });
+        // Guidance keeps an arrow to distinguish steering the active turn.
         let is_guidance = msg.role == Role::User
             && msg.parts.iter().any(|p| {
                 matches!(
@@ -378,7 +400,7 @@ pub(crate) fn build_chat_lines(
         } else {
             match msg.role {
                 Role::User => (
-                    ">",
+                    " ",
                     app.theme.resolve("text.accent"),
                     Style::default().fg(app.theme.resolve("foreground")),
                 ),
@@ -679,8 +701,7 @@ pub(crate) fn build_chat_lines(
                         // Pre-wrap user text to `md_width` so every line is
                         // ≤ chat_inner.width and `Wrap` is a no-op (lets us
                         // slice the visible window without ratatui re-wrapping).
-                        // `prefix` is "> " (2 cols), so wrap content to
-                        // `md_width.saturating_sub(prefix_width)`.
+                        // Keep two columns of padding on either side.
                         let prefix_str = format!("{} ", prefix);
                         let prefix_w = display_width(&prefix_str) as u16;
                         let content_w = md_width.saturating_sub(prefix_w);
@@ -783,6 +804,7 @@ pub(crate) fn build_chat_lines(
             part_idx += 1;
         }
 
+        sel_ctx.surface_bg = app.theme.resolve("chat.surface.background");
         if message_had_content {
             sel_ctx.push_line(Line::from(""));
         }

@@ -1,5 +1,5 @@
 --- snapshot result ---
-> hello world
+  hello world
 
   Hi there! How can I help?
 
@@ -20,7 +20,7 @@
 
 
 
- >
+
 
   ~/mew   git: main   0 tok  ·  $0.00
 ---

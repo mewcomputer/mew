@@ -15,6 +15,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #0d1017;
+  --chat-user-background: #222834;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -120,6 +121,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #fcfcfc;
+  --chat-user-background: #e7e9eb;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -225,6 +227,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #1d2331;
+  --chat-user-background: #333b4d;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -330,6 +333,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #303446;
+  --chat-user-background: #41455a;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -435,6 +439,7 @@
   --chart-3: #df8e1d;
   --chart-4: #8839ef;
   --chat-surface-background: #eff1f5;
+  --chat-user-background: #e6e9ef;
   --cyan-bg: #d4f0f2;
   --cyan-fg: #179299;
   --cyan-med: #4cb8be;
@@ -542,6 +547,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #24273a;
+  --chat-user-background: #4b5069;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -647,6 +653,7 @@
   --chart-3: #f9e2af;
   --chart-4: #cba6f7;
   --chat-surface-background: #1e1e2e;
+  --chat-user-background: #45475a;
   --cyan-bg: #0f3a3a;
   --cyan-fg: #94e2d5;
   --cyan-med: #0d9488;
@@ -754,6 +761,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #282a36;
+  --chat-user-background: #434659;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -859,6 +867,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #222a2e;
+  --chat-user-background: #363d40;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -964,6 +973,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #2c3538;
+  --chat-user-background: #3e474c;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1069,6 +1079,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #d5dfe9;
+  --chat-user-background: #b2c2ce;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1174,6 +1185,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #1e2528;
+  --chat-user-background: #31383b;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1279,6 +1291,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #0d1116;
+  --chat-user-background: #353d46;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1384,6 +1397,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #2b2525;
+  --chat-user-background: #4b433f;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1489,6 +1503,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #2e3440;
+  --chat-user-background: #464f62;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1594,6 +1609,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #1a1825;
+  --chat-user-background: #29263c;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1699,6 +1715,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #faf3eb;
+  --chat-user-background: #e9dfd9;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1804,6 +1821,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #242236;
+  --chat-user-background: #383452;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -1909,6 +1927,7 @@
   --chart-3: #e0af68;
   --chart-4: #bb9af7;
   --chat-surface-background: #1a1b26;
+  --chat-user-background: #24283b;
   --cyan-bg: #0f2e3a;
   --cyan-fg: #7dcfff;
   --cyan-med: #2a8ac4;
@@ -2016,6 +2035,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #e6e7ec;
+  --chat-user-background: #ccced6;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;
@@ -2121,6 +2141,7 @@
   --chart-3: #f5c850;
   --chart-4: #c8aaf0;
   --chat-surface-background: #1d2041;
+  --chat-user-background: #3c3e5a;
   --cyan-bg: #143232;
   --cyan-fg: #00ffff;
   --cyan-med: #287878;

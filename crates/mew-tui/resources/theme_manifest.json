@@ -37,6 +37,7 @@
     "panel.overlay": "@popover",
     "panel.overlay_hover": "@background",
     "chat.surface.background": "@panel.background",
+    "chat.user.background": "@muted",
     "tool.background": "@card",
     "tool.border": "@border",
     "status_bar.background": "@background",
@@ -295,6 +296,7 @@
       "tokens": {
         "background": "#eff1f5",
         "foreground": "#4c4f69",
+        "chat.user.background": "@card",
         "card": "#e6e9ef",
         "card_foreground": "#4c4f69",
         "popover": "#e6e9ef",
@@ -1297,6 +1299,7 @@
       "tokens": {
         "background": "#1a1b26",
         "foreground": "#a9b1d6",
+        "chat.user.background": "@card",
         "card": "#24283b",
         "card_foreground": "#a9b1d6",
         "popover": "#24283b",

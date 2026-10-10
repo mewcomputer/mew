@@ -83,7 +83,7 @@ pub(super) fn desired_height(app: &App, width: u16) -> u16 {
 }
 
 pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
-    let input_bg = app.theme.resolve("muted");
+    let input_bg = app.theme.resolve("chat.user.background");
     let style = match app.mode {
         Mode::SlashCommand => Style::default()
             .fg(app.theme.resolve("text.warning"))
@@ -97,7 +97,7 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let queue_height = layout.queue.height;
     if queue_height > 0 {
         let queue_area = layout.queue;
-        let queue_bg = app.theme.resolve("muted");
+        let queue_bg = input_bg;
         let muted_style = Style::default()
             .fg(app.theme.resolve("text.muted"))
             .bg(queue_bg)
@@ -156,7 +156,7 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         )
     } else {
         Span::styled(
-            &"> "[..prefix_width],
+            &"  "[..prefix_width],
             Style::default()
                 .fg(app.theme.resolve("text.accent"))
                 .bg(input_bg),
@@ -269,7 +269,7 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 /// Compact companion render when chat content would be overlapped.
 /// Shows bubble text and a single sprite face line at the right of the input area.
 pub(super) fn draw_companion_compact(f: &mut Frame, app: &App, _input_area: Rect) {
-    let input_bg = app.theme.resolve("muted");
+    let input_bg = app.theme.resolve("chat.user.background");
     let bubble = app
         .plugin_ui
         .get("buddy/bubble")

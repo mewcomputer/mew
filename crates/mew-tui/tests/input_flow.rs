@@ -40,7 +40,7 @@ fn queued_follow_up_stays_visible_above_the_editable_prompt() {
     let rows = draw(&mut app, &mut terminal);
 
     assert!(rows[app.input_area.y as usize].contains("check the tests (+1)"));
-    assert!(rows[app.input_area.y as usize + 2].contains("> current prompt"));
+    assert_eq!(rows[app.input_area.y as usize + 2].trim(), "current prompt");
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn history_recall_scrolls_to_the_end_and_restores_the_draft() {
     let rows = draw(&mut app, &mut terminal);
     let cursor = terminal.get_cursor_position().unwrap();
     assert_eq!(app.input, "draft");
-    assert!(rows[cursor.y as usize].contains("> draft"));
+    assert_eq!(rows[cursor.y as usize].trim(), "draft");
 }
 
 #[test]

@@ -863,14 +863,15 @@ mod tests {
 
         // The autocomplete itself is rendered in the rows directly above the
         // box (absolute positioning), not pushed below the fold. The box's
-        // visible "> /" marker sits one row below its top edge (the box has a
+        // visible "/" text sits one row below its top edge (the box has a
         // 1-row inset above the text).
         let frame = h.render();
         let content_row = h.app.input_area.y as usize + 1;
         let lines: Vec<&str> = frame.lines().collect();
-        assert!(
-            lines[content_row].contains('>'),
-            "input box marker missing at row {content_row}: {frame}"
+        assert_eq!(
+            lines[content_row].trim(),
+            "/",
+            "input text missing at row {content_row}: {frame}"
         );
     }
 

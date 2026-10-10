@@ -53,7 +53,8 @@ Core shadcn-style tokens:
 Extended TUI/web tokens:
 
 - Surface: `panel.background`, `panel.overlay`, `panel.overlay_hover`,
-  `tool.background`, `tool.border`, `status_bar.background`, `sidebar.background`,
+  `chat.surface.background`, `chat.user.background`, `tool.background`,
+  `tool.border`, `status_bar.background`, `sidebar.background`,
   `divider`, `surface.success`, `surface.error`, `surface.inverse`
 - Selection: `selection.foreground`, `selection.background`
 - Text: `text.body`, `text.muted`, `text.placeholder`, `text.disabled`,
