@@ -69,6 +69,40 @@ fn chat_selection_uses_the_rendered_zero_based_row_after_scroll_and_resize() {
         assert_eq!(app.selected_text(), expected, "width {width}");
     }
 }
+
+#[test]
+fn releasing_a_wrapped_chat_selection_copies_text_without_terminal_layout() {
+    let text = "first words in a sentence that wraps across several rows, ending last.";
+    let mut app = App::new();
+    app.push_user(text.into(), vec![]);
+    let buffer = draw(&mut app, 40, 30);
+    let (start_x, start_y) = find(&buffer, "first");
+    let (end_x, end_y) = find(&buffer, "last.");
+    mouse(
+        &mut app,
+        MouseEventKind::Down(MouseButton::Left),
+        start_x,
+        start_y,
+    );
+    mouse(
+        &mut app,
+        MouseEventKind::Drag(MouseButton::Left),
+        end_x + 5,
+        end_y,
+    );
+    let action = handle_input_event(
+        &mut app,
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: end_x + 5,
+            row: end_y,
+            modifiers: KeyModifiers::NONE,
+        }),
+    );
+    assert!(
+        matches!(action, Some(mew_tui::events::Action::CopySelection(copied)) if copied == text)
+    );
+}
 #[test]
 fn scrollbar_click_and_drag_use_the_actual_column_and_reach_both_ends() {
     let mut app = App::new();

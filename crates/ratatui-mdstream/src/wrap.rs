@@ -9,74 +9,109 @@ use crate::inline::StyledRun;
 /// Breaks prefer word boundaries (whitespace), falling back to grapheme boundaries
 /// only when a single word exceeds the width.
 pub fn wrap_styled(runs: &[StyledRun], width: u16) -> Vec<Vec<Span<'static>>> {
+    wrap_styled_with_metadata(runs, width)
+        .into_iter()
+        .map(|line| line.spans)
+        .collect()
+}
+
+pub(crate) struct WrappedLine {
+    pub spans: Vec<Span<'static>>,
+    pub continues_previous: bool,
+}
+
+fn flush(lines: &mut Vec<WrappedLine>, current: &mut Vec<Span<'static>>, continues: &mut bool) {
+    lines.push(WrappedLine {
+        spans: std::mem::take(current),
+        continues_previous: *continues,
+    });
+    *continues = true;
+}
+
+pub(crate) fn wrap_styled_with_metadata(runs: &[StyledRun], width: u16) -> Vec<WrappedLine> {
     let width = width.max(1) as usize;
-    let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut lines = Vec::new();
     let mut current_line: Vec<Span<'static>> = Vec::new();
     let mut current_width: usize = 0;
+    let mut continues = false;
+    let mut logical_has_content = false;
+    let mut ends_with_newline = false;
 
     for (text, style) in runs {
-        let words: Vec<&str> = text.split_inclusive(' ').collect();
+        for segment in text.split_inclusive('\n') {
+            let hard_break = segment.ends_with('\n');
+            let segment = segment.strip_suffix('\n').unwrap_or(segment);
+            ends_with_newline = hard_break;
+            for word in segment.split_inclusive(' ') {
+                logical_has_content = true;
+                let word_width = word.width();
 
-        for word in words {
-            let word_width = word.width();
+                // If the word fits on the current line, append it.
+                if current_width + word_width <= width {
+                    current_line.push(Span::styled(word.to_string(), *style));
+                    current_width += word_width;
+                    continue;
+                }
 
-            // If the word fits on the current line, append it.
-            if current_width + word_width <= width {
-                current_line.push(Span::styled(word.to_string(), *style));
-                current_width += word_width;
-                continue;
-            }
+                // Word doesn't fit. If current line has content, flush it first.
+                if !current_line.is_empty() {
+                    flush(&mut lines, &mut current_line, &mut continues);
+                    current_width = 0;
+                }
 
-            // Word doesn't fit. If current line has content, flush it first.
-            if !current_line.is_empty() {
-                lines.push(std::mem::take(&mut current_line));
-                current_width = 0;
-            }
+                // If the word itself fits on an empty line, place it whole.
+                if word_width <= width {
+                    current_line.push(Span::styled(word.to_string(), *style));
+                    current_width = word_width;
+                    continue;
+                }
 
-            // If the word itself fits on an empty line, place it whole.
-            if word_width <= width {
-                current_line.push(Span::styled(word.to_string(), *style));
-                current_width = word_width;
-                continue;
-            }
+                // Word is wider than the line: break at grapheme boundaries.
+                let mut remaining = word;
+                while !remaining.is_empty() {
+                    let mut chunk = String::new();
+                    let mut chunk_width: usize = 0;
 
-            // Word is wider than the line: break at grapheme boundaries.
-            let mut remaining = word;
-            while !remaining.is_empty() {
-                let mut chunk = String::new();
-                let mut chunk_width: usize = 0;
-
-                for grapheme in remaining.graphemes(true) {
-                    let g_width = grapheme.width();
-                    if chunk_width + g_width > width {
-                        break;
+                    for grapheme in remaining.graphemes(true) {
+                        let g_width = grapheme.width();
+                        if chunk_width + g_width > width {
+                            break;
+                        }
+                        chunk.push_str(grapheme);
+                        chunk_width += g_width;
                     }
-                    chunk.push_str(grapheme);
-                    chunk_width += g_width;
+
+                    if chunk.is_empty() {
+                        // Single grapheme wider than width — take it anyway.
+                        let g = remaining.graphemes(true).next().unwrap_or("");
+                        chunk = g.to_string();
+                    }
+
+                    let chunk_len = chunk.len();
+                    current_line.push(Span::styled(chunk, *style));
+                    flush(&mut lines, &mut current_line, &mut continues);
+
+                    remaining = &remaining[chunk_len..];
                 }
-
-                if chunk.is_empty() {
-                    // Single grapheme wider than width — take it anyway.
-                    let g = remaining.graphemes(true).next().unwrap_or("");
-                    chunk = g.to_string();
+            }
+            if hard_break {
+                if !current_line.is_empty() || !logical_has_content {
+                    flush(&mut lines, &mut current_line, &mut continues);
                 }
-
-                let chunk_len = chunk.len();
-                current_line.push(Span::styled(chunk, *style));
-                lines.push(std::mem::take(&mut current_line));
-
-                remaining = &remaining[chunk_len..];
+                continues = false;
+                current_width = 0;
+                logical_has_content = false;
             }
         }
     }
 
     if !current_line.is_empty() {
-        lines.push(current_line);
+        flush(&mut lines, &mut current_line, &mut continues);
     }
 
     // Ensure at least one empty line if input was empty.
-    if lines.is_empty() {
-        lines.push(Vec::new());
+    if lines.is_empty() || ends_with_newline {
+        flush(&mut lines, &mut current_line, &mut continues);
     }
 
     lines

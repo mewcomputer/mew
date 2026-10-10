@@ -2026,3 +2026,20 @@ turn open; Ctrl+X cannot trigger the unmodified child-cancellation shortcut.
 All 531 TUI tests across 19 targets passed, including 45 added behavior tests;
 focused clippy passed. Refreshed renderer captures and added three desktop and
 narrow help images to the gallery. Live interaction remains pending.
+
+### 2026-10-10: copy transcript text without terminal layout
+
+Chat selection now copies source content bounds instead of padded screen rows.
+Soft wraps join without adding spaces or newlines, including long Unicode words;
+real paragraph breaks, code indentation and tool-output whitespace remain intact.
+Partial and reversed selections exclude generated margins and surface fill.
+List and quote continuations omit repeated display prefixes, and redundant blank
+separators do not add extra copy breaks.
+
+The markdown renderer records copy bounds and break provenance while rendering,
+including pending blocks and incremental caches, without rendering a second time.
+Existing rendering APIs remain available, and visual goldens are unchanged.
+All 541 TUI tests across 20 targets and 42 markdown-renderer tests passed, with
+22 new regression tests covering copy content, streaming, resizing and mouse
+release. Strict checks passed for both crates. Rendered tables retain their grid
+formatting and interior column spacing. Live interaction remains pending.

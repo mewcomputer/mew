@@ -1823,7 +1823,11 @@ fn test_rewind_to_truncates_messages() {
         app.messages.push(msg);
         app.rendered_md_cache.insert(
             part_id,
-            (80, format!("msg {}", i), std::rc::Rc::new(vec![])),
+            (
+                80,
+                format!("msg {}", i),
+                std::rc::Rc::new(ratatui_mdstream::RenderedLines::default()),
+            ),
         );
     }
     assert_eq!(app.messages.len(), 5);
@@ -2794,11 +2798,19 @@ fn test_multipart_cache_keyed_by_partid() {
     // its own cache entry keyed by PartId.
     app.rendered_md_cache.insert(
         part1_id,
-        (80, "first".to_string(), std::rc::Rc::new(vec![])),
+        (
+            80,
+            "first".to_string(),
+            std::rc::Rc::new(ratatui_mdstream::RenderedLines::default()),
+        ),
     );
     app.rendered_md_cache.insert(
         part2_id,
-        (80, "second".to_string(), std::rc::Rc::new(vec![])),
+        (
+            80,
+            "second".to_string(),
+            std::rc::Rc::new(ratatui_mdstream::RenderedLines::default()),
+        ),
     );
 
     // Both entries must survive — if the cache were keyed by MessageId,

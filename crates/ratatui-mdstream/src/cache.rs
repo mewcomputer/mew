@@ -1,8 +1,9 @@
 use ratatui::text::Line;
 
 use crate::highlight::Highlighter;
-use crate::render::render_block;
+use crate::render::render_block_with_metadata;
 use crate::theme::Theme;
+use crate::{LineMetadata, RenderedLines};
 
 /// Incremental render cache keyed by width.
 pub struct RenderCache {
@@ -45,10 +46,11 @@ impl RenderCache {
         }
 
         for block in &blocks[self.committed_count..] {
-            let lines = render_block(block, width, theme, highlighter);
+            let rendered = render_block_with_metadata(block, width, theme, highlighter);
             self.committed.push(CachedBlock {
                 id: block.id,
-                lines,
+                lines: rendered.lines,
+                metadata: rendered.metadata,
             });
         }
         self.committed_count = blocks.len();
@@ -74,6 +76,23 @@ impl RenderCache {
         }
         out
     }
+
+    /// Collect cached rows with their copy bounds without rendering again.
+    pub fn collect_with_metadata(&self) -> RenderedLines {
+        let capacity = self.total_lines();
+        let mut out = RenderedLines {
+            lines: Vec::with_capacity(capacity),
+            metadata: Vec::with_capacity(capacity),
+        };
+        for (i, block) in self.committed.iter().enumerate() {
+            if i > 0 {
+                out.push_blank();
+            }
+            out.lines.extend(block.lines.iter().cloned());
+            out.metadata.extend(block.metadata.iter().cloned());
+        }
+        out
+    }
 }
 
 impl Default for RenderCache {
@@ -85,6 +104,7 @@ impl Default for RenderCache {
 pub struct CachedBlock {
     pub id: mdstream::BlockId,
     pub lines: Vec<Line<'static>>,
+    pub metadata: Vec<LineMetadata>,
 }
 
 #[cfg(test)]

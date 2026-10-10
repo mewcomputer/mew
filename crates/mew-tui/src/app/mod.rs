@@ -216,7 +216,7 @@ pub struct App {
     pub md_stream: Option<mdstream::MdStream>,
     pub md_render_cache: ratatui_mdstream::cache::RenderCache,
     pub rendered_md_cache:
-        HashMap<mew_message::PartId, (u16, String, Rc<Vec<ratatui::text::Line<'static>>>)>,
+        HashMap<mew_message::PartId, (u16, String, Rc<ratatui_mdstream::RenderedLines>)>,
     pub last_md_width: u16,
     pub max_scroll: u16,
     pub rendered_chat: Option<RenderedChat>,
@@ -244,6 +244,7 @@ pub struct App {
     pub sel_end_row: Option<usize>,
     pub sel_end_col: Option<usize>,
     pub chat_rows: Vec<String>,
+    pub chat_copy_metadata: Vec<ratatui_mdstream::LineMetadata>,
     pub alert: Option<(String, Instant)>,
     pub toasts: Vec<(String, Instant)>,
     pub plugin_ui: std::collections::HashMap<String, String>,
@@ -329,6 +330,7 @@ pub struct RenderedChat {
 pub struct BuiltChat {
     pub lines: Vec<ratatui::text::Line<'static>>,
     pub chat_rows: Vec<String>,
+    pub copy_metadata: Vec<ratatui_mdstream::LineMetadata>,
 }
 
 /// A running or completed subagent task shown in the sidebar.
@@ -1005,6 +1007,7 @@ impl App {
             sel_end_row: None,
             sel_end_col: None,
             chat_rows: Vec::new(),
+            chat_copy_metadata: Vec::new(),
             alert: None,
             toasts: Vec::new(),
             plugin_ui: std::collections::HashMap::new(),
@@ -1665,49 +1668,36 @@ impl App {
         } else {
             (ac.min(ec), ac.max(ec))
         };
-        let mut parts: Vec<String> = Vec::new();
-        for (row, line) in self
-            .chat_rows
-            .iter()
-            .enumerate()
-            .skip(lo)
-            .take(hi.saturating_sub(lo) + 1)
-        {
-            let byte_lo = byte_at_display_offset(line, lo_col);
-            let byte_hi = byte_at_display_offset(line, hi_col);
-            if row == lo && row == hi {
-                if byte_lo < byte_hi {
-                    parts.push(line[byte_lo..byte_hi].to_string());
-                }
-            } else if row == lo {
-                parts.push(line[byte_lo..].to_string());
-            } else if row == hi {
-                parts.push(line[..byte_hi].to_string());
+        let mut result = String::new();
+        let mut breaks = 0;
+        for row in lo..=hi {
+            let line = &self.chat_rows[row];
+            let Some(metadata) = self.chat_copy_metadata.get(row) else {
+                continue;
+            };
+            let start = if row == lo {
+                byte_at_display_offset(line, lo_col).max(metadata.content.start)
             } else {
-                parts.push(line.to_string());
+                metadata.content.start
+            };
+            let end = if row == hi {
+                byte_at_display_offset(line, hi_col).min(metadata.content.end)
+            } else {
+                metadata.content.end
+            };
+            if !result.is_empty() && !metadata.continues_previous {
+                breaks += 1;
             }
-        }
-
-        // For multi-line selections, strip the common leading whitespace
-        // prefix (the TUI's left margin / padding that the user didn't
-        // intend to copy). Single-line selections are left verbatim since
-        // the user explicitly positioned the column cursor.
-        if parts.len() > 1 {
-            let common_ws = parts
-                .iter()
-                .map(|p| p.chars().take_while(|c| c.is_whitespace()).count())
-                .min()
-                .unwrap_or(0);
-            if common_ws > 0 {
-                for part in &mut parts {
-                    *part = part.chars().skip(common_ws).collect();
-                }
+            if start >= end {
+                continue;
             }
+            for _ in 0..breaks {
+                result.push('\n');
+            }
+            breaks = 0;
+            result.extend(line[start..end].chars().filter(|&ch| ch != '\r'));
         }
-
-        // Strip carriage returns that leak from terminal rendering.
-        let result = parts.join("\n");
-        result.replace('\r', "")
+        result
     }
 
     pub fn clear_selection(&mut self) {
@@ -1889,6 +1879,7 @@ impl App {
             // companion overlay. Only on rebuild — idle scroll frames skip
             // this clone, keeping them O(visible).
             self.chat_rows = built.chat_rows.clone();
+            self.chat_copy_metadata = built.copy_metadata;
             self.rendered_chat = Some(RenderedChat {
                 lines: built.lines,
                 chat_rows: built.chat_rows,

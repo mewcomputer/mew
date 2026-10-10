@@ -1,6 +1,6 @@
 use ratatui::text::{Line, Span};
 
-use crate::{highlight::Highlighter, render, theme::Theme};
+use crate::{highlight::Highlighter, render, theme::Theme, LineMetadata, RenderedLines};
 
 /// Policy for rendering pending (incomplete) blocks.
 pub trait PendingPolicy: Send + Sync {
@@ -12,6 +12,19 @@ pub trait PendingPolicy: Send + Sync {
         theme: &Theme,
         highlighter: &mut dyn Highlighter,
     ) -> Vec<Line<'static>>;
+
+    /// Custom policies default to copying each rendered row as a hard line.
+    /// Built-in policies preserve the underlying block's source bounds.
+    fn render_with_metadata(
+        &self,
+        kind: mdstream::BlockKind,
+        text: &str,
+        width: u16,
+        theme: &Theme,
+        highlighter: &mut dyn Highlighter,
+    ) -> RenderedLines {
+        RenderedLines::from_lines(self.render(kind, text, width, theme, highlighter))
+    }
 }
 
 /// Render the full pending block with no truncation.
@@ -26,6 +39,18 @@ impl PendingPolicy for FullPending {
         theme: &Theme,
         highlighter: &mut dyn Highlighter,
     ) -> Vec<Line<'static>> {
+        self.render_with_metadata(kind, text, width, theme, highlighter)
+            .lines
+    }
+
+    fn render_with_metadata(
+        &self,
+        kind: mdstream::BlockKind,
+        text: &str,
+        width: u16,
+        theme: &Theme,
+        highlighter: &mut dyn Highlighter,
+    ) -> RenderedLines {
         let block = mdstream::Block {
             id: mdstream::BlockId(0),
             status: mdstream::BlockStatus::Pending,
@@ -33,7 +58,7 @@ impl PendingPolicy for FullPending {
             raw: text.to_string(),
             display: None,
         };
-        render::render_block(&block, width, theme, highlighter)
+        render::render_block_with_metadata(&block, width, theme, highlighter)
     }
 }
 
@@ -57,6 +82,18 @@ impl PendingPolicy for ElideHeadAndTail {
         theme: &Theme,
         highlighter: &mut dyn Highlighter,
     ) -> Vec<Line<'static>> {
+        self.render_with_metadata(kind, text, width, theme, highlighter)
+            .lines
+    }
+
+    fn render_with_metadata(
+        &self,
+        kind: mdstream::BlockKind,
+        text: &str,
+        width: u16,
+        theme: &Theme,
+        highlighter: &mut dyn Highlighter,
+    ) -> RenderedLines {
         let block = mdstream::Block {
             id: mdstream::BlockId(0),
             status: mdstream::BlockStatus::Pending,
@@ -64,17 +101,17 @@ impl PendingPolicy for ElideHeadAndTail {
             raw: text.to_string(),
             display: None,
         };
-        let lines = render::render_block(&block, width, theme, highlighter);
+        let mut rendered = render::render_block_with_metadata(&block, width, theme, highlighter);
 
         // Only elide code fences by default.
-        if kind != mdstream::BlockKind::CodeFence || lines.len() <= self.max_lines {
-            return lines;
+        if kind != mdstream::BlockKind::CodeFence || rendered.lines.len() <= self.max_lines {
+            return rendered;
         }
 
-        let total = lines.len();
-        let mut kept = Vec::new();
-        if let Some(first) = lines.first() {
-            kept.push(first.clone());
+        let total = rendered.lines.len();
+        let mut kept = RenderedLines::default();
+        if let Some(first) = rendered.lines.first() {
+            kept.push(first.clone(), rendered.metadata[0].clone());
         }
         let hint = Line::from(Span::styled(
             format!(
@@ -84,10 +121,18 @@ impl PendingPolicy for ElideHeadAndTail {
             ),
             theme.pending_indicator,
         ));
-        kept.push(hint);
+        let hint_end = hint.spans.iter().map(|span| span.content.len()).sum();
+        kept.push(
+            hint,
+            LineMetadata {
+                content: 0..hint_end,
+                continues_previous: false,
+            },
+        );
 
         let tail_start = total.saturating_sub(self.max_lines.saturating_sub(2));
-        kept.extend(lines.into_iter().skip(tail_start));
+        kept.lines.extend(rendered.lines.drain(tail_start..));
+        kept.metadata.extend(rendered.metadata.drain(tail_start..));
 
         kept
     }

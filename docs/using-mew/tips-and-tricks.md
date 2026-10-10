@@ -28,6 +28,8 @@ description: Power-user features and workflows for mew.
 
 - **Copy text**: `Ctrl+Shift+C` copies selected text to the clipboard.
   Click and drag to select (when mouse capture is on, toggle with `/mouse`).
+  Copied text omits terminal padding and wrap breaks, preserving paragraph
+  breaks and code indentation.
 - **Scroll**: mouse wheel, `PageUp`/`PageDown` (10 lines), or click the
   scrollbar. `Ctrl+Home` / `Ctrl+End` jump to top / bottom. `Ctrl+L`
   re-attaches auto-scroll to the bottom.
