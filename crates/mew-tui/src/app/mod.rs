@@ -226,6 +226,11 @@ pub struct App {
     pub mouse_capture: bool,
     pub pending_mouse_toggle: bool,
     pub chat_area: Rect,
+    pub chat_content_area: Rect,
+    pub chat_rendered_scroll: usize,
+    pub chat_scrollbar: MouseScrollbar,
+    pub picker_mouse: PickerMouseView,
+    pub mouse_scroll_drag: Option<(MouseScrollTarget, u16)>,
     pub input_area: Rect,
     pub sel_anchor_row: Option<usize>,
     pub sel_anchor_col: Option<usize>,
@@ -387,6 +392,31 @@ pub struct PickerItem {
     /// Lets a filter like `model:gpt` match the value after the prefix
     /// instead of requiring the prefix itself to appear in the label.
     pub namespace: Option<&'static str>,
+}
+
+/// Scrollbar geometry captured from the rendered frame, including its thumb.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MouseScrollbar {
+    pub area: Rect,
+    pub thumb: Rect,
+    pub max_scroll: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseScrollTarget {
+    Chat,
+    Slash,
+    Picker,
+}
+
+/// Only visible selectable rows are recorded; section headers remain inert.
+#[derive(Debug, Default)]
+pub struct PickerMouseView {
+    pub list: Rect,
+    pub details: Rect,
+    pub details_max_scroll: usize,
+    pub rows: Vec<(u16, usize)>,
+    pub scrollbar: MouseScrollbar,
 }
 
 /// State for the cmdk-style command palette.
@@ -912,6 +942,11 @@ impl App {
             mouse_capture: true,
             pending_mouse_toggle: false,
             chat_area: Rect::ZERO,
+            chat_content_area: Rect::ZERO,
+            chat_rendered_scroll: 0,
+            chat_scrollbar: MouseScrollbar::default(),
+            picker_mouse: PickerMouseView::default(),
+            mouse_scroll_drag: None,
             input_area: Rect::ZERO,
             sel_anchor_row: None,
             sel_anchor_col: None,

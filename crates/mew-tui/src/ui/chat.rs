@@ -35,6 +35,34 @@ struct ChatLineCtx<'t> {
 
 impl<'t> ChatLineCtx<'t> {
     fn push_line(&mut self, line: Line<'static>) {
+        // Every cached line must occupy one terminal row. Long headers are
+        // wrapped here, before row indices and selection ranges are recorded.
+        if self.chat_width > 0 && line.width() > self.chat_width as usize {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut used = 0;
+            for grapheme in line.styled_graphemes(line.style) {
+                let width = display_width(grapheme.symbol);
+                if used + width > self.chat_width as usize && !spans.is_empty() {
+                    self.push_line(Line::from(std::mem::take(&mut spans)));
+                    used = 0;
+                }
+                let symbol = if width > self.chat_width as usize {
+                    "�"
+                } else {
+                    grapheme.symbol
+                };
+                used += display_width(symbol);
+                if let Some(last) = spans.last_mut().filter(|span| span.style == grapheme.style) {
+                    last.content.to_mut().push_str(symbol);
+                } else {
+                    spans.push(Span::styled(symbol.to_string(), grapheme.style));
+                }
+            }
+            if !spans.is_empty() {
+                self.push_line(Line::from(spans));
+            }
+            return;
+        }
         let mut line = if self.has_sel {
             self.apply_selection(line)
         } else {
@@ -176,6 +204,11 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         width: area.width.saturating_sub(scrollbar_area.width),
         height: area.height,
     };
+    if chat_inner.width <= 2 || chat_inner.height == 0 {
+        app.chat_content_area = Rect::default();
+        return;
+    }
+    app.chat_content_area = chat_inner;
     // The chat indents every text part by 2 spaces ("  ") for a left
     // margin. The markdown renderer produces lines that, after prepending
     // that indent, are exactly `chat_inner.width` wide. User/reasoning text
@@ -203,6 +236,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         app.scroll = max_scroll;
     }
     let scroll_offset = app.scroll.min(max_scroll) as usize;
+    app.chat_rendered_scroll = scroll_offset;
 
     // Visible window: each cached line is already ≤ chat_inner.width wide
     // (pre-wrapped), so without `Wrap` each line is exactly one visual row.
@@ -242,6 +276,7 @@ pub(super) fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
             .track_symbol(Some("│"))
             .thumb_symbol("█");
         f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+        app.chat_scrollbar = super::mouse_scrollbar(f, scrollbar_area, max_scroll as usize);
     }
 
     if app.scroll > 0 {

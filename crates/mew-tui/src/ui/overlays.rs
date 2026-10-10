@@ -185,6 +185,7 @@ pub(super) fn draw_slash_autocomplete(
         ),
         area,
     );
+    autocomplete_mouse(f, &mut app.picker_mouse, area, cmds.len(), app.slash_scroll);
 }
 
 /// Render references using the actual allocated viewport above the composer.
@@ -222,6 +223,30 @@ pub(super) fn draw_reference_autocomplete(f: &mut Frame, app: &mut App, area: Re
         ("References", "↑↓ choose · Enter insert · Esc close"),
         area,
     );
+    autocomplete_mouse(f, &mut app.picker_mouse, area, filtered_len, picker.scroll);
+}
+
+fn autocomplete_mouse(
+    f: &mut Frame,
+    mouse: &mut crate::app::PickerMouseView,
+    area: Rect,
+    len: usize,
+    scroll: usize,
+) {
+    let list = autocomplete_rows(area);
+    mouse.list = list;
+    mouse.rows.extend(
+        (scroll..len.min(scroll + list.height as usize))
+            .enumerate()
+            .map(|(row, index)| (list.y + row as u16, index)),
+    );
+    if len > list.height as usize && area.width > 2 && list.height > 0 {
+        mouse.scrollbar = super::mouse_scrollbar(
+            f,
+            Rect::new(area.right() - 1, list.y, 1, list.height),
+            len.saturating_sub(list.height as usize),
+        );
+    }
 }
 
 pub(super) fn draw_alert(f: &mut Frame, app: &App, area: Rect) {
@@ -905,6 +930,7 @@ fn budget_track_line(
 pub(super) fn draw_picker(
     f: &mut Frame,
     picker: &mut PickerState,
+    mouse: &mut crate::app::PickerMouseView,
     area: Rect,
     tokens: &crate::theme::Theme,
 ) {
@@ -1124,6 +1150,7 @@ pub(super) fn draw_picker(
         list_width,
         list_height,
     );
+    mouse.list = list_area;
     picker.visible_items = list_height as usize;
     picker.visible_details = details_height.saturating_sub(1) as usize;
     if picker.selected < picker.scroll {
@@ -1136,6 +1163,15 @@ pub(super) fn draw_picker(
     picker.scroll = picker
         .scroll
         .min(filtered.len().saturating_sub(picker.visible_items));
+    mouse.rows.extend(
+        filtered
+            .iter()
+            .enumerate()
+            .skip(picker.scroll)
+            .take(list_height as usize)
+            .filter(|(_, item)| !item.header)
+            .map(|(index, _)| (list_area.y + (index - picker.scroll) as u16, index)),
+    );
     if filtered.is_empty() {
         f.render_widget(
             Paragraph::new(if picker.filter.is_empty() {
@@ -1148,6 +1184,13 @@ pub(super) fn draw_picker(
         );
     } else {
         render_picker_list(f, picker, &filtered, list_area, tokens);
+        if filtered.len() > picker.visible_items && !list_area.is_empty() {
+            mouse.scrollbar = super::mouse_scrollbar(
+                f,
+                Rect::new(list_area.right(), list_area.y, 1, list_area.height),
+                filtered.len().saturating_sub(picker.visible_items),
+            );
+        }
     }
     if details_height > 0 {
         f.render_widget(
@@ -1155,6 +1198,8 @@ pub(super) fn draw_picker(
             Rect::new(inner.x, list_area.bottom(), inner.width, 1),
         );
         let rows = details_height.saturating_sub(1) as usize;
+        mouse.details = Rect::new(inner.x, list_area.bottom() + 1, inner.width, rows as u16);
+        mouse.details_max_scroll = details.len().saturating_sub(rows);
         picker.details_scroll = picker
             .details_scroll
             .min(details.len().saturating_sub(rows));

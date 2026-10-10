@@ -3103,19 +3103,25 @@ fn test_budget_mouse_wheel_nudges_and_commits() {
 
     let mut app = App::new();
     open_qwen_thinking_picker(&mut app);
-    let rect = ratatui::layout::Rect::new(10, 5, 20, 1);
-    app.picker
-        .as_mut()
+    select_budget_row(&mut app);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let rect = app
+        .picker
+        .as_ref()
         .unwrap()
         .budget
-        .as_mut()
+        .as_ref()
         .unwrap()
-        .track_rect = Some(rect);
+        .track_rect
+        .unwrap();
 
     let mouse = |kind: MouseEventKind| MouseEvent {
         kind,
-        column: 14,
-        row: 5,
+        column: rect.x,
+        row: rect.y,
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
 
@@ -3125,20 +3131,20 @@ fn test_budget_mouse_wheel_nudges_and_commits() {
     // Wheel up nudges up.
     let action = crate::events::handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollUp));
     assert_eq!(thinking_action(action), Some("budget:131072".into()));
-    // Wheel outside the track scrolls the list (moves selection) and leaves
+    // Wheel over the choices scrolls the list (moves selection) and leaves
     // the budget draft untouched.
     let selected_before = app.picker.as_ref().unwrap().selected;
     let off = MouseEvent {
         kind: MouseEventKind::ScrollUp,
-        column: 2,
-        row: 2,
+        column: app.picker_mouse.list.x,
+        row: app.picker_mouse.list.y,
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
     assert!(crate::events::handle_mouse_event(&mut app, off).is_none());
     assert_ne!(
         app.picker.as_ref().unwrap().selected,
         selected_before,
-        "wheel off the track should scroll the list"
+        "wheel over the choices should scroll the list"
     );
     assert_eq!(
         budget_draft(&app),
@@ -3153,10 +3159,15 @@ fn test_picker_mouse_wheel_scrolls_selection() {
 
     let mut app = App::new();
     app.open_command_palette();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
+    let choices = app.picker_mouse.list;
     let mouse = |kind: MouseEventKind| MouseEvent {
         kind,
-        column: 40,
-        row: 10,
+        column: choices.x,
+        row: choices.y,
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
     assert_eq!(app.picker.as_ref().unwrap().selected, 0);
@@ -3164,14 +3175,34 @@ fn test_picker_mouse_wheel_scrolls_selection() {
     assert_eq!(app.picker.as_ref().unwrap().selected, 1);
     crate::events::handle_mouse_event(&mut app, mouse(MouseEventKind::ScrollUp));
     assert_eq!(app.picker.as_ref().unwrap().selected, 0);
-    // Non-wheel events stay inert on picker content.
+    let outside = MouseEvent {
+        kind: MouseEventKind::ScrollDown,
+        column: 0,
+        row: 0,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    crate::events::handle_mouse_event(&mut app, outside);
+    assert_eq!(app.picker.as_ref().unwrap().selected, 0);
+    // Clicking a rendered row selects it; Enter keeps the existing activation.
+    let settings_row = app
+        .picker_mouse
+        .rows
+        .iter()
+        .find(|(_, index)| *index == 2)
+        .unwrap()
+        .0;
     let click = MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
-        column: 40,
-        row: 10,
+        column: choices.x,
+        row: settings_row,
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
     assert!(crate::events::handle_mouse_event(&mut app, click).is_none());
+    assert_eq!(app.picker.as_ref().unwrap().selected, 2);
+    assert!(matches!(
+        crate::events::handle_key_event(&mut app, key(crossterm::event::KeyCode::Enter)),
+        Some(crate::events::Action::OpenSettings)
+    ));
 }
 
 #[test]

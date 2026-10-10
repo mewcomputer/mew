@@ -1765,3 +1765,17 @@ Selected and freeform answers keep their existing result format.
 Verified the new real-tool regression failing on the prior description loss and
 passing after the fix. An isolated staged snapshot passed all 193 agent tests,
 strict agent/message clippy, and CLI, daemon, mobile and shared-core compilation.
+
+### 2026-10-10: rendered mouse geometry and picker interactions
+
+Terminal mouse coordinates stay zero-based and hit testing uses the visible
+chat, choice rows, detail viewport and scrollbar thumbs from each frame.
+Wrapped reasoning headers keep subsequent selection rows aligned. Picker
+clicks select visible choices, wheels stay local to the list or details under
+the pointer, and scrollbar track paging and thumb dragging reach both ends.
+Resizing clears stale hits; modal ownership and release end prior grabs.
+
+Verified 17 actual-frame mouse regressions, rendered budget and picker wheel
+fixtures, related picker, autocomplete and activity behavior tests, and strict
+all-target TUI clippy. The tests cover narrow and resized terminals, Unicode,
+wrapped text, sidebar widths, landing and chat composers, and modal ownership.

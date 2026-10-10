@@ -448,6 +448,15 @@ fn insert_paste(app: &mut crate::app::App, content: &str) {
 }
 
 pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
+    // A release consumed by a modal must not leave an old scrollbar grab alive.
+    if !matches!(
+        app.mode,
+        crate::app::Mode::Normal
+            | crate::app::Mode::SlashCommand
+            | crate::app::Mode::CommandPalette
+    ) {
+        app.mouse_scroll_drag = None;
+    }
     if app.mode == crate::app::Mode::TodoEditor {
         if let Some(state) = app.todo_editor.as_mut() {
             if state.body.contains((mouse.column, mouse.row).into()) && state.draft.is_none() {
@@ -495,22 +504,65 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
         }
         return None;
     }
+    let inline_picker = app.mode == crate::app::Mode::CommandPalette
+        && app
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.is_at_picker());
+    if matches!(
+        app.mode,
+        crate::app::Mode::Normal
+            | crate::app::Mode::SlashCommand
+            | crate::app::Mode::CommandPalette
+    ) && handle_scrollbar_mouse(app, mouse)
+    {
+        return None;
+    }
+    let in_choices = app
+        .picker_mouse
+        .list
+        .contains((mouse.column, mouse.row).into())
+        || app
+            .picker_mouse
+            .scrollbar
+            .area
+            .contains((mouse.column, mouse.row).into());
     if app.mode == crate::app::Mode::SlashCommand
         && app
             .autocomplete_area
             .contains((mouse.column, mouse.row).into())
     {
         match mouse.kind {
-            MouseEventKind::ScrollUp => app.slash_prev(),
-            MouseEventKind::ScrollDown => app.slash_next(),
+            MouseEventKind::ScrollUp if in_choices => app.slash_prev(),
+            MouseEventKind::ScrollDown if in_choices => app.slash_next(),
+            MouseEventKind::Down(MouseButton::Left)
+                if app
+                    .picker_mouse
+                    .list
+                    .contains((mouse.column, mouse.row).into()) =>
+            {
+                if let Some((_, index)) = app
+                    .picker_mouse
+                    .rows
+                    .iter()
+                    .find(|(row, _)| *row == mouse.row)
+                {
+                    app.slash_selected = *index;
+                }
+            }
             _ => {}
         }
         return None;
     }
-    // The thinking picker's budget track is mouse-interactive; the wheel
-    // scrolls every picker list. All other picker content stays inert.
     if app.mode == crate::app::Mode::CommandPalette {
-        return handle_picker_mouse_event(app, mouse);
+        let inside = in_choices
+            || app
+                .picker_mouse
+                .details
+                .contains((mouse.column, mouse.row).into());
+        if !inline_picker || inside {
+            return handle_picker_mouse_event(app, mouse);
+        }
     }
     // The permission modal scrolls with the wheel like the chat view.
     if app.mode == crate::app::Mode::PermissionPrompt {
@@ -537,14 +589,22 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
     if !matches!(
         app.mode,
         crate::app::Mode::Normal | crate::app::Mode::SlashCommand
-    ) {
+    ) && !inline_picker
+    {
         return None;
     }
     match mouse.kind {
         MouseEventKind::ScrollUp => {
             if app.sidebar_rect.contains((mouse.column, mouse.row).into()) {
                 app.sidebar_scroll = app.sidebar_scroll.saturating_sub(1);
-            } else {
+            } else if app
+                .chat_content_area
+                .contains((mouse.column, mouse.row).into())
+                || app
+                    .chat_scrollbar
+                    .area
+                    .contains((mouse.column, mouse.row).into())
+            {
                 app.scroll_up(1);
             }
             None
@@ -555,14 +615,21 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
                     .sidebar_scroll
                     .saturating_add(1)
                     .min(app.sidebar_max_scroll);
-            } else {
+            } else if app
+                .chat_content_area
+                .contains((mouse.column, mouse.row).into())
+                || app
+                    .chat_scrollbar
+                    .area
+                    .contains((mouse.column, mouse.row).into())
+            {
                 app.scroll_down(1);
             }
             None
         }
         MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Down(MouseButton::Right) => {
-            let row = mouse.row.saturating_sub(1);
-            let col = mouse.column.saturating_sub(1);
+            let row = mouse.row;
+            let col = mouse.column;
 
             // Sidebar click → toggle section.
             if app.sidebar_rect.contains((mouse.column, mouse.row).into()) {
@@ -583,23 +650,6 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
                         app.toggle_sidebar_section(section);
                         return None;
                     }
-                }
-                return None;
-            }
-
-            // Scrollbar click → seek.
-            let scrollbar_col = app.chat_area.right().saturating_sub(1);
-            if col == scrollbar_col && app.chat_area.height > 0 && app.max_scroll > 0 {
-                let rel_y = row.saturating_sub(app.chat_area.y) as f64;
-                let ratio = (rel_y / app.chat_area.height as f64).clamp(0.0, 1.0);
-                let target = (app.max_scroll as f64 * ratio).round() as u16;
-                let target = target.min(app.max_scroll);
-                if target >= app.max_scroll {
-                    app.auto_scroll = true;
-                    app.scroll = app.max_scroll;
-                } else {
-                    app.auto_scroll = false;
-                    app.scroll = target;
                 }
                 return None;
             }
@@ -631,9 +681,12 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
             }
 
             // Chat area click → start selection.
-            if app.chat_area.contains((col, row).into()) && !app.chat_rows.is_empty() {
-                let rel_row = row.saturating_sub(app.chat_area.y) as usize;
-                let visual_row = (app.scroll as usize + rel_row).min(app.chat_rows.len() - 1);
+            if app.chat_content_area.contains((col, row).into()) && !app.chat_rows.is_empty() {
+                let rel_row = row.saturating_sub(app.chat_content_area.y) as usize;
+                let visual_row = app.chat_rendered_scroll + rel_row;
+                if visual_row >= app.chat_rows.len() {
+                    return None;
+                }
 
                 // Check if this click landed on a reasoning block header.
                 if let Some(&(id, _)) = app
@@ -682,7 +735,7 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
                     return None;
                 }
 
-                let rel_col = col.saturating_sub(app.chat_area.x) as usize;
+                let rel_col = col.saturating_sub(app.chat_content_area.x) as usize;
                 app.sel_anchor_row = Some(visual_row);
                 app.sel_anchor_col = Some(rel_col);
                 app.sel_end_row = Some(visual_row);
@@ -693,15 +746,18 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
             None
         }
         MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Right) => {
-            let row = mouse.row.saturating_sub(1);
-            let col = mouse.column.saturating_sub(1);
-            if app.chat_area.contains((col, row).into())
+            let row = mouse.row;
+            let col = mouse.column;
+            if app.chat_content_area.contains((col, row).into())
                 && !app.chat_rows.is_empty()
                 && app.sel_anchor_row.is_some()
             {
-                let rel_row = row.saturating_sub(app.chat_area.y) as usize;
-                let visual_row = (app.scroll as usize + rel_row).min(app.chat_rows.len() - 1);
-                let rel_col = col.saturating_sub(app.chat_area.x) as usize;
+                let rel_row = row.saturating_sub(app.chat_content_area.y) as usize;
+                let visual_row = app.chat_rendered_scroll + rel_row;
+                if visual_row >= app.chat_rows.len() {
+                    return None;
+                }
+                let rel_col = col.saturating_sub(app.chat_content_area.x) as usize;
                 app.sel_end_row = Some(visual_row);
                 app.sel_end_col = Some(rel_col);
                 app.mark_chat_dirty();
@@ -720,12 +776,136 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
     }
 }
 
-/// Mouse handling while a picker is open. The thinking picker's budget
-/// track is interactive: click/drag sets the draft, release commits it as
-/// `budget:<n>` (the picker stays open), and the wheel over the track nudges
-/// by one step and commits immediately. The wheel anywhere else on the list
-/// scrolls it by moving the selection; the draw pass keeps the selected
-/// item's wrapped rows in view.
+/// Thumb drags retain the initial grab offset; track clicks page the viewport.
+fn handle_scrollbar_mouse(app: &mut crate::app::App, mouse: MouseEvent) -> bool {
+    use crate::app::MouseScrollTarget;
+    let point = (mouse.column, mouse.row).into();
+    let active_target = if app.mode == crate::app::Mode::SlashCommand {
+        MouseScrollTarget::Slash
+    } else if app.mode == crate::app::Mode::CommandPalette {
+        MouseScrollTarget::Picker
+    } else {
+        MouseScrollTarget::Chat
+    };
+    let active_bar = if active_target == MouseScrollTarget::Chat {
+        app.chat_scrollbar
+    } else {
+        app.picker_mouse.scrollbar
+    };
+    if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+        return app.mouse_scroll_drag.take().is_some();
+    }
+    if let Some((target, grab)) = app.mouse_scroll_drag {
+        let chat_allowed = app.mode != crate::app::Mode::CommandPalette
+            || app
+                .picker
+                .as_ref()
+                .is_some_and(|picker| picker.is_at_picker());
+        if target != active_target && (target != MouseScrollTarget::Chat || !chat_allowed) {
+            app.mouse_scroll_drag = None;
+            return false;
+        }
+        if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) {
+            let bar = if target == MouseScrollTarget::Chat {
+                app.chat_scrollbar
+            } else {
+                active_bar
+            };
+            if bar.area.is_empty() || bar.thumb.is_empty() {
+                app.mouse_scroll_drag = None;
+                return true;
+            }
+            let travel = bar.area.height.saturating_sub(bar.thumb.height);
+            if travel > 0 {
+                let top = mouse
+                    .row
+                    .saturating_sub(grab)
+                    .saturating_sub(bar.area.y)
+                    .min(travel);
+                set_mouse_scroll(
+                    app,
+                    target,
+                    (top as usize * bar.max_scroll + travel as usize / 2) / travel as usize,
+                );
+            }
+            return true;
+        }
+    }
+    let (target, bar) = if active_bar.area.contains(point) {
+        (active_target, active_bar)
+    } else if (active_target != MouseScrollTarget::Picker
+        || app
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.is_at_picker()))
+        && app.chat_scrollbar.area.contains(point)
+    {
+        (MouseScrollTarget::Chat, app.chat_scrollbar)
+    } else {
+        return false;
+    };
+    if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+        app.clear_selection();
+        if bar.thumb.contains(point) {
+            app.mouse_scroll_drag = Some((target, mouse.row - bar.thumb.y));
+        } else {
+            let current = match target {
+                MouseScrollTarget::Chat => app.chat_rendered_scroll,
+                MouseScrollTarget::Slash => app.slash_scroll,
+                MouseScrollTarget::Picker => app.picker.as_ref().map_or(0, |picker| picker.scroll),
+            };
+            let page = bar.area.height as usize;
+            let offset = if mouse.row < bar.thumb.y {
+                current.saturating_sub(page)
+            } else {
+                current.saturating_add(page).min(bar.max_scroll)
+            };
+            set_mouse_scroll(app, target, offset);
+        }
+        return true;
+    }
+    false
+}
+
+fn set_mouse_scroll(
+    app: &mut crate::app::App,
+    target: crate::app::MouseScrollTarget,
+    offset: usize,
+) {
+    use crate::app::MouseScrollTarget;
+    match target {
+        MouseScrollTarget::Chat => {
+            app.scroll = offset.min(app.max_scroll as usize) as u16;
+            app.auto_scroll = app.scroll == app.max_scroll;
+        }
+        MouseScrollTarget::Slash => {
+            app.slash_scroll = offset;
+            app.slash_selected = app
+                .slash_selected
+                .clamp(offset, offset + app.slash_visible.saturating_sub(1));
+        }
+        MouseScrollTarget::Picker => {
+            if let Some(picker) = app.picker.as_mut() {
+                let end = offset + picker.visible_items.saturating_sub(1);
+                let selected = picker.selected.clamp(offset, end);
+                let index = picker
+                    .filtered()
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, item)| *index >= offset && *index <= end && !item.header)
+                    .min_by_key(|(index, _)| index.abs_diff(selected))
+                    .map(|(index, _)| index);
+                if let Some(index) = index {
+                    picker.selected = index;
+                }
+                picker.scroll = offset;
+                picker.details_scroll = 0;
+            }
+        }
+    }
+}
+
+/// Route picker rows, details and the budget track through their rendered bounds.
 fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
     let row = mouse.row;
     let col = mouse.column;
@@ -743,16 +923,27 @@ fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Op
         let dragging = picker.budget.as_ref().map(|b| b.dragging).unwrap_or(false);
         (in_track, dragging)
     };
-    // Track interactions need the track; Up only needs an active drag (the
-    // pointer may have left the track mid-drag). The wheel scrolls the list
-    // everywhere else.
-    if !in_track
-        && !dragging
-        && !matches!(
-            mouse.kind,
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-        )
-    {
+    let in_list = app.picker_mouse.list.contains((col, row).into())
+        || app.picker_mouse.scrollbar.area.contains((col, row).into());
+    let in_details = app.picker_mouse.details.contains((col, row).into());
+    if !in_track && !dragging && !in_list && !in_details {
+        return None;
+    }
+    if in_details && !dragging {
+        if let Some(picker) = app.picker.as_mut() {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    picker.details_scroll = picker.details_scroll.saturating_sub(1)
+                }
+                MouseEventKind::ScrollDown => {
+                    picker.details_scroll = picker
+                        .details_scroll
+                        .saturating_add(1)
+                        .min(app.picker_mouse.details_max_scroll)
+                }
+                _ => {}
+            }
+        }
         return None;
     }
     match mouse.kind {
@@ -771,7 +962,7 @@ fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Op
                 budget.snapped()
             )))
         }
-        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if in_list => {
             if matches!(mouse.kind, MouseEventKind::ScrollUp) {
                 app.picker_up();
             } else {
@@ -789,6 +980,19 @@ fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Op
             budget.dragging = true;
             if let Some(rect) = budget.track_rect {
                 budget.set_from_col(col, rect);
+            }
+            None
+        }
+        MouseEventKind::Down(MouseButton::Left) if in_list => {
+            if let Some((_, index)) = app
+                .picker_mouse
+                .rows
+                .iter()
+                .find(|(row, _)| *row == mouse.row)
+            {
+                let picker = app.picker.as_mut()?;
+                picker.selected = *index;
+                picker.details_scroll = 0;
             }
             None
         }

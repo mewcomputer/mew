@@ -66,6 +66,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let main_area = main_chunks[0];
     app.autocomplete_area = Rect::default();
+    app.picker_mouse.list = Rect::default();
+    app.picker_mouse.details = Rect::default();
+    app.picker_mouse.details_max_scroll = 0;
+    app.picker_mouse.rows.clear();
+    app.picker_mouse.scrollbar = Default::default();
+    app.chat_content_area = Rect::default();
+    app.chat_scrollbar = Default::default();
 
     let slash_cmds = app.filtered_slash_commands();
     let show_slash = app.mode == Mode::SlashCommand && !slash_cmds.is_empty();
@@ -265,12 +272,38 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
             // The inline `@`-mention picker is drawn above the input by the
             // layout; only centered pickers render as a modal overlay.
             if !picker.is_at_picker() {
-                overlays::draw_picker(f, picker, area, &app.theme);
+                overlays::draw_picker(f, picker, &mut app.picker_mouse, area, &app.theme);
             }
         }
     }
 
     if app.mode == Mode::Help {
         overlays::draw_help_overlay(f, app, area);
+    }
+}
+
+/// Read the thumb painted by ratatui so hit testing follows its exact geometry.
+pub(super) fn mouse_scrollbar(
+    f: &mut Frame,
+    area: Rect,
+    max_scroll: usize,
+) -> crate::app::MouseScrollbar {
+    if area.is_empty() {
+        return Default::default();
+    }
+    let mut thumb = Rect::default();
+    for y in area.y..area.bottom() {
+        if f.buffer_mut()[(area.x, y)].symbol() == "█" {
+            if thumb.is_empty() {
+                thumb = Rect::new(area.x, y, area.width, 1);
+            } else {
+                thumb.height += 1;
+            }
+        }
+    }
+    crate::app::MouseScrollbar {
+        area,
+        thumb,
+        max_scroll,
     }
 }
