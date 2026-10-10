@@ -3341,6 +3341,7 @@ fn test_permission_max_scroll_accounts_for_wrapping() {
         tx: None,
         selected: 0,
         scroll: 0,
+        view: Default::default(),
     };
     // One raw line, but many wrapped rows at the default popup width: the
     // scroll range must be non-trivial.
@@ -3363,6 +3364,7 @@ fn test_permission_max_scroll_accounts_for_wrapping() {
         tx: None,
         selected: 0,
         scroll: 0,
+        view: Default::default(),
     };
     assert_eq!(short.max_scroll(80, 24), None);
 }
@@ -3380,8 +3382,12 @@ fn test_permission_mouse_wheel_scrolls() {
         tx: None,
         selected: 0,
         scroll: 0,
+        view: Default::default(),
     });
-    app.chat_area = ratatui::layout::Rect::new(0, 0, 80, 24);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| crate::ui::draw(frame, &mut app))
+        .unwrap();
     let mouse = |kind: MouseEventKind| MouseEvent {
         kind,
         column: 30,

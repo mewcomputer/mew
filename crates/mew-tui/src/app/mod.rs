@@ -596,44 +596,110 @@ pub struct PermissionState {
     /// Vertical scroll offset for the tool-input text when it overflows the
     /// content area.
     pub scroll: u16,
+    pub view: DecisionView,
+}
+
+/// The currently rendered body viewport of a decision dialog.
+#[derive(Debug, Clone, Default)]
+pub struct DecisionView {
+    pub max_scroll: u16,
+    pub page_rows: u16,
+}
+
+/// Shared body and pinned action geometry for decision dialogs.
+pub(crate) struct DecisionLayout {
+    pub popup: Rect,
+    pub body: Rect,
+    pub actions: Rect,
+    pub hint: Rect,
+}
+
+impl DecisionLayout {
+    pub fn content_width(area_width: u16, width_cap: u16) -> u16 {
+        let margin = if area_width > 12 { 4 } else { 0 };
+        width_cap
+            .min(area_width.saturating_sub(margin))
+            .saturating_sub(4)
+    }
+
+    pub fn new(area: Rect, width_cap: u16, body_rows: usize, action_rows: u16) -> Self {
+        let horizontal_margin = if area.width > 12 { 4 } else { 0 };
+        let vertical_margin = if area.height > 8 { 2 } else { 0 };
+        let width = width_cap.min(area.width.saturating_sub(horizontal_margin));
+        let height = (body_rows.min(u16::MAX as usize) as u16)
+            .saturating_add(action_rows + 4)
+            .min(area.height.saturating_sub(vertical_margin));
+        let popup = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        );
+        let inner = popup.inner(ratatui::layout::Margin::new(2, 1));
+        let action_height = action_rows.min(inner.height);
+        let hint_height = u16::from(inner.height > action_height);
+        let body_height = inner.height.saturating_sub(action_height + hint_height + 1);
+        let body = Rect::new(inner.x, inner.y, inner.width, body_height);
+        let actions = Rect::new(
+            inner.x,
+            inner.bottom().saturating_sub(action_height + hint_height),
+            inner.width,
+            action_height,
+        );
+        let hint = Rect::new(
+            inner.x,
+            inner.bottom().saturating_sub(hint_height),
+            inner.width,
+            hint_height,
+        );
+        Self {
+            popup,
+            body,
+            actions,
+            hint,
+        }
+    }
+
+    pub fn clamp_scroll(&self, scroll: &mut u16, view: &mut DecisionView, rows: usize) {
+        view.page_rows = self.body.height;
+        view.max_scroll = (rows.min(u16::MAX as usize) as u16).saturating_sub(self.body.height);
+        *scroll = (*scroll).min(view.max_scroll);
+    }
 }
 
 impl PermissionState {
-    /// Width of the popup's inner content area for the given main-area width,
-    /// mirroring the layout math in `draw_permission_modal`.
-    fn inner_width(chat_width: u16) -> u16 {
-        60u16.min(chat_width.saturating_sub(4)).saturating_sub(4)
-    }
-
-    /// Maximum scroll offset that keeps the tool input content in view.
-    /// `chat_width`/`chat_height` are the terminal's main-area dimensions
-    /// (used to derive the popup size). The offset is measured in rendered
-    /// rows, so wrapped content is counted exactly. Returns `None` when the
-    /// content fits without scrolling.
-    pub fn max_scroll(&self, chat_width: u16, chat_height: u16) -> Option<u16> {
-        let popup_height = Self::popup_height(chat_height);
-        let content_height = popup_height.saturating_sub(4).max(3);
-        let total = 5u16 + self.input_rows(chat_width) as u16;
-        if total <= content_height {
-            return None;
-        }
-        Some(total.saturating_sub(content_height))
-    }
-
-    /// Number of display rows the tool input occupies once wrapped to the
-    /// popup's content width (Unicode width aware, matching the render).
-    fn input_rows(&self, chat_width: u16) -> usize {
+    pub(crate) fn body_lines(&self, chat_width: u16) -> Vec<String> {
+        let width = DecisionLayout::content_width(chat_width, 60);
         let json = serde_json::to_string_pretty(&self.input).unwrap_or_default();
-        let width = Self::inner_width(chat_width);
-        json.lines()
-            .map(|l| crate::ui::chat::wrap_text_to_width(l, width).len())
-            .sum()
+        let mut rows =
+            crate::ui::chat::wrap_text_to_width(&format!("tool  {}", self.tool_name), width);
+        rows.push(String::new());
+        rows.extend(
+            json.lines()
+                .flat_map(|line| crate::ui::chat::wrap_text_to_width(line, width)),
+        );
+        rows
     }
 
-    /// Height of the popup for the given terminal main-area height.
-    pub fn popup_height(chat_height: u16) -> u16 {
-        // Popup is the terminal height minus a 2-row margin top and bottom.
-        chat_height.saturating_sub(4).max(10)
+    pub(crate) fn action_rows(chat_width: u16) -> u16 {
+        if DecisionLayout::content_width(chat_width, 60) < 43 {
+            3
+        } else {
+            1
+        }
+    }
+
+    /// The scroll range uses the same wrapped rows and body viewport as rendering.
+    pub fn max_scroll(&self, chat_width: u16, chat_height: u16) -> Option<u16> {
+        let rows = self.body_lines(chat_width).len();
+        let layout = DecisionLayout::new(
+            Rect::new(0, 0, chat_width, chat_height),
+            60,
+            rows,
+            Self::action_rows(chat_width),
+        );
+        let max = (rows.min(u16::MAX as usize) as u16).saturating_sub(layout.body.height);
+        (max > 0).then_some(max)
     }
 }
 
@@ -2222,6 +2288,7 @@ impl App {
                     tx: Some(tx),
                     selected: 0,
                     scroll: 0,
+                    view: Default::default(),
                 });
             }
             AgentEvent::AskUser {
@@ -2410,6 +2477,7 @@ impl App {
                     tx: Some(tx),
                     selected: 0,
                     scroll: 0,
+                    view: Default::default(),
                 });
                 self.mode = crate::app::Mode::PermissionPrompt;
             }
@@ -2421,6 +2489,7 @@ impl App {
                     tx: Some(tx),
                     selected: 0,
                     scroll: 0,
+                    view: Default::default(),
                 });
                 self.mode = crate::app::Mode::PermissionPrompt;
             }

@@ -606,82 +606,53 @@ fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Op
     }
 }
 
-/// Wheel over the permission modal scrolls the wrapped tool-input content.
+/// Scroll the body without moving the focused decision action.
+fn scroll_decision(scroll: &mut u16, view: &crate::app::DecisionView, code: KeyCode) {
+    let page = view.page_rows.max(1);
+    *scroll = match code {
+        KeyCode::Up => scroll.saturating_sub(1),
+        KeyCode::Down => scroll.saturating_add(1).min(view.max_scroll),
+        KeyCode::PageUp => scroll.saturating_sub(page),
+        KeyCode::PageDown => scroll.saturating_add(page).min(view.max_scroll),
+        KeyCode::Home => 0,
+        KeyCode::End => view.max_scroll,
+        _ => *scroll,
+    };
+}
+
 fn handle_permission_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
-    app.permission.as_ref()?;
+    let perm = app.permission.as_mut()?;
     match mouse.kind {
-        MouseEventKind::ScrollUp => {
-            if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm.scroll.saturating_sub(1);
-            }
-            None
-        }
-        MouseEventKind::ScrollDown => {
-            if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm.scroll.saturating_add(1).min(
-                    perm.max_scroll(app.chat_area.width, app.chat_area.height)
-                        .unwrap_or(perm.scroll),
-                );
-            }
-            None
-        }
-        _ => None,
+        MouseEventKind::ScrollUp => scroll_decision(&mut perm.scroll, &perm.view, KeyCode::Up),
+        MouseEventKind::ScrollDown => scroll_decision(&mut perm.scroll, &perm.view, KeyCode::Down),
+        _ => {}
     }
+    None
 }
 
 fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
-    let page_lines = (app.chat_area.height.saturating_sub(8)).max(3);
     match key.code {
         KeyCode::Char('a') | KeyCode::Char('A') => {
-            app.send_permission_decision(mew_hooks::PermissionDecision::AllowOnce);
-            None
+            app.send_permission_decision(mew_hooks::PermissionDecision::AllowOnce)
         }
         KeyCode::Char('s') | KeyCode::Char('S') => {
-            app.send_permission_decision(mew_hooks::PermissionDecision::AllowSession);
-            None
+            app.send_permission_decision(mew_hooks::PermissionDecision::AllowSession)
         }
         KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Esc => {
-            app.send_permission_decision(mew_hooks::PermissionDecision::Deny);
-            None
+            app.send_permission_decision(mew_hooks::PermissionDecision::Deny)
         }
-        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm.scroll.saturating_sub(1);
+        KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(perm) = app.permission.as_mut() {
+                scroll_decision(&mut perm.scroll, &perm.view, key.code);
             }
-            None
         }
-        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm.scroll.saturating_add(1).min(
-                    perm.max_scroll(app.chat_area.width, app.chat_area.height)
-                        .unwrap_or(perm.scroll),
-                );
+        KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+            if let Some(perm) = app.permission.as_mut() {
+                scroll_decision(&mut perm.scroll, &perm.view, key.code);
             }
-            None
         }
-        KeyCode::Down | KeyCode::Tab => {
-            app.permission_next();
-            None
-        }
-        KeyCode::Up => {
-            app.permission_prev();
-            None
-        }
-        KeyCode::PageDown => {
-            if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm.scroll.saturating_add(page_lines).min(
-                    perm.max_scroll(app.chat_area.width, app.chat_area.height)
-                        .unwrap_or(perm.scroll),
-                );
-            }
-            None
-        }
-        KeyCode::PageUp => {
-            if let Some(ref mut perm) = app.permission {
-                perm.scroll = perm.scroll.saturating_sub(page_lines);
-            }
-            None
-        }
+        KeyCode::Down | KeyCode::Tab => app.permission_next(),
+        KeyCode::Up | KeyCode::BackTab => app.permission_prev(),
         KeyCode::Enter => {
             let decision = app.permission.as_ref().map(|p| match p.selected {
                 0 => mew_hooks::PermissionDecision::AllowOnce,
@@ -691,10 +662,10 @@ fn handle_permission_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Act
             if let Some(d) = decision {
                 app.send_permission_decision(d);
             }
-            None
         }
-        _ => None,
+        _ => {}
     }
+    None
 }
 
 fn handle_user_question_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {

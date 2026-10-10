@@ -1,4 +1,5 @@
 use std::time::{Duration, Instant};
+use unicode_segmentation::UnicodeSegmentation;
 
 use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
@@ -10,8 +11,8 @@ use ratatui::{
 
 use super::display_width;
 use crate::app::{
-    App, GoalComposeState, GoalProposalState, PermissionState, PersonaSummary,
-    PersonaSwitchConfirmState, PickerBudget, PickerItem, PickerState, SlashCommand,
+    App, DecisionLayout, DecisionView, GoalComposeState, GoalProposalState, PermissionState,
+    PersonaSummary, PersonaSwitchConfirmState, PickerBudget, PickerItem, PickerState, SlashCommand,
     UserQuestionState, PICKER_VISIBLE_ITEMS,
 };
 
@@ -217,89 +218,78 @@ fn draw_toasts(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-pub(super) fn draw_permission_modal(
+fn draw_decision_frame(
     f: &mut Frame,
-    perm: &PermissionState,
-    area: Rect,
+    layout: &DecisionLayout,
+    title: &str,
+    accent: ratatui::style::Color,
     tokens: &crate::theme::Theme,
 ) {
-    // Use most of the terminal height (minus a 2-row margin top/bottom) so
-    // long tool inputs are readable. Cap width at 60.
-    let width = 60u16.min(area.width.saturating_sub(4));
-    let height = PermissionState::popup_height(area.height);
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup = Rect::new(x, y, width, height);
-
-    f.render_widget(Clear, popup);
-
-    let bg = Block::default().style(Style::default().bg(tokens.resolve("panel.overlay")));
-    f.render_widget(bg, popup);
-
-    let inner = Rect::new(
-        popup.x + 2,
-        popup.y + 1,
-        popup.width.saturating_sub(4),
-        popup.height.saturating_sub(2),
+    f.render_widget(Clear, layout.popup);
+    f.render_widget(
+        Block::bordered()
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(tokens.resolve("foreground"))
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .border_style(Style::default().fg(accent))
+            .style(Style::default().bg(tokens.resolve("panel.overlay"))),
+        layout.popup,
     );
+}
 
-    let tool_input = serde_json::to_string_pretty(&perm.input).unwrap_or_default();
-    let mut content = Text::default();
-    content.push_line(Line::from(vec![
-        Span::styled(
-            "tool  ",
-            Style::default()
-                .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("panel.overlay")),
-        ),
-        Span::styled(
-            &perm.tool_name,
-            Style::default()
-                .fg(tokens.resolve("foreground"))
-                .bg(tokens.resolve("panel.overlay"))
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    content.push_line(Line::from(""));
-    content.push_line(Line::from(vec![Span::styled(
-        "input",
-        Style::default()
-            .fg(tokens.resolve("text.muted"))
-            .bg(tokens.resolve("panel.overlay")),
-    )]));
-    // Pre-wrap the pretty-printed JSON to the content width. Lines are exact
-    // display rows (no ratatui `Wrap`), so `max_scroll` — computed from the
-    // same wrapping — can reach the true bottom of the content.
-    let json_style = Style::default()
-        .fg(tokens.resolve("text.placeholder"))
-        .bg(tokens.resolve("panel.overlay"));
-    for raw in tool_input.lines() {
-        for wrapped in wrap_text(raw, inner.width as usize) {
-            content.push_line(Line::from(Span::styled(wrapped, json_style)));
-        }
+fn draw_decision_body(
+    f: &mut Frame,
+    layout: &DecisionLayout,
+    lines: Vec<Line<'_>>,
+    scroll: u16,
+    view: &DecisionView,
+    tokens: &crate::theme::Theme,
+) {
+    f.render_widget(
+        Paragraph::new(lines)
+            .style(
+                Style::default()
+                    .fg(tokens.resolve("foreground"))
+                    .bg(tokens.resolve("panel.overlay")),
+            )
+            .scroll((scroll, 0)),
+        layout.body,
+    );
+    if view.max_scroll > 0 && layout.body.height > 0 {
+        let track = Rect::new(
+            layout.popup.right().saturating_sub(1),
+            layout.body.y,
+            1,
+            layout.body.height,
+        );
+        let mut state = ScrollbarState::new(view.max_scroll as usize + 1).position(scroll as usize);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_style(Style::default().fg(tokens.resolve("panel.overlay")))
+                .thumb_style(Style::default().fg(tokens.resolve("text.muted"))),
+            track,
+            &mut state,
+        );
     }
-    content.push_line(Line::from(""));
-    content.push_line(Line::from(Span::styled(
-        "choose:",
-        Style::default()
-            .fg(tokens.resolve("text.muted"))
-            .bg(tokens.resolve("panel.overlay")),
-    )));
-    let content_height = inner.height.saturating_sub(2).max(3);
-    let paragraph = Paragraph::new(content).scroll((perm.scroll, 0));
-    let content_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: content_height,
-    };
-    f.render_widget(paragraph, content_area);
+}
 
-    let options = [("allow once", 'a'), ("session", 's'), ("deny", 'd')];
-    let mut option_lines = Vec::new();
-    for (i, (label, key)) in options.iter().enumerate() {
-        let is_selected = i == perm.selected;
-        let style = if is_selected {
+fn draw_decision_actions(
+    f: &mut Frame,
+    layout: &DecisionLayout,
+    labels: &[&str],
+    selected: usize,
+    scrollable: bool,
+    tokens: &crate::theme::Theme,
+) {
+    let mut rows = Vec::new();
+    let mut spans = Vec::new();
+    for (i, label) in labels.iter().enumerate() {
+        let style = if i == selected {
             Style::default()
                 .fg(tokens.resolve("selection.foreground"))
                 .bg(tokens.resolve("selection.background"))
@@ -309,16 +299,65 @@ pub(super) fn draw_permission_modal(
                 .fg(tokens.resolve("text.placeholder"))
                 .bg(tokens.resolve("panel.overlay"))
         };
-        option_lines.push(Span::styled(format!(" [{}] {}  ", key, label), style));
+        let span = Span::styled(*label, style);
+        if layout.actions.height > 1 {
+            rows.push(Line::from(span));
+        } else {
+            if i > 0 {
+                spans.push(Span::raw("  "));
+            }
+            spans.push(span);
+        }
     }
-
-    let option_area = Rect::new(
-        inner.x,
-        inner.y + inner.height.saturating_sub(1),
-        inner.width,
-        1,
+    if layout.actions.height <= 1 {
+        rows.push(Line::from(spans));
+    }
+    f.render_widget(Paragraph::new(rows), layout.actions);
+    let hint = match (layout.hint.width, scrollable) {
+        (53.., true) => "PgUp/PgDn scroll · Tab choose · Enter/Esc",
+        (36.., true) => "PgUp/PgDn scroll · Enter/Esc",
+        (26.., true) => "PgUp/PgDn · Enter/Esc",
+        (19.., _) => "Tab/Enter · Esc",
+        (9.., _) => "Enter/Esc",
+        _ => "Esc",
+    };
+    f.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(tokens.resolve("text.muted"))),
+        layout.hint,
     );
-    f.render_widget(Paragraph::new(Line::from(option_lines)), option_area);
+}
+
+pub(super) fn draw_permission_modal(
+    f: &mut Frame,
+    perm: &mut PermissionState,
+    area: Rect,
+    tokens: &crate::theme::Theme,
+) {
+    let rows = perm.body_lines(area.width);
+    let layout = DecisionLayout::new(
+        area,
+        60,
+        rows.len(),
+        PermissionState::action_rows(area.width),
+    );
+    layout.clamp_scroll(&mut perm.scroll, &mut perm.view, rows.len());
+    draw_decision_frame(
+        f,
+        &layout,
+        " Allow tool? ",
+        tokens.resolve("text.warning"),
+        tokens,
+    );
+    let lines = rows.into_iter().map(Line::from).collect();
+    draw_decision_body(f, &layout, lines, perm.scroll, &perm.view, tokens);
+    draw_decision_actions(
+        f,
+        &layout,
+        &["[a] allow once", "[s] session", "[d] deny"],
+        perm.selected,
+        perm.view.max_scroll > 0,
+        tokens,
+    );
 }
 
 /// Render the ask_user prompt on a raised surface in the input slot.
@@ -687,13 +726,13 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let mut out = String::new();
     let mut w = 0;
-    for ch in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+    for grapheme in s.graphemes(true) {
+        let cw = display_width(grapheme);
         if w + cw + 1 > max {
             out.push('…');
             break;
         }
-        out.push(ch);
+        out.push_str(grapheme);
         w += cw;
     }
     out
@@ -1687,4 +1726,18 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
         Constraint::Length(area.width.saturating_sub(w) / 2),
     ])
     .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncated_labels_keep_graphemes_whole_and_use_the_column_budget() {
+        assert_eq!(truncate("👩‍💻xy", 3), "👩‍💻…");
+        assert_eq!(truncate("e\u{301}xyz", 2), "e\u{301}…");
+        assert_eq!(truncate("日本語", 4), "日…");
+        assert_eq!(truncate("👩‍💻", 2), "👩‍💻");
+        assert_eq!(truncate("text", 0), "");
+    }
 }

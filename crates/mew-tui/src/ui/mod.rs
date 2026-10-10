@@ -239,7 +239,7 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.mode == Mode::PermissionPrompt {
-        if let Some(ref perm) = app.permission {
+        if let Some(ref mut perm) = app.permission {
             overlays::draw_permission_modal(f, perm, area, &app.theme);
         }
     }

@@ -61,6 +61,7 @@ fn modal_padding_uses_the_raised_surface() {
             tx: None,
             selected: 0,
             scroll: 0,
+            view: Default::default(),
         });
         app.open_command_palette();
         app.persona_switch_confirm = Some(PersonaSwitchConfirmState {
