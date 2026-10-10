@@ -9,6 +9,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 pub struct ClientEngine {
     state: ClientState,
     connection: Box<dyn ClientConnection>,
+    session_list_pending: bool,
+    session_list_dirty: bool,
 }
 
 impl ClientEngine {
@@ -51,7 +53,12 @@ impl ClientEngine {
             )));
         }
         state.set_connection_status(crate::ConnectionStatus::Connected);
-        Ok(Self { state, connection })
+        Ok(Self {
+            state,
+            connection,
+            session_list_pending: false,
+            session_list_dirty: false,
+        })
     }
 
     pub fn state(&self) -> &ClientState {
@@ -71,19 +78,30 @@ impl ClientEngine {
     }
 
     pub async fn send(&mut self, message: ClientMessage) -> Result<(), TransportError> {
-        self.connection.send(message).await
+        if matches!(message, ClientMessage::ListSessions) {
+            if self.session_list_pending {
+                self.session_list_dirty = true;
+                return Ok(());
+            }
+            self.connection.send(message).await?;
+            self.session_list_pending = true;
+            Ok(())
+        } else {
+            self.connection.send(message).await
+        }
     }
 
     pub async fn send_prompt(&mut self, text: String) -> Result<(), TransportError> {
         let session_id = self.state.attached_session.clone().ok_or_else(|| {
             TransportError::Other("cannot send a prompt without an attached session".into())
         })?;
-        self.state.record_prompt(&session_id, text.clone());
         self.send(ClientMessage::Prompt {
-            text,
+            text: text.clone(),
             attachments: Vec::new(),
         })
-        .await
+        .await?;
+        self.state.record_prompt(&session_id, text);
+        Ok(())
     }
 
     pub async fn yield_control(&mut self) -> Result<(), TransportError> {
@@ -136,7 +154,42 @@ impl ClientEngine {
 
     pub async fn receive(&mut self) -> Result<Vec<ClientEvent>, TransportError> {
         match self.connection.receive().await? {
-            Some(message) => Ok(self.state.apply_server_message(message)),
+            Some(message) => {
+                let personas = matches!(&message, ServerMessage::SessionReady { .. });
+                match &message {
+                    ServerMessage::SessionList { .. } => self.session_list_pending = false,
+                    ServerMessage::SessionReady { .. }
+                    | ServerMessage::SessionMetaChanged { .. } => self.session_list_dirty = true,
+                    ServerMessage::SessionActivityChanged {
+                        session_id,
+                        activity,
+                    } => {
+                        let running = *activity == mew_protocol::SessionState::Running;
+                        if self
+                            .state
+                            .session(session_id)
+                            .is_none_or(|session| session.running != running)
+                            || !self
+                                .state
+                                .session_list
+                                .iter()
+                                .any(|session| session.session_id == *session_id)
+                        {
+                            self.session_list_dirty = true;
+                        }
+                    }
+                    _ => {}
+                }
+                let events = self.state.apply_server_message(message);
+                if self.session_list_dirty && !self.session_list_pending {
+                    self.send(ClientMessage::ListSessions).await?;
+                    self.session_list_dirty = false;
+                }
+                if personas {
+                    self.send(ClientMessage::ListPersonas).await?;
+                }
+                Ok(events)
+            }
             None => {
                 self.state
                     .set_connection_status(crate::ConnectionStatus::Disconnected);
@@ -227,7 +280,7 @@ mod tests {
         engine.send_prompt("hello".into()).await.unwrap();
         assert!(matches!(
             transport.sent_messages().as_slice(),
-            [ClientMessage::Ping, ClientMessage::Prompt { text, .. }] if text == "hello"
+            [ClientMessage::Ping, ClientMessage::ListSessions, ClientMessage::ListPersonas, ClientMessage::Prompt { text, .. }] if text == "hello"
         ));
 
         let session_id = Ulid::from_string(SESSION_ID).unwrap();

@@ -865,7 +865,9 @@ impl MobileCore {
                             format!("subagent:{tool_name}"),
                             serde_json::to_string_pretty(input).unwrap_or_default(),
                         )),
-                        ActionKind::AskUser { call_id, questions } => {
+                        ActionKind::AskUser {
+                            call_id, questions, ..
+                        } => {
                             snap.pending_ask_user.push(state::PendingAskUser {
                                 daemon: id.node_id.clone(),
                                 request_id: action.request_id.clone(),

@@ -988,6 +988,7 @@ mod tests {
         };
         let session = state.session_mut(SESSION_ID);
         session.subagents.push(SubagentEntry {
+            child_session_id: None,
             task_id: "task-1".into(),
             name: "explore".into(),
             display_name: Some("Explore the codebase".into()),

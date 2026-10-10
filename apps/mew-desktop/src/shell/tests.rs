@@ -645,6 +645,11 @@ mod shell_tests {
 
     #[test]
     fn activity_events_request_full_session_snapshots() {
+        assert!(client_event_requires_session_snapshot(
+            &ClientEvent::ActivitySnapshot {
+                session_id: "session".into()
+            }
+        ));
         assert!(client_event_requires_transcript_snapshot(
             &ClientEvent::ProviderMessageEnded {
                 session_id: "session".into(),

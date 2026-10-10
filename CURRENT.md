@@ -1800,3 +1800,26 @@ Verified the isolated commit snapshot: 194 agent tests, 73 daemon tests, 122
 protocol tests and 29 TypeScript client tests passed. One existing daemon browser
 test requires Chrome and remains ignored. Formatting and all-target daemon,
 mobile, shared-core and UI-model compilation passed with a separate build target.
+
+### 2026-10-10: shared client activity and error ownership
+
+The shared client retains shell jobs, provider retry status, task child identity,
+request-scoped todo/history replies and authoritative activity replacements.
+Typed events preserve exact prompt provenance and part updates. Turn errors
+carry their session identity; command errors keep their existing connection
+semantics. Session lists keep latest activity order and attention counts even
+when attention arrives before the list. Background failures stay unread until
+their session is viewed. Display metadata snapshots omit accumulated transcript
+and streaming text while retaining their session's activity.
+
+The engine coalesces pending session-list refreshes, requests fresh catalog data
+after confirmed attachment and refreshes lists on turn and metadata changes.
+Failed prompt sends no longer create optimistic history. Native activity
+snapshots trigger the existing session projection, with minimal raw mobile
+constructor compatibility for the shared question-source field.
+
+An isolated commit snapshot passed all 66 shared-core tests, 12 UI-model tests,
+formatting and strict all-target shared-core, UI-model and mobile clippy. The
+native activity snapshot projection regression passed with the installed CEF
+SDK. Thirteen actor tests passed separately, including real daemon offscreen
+conversation and completed-turn ordering against persisted metadata.

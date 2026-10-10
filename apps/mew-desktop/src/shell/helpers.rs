@@ -1697,7 +1697,8 @@ pub(super) fn client_event_requires_transcript_remeasure(event: &ClientEvent) ->
 pub(super) fn client_event_requires_session_snapshot(event: &ClientEvent) -> bool {
     matches!(
         event,
-        ClientEvent::SessionActivityChanged { .. }
+        ClientEvent::ActivitySnapshot { .. }
+            | ClientEvent::SessionActivityChanged { .. }
             | ClientEvent::ProviderMessageEnded { .. }
             | ClientEvent::SubagentsChanged { .. }
             | ClientEvent::TodosChanged { .. }
