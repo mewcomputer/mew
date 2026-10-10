@@ -3207,11 +3207,8 @@ fn test_picker_mouse_wheel_scrolls_selection() {
 
 #[test]
 fn test_picker_row_scroll_keeps_selection_visible() {
-    // Scroll offsets are measured in wrapped display rows: reaching the last
-    // item advances the scroll so the selected item's full row span is in
-    // view.
     let mut h = crate::harness::Harness::new(80, 24);
-    let items = (0..12)
+    let items = (0..30)
         .map(|n| PickerItem {
             id: format!("skill{n}"),
             label: format!("@skill:skill{n}"),
@@ -3222,13 +3219,12 @@ fn test_picker_row_scroll_keeps_selection_visible() {
         })
         .collect();
     open_test_picker(&mut h.app, "command", items);
-    // Move to the last item (11 steps from index 0).
-    for _ in 0..11 {
+    for _ in 0..29 {
         h.app.picker_down();
     }
     h.render();
     let picker = h.app.picker.as_ref().unwrap();
-    assert_eq!(picker.selected, 11);
+    assert_eq!(picker.selected, 29);
     assert!(
         picker.scroll > 0,
         "reaching the last item must scroll, scroll={}",
@@ -3236,7 +3232,7 @@ fn test_picker_row_scroll_keeps_selection_visible() {
     );
     let rendered = h.render();
     assert!(
-        rendered.contains("@skill:skill11"),
+        rendered.contains("@skill:skill29"),
         "selected item must be visible:\n{rendered}"
     );
 }
@@ -3277,7 +3273,7 @@ fn test_picker_scrollbar_travels_full_track() {
     // position == content_length - 1, so the old `content_length = total`
     // call left the thumb short of the bottom at max scroll.
     let mut h = crate::harness::Harness::new(80, 24);
-    let items = (0..12)
+    let items = (0..30)
         .map(|n| PickerItem {
             id: format!("skill{n}"),
             label: format!("@skill:skill{n}"),
@@ -3300,7 +3296,7 @@ fn test_picker_scrollbar_travels_full_track() {
     // Jump to the very bottom: select the last item (which advances scroll)
     // and force the offset to max; the draw pass keeps the selection in view
     // and clamps scroll to max_scroll.
-    for _ in 0..11 {
+    for _ in 0..29 {
         h.app.picker_down();
     }
     h.app.picker.as_mut().unwrap().scroll = usize::MAX;

@@ -63,3 +63,7 @@ permissions or unread outcomes. `Tab` switches between attention and all
 conversations. Each conversation keeps its draft, attachments and queued
 follow-ups when you switch. Submitted input stays visible until the daemon
 acknowledges it; an uncertain submission is never replayed automatically.
+
+Conversation icons show state: `○` idle or complete, `●` unread update, `?`
+question, `!` approval, and `▶` working. Selected details keep the project,
+timestamp, pending action counts and any failure. Use `/cost` for cost details.

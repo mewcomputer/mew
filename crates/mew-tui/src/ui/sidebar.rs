@@ -177,7 +177,7 @@ fn draw_conversations(text: &mut Text, visual_row: &mut u16, app: &mut App, widt
         .filter(|session| !session.archived)
         .take(3)
     {
-        let (label, _) = app.session_label_and_status(session);
+        let label = app.session_label(session);
         app.sidebar_item_rows.push((
             *visual_row,
             SidebarItem::Session(session.session_id.clone()),

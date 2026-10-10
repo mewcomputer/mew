@@ -19,7 +19,7 @@ fn display_row(buffer: &ratatui::buffer::Buffer, row: u16) -> String {
 }
 
 #[test]
-fn centered_pickers_identify_the_task_and_keep_navigation_visible_while_searching() {
+fn centered_pickers_identify_the_task_and_show_only_special_actions_while_searching() {
     for (kind, title) in [
         ("command", "Commands"),
         ("model", "Models"),
@@ -45,20 +45,18 @@ fn centered_pickers_identify_the_task_and_keep_navigation_visible_while_searchin
             picker.cursor = picker.filter.len();
             picker.hint = Some("special action".into());
             let frame = harness.render();
-            for expected in [
-                title,
-                "choice",
-                "first choice",
-                "↑↓ move",
-                "Enter choose",
-                "Esc close",
-                "special action",
-            ] {
+            for expected in [title, "choice", "first choice", "special action"] {
                 assert!(
                     frame.contains(expected),
                     "missing {expected} for {kind} at width {width}:\n{frame}"
                 );
             }
+            assert!(
+                !frame.contains("↑↓ move")
+                    && !frame.contains("Enter choose")
+                    && !frame.contains("Esc close"),
+                "{frame}"
+            );
         }
     }
 }
@@ -77,7 +75,7 @@ fn empty_picker_search_keeps_the_query_and_a_way_out() {
         picker.filter = "missing model".into();
         picker.cursor = picker.filter.len();
         let frame = harness.render();
-        for expected in ["Models", "missing model", "No matches", "Esc close"] {
+        for expected in ["Models", "missing model", "No matches"] {
             assert!(
                 frame.contains(expected),
                 "missing {expected} at width {width}:\n{frame}"
@@ -85,6 +83,8 @@ fn empty_picker_search_keeps_the_query_and_a_way_out() {
         }
         assert!(!frame.contains("first choice"));
         assert_eq!(harness.app.picker.as_ref().unwrap().filter, "missing model");
+        harness.send_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(harness.app.mode, mew_tui::app::Mode::Normal);
     }
 }
 
@@ -95,7 +95,8 @@ fn empty_unfiltered_picker_explains_the_state() {
     let frame = harness.render();
     assert!(frame.contains("Conversations"), "{frame}");
     assert!(frame.contains("No conversations"), "{frame}");
-    assert!(frame.contains("Esc close"), "{frame}");
+    harness.send_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(harness.app.mode, mew_tui::app::Mode::Normal);
 }
 
 #[test]
@@ -117,7 +118,7 @@ fn large_picker_uses_available_height_without_crowding_details_and_navigation() 
         let picker = harness.app.picker.as_ref().unwrap();
         assert!(picker.visible_items > previous, "{frame}");
         assert!(picker.visible_details > 0);
-        for expected in ["details 00", "Enter choose", "Esc close", "█", "│"] {
+        for expected in ["details 00", "█", "│"] {
             assert!(frame.contains(expected), "missing {expected}: {frame}");
         }
         previous = picker.visible_items;
@@ -131,10 +132,7 @@ fn large_picker_uses_available_height_without_crowding_details_and_navigation() 
     );
     harness.resize(40, 16);
     let frame = harness.render();
-    assert!(
-        frame.contains("model 79") && frame.contains("Esc close"),
-        "{frame}"
-    );
+    assert!(frame.contains("model 79"), "{frame}");
     harness.app.picker.as_mut().unwrap().items.truncate(2);
     let frame = harness.render();
     assert_eq!(harness.app.picker.as_ref().unwrap().visible_items, 2);
@@ -142,7 +140,7 @@ fn large_picker_uses_available_height_without_crowding_details_and_navigation() 
 }
 
 #[test]
-fn short_picker_keeps_the_selected_wrapped_row_and_footer_reachable() {
+fn short_picker_keeps_the_selected_wrapped_row_and_escape_reachable() {
     for (width, height) in [(24, 12), (40, 16), (80, 24)] {
         let mut harness = Harness::new(width, height);
         harness.app.open_model_picker();
@@ -160,15 +158,15 @@ fn short_picker_keeps_the_selected_wrapped_row_and_footer_reachable() {
             harness.send_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         let frame = harness.render();
-        for expected in [
-            "Models", "model 19", "move", "Enter", "choose", "Esc", "close",
-        ] {
+        for expected in ["Models", "model 19"] {
             assert!(
                 frame.contains(expected),
                 "missing {expected} at {width}x{height}:\n{frame}"
             );
         }
         assert!(harness.app.picker.as_ref().unwrap().scroll > 0);
+        harness.send_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(harness.app.mode, mew_tui::app::Mode::Normal);
     }
 }
 
@@ -367,7 +365,7 @@ fn long_choice_details_are_reachable_without_moving_the_choice_or_footer() {
         "first choice",
         "second choice",
         "detail line 19",
-        "Esc close",
+        "→ thinking variants",
     ] {
         assert!(frame.contains(expected), "{frame}");
     }
@@ -399,13 +397,17 @@ fn short_picker_can_read_every_detail_line_with_its_actions_visible() {
             ..Default::default()
         })
         .collect();
-    for expected in ["detail zero", "detail one", "detail two", "detail three"] {
+    let mut seen = String::new();
+    for _ in 0..4 {
         let frame = harness.render();
-        assert!(frame.contains(expected), "{frame}");
-        for action in ["Enter", "choose", "Esc", "close", "thinking", "variants"] {
+        seen.push_str(&frame);
+        for action in ["thinking", "variants"] {
             assert!(frame.contains(action), "{frame}");
         }
         harness.send_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+    }
+    for expected in ["detail zero", "detail one", "detail two", "detail three"] {
+        assert!(seen.contains(expected), "{seen}");
     }
     assert_eq!(harness.app.picker.as_ref().unwrap().selected, 0);
 }

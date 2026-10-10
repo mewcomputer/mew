@@ -1029,14 +1029,7 @@ pub(super) fn draw_picker(
     let muted_style = Style::default()
         .fg(tokens.resolve("text.muted"))
         .bg(surface);
-    let mut footer = wrap_text(
-        if inner_width >= 14 {
-            "↑↓ move Enter choose Esc close"
-        } else {
-            "↑↓ Enter Esc"
-        },
-        inner_width as usize,
-    );
+    let mut footer = Vec::new();
     if let Some(hint) = &picker.hint {
         footer.extend(wrap_text(hint, inner_width as usize));
     }
@@ -1088,26 +1081,34 @@ pub(super) fn draw_picker(
         inner_width,
         height.saturating_sub(vertical_padding * 2),
     );
-    let count = format!(
-        "{choices} {}",
-        if choices == 1 { "choice" } else { "choices" }
-    );
-    let title_width = display_width(title);
-    let title_line = if title_width + display_width(&count) + 2 <= inner.width as usize {
-        Line::from(vec![
-            Span::styled(title, body_style.add_modifier(Modifier::BOLD)),
-            Span::styled(
-                " ".repeat(inner.width as usize - title_width - display_width(&count)),
-                muted_style,
-            ),
-            Span::styled(count, muted_style),
-        ])
+    let count = if matches!(
+        picker.kind.as_str(),
+        "session" | "session_attention" | "session_archived"
+    ) {
+        String::new()
     } else {
-        Line::from(Span::styled(
-            truncate(title, inner.width as usize),
-            body_style.add_modifier(Modifier::BOLD),
-        ))
+        format!(
+            "{choices} {}",
+            if choices == 1 { "choice" } else { "choices" }
+        )
     };
+    let title_width = display_width(title);
+    let title_line =
+        if !count.is_empty() && title_width + display_width(&count) + 2 <= inner.width as usize {
+            Line::from(vec![
+                Span::styled(title, body_style.add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " ".repeat(inner.width as usize - title_width - display_width(&count)),
+                    muted_style,
+                ),
+                Span::styled(count, muted_style),
+            ])
+        } else {
+            Line::from(Span::styled(
+                truncate(title, inner.width as usize),
+                body_style.add_modifier(Modifier::BOLD),
+            ))
+        };
     f.render_widget(
         Paragraph::new(title_line),
         Rect::new(inner.x, inner.y, inner.width, 1),

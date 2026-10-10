@@ -11,6 +11,20 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+fn conversation_marker(permissions: u32, questions: u32, unread: bool, running: bool) -> char {
+    if permissions > 0 {
+        '!'
+    } else if questions > 0 {
+        '?'
+    } else if unread {
+        '●'
+    } else if running {
+        '▶'
+    } else {
+        '○'
+    }
+}
+
 impl App {
     pub fn open_model_picker(&mut self) {
         let mut items: Vec<PickerItem> = Vec::new();
@@ -115,39 +129,38 @@ impl App {
         permissions > 0 || questions > 0 || self.unread_completions.contains(&session.session_id)
     }
 
-    pub(crate) fn session_label_and_status(
-        &self,
-        session: &mew_protocol::SessionInfo,
-    ) -> (String, String) {
+    pub(crate) fn session_label(&self, session: &mew_protocol::SessionInfo) -> String {
         let id = &session.session_id;
         let title = self
             .session_titles
             .get(id)
-            .cloned()
-            .or_else(|| session.summary.clone())
-            .or_else(|| session.first_message.clone())
-            .unwrap_or_else(|| id.chars().take(8).collect());
+            .map(String::as_str)
+            .or(session.summary.as_deref())
+            .or(session.first_message.as_deref());
         let (permissions, questions) = self
             .session_attention
             .get(id)
             .copied()
             .unwrap_or((session.pending_permissions, session.pending_questions));
-        let marker = if permissions > 0 || questions > 0 {
-            "?"
-        } else {
-            match self.session_turn_outcomes.get(id) {
-                Some(mew_client_core::TurnOutcome::Completed) => "✓",
-                Some(mew_client_core::TurnOutcome::Failed { .. }) => "✗",
-                None if session.last_turn_failed => "✗",
-                None if session.state == mew_protocol::SessionState::Running => "▶",
-                None => "○",
-            }
-        };
-        let unread = if self.unread_completions.contains(id) {
-            "● "
-        } else {
-            ""
-        };
+        let marker = conversation_marker(
+            permissions,
+            questions,
+            self.unread_completions.contains(id),
+            session.state == mew_protocol::SessionState::Running,
+        );
+        match title {
+            Some(title) => format!("{marker} {title}"),
+            None => format!("{marker} {id:.8}"),
+        }
+    }
+
+    pub(crate) fn session_picker_item(&self, session: &mew_protocol::SessionInfo) -> PickerItem {
+        let id = &session.session_id;
+        let (permissions, questions) = self
+            .session_attention
+            .get(id)
+            .copied()
+            .unwrap_or((session.pending_permissions, session.pending_questions));
         let mut status = Vec::new();
         if permissions > 0 {
             status.push(format!(
@@ -169,24 +182,6 @@ impl App {
                 }
             ));
         }
-        if status.is_empty() {
-            status.push(
-                match self.session_turn_outcomes.get(id) {
-                    Some(mew_client_core::TurnOutcome::Completed) => "Completed",
-                    Some(mew_client_core::TurnOutcome::Failed { .. }) => "Failed",
-                    None if session.last_turn_failed => "Failed",
-                    None => match session.state {
-                        mew_protocol::SessionState::Running => "Working",
-                        mew_protocol::SessionState::Active => "Ready",
-                        mew_protocol::SessionState::Idle => "Idle",
-                    },
-                }
-                .into(),
-            );
-        }
-        if self.unread_completions.contains(id) {
-            status.push("unread".into());
-        }
         if session.archived {
             status.push("Archived".into());
         }
@@ -196,38 +191,44 @@ impl App {
         if id == &self.status.session_id {
             status.push("current".into());
         }
-        let status = status.join(" · ");
-        (format!("{unread}{marker} {title} · {status}"), status)
-    }
-
-    pub(crate) fn session_picker_item(&self, session: &mew_protocol::SessionInfo) -> PickerItem {
-        let id = &session.session_id;
-        let (label, status) = self.session_label_and_status(session);
+        let mut description = status.join(" · ");
         let last = session
             .last_message_at
-            .map(|ts| {
-                chrono::DateTime::from_timestamp_millis(ts)
-                    .map(|dt| dt.format("%m-%d %H:%M").to_string())
-                    .unwrap_or_else(|| "—".to_string())
-            })
-            .unwrap_or_else(|| "—".to_string());
-        let mut description = format!(
-            "{status}\ncwd: {} · last: {last}",
-            session.cwd.as_deref().unwrap_or("—")
-        );
-        if let Some(usage) = &session.usage {
-            description.push_str(&format!(" · cost: ${:.2}", usage.cost));
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|dt| dt.format("%m-%d %H:%M").to_string());
+        if session.cwd.is_some() || last.is_some() {
+            if !description.is_empty() {
+                description.push('\n');
+            }
+            if let Some(cwd) = &session.cwd {
+                description.push_str(cwd);
+            }
+            if let Some(last) = last {
+                if session.cwd.is_some() {
+                    description.push_str(" · ");
+                }
+                description.push_str(&last);
+            }
         }
-        if let Some(mew_client_core::TurnOutcome::Failed {
-            detail: Some(detail),
-        }) = self.session_turn_outcomes.get(id)
-        {
-            description.push('\n');
+        let failure = match self.session_turn_outcomes.get(id) {
+            Some(mew_client_core::TurnOutcome::Failed { detail }) => Some(
+                detail
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or("Last turn failed"),
+            ),
+            None if session.last_turn_failed => Some("Last turn failed"),
+            _ => None,
+        };
+        if let Some(detail) = failure {
+            if !description.is_empty() {
+                description.push('\n');
+            }
             description.push_str(detail);
         }
         PickerItem {
             id: id.clone(),
-            label,
+            label: self.session_label(session),
             description,
             ..Default::default()
         }
@@ -253,17 +254,16 @@ impl App {
                     .unwrap_or_else(|| id.chars().take(12).collect());
                 let (permissions, questions) =
                     self.session_attention.get(id).copied().unwrap_or_default();
-                let status = if permissions > 0 || questions > 0 {
-                    "Needs your attention"
-                } else {
-                    "Unread update"
-                };
+                let marker = conversation_marker(
+                    permissions,
+                    questions,
+                    self.unread_completions.contains(id),
+                    false,
+                );
                 PickerItem {
                     id: id.into(),
-                    label: format!("{title} · {status}"),
-                    description:
-                        "Session metadata not loaded yet; Enter attaches to this conversation."
-                            .into(),
+                    label: format!("{marker} {title}"),
+                    description: "Conversation details unavailable.".into(),
                     ..Default::default()
                 }
             }));
@@ -387,7 +387,7 @@ impl App {
             details_scroll: 0,
             visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
-            hint: Some("new session in project".into()),
+            hint: None,
             budget: None,
         });
     }

@@ -1935,3 +1935,23 @@ Rust libraries and regenerating UniFFI bindings. Thirty renderer captures are
 available in notes/capture/tui-20261010/index.html, including eight new task-flow,
 output, review and child-question views at 1280 by 800 pixels. Captures use sample
 state; paired live interaction remains pending.
+
+### 2026-10-10: compact conversation states and picker chrome
+
+Conversation rows in the picker and sidebar use one state icon and their title.
+Quiet/read conversations use an empty circle, unread updates a filled circle,
+questions a question mark, approvals an exclamation mark and running work a play
+marker. Selected details retain project/time context, pending counts and failures,
+including persisted failures without an error message. Repeated quiet-state,
+unread and cost copy is removed from the conversation picker.
+
+Centered pickers retain special actions and detail scrolling hints while omitting
+the generic arrow/Enter/Escape navigation footer. Conversation choice counts and
+the project picker's duplicate title footer are removed. Overflow fixtures now
+use enough choices to exercise scrolling with the recovered space.
+
+Observed the new icon, detail and footer regressions fail before their fixes.
+All 467 TUI tests across 18 targets passed, with generated themes up to date.
+Refreshed the eight task-flow captures and visually checked the conversation and
+attention views at 1280 by 800 pixels. Updated command documentation with the
+icon meanings; live interaction remains pending.

@@ -84,12 +84,11 @@ fn bell_counts_conversations_once_and_opens_archived_attention_without_losing_th
         picker.items[0].description.contains("2 approvals")
             && picker.items[0].description.contains("1 question")
     );
-    assert!(
-        picker.items[1].label.contains("Completed") && picker.items[1].label.contains("unread")
-    );
+    assert_eq!(picker.items[0].label, "! approval work");
+    assert_eq!(picker.items[1].label, "● finished work");
     assert!(
         picker.items[2].description.contains("provider unavailable")
-            && picker.items[2].label.contains("Archived")
+            && picker.items[2].description.contains("Archived")
     );
     app.picker.as_mut().unwrap().selected = 2;
     assert!(
@@ -238,7 +237,10 @@ fn attention_arriving_before_session_metadata_remains_reachable() {
     let picker = app.picker.as_ref().unwrap();
     assert_eq!(picker.items.len(), 1);
     assert_eq!(picker.items[0].id, "not-yet-listed");
-    assert!(picker.items[0].description.contains("metadata"));
+    assert_eq!(
+        picker.items[0].description,
+        "Conversation details unavailable."
+    );
 }
 #[test]
 fn canonical_completion_and_ready_ack_drive_the_bell() {
@@ -296,7 +298,8 @@ fn canonical_failed_alert_is_unread_until_ready_and_keeps_its_failure_detail() {
     app.apply_client_update(&events, &state, None);
     app.open_attention_picker();
     let item = &app.picker.as_ref().unwrap().items[0];
-    assert!(item.label.contains("● ✗") && item.label.contains("Archived"));
+    assert_eq!(item.label, "● failed work");
+    assert!(item.description.contains("Archived"));
     assert!(item.description.contains("provider unavailable"));
     let events = state.apply_server_message(mew_protocol::ServerMessage::SessionReady {
         session_id: "failed".into(),
@@ -310,7 +313,7 @@ fn canonical_failed_alert_is_unread_until_ready_and_keeps_its_failure_detail() {
     app.open_session_picker();
     key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
     let item = &app.picker.as_ref().unwrap().items[0];
-    assert!(!item.label.contains("●") && item.label.contains("Failed"));
+    assert_eq!(item.label, "○ failed work");
     assert!(item.description.contains("provider unavailable"));
 }
 
@@ -367,7 +370,7 @@ fn unread_failure_marker_survives_a_long_sidebar_title_and_routes_by_id() {
         mew_client_core::TurnOutcome::Failed { detail: None },
     );
     let buffer = draw(&mut app, 120, 30);
-    let y = row(&buffer, "● ✗");
+    let y = row(&buffer, "● long conversation");
     let x = app.sidebar_rect.x + 2;
     let action = handle_input_event(
         &mut app,
@@ -410,7 +413,116 @@ fn conversation_details_format_the_daemons_millisecond_timestamp() {
     app.open_session_picker();
     assert!(app.picker.as_ref().unwrap().items[0]
         .description
-        .contains("last: 10-10 10:30"));
+        .contains("10-10 10:30"));
+}
+
+#[test]
+fn conversation_icons_distinguish_decisions_unread_updates_and_running_work() {
+    for (permissions, questions, unread, running, expected) in [
+        (0, 0, false, false, "○"),
+        (0, 0, true, false, "●"),
+        (0, 1, false, false, "?"),
+        (1, 0, false, false, "!"),
+        (1, 1, true, true, "!"),
+        (0, 1, true, true, "?"),
+        (0, 0, false, true, "▶"),
+    ] {
+        let mut app = App::new();
+        let mut conversation = session("work", "chosen work", false);
+        conversation.pending_permissions = permissions;
+        conversation.pending_questions = questions;
+        if running {
+            conversation.state = mew_protocol::SessionState::Running;
+        }
+        app.daemon_sessions = vec![conversation];
+        app.session_turn_outcomes
+            .insert("work".into(), mew_client_core::TurnOutcome::Completed);
+        if unread {
+            app.unread_completions.insert("work".into());
+        }
+        app.open_session_picker();
+        assert_eq!(
+            app.picker.as_ref().unwrap().items[0].label,
+            format!("{expected} chosen work")
+        );
+    }
+}
+
+#[test]
+fn conversation_details_keep_context_without_repeating_quiet_state_or_cost() {
+    let mut app = App::new();
+    let mut conversation = session("work", "chosen work", false);
+    conversation.cwd = Some("/tmp/project".into());
+    conversation.last_message_at = Some(1_728_556_200_000);
+    conversation.usage = Some(
+        serde_json::from_value(serde_json::json!({
+            "input_tokens": 100, "output_tokens": 200, "cache_read_tokens": 0,
+            "cache_write_tokens": 0, "cost": 2.5, "turns": 1
+        }))
+        .unwrap(),
+    );
+    app.daemon_sessions = vec![conversation];
+    app.open_session_picker();
+    let picker = app.picker.as_ref().unwrap();
+    assert_eq!(picker.items[0].description, "/tmp/project · 10-10 10:30");
+    let buffer = draw(&mut app, 80, 24);
+    let text = (0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
+        .map(|(x, y)| buffer[(x, y)].symbol())
+        .collect::<String>();
+    assert!(!text.contains("choices") && !text.contains("choice"));
+    assert!(!text.contains("move") && !text.contains("choose") && !text.contains("close"));
+    assert!(
+        text.contains("Tab archived") && text.contains("^A archive") && text.contains("^P pin")
+    );
+}
+
+#[test]
+fn unlisted_conversations_use_the_same_decision_icons() {
+    let mut app = App::new();
+    app.session_attention.insert("approval".into(), (1, 0));
+    app.session_attention.insert("question".into(), (0, 1));
+    app.unread_completions.insert("update".into());
+    app.open_attention_picker();
+    let picker = app.picker.as_ref().unwrap();
+    for (id, marker) in [("approval", "!"), ("question", "?"), ("update", "●")] {
+        assert_eq!(
+            picker
+                .items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap()
+                .label,
+            format!("{marker} {id}")
+        );
+    }
+}
+
+#[test]
+fn read_failures_without_error_details_remain_visible_when_selected() {
+    for persisted in [false, true] {
+        let mut app = App::new();
+        let mut conversation = session("failed", "previous work", false);
+        conversation.last_turn_failed = persisted;
+        app.daemon_sessions = vec![conversation];
+        if !persisted {
+            app.session_turn_outcomes.insert(
+                "failed".into(),
+                mew_client_core::TurnOutcome::Failed { detail: None },
+            );
+        }
+        app.open_session_picker();
+        let item = &app.picker.as_ref().unwrap().items[0];
+        assert_eq!(item.label, "○ previous work");
+        assert_eq!(item.description, "Last turn failed");
+    }
+}
+
+#[test]
+fn project_picker_does_not_repeat_its_title_in_the_footer() {
+    let mut app = App::new();
+    app.open_project_picker();
+    assert!(app.picker.as_ref().unwrap().hint.is_none());
 }
 
 #[test]
