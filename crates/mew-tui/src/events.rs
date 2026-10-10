@@ -495,6 +495,18 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
         }
         return None;
     }
+    if app.mode == crate::app::Mode::SlashCommand
+        && app
+            .autocomplete_area
+            .contains((mouse.column, mouse.row).into())
+    {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => app.slash_prev(),
+            MouseEventKind::ScrollDown => app.slash_next(),
+            _ => {}
+        }
+        return None;
+    }
     // The thinking picker's budget track is mouse-interactive; the wheel
     // scrolls every picker list. All other picker content stays inert.
     if app.mode == crate::app::Mode::CommandPalette {

@@ -13,7 +13,7 @@ use super::display_width;
 use crate::app::{
     App, DecisionLayout, DecisionView, GoalComposeState, GoalProposalState, PermissionState,
     PersonaSummary, PersonaSwitchConfirmState, PickerBudget, PickerItem, PickerState, SlashCommand,
-    UserQuestionState, PICKER_VISIBLE_ITEMS,
+    UserQuestionState,
 };
 
 /// A single selectable row in an inline autocomplete list (slash commands or
@@ -157,6 +157,7 @@ pub(super) fn draw_slash_autocomplete(
     cmds: &[SlashCommand],
     area: Rect,
 ) {
+    app.autocomplete_area = area;
     app.slash_visible = autocomplete_rows(area).height as usize;
     app.slash_selected = app.slash_selected.min(cmds.len().saturating_sub(1));
     keep_autocomplete_selection_visible(
@@ -195,6 +196,7 @@ pub(super) fn draw_reference_autocomplete(f: &mut Frame, app: &mut App, area: Re
     if filtered_len == 0 {
         return;
     }
+    app.autocomplete_area = area;
     picker.visible_items = autocomplete_rows(area).height as usize;
     picker.selected = picker.selected.min(filtered_len - 1);
     keep_autocomplete_selection_visible(
@@ -1019,8 +1021,10 @@ pub(super) fn draw_picker(
     } else {
         (details.len().min(3) as u16 + 1).min(content_budget - min_choices)
     };
-    let list_height = (filtered.len().clamp(1, PICKER_VISIBLE_ITEMS) as u16)
-        .min(content_budget.saturating_sub(details_height));
+    let list_height = filtered
+        .len()
+        .clamp(1, u16::MAX as usize)
+        .min(content_budget.saturating_sub(details_height) as usize) as u16;
     let height = chrome + list_height + details_height;
     let popup = Rect::new(
         area.x + area.width.saturating_sub(width) / 2,

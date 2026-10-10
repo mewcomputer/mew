@@ -190,6 +190,8 @@ pub struct App {
     /// Updated by the autocomplete renderer so `adjust_slash_scroll` can keep the
     /// selection in view.
     pub slash_visible: usize,
+    /// Rendered inline list bounds for routing wheel input above the composer.
+    pub autocomplete_area: Rect,
     pub bash_expanded: bool,
     pub reasoning_expanded: HashSet<PartId>,
     pub reasoning_active_id: Option<PartId>,
@@ -884,6 +886,7 @@ impl App {
             slash_selected: 0,
             slash_scroll: 0,
             slash_visible: 0,
+            autocomplete_area: Rect::default(),
             bash_expanded: false,
             reasoning_expanded: HashSet::new(),
             reasoning_active_id: None,

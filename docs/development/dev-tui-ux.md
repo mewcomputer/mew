@@ -43,6 +43,12 @@ work are useful foundations.
   paste and undo history without modifying the conversation draft.
 - Inline autocomplete measures the clipped landing viewport, keeps the choice
   visible through scrolling and resizing, and retains completion/close hints.
+  Long slash/reference lists grow to three fifths of the terminal, bounded by
+  composer space; short searches shrink to their matches. Centered pickers use
+  the available popup height rather than an eight-choice cap. Overflow has a
+  proportional scrollbar. Wheeling over slash choices moves their selection;
+  wheeling over chat retains chat scrolling. Landing choices cover the hero
+  while preserving the composer's position.
 - The sidebar appears at 112 columns. It leads with current work or the waiting
   decision, shows remaining/blocked tasks, and scrolls independently. Successful
   and cancelled activity leaves immediately; recent failures retain their

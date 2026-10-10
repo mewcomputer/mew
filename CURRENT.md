@@ -1736,3 +1736,20 @@ seven real daemon-capture tests, workspace/all-target TUI strict clippy, CLI
 build, architecture and generated-theme checks. The gallery's subagent and job
 views were retaken at 1280 by 800 pixels. Recorded-turn viewing does not provide
 a parent/child mailbox or restore missing outputs in older transcripts.
+
+### 2026-10-10: adaptive picker height and wheel routing
+
+Inline command/reference choices grow to three fifths of the terminal when
+needed, preserving composer/status space and shrinking for fewer matches.
+Landing autocomplete clips above the anchored input. Centered pickers use their
+available content budget instead of stopping at eight rows; selected details
+and navigation remain reserved. Existing proportional scrollbars indicate
+overflow and reach both ends. Wheel input over slash choices now navigates
+those choices instead of scrolling the conversation underneath.
+
+Verified five new behavior regressions and the full 396-test TUI suite,
+all-target TUI strict clippy, CLI build, architecture and generated-theme checks.
+Three independent review lenses found no required issues. The screenshot
+gallery includes expanded commands, overflow at the end, file references,
+short results, landing suggestions and a short terminal. Desktop captures
+remain 1280 by 800 pixels. Live interaction remains pending.

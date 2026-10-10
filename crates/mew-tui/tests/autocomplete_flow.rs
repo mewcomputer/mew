@@ -1,5 +1,9 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use mew_tui::{app::Mode, events::handle_key_event, ui, App};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use mew_tui::{
+    app::Mode,
+    events::{handle_input_event, handle_key_event},
+    ui, App,
+};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 
 fn draw(app: &mut App, width: u16, height: u16) -> Buffer {
@@ -138,4 +142,154 @@ fn narrow_autocomplete_keeps_completion_and_close_keys_visible() {
     assert!(frame.contains("Tab complete"), "{frame}");
     assert!(frame.contains("Enter"), "{frame}");
     assert!(frame.contains("Esc"), "{frame}");
+}
+
+#[test]
+fn long_autocomplete_lists_grow_with_the_terminal_and_shrink_to_matches() {
+    for references in [false, true] {
+        let mut app = App::new();
+        app.push_synthetic_message("conversation".into());
+        app.input = if references { "@" } else { "/" }.into();
+        app.cursor = 1;
+        if references {
+            app.open_at_picker();
+            app.picker.as_mut().unwrap().items = (0..80)
+                .map(|i| mew_tui::app::PickerItem {
+                    id: format!("file{i:02}.rs"),
+                    label: format!("@file{i:02}.rs"),
+                    ..Default::default()
+                })
+                .collect();
+        } else {
+            app.mode = Mode::SlashCommand;
+        }
+        let mut previous = 0;
+        for height in [24, 40, 60] {
+            let frame = rows(&draw(&mut app, 80, height)).join("\n");
+            let visible = if references {
+                app.picker.as_ref().unwrap().visible_items
+            } else {
+                app.slash_visible
+            };
+            assert!(
+                visible > previous,
+                "list did not grow at height {height}: {visible}"
+            );
+            assert!(app.chat_area.height >= height / 4);
+            assert_eq!(app.input_area.height, 3);
+            assert!(frame.contains("Enter") && frame.contains("Esc"), "{frame}");
+            previous = visible;
+        }
+        assert!(previous > 20);
+        if references {
+            app.picker.as_mut().unwrap().items.truncate(2);
+        } else {
+            app.input = "/clear".into();
+            app.cursor = app.input.len();
+        }
+        let buffer = draw(&mut app, 80, 60);
+        assert_eq!(
+            if references {
+                app.picker.as_ref().unwrap().visible_items
+            } else {
+                app.slash_visible
+            },
+            if references { 2 } else { 1 }
+        );
+        assert!(!(0..60).any(|y| buffer[(79, y)].symbol() == "█"));
+    }
+}
+
+#[test]
+fn landing_choices_grow_above_the_composer_without_moving_it() {
+    let mut app = App::new();
+    app.input = "/".into();
+    app.cursor = 1;
+    let mut previous = 0;
+    for height in [24, 40, 60] {
+        app.mode = Mode::Normal;
+        draw(&mut app, 80, height);
+        let input_area = app.input_area;
+        app.mode = Mode::SlashCommand;
+        let frame = rows(&draw(&mut app, 80, height)).join("\n");
+        assert!(app.slash_visible > previous);
+        assert_eq!(app.input_area, input_area);
+        assert!(app.autocomplete_area.bottom() <= input_area.y);
+        assert!(
+            frame.contains("Tab complete") && frame.contains("Esc"),
+            "{frame}"
+        );
+        previous = app.slash_visible;
+    }
+    assert!(previous > 20);
+}
+
+#[test]
+fn autocomplete_scrollbar_reaches_both_ends_and_keeps_the_selected_choice_visible() {
+    let mut app = App::new();
+    app.push_synthetic_message("conversation".into());
+    app.input = "/".into();
+    app.cursor = 1;
+    app.mode = Mode::SlashCommand;
+    let first = draw(&mut app, 80, 40);
+    let track: Vec<_> = (0..40)
+        .filter(|&y| matches!(first[(79, y)].symbol(), "│" | "█"))
+        .collect();
+    assert_eq!(track.len(), app.slash_visible);
+    assert_eq!(first[(79, track[0])].symbol(), "█");
+    assert_eq!(first[(79, *track.last().unwrap())].symbol(), "│");
+    app.slash_selected = app.filtered_slash_commands().len() - 1;
+    let last = draw(&mut app, 80, 40);
+    assert_eq!(last[(79, track[0])].symbol(), "│");
+    assert_eq!(last[(79, *track.last().unwrap())].symbol(), "█");
+    assert!(rows(&last)
+        .iter()
+        .any(|row| row.contains(&app.filtered_slash_commands()[app.slash_selected].name)));
+}
+
+#[test]
+fn wheel_over_command_choices_moves_the_selection_instead_of_the_chat() {
+    let mut app = App::new();
+    app.push_synthetic_message("conversation\n".repeat(100));
+    app.input = "/".into();
+    app.cursor = 1;
+    app.mode = Mode::SlashCommand;
+    let buffer = draw(&mut app, 80, 40);
+    let y = rows(&buffer)
+        .iter()
+        .position(|row| row.contains("/clear"))
+        .unwrap() as u16;
+    let scroll = app.scroll;
+    handle_input_event(
+        &mut app,
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 4,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }),
+    );
+    assert_eq!(app.slash_selected, 1);
+    assert_eq!(app.scroll, scroll);
+    handle_input_event(
+        &mut app,
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 4,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }),
+    );
+    assert_eq!(app.slash_selected, 0);
+    handle_input_event(
+        &mut app,
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 4,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }),
+    );
+    assert!(app.scroll < scroll);
+    assert_eq!(app.slash_selected, 0);
 }

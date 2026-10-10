@@ -65,6 +65,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     };
 
     let main_area = main_chunks[0];
+    app.autocomplete_area = Rect::default();
 
     let slash_cmds = app.filtered_slash_commands();
     let show_slash = app.mode == Mode::SlashCommand && !slash_cmds.is_empty();
@@ -80,13 +81,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let show_ref = app.mode == Mode::CommandPalette
         && app.picker.as_ref().is_some_and(|p| p.is_at_picker())
         && ref_count > 0;
-    // Reserve the list's heading and pinned completion hint within its cap.
-    // The renderer measures the final clipped viewport on the landing screen.
-    let max_autocomplete_height = (main_area.height / 2).min(16);
-    let autocomplete_height = if show_slash {
-        (slash_cmds.len().min(12) as u16 + 4).min(max_autocomplete_height)
-    } else if show_ref {
-        (ref_count.min(12) as u16 + 4).min(max_autocomplete_height)
+    // Long lists can use three fifths of the screen. Each layout clips this
+    // budget to preserve its composer; short lists shrink to their content.
+    let max_autocomplete_height = (main_area.height as u32 * 3 / 5) as u16;
+    let autocomplete_count = if show_slash {
+        slash_cmds.len()
+    } else {
+        ref_count
+    };
+    let autocomplete_height = if show_slash || show_ref {
+        autocomplete_count
+            .min(u16::MAX as usize)
+            .saturating_add(4)
+            .min(max_autocomplete_height as usize) as u16
     } else {
         0
     };
@@ -150,6 +157,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     let input_height = input::desired_height(app, main_area.width);
+    let autocomplete_height = autocomplete_height.min(
+        main_area
+            .height
+            .saturating_sub(input_height.saturating_add(2)),
+    );
 
     // When an ask_user question is active, the input slot is replaced by the
     // question overlay. Reserve enough vertical space for the prompt + a few

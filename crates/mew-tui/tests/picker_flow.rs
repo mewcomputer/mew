@@ -99,6 +99,49 @@ fn empty_unfiltered_picker_explains_the_state() {
 }
 
 #[test]
+fn large_picker_uses_available_height_without_crowding_details_and_navigation() {
+    let mut harness = Harness::new(80, 40);
+    harness.app.open_model_picker();
+    harness.app.picker.as_mut().unwrap().items = (0..80)
+        .map(|index| PickerItem {
+            id: index.to_string(),
+            label: format!("model {index:02}"),
+            description: format!("details {index:02}: chosen model"),
+            ..Default::default()
+        })
+        .collect();
+    let mut previous = 0;
+    for height in [24, 40, 60] {
+        harness.resize(80, height);
+        let frame = harness.render();
+        let picker = harness.app.picker.as_ref().unwrap();
+        assert!(picker.visible_items > previous, "{frame}");
+        assert!(picker.visible_details > 0);
+        for expected in ["details 00", "Enter choose", "Esc close", "█", "│"] {
+            assert!(frame.contains(expected), "missing {expected}: {frame}");
+        }
+        previous = picker.visible_items;
+    }
+    assert!(previous > 30);
+    harness.app.picker.as_mut().unwrap().selected = 79;
+    let frame = harness.render();
+    assert!(
+        frame.contains("model 79") && frame.contains("details 79"),
+        "{frame}"
+    );
+    harness.resize(40, 16);
+    let frame = harness.render();
+    assert!(
+        frame.contains("model 79") && frame.contains("Esc close"),
+        "{frame}"
+    );
+    harness.app.picker.as_mut().unwrap().items.truncate(2);
+    let frame = harness.render();
+    assert_eq!(harness.app.picker.as_ref().unwrap().visible_items, 2);
+    assert!(!frame.contains('│'), "{frame}");
+}
+
+#[test]
 fn short_picker_keeps_the_selected_wrapped_row_and_footer_reachable() {
     for (width, height) in [(24, 12), (40, 16), (80, 24)] {
         let mut harness = Harness::new(width, height);
