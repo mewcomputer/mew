@@ -52,6 +52,10 @@ work are useful foundations.
   `/agents` and `/jobs` also work below the sidebar width. Finished work leaves
   the sidebar while an already-open detail view retains its final status.
   Activity views retain their session owner and explain when data is unavailable.
+  Their raised surfaces have no extra outline. Subagent views read recorded child
+  messages and tool arguments/results/errors through a correlated daemon request,
+  refresh while open, coalesce repeated refreshes and retain scroll position.
+  The initial assignment is visible; an unfinished turn may not yet be saved.
 - The todo browser includes completed records and supports description/status
   editing. Saves wait for a correlated daemon acknowledgment; conflicts,
   dependency constraints and persistence failures keep the draft for recovery.
@@ -78,8 +82,9 @@ work are useful foundations.
 | P2 | Changes are a noninteractive path list; session-diff replies have no TUI consumer. Some advertised commands are unsupported in the daemon path. | Direct review entry point using session/request correlation; implement commands against authoritative state or explain their availability. |
 
 Tool-output truncation still needs a clear way to inspect the omitted content.
-Activity detail views use the status, progress, command and failure information
-already received; child transcripts and job output need transport support.
+Subagent detail views include recorded child transcripts. Background job detail
+views still need transport support for full job output. Child `ask_user` questions
+remain unforwarded, and parent/child follow-up messaging is not implemented.
 These follow the ownership and connection repairs. The sidebar reflects events
 received by the current adapter; passive progress from another client remains
 limited by its transport. Changes remains the cumulative session delta summary.

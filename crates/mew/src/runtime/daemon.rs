@@ -85,6 +85,18 @@ impl CommandTarget for DaemonTarget {
             .map_err(|_| Unsupported("daemon connection failed during compact"))
     }
 
+    async fn read_subagent_history(
+        &mut self,
+        session_id: &str,
+        child_session_id: &str,
+        request_id: &str,
+    ) -> Result<(), Unsupported> {
+        self.client
+            .read_subagent_history(session_id, child_session_id, request_id)
+            .await
+            .map_err(|_| Unsupported("could not request subagent trace"))
+    }
+
     async fn update_todo(
         &mut self,
         session_id: &str,

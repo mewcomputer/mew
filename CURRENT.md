@@ -1715,3 +1715,24 @@ Verified protocol roundtrips, read scopes, two real WebSocket regressions, 64
 daemon library tests and 27 TypeScript client tests/build. Mobile/shared clients
 compile and scoped strict clippy passes. Reads do not wait for the turn lock or
 switch attachment. Older daemons fail through the viewer's bounded timeout.
+
+### 2026-10-10: borderless subagent conversation viewer
+
+Activity panels keep their raised color without an extra outline. Subagent
+details include the recorded assignment, child messages, available reasoning,
+tool arguments, results and errors. Running views refresh saved turns every two
+seconds; repeated refresh presses coalesce behind one request. Errors/timeouts
+retain the last snapshot and allow explicit retry. Replies must match session,
+child and request, and an old child's completion cannot finish a replacement.
+
+Trace wrapping is cached across frames and rebuilt for new records or width.
+Refresh preserves scroll; narrow layouts retain refresh/close hints. The real
+TUI drain now routes wheel bursts to the visible editor/view. Daemon capture
+Enter dispatches the visible action and quiet turns process trace notifications
+without needing another agent event.
+
+Verified 17 activity tests and the full 391-test TUI suite, 22 dispatch tests,
+seven real daemon-capture tests, workspace/all-target TUI strict clippy, CLI
+build, architecture and generated-theme checks. The gallery's subagent and job
+views were retaken at 1280 by 800 pixels. Recorded-turn viewing does not provide
+a parent/child mailbox or restore missing outputs in older transcripts.

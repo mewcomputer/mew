@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-pub use activity::{ActivityTarget, ActivityView, SidebarItem};
+pub use activity::{ActivityTarget, ActivityView, SidebarItem, SubagentTranscript};
 pub(crate) use input::visual_rows;
 pub use mdstream;
 
@@ -315,6 +315,7 @@ pub struct BuiltChat {
 #[derive(Debug, Clone)]
 pub struct SubagentState {
     pub task_id: String,
+    pub child_session_id: String,
     pub name: String,
     pub started_at: Instant,
     pub status: SubagentStatus,
@@ -957,6 +958,21 @@ impl App {
     pub fn apply_daemon_notification(&mut self, msg: &mew_protocol::ServerMessage) {
         use mew_protocol::ServerMessage;
         match msg {
+            ServerMessage::SubagentHistory {
+                session_id,
+                child_session_id,
+                request_id,
+                messages,
+                error,
+            } => {
+                self.apply_subagent_history(
+                    session_id,
+                    child_session_id,
+                    request_id,
+                    messages,
+                    error.as_deref(),
+                );
+            }
             ServerMessage::TodosUpdated { todos } => {
                 self.todos = todos
                     .iter()
@@ -2462,12 +2478,14 @@ impl App {
             }
             AgentEvent::SubagentStart {
                 parent_call_id,
+                child_session_id,
                 name,
                 display_name,
                 ..
             } => {
                 let state = SubagentState {
                     task_id: parent_call_id,
+                    child_session_id,
                     name,
                     started_at: Instant::now(),
                     status: SubagentStatus::Running,
@@ -2501,13 +2519,14 @@ impl App {
             }
             AgentEvent::SubagentEnd {
                 parent_call_id,
+                child_session_id,
                 outcome,
                 ..
             } => {
                 if let Some(sa) = self
                     .subagents
                     .iter_mut()
-                    .find(|s| s.task_id == parent_call_id)
+                    .find(|s| s.task_id == parent_call_id && s.child_session_id == child_session_id)
                 {
                     sa.status = match outcome {
                         mew_agent::SubagentOutcome::Completed => SubagentStatus::Completed,
@@ -2517,6 +2536,9 @@ impl App {
                         }
                     };
                     sa.finished_at = Some(Instant::now());
+                    if self.activity_view.as_ref().is_some_and(|view| view.session_id == self.status.session_id && matches!(&view.target, ActivityTarget::Subagent(id) if id == &parent_call_id)) {
+                        self.refresh_activity();
+                    }
                 }
             }
             AgentEvent::SubagentPermissionRequest { call, tx, .. } => {

@@ -162,19 +162,6 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
             }
             match event {
                 mew_tui::Event::Input(crossterm_event) => {
-                    if let crossterm::event::Event::Mouse(ref mouse) = crossterm_event {
-                        match mouse.kind {
-                            crossterm::event::MouseEventKind::ScrollUp => {
-                                app.scroll_up(1);
-                                continue;
-                            }
-                            crossterm::event::MouseEventKind::ScrollDown => {
-                                app.scroll_down(1);
-                                continue;
-                            }
-                            _ => {}
-                        }
-                    }
                     if let Some(action) =
                         mew_tui::events::handle_input_event(&mut app, crossterm_event)
                     {
@@ -208,6 +195,10 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
             if let Some(text) = app.pop_queued_message() {
                 queued_actions.push(mew_tui::events::Action::Submit(text));
             }
+        }
+
+        if let Some(action) = app.take_activity_request(std::time::Instant::now()) {
+            queued_actions.push(action);
         }
 
         // Replay queued actions through handle_action.

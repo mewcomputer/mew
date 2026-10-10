@@ -818,6 +818,8 @@ fn scroll_decision(scroll: &mut u16, view: &crate::app::DecisionView, code: KeyC
 fn handle_activity_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
         app.close_activity();
+    } else if key.code == KeyCode::Char('r') {
+        app.refresh_activity();
     } else if let Some(view) = app.activity_view.as_mut() {
         scroll_decision(&mut view.scroll, &view.view, key.code);
     }
@@ -1908,6 +1910,11 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
 /// High-level actions produced by input handling.
 #[derive(Debug, Clone, strum::EnumIter)]
 pub enum Action {
+    ReadSubagentHistory {
+        session_id: String,
+        child_session_id: String,
+        request_id: String,
+    },
     UpdateTodo {
         session_id: String,
         edit: mew_protocol::TodoEdit,

@@ -400,17 +400,17 @@ impl DaemonBackend {
                     Ok(mew_tui::Event::Input(_) | mew_tui::Event::Quit) => {}
                     Err(_) => break,
                 }
-                while let Ok(msg) = self.notify_rx.try_recv() {
-                    trace!(
-                        msg_type = server_message_type(&msg),
-                        "wait_turn: received server message"
-                    );
-                    self.app.apply_daemon_notification(&msg);
-                    if let Some((request_id, event)) = self.client.take_required_action(&msg) {
-                        self.app.handle_daemon_required_action(request_id, event);
-                    }
-                    had_event = true;
+            }
+            while let Ok(msg) = self.notify_rx.try_recv() {
+                trace!(
+                    msg_type = server_message_type(&msg),
+                    "wait_turn: received server message"
+                );
+                self.app.apply_daemon_notification(&msg);
+                if let Some((request_id, event)) = self.client.take_required_action(&msg) {
+                    self.app.handle_daemon_required_action(request_id, event);
                 }
+                had_event = true;
             }
 
             let now = Instant::now();
@@ -418,6 +418,7 @@ impl DaemonBackend {
                 self.app.tick();
                 last_tick = now;
             }
+            self.refresh_activity().await;
             let frame_due = now.duration_since(last_frame).as_millis() >= 16;
             if frame_due {
                 let draw_start = Instant::now();
@@ -491,6 +492,12 @@ impl DaemonBackend {
             if let Some((request_id, event)) = self.client.take_required_action(&msg) {
                 self.app.handle_daemon_required_action(request_id, event);
             }
+        }
+    }
+
+    async fn refresh_activity(&mut self) {
+        if let Some(action) = self.app.take_activity_request(Instant::now()) {
+            self.dispatch_action(action).await;
         }
     }
 
@@ -924,12 +931,13 @@ async fn exec_verb_daemon(
         "type" => backend.type_str(rest),
         "key" => match mew_tui::harness::parse_key(rest) {
             Some(key) => {
-                if key.code == KeyCode::Enter {
-                    backend.send_text("").await?;
-                    out.push_str("--- submitted ---\n");
-                } else {
-                    backend.send_key(key);
+                if let Some(action) = mew_tui::events::handle_input_event(
+                    &mut backend.app,
+                    crossterm::event::Event::Key(key),
+                ) {
+                    backend.dispatch_action(action).await;
                 }
+                backend.capture_frame();
             }
             None => out.push_str(&format!("!! unknown key '{rest}'\n")),
         },
@@ -1067,6 +1075,7 @@ async fn exec_verb_daemon(
         }
     }
 
+    backend.refresh_activity().await;
     Ok(out)
 }
 
@@ -1266,6 +1275,69 @@ mod tests {
                 Some("fake".to_string()),
             ))
         })
+    }
+
+    #[tokio::test]
+    async fn test_daemon_capture_processes_trace_notifications_during_a_quiet_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = mew_daemon::DaemonServer::with_session_dir(
+            fake_provider_builder("unused"),
+            dir.path().to_path_buf(),
+        );
+        let (addr, handle) = spawn_daemon_tcp(server).await;
+        let mut backend = DaemonBackend::connect(&format!("ws://{addr}"), 80, 24)
+            .await
+            .unwrap();
+        backend
+            .app
+            .handle_agent_event(mew_agent::AgentEvent::SubagentStart {
+                parent_call_id: "missing-child".into(),
+                child_session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+                name: "researcher".into(),
+                display_name: None,
+            });
+        backend.app.open_subagent("missing-child".into());
+        backend.app.streaming = true;
+        backend.refresh_activity().await;
+        let result = backend.wait_turn(200).await;
+        handle.abort();
+        assert!(
+            result.is_err(),
+            "the quiet turn is deliberately still active"
+        );
+        assert!(
+            backend
+                .app
+                .activity_view
+                .as_ref()
+                .unwrap()
+                .transcript
+                .as_ref()
+                .unwrap()
+                .error
+                .is_some(),
+            "the daemon's missing-recording reply must be read without another agent event"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_daemon_capture_enter_opens_activity_without_submitting_a_turn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = mew_daemon::DaemonServer::with_session_dir(
+            fake_provider_builder("unexpected turn"),
+            dir.path().to_path_buf(),
+        );
+        let (addr, handle) = spawn_daemon_tcp(server).await;
+        let mut backend = DaemonBackend::connect(&format!("ws://{addr}"), 80, 24)
+            .await
+            .unwrap();
+        backend.type_str("/agents");
+        let output = exec_verb_daemon(&mut backend, "key Enter", &mut None, &mut 0).await;
+        handle.abort();
+        let output =
+            output.expect("Enter must open the picker without waiting for a prompt stream");
+        assert!(backend.render().contains("Subagents"), "{output}");
+        assert!(!backend.app.streaming);
     }
 
     #[tokio::test]

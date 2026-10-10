@@ -62,6 +62,14 @@ pub trait CommandTarget: Send {
     /// Force context compaction.
     async fn compact(&mut self) -> Result<(), Unsupported>;
 
+    /// Read a child transcript without changing the attached conversation.
+    async fn read_subagent_history(
+        &mut self,
+        session_id: &str,
+        child_session_id: &str,
+        request_id: &str,
+    ) -> Result<(), Unsupported>;
+
     /// Edit one authoritative todo, preserving its identity and dependencies.
     async fn update_todo(
         &mut self,

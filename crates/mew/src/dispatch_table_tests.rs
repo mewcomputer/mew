@@ -64,6 +64,15 @@ impl runtime::target::CommandTarget for RecordingTarget {
         self.record("compact");
         self.check()
     }
+    async fn read_subagent_history(
+        &mut self,
+        _session_id: &str,
+        _child_session_id: &str,
+        _request_id: &str,
+    ) -> Result<(), runtime::target::Unsupported> {
+        self.record("read_subagent_history");
+        self.check()
+    }
     async fn update_todo(
         &mut self,
         _session_id: &str,

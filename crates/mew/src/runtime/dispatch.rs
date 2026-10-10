@@ -49,6 +49,29 @@ pub struct Ctx<'a, T: CommandTarget> {
 /// always maintained.
 pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action) -> Flow {
     match action {
+        Action::ReadSubagentHistory {
+            session_id,
+            child_session_id,
+            request_id,
+        } => {
+            if session_id == cx.app.status.session_id {
+                if let Err(Unsupported(reason)) = cx
+                    .target
+                    .read_subagent_history(&session_id, &child_session_id, &request_id)
+                    .await
+                {
+                    cx.app.apply_subagent_history(
+                        &session_id,
+                        &child_session_id,
+                        &request_id,
+                        &[],
+                        Some(reason),
+                    );
+                    cx.app.set_alert(reason);
+                }
+            }
+            Flow::Continue
+        }
         Action::UpdateTodo { session_id, edit } => {
             let result = if session_id != cx.app.status.session_id {
                 Err("session changed; reopen todos".into())

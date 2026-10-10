@@ -53,8 +53,20 @@ If the subagent hit its turn or time limit, the result is marked as
 possibly incomplete. The parent agent should treat it with appropriate
 caution.
 
-Progress updates flow up during the run via `AgentEvent::SubagentStatus`,
-so you can see what the subagent is doing in real time.
+Progress reports reach attached clients during the run. Child tool and workspace
+permission requests retain their reply channels, so approving or denying a
+request reaches the waiting child.
+
+### Parent and child communication
+
+The parent supplies the initial assignment. The child has its own context and
+returns its final result directly for a blocking start, or when the parent
+collects an asynchronous task with `subagent_wait`. Progress reports are UI
+status updates; they are not new messages in the parent's model context.
+
+There is no parent/child mailbox or follow-up messaging API. The parent can
+cancel a child, but cannot send new instructions to that running child. Child
+`ask_user` questions are not yet forwarded by the runner.
 
 ## Defining custom subagents
 
@@ -172,13 +184,16 @@ Turing (coder)     12s
   writing tests
 ```
 
-The display name, subagent type, and elapsed time are always visible. The
-last progress message appears on a sub-line with a indent. Completed
-subagents show a status dot:
+The display name, subagent type, and elapsed time are visible. The last
+progress message appears below the name. Completed and cancelled activity leaves
+the sidebar; recent failures retain their reason for the configured lifetime.
 
-- Green: completed successfully
-- Red: failed
-- Yellow: cancelled
+Click a subagent or use `/agents` to open its details. The borderless viewer shows
+the recorded assignment, child messages, available reasoning, tool arguments,
+results and errors. It refreshes saved turns while open; an unfinished turn may
+not yet be recorded. Press `r` to refresh manually, use arrow/page keys or the
+wheel to scroll, and Escape to close. An open viewer retains the final outcome.
+Trace replies cannot switch the parent conversation or replace its transcript.
 
 ## Subagent sessions
 
@@ -188,6 +203,9 @@ Each subagent run gets its own session file, nested under the parent:
 sessions/<parent-id>/subagents/<child-id>/session.jsonl
 ```
 
-This means subagent transcripts are persisted and can be resumed. The
-parent session's `meta.json` records child session IDs. See
+The parent session's `meta.json` records child session IDs. Recorded transcripts
+are readable, but child workers cannot currently be resumed. After a parent
+resume, outstanding tasks are reported as orphaned with a best-effort recovery
+of their final result. Older transcripts may lack completed tool outputs that
+were not recorded at the time; those outputs cannot be reconstructed. See
 [Sessions](/docs/getting-started/sessions/) for the session storage format.

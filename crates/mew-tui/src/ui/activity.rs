@@ -12,7 +12,12 @@ pub(super) fn draw_activity(f: &mut Frame, app: &mut App, area: Rect) {
     let Some(view) = app.activity_view.as_mut() else {
         return;
     };
-    let width = DecisionLayout::content_width(area.width, 76);
+    let width_cap = if matches!(view.target, ActivityTarget::Subagent(_)) {
+        104
+    } else {
+        76
+    };
+    let width = DecisionLayout::content_width(area.width, width_cap);
     let mut rows = Vec::new();
     let (title, status) = if view.session_id != app.status.session_id {
         detail(
@@ -26,7 +31,11 @@ pub(super) fn draw_activity(f: &mut Frame, app: &mut App, area: Rect) {
         match &view.target {
             ActivityTarget::Subagent(id) => {
                 let state = app.subagents.iter().find(|state| &state.task_id == id);
-                if let Some(state) = state {
+                if let Some(state) = state.filter(|state| {
+                    view.transcript.as_ref().is_none_or(|transcript| {
+                        state.child_session_id == transcript.child_session_id
+                    })
+                }) {
                     let name = state
                         .display_name
                         .as_ref()
@@ -43,26 +52,71 @@ pub(super) fn draw_activity(f: &mut Frame, app: &mut App, area: Rect) {
                         SubagentStatus::Cancelled => "Cancelled",
                         SubagentStatus::Failed { .. } => "Failed",
                     };
+                    rows.extend(
+                        super::chat::wrap_text_to_width(
+                            &format!(
+                                "Task {} · {}",
+                                state.task_id,
+                                elapsed(state.started_at, state.finished_at)
+                            ),
+                            width,
+                        )
+                        .into_iter()
+                        .map(Line::from),
+                    );
+                    if let Some(transcript) = &mut view.transcript {
+                        if let Some(error) = &transcript.error {
+                            detail(&mut rows, "Trace unavailable", error, width);
+                        }
+                        if transcript.messages.is_empty() && transcript.error.is_none() {
+                            detail(
+                                &mut rows,
+                                "Recorded conversation",
+                                if transcript.loaded {
+                                    "No messages have been recorded."
+                                } else {
+                                    "Loading recorded turns. The unfinished turn may not appear yet."
+                                },
+                                width,
+                            );
+                        } else if !transcript.messages.is_empty() {
+                            if !transcript
+                                .rendered
+                                .as_ref()
+                                .is_some_and(|(rendered_width, _)| *rendered_width == width)
+                            {
+                                let mut lines = Vec::new();
+                                transcript_rows(&mut lines, &transcript.messages, width);
+                                transcript.rendered = Some((width, lines));
+                            }
+                            let (_, lines) = transcript.rendered.as_ref().unwrap();
+                            rows.extend(lines.iter().map(|line| {
+                                Line::from(
+                                    line.spans
+                                        .iter()
+                                        .map(|span| Span::styled(span.content.as_ref(), span.style))
+                                        .collect::<Vec<_>>(),
+                                )
+                            }));
+                        }
+                    }
                     if let Some(progress) = &state.last_progress {
                         detail(&mut rows, "Latest progress", progress, width);
                     }
                     if let SubagentStatus::Failed { reason } = &state.status {
                         detail(&mut rows, "Failure", reason, width);
                     }
-                    detail(
-                        &mut rows,
-                        "Elapsed",
-                        &elapsed(state.started_at, state.finished_at),
-                        width,
-                    );
-                    detail(&mut rows, "Task", &state.task_id, width);
                     ("Subagent", status)
                 } else {
                     detail(&mut rows, "Task", id, width);
                     detail(
                         &mut rows,
                         "Activity",
-                        "This subagent is no longer available.",
+                        if state.is_some() {
+                            "The child changed; close and reopen this subagent."
+                        } else {
+                            "This subagent is no longer available."
+                        },
                         width,
                     );
                     ("Subagent", "Unavailable")
@@ -99,7 +153,15 @@ pub(super) fn draw_activity(f: &mut Frame, app: &mut App, area: Rect) {
             }
         }
     };
-    let layout = DecisionLayout::new(area, 76, rows.len(), 0);
+    let mut layout = DecisionLayout::new(area, width_cap, rows.len() + 1, 0);
+    let title_area = Rect::new(
+        layout.body.x,
+        layout.body.y,
+        layout.body.width,
+        u16::from(layout.body.height > 0),
+    );
+    layout.body.y += title_area.height;
+    layout.body.height = layout.body.height.saturating_sub(title_area.height);
     layout.clamp_scroll(&mut view.scroll, &mut view.view, rows.len());
     let surface = app.theme.resolve("panel.overlay");
     let fg = app.theme.resolve("text.body");
@@ -110,14 +172,17 @@ pub(super) fn draw_activity(f: &mut Frame, app: &mut App, area: Rect) {
     });
     f.render_widget(Clear, layout.popup);
     f.render_widget(
-        Block::bordered()
-            .title(Span::styled(
-                format!(" {title} · {status} "),
-                Style::default().fg(fg).add_modifier(Modifier::BOLD),
-            ))
-            .border_style(Style::default().fg(accent))
-            .style(Style::default().bg(surface)),
+        Block::default().style(Style::default().bg(surface)),
         layout.popup,
+    );
+    f.render_widget(
+        Paragraph::new(format!("{title} · {status}")).style(
+            Style::default()
+                .fg(accent)
+                .bg(surface)
+                .add_modifier(Modifier::BOLD),
+        ),
+        title_area,
     );
     f.render_widget(
         Paragraph::new(rows)
@@ -125,8 +190,13 @@ pub(super) fn draw_activity(f: &mut Frame, app: &mut App, area: Rect) {
             .scroll((view.scroll, 0)),
         layout.body,
     );
-    let hint = if view.view.max_scroll > 0 && layout.hint.width >= 30 {
-        "↑↓/PgUp/PgDn scroll · Esc close"
+    let trace = view.transcript.is_some();
+    let hint = if trace && layout.hint.width >= 41 {
+        "↑↓/PgUp/PgDn scroll · r refresh · Esc close"
+    } else if trace && layout.hint.width >= 25 {
+        "↑↓ · r refresh · Esc close"
+    } else if trace && layout.hint.width >= 19 {
+        "r refresh Esc close"
     } else if view.view.max_scroll > 0 && layout.hint.width >= 16 {
         "↑↓ · Esc close"
     } else {
@@ -164,7 +234,59 @@ pub(super) fn draw_activity(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn detail(rows: &mut Vec<Line<'static>>, label: &str, value: &str, width: u16) {
+fn transcript_rows(rows: &mut Vec<Line<'static>>, messages: &[mew_message::Message], width: u16) {
+    use mew_message::{Part, Role, ToolState};
+    for (index, message) in messages.iter().enumerate() {
+        for part in &message.parts {
+            match part {
+                Part::Text(text) if !text.text.is_empty() => detail(
+                    rows,
+                    match message.role {
+                        Role::User if index == 0 => "Parent assignment",
+                        Role::User => "Instructions",
+                        Role::System => "System instructions",
+                        Role::Assistant => "Subagent message",
+                    },
+                    &text.text,
+                    width,
+                ),
+                Part::Reasoning(reasoning) if !reasoning.text.is_empty() => {
+                    detail(rows, "Reasoning", &reasoning.text, width)
+                }
+                Part::ToolCall(call) => {
+                    let state = match call.state {
+                        ToolState::Pending(_) => "pending",
+                        ToolState::Running(_) => "running",
+                        ToolState::Completed(_) => "completed",
+                        ToolState::Error(_) => "failed",
+                    };
+                    detail(
+                        rows,
+                        &format!("{} · {state}", call.tool_name),
+                        &serde_json::to_string_pretty(call.state.input()).unwrap_or_default(),
+                        width,
+                    );
+                    if let Some(output) = call.state.output().filter(|output| !output.is_empty()) {
+                        detail(rows, "Result", output, width);
+                    }
+                    if let ToolState::Error(error) = &call.state {
+                        detail(rows, "Error", &error.error, width);
+                    }
+                }
+                Part::File(file) => detail(rows, "File", &file.url, width),
+                Part::Compaction(compaction) => detail(
+                    rows,
+                    "Compaction",
+                    compaction.summary.as_deref().unwrap_or("Context compacted"),
+                    width,
+                ),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn detail<'a>(rows: &mut Vec<Line<'a>>, label: &str, value: &str, width: u16) {
     if !rows.is_empty() {
         rows.push(Line::default());
     }

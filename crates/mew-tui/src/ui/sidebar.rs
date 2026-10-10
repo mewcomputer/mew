@@ -1012,6 +1012,7 @@ mod tests {
         app.sidebar_finished_ttl = 0; // hide finished entries immediately
         app.subagents.push(crate::app::SubagentState {
             task_id: "running".into(),
+            child_session_id: "running-child".into(),
             name: "researcher".into(),
             started_at: std::time::Instant::now(),
             status: crate::app::SubagentStatus::Running,
@@ -1021,6 +1022,7 @@ mod tests {
         });
         app.subagents.push(crate::app::SubagentState {
             task_id: "done".into(),
+            child_session_id: "done-child".into(),
             name: "coder".into(),
             started_at: std::time::Instant::now(),
             status: crate::app::SubagentStatus::Completed,
