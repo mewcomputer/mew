@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -129,7 +130,8 @@ impl ShellJobState {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Running => "running",
-            Self::Completed { .. } => "completed",
+            Self::Completed { exit_code: 0 } => "completed",
+            Self::Completed { .. } => "failed",
             Self::Failed { .. } => "failed",
             Self::Cancelled => "cancelled",
         }
@@ -152,6 +154,16 @@ pub struct ShellJob {
     /// Notified once when the job reaches a terminal state. Used by
     /// `job_block` to wait without polling.
     pub done: Arc<tokio::sync::Notify>,
+    /// Readers could not reach EOF within the bounded drain after process exit.
+    pub output_incomplete: Arc<AtomicBool>,
+}
+
+/// A bounded UTF-8 chunk from a background job’s accumulated output.
+pub struct ShellJobOutput {
+    pub output: String,
+    pub next_offset: u64,
+    pub done: bool,
+    pub incomplete: bool,
 }
 
 #[derive(Clone)]
@@ -1642,6 +1654,7 @@ impl Agent {
         let output = Arc::new(tokio::sync::Mutex::new(String::new()));
         let state = Arc::new(tokio::sync::Mutex::new(ShellJobState::Running));
         let done = Arc::new(tokio::sync::Notify::new());
+        let output_incomplete = Arc::new(AtomicBool::new(false));
 
         let job = ShellJob {
             id: id.clone(),
@@ -1651,14 +1664,23 @@ impl Agent {
             output: output.clone(),
             state: state.clone(),
             done: done.clone(),
+            output_incomplete: output_incomplete.clone(),
         };
 
         // Spawn the background runner.
-        let _job_id = id.clone();
         let cmd = command.to_string();
         let cwd = cwd.to_path_buf();
         tokio::spawn(async move {
-            run_shell_job(&cmd, &cwd, &output, &state, &done, &cancel).await;
+            run_shell_job(
+                &cmd,
+                &cwd,
+                &output,
+                &state,
+                &done,
+                &cancel,
+                &output_incomplete,
+            )
+            .await;
         });
 
         self.shell_jobs.lock().await.insert(id.clone(), job);
@@ -1670,7 +1692,11 @@ impl Agent {
         let jobs = self.shell_jobs.lock().await;
         let job = jobs.get(job_id)?;
         let state = job.state.lock().await.clone();
-        let output = job.output.lock().await.clone();
+        let mut output = job.output.lock().await.clone();
+        if state.is_terminal() && job.output_incomplete.load(Ordering::Acquire) {
+            output
+                .push_str("\n[output incomplete: a reader did not reach EOF after process exit]\n");
+        }
         Some((state, output))
     }
 
@@ -1683,20 +1709,50 @@ impl Agent {
         job_id: &str,
         timeout_secs: u64,
     ) -> Option<(ShellJobState, String)> {
-        let done = {
+        let (done, state) = {
             let jobs = self.shell_jobs.lock().await;
-            jobs.get(job_id)?.done.clone()
+            let job = jobs.get(job_id)?;
+            (job.done.clone(), job.state.clone())
         };
-
-        // Wait for the done signal or timeout.
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            done.notified(),
-        )
-        .await;
+        let notified = done.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !state.lock().await.is_terminal() {
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), notified).await;
+        }
 
         // Return whatever state we're in.
         self.shell_job_status(job_id).await
+    }
+
+    /// Read up to 64 KiB without copying the growing output buffer. Offsets
+    /// are UTF-8 byte positions returned by the preceding read.
+    pub async fn shell_job_output(
+        &self,
+        job_id: &str,
+        offset: u64,
+    ) -> Result<ShellJobOutput, String> {
+        let jobs = self.shell_jobs.lock().await;
+        let job = jobs
+            .get(job_id)
+            .ok_or_else(|| format!("unknown job: {job_id}"))?;
+        let terminal = job.state.lock().await.is_terminal();
+        let output = job.output.lock().await;
+        let start = usize::try_from(offset).map_err(|_| "invalid output offset".to_string())?;
+        if start > output.len() || !output.is_char_boundary(start) {
+            return Err("invalid output offset".to_string());
+        }
+        let mut end = start.saturating_add(65_536).min(output.len());
+        while !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        Ok(ShellJobOutput {
+            output: output[start..end].to_string(),
+            next_offset: end as u64,
+            done: terminal && end == output.len(),
+            incomplete: terminal && job.output_incomplete.load(Ordering::Acquire),
+        })
     }
 
     /// Cancel a running shell job by killing the process. Returns true if
@@ -1725,6 +1781,7 @@ async fn run_shell_job(
     state: &Arc<tokio::sync::Mutex<ShellJobState>>,
     done: &Arc<tokio::sync::Notify>,
     cancel: &tokio_util::sync::CancellationToken,
+    output_incomplete: &Arc<AtomicBool>,
 ) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::process::Command;
@@ -1750,52 +1807,72 @@ async fn run_shell_job(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    // Reader tasks for stdout and stderr.
+    let mut readers = tokio::task::JoinSet::new();
     if let Some(stdout) = stdout {
         let output = output.clone();
-        tokio::spawn(async move {
+        readers.spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let mut out = output.lock().await;
-                out.push_str(&line);
-                out.push('\n');
+            loop {
+                match reader.next_line().await {
+                    Ok(Some(line)) => {
+                        let mut out = output.lock().await;
+                        out.push_str(&line);
+                        out.push('\n');
+                    }
+                    Ok(None) => return true,
+                    Err(_) => return false,
+                }
             }
         });
     }
     if let Some(stderr) = stderr {
         let output = output.clone();
-        tokio::spawn(async move {
+        readers.spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let mut out = output.lock().await;
-                out.push_str(&line);
-                out.push('\n');
+            loop {
+                match reader.next_line().await {
+                    Ok(Some(line)) => {
+                        let mut out = output.lock().await;
+                        out.push_str(&line);
+                        out.push('\n');
+                    }
+                    Ok(None) => return true,
+                    Err(_) => return false,
+                }
             }
         });
     }
 
-    // Wait for exit or cancellation.
-    tokio::select! {
+    let final_state = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
             let _ = child.kill().await;
-            *state.lock().await = ShellJobState::Cancelled;
+            ShellJobState::Cancelled
         }
         status = child.wait() => {
             match status {
-                Ok(s) => {
-                    *state.lock().await = ShellJobState::Completed {
-                        exit_code: s.code().unwrap_or(-1),
-                    };
-                }
-                Err(e) => {
-                    *state.lock().await = ShellJobState::Failed {
-                        reason: format!("wait failed: {}", e),
-                    };
-                }
+                Ok(s) => ShellJobState::Completed { exit_code: s.code().unwrap_or(-1) },
+                Err(e) => ShellJobState::Failed { reason: format!("wait failed: {}", e) },
             }
         }
+    };
+
+    // Descendants can inherit a pipe after the shell exits. Preserve buffered
+    // output, but bound that wait so those descendants cannot retain the job.
+    let mut complete = true;
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while let Some(result) = readers.join_next().await {
+            complete &= matches!(result, Ok(true));
+        }
+    })
+    .await
+    .is_ok();
+    if !drained {
+        readers.abort_all();
+        while readers.join_next().await.is_some() {}
     }
+    output_incomplete.store(!drained || !complete, Ordering::Release);
+    *state.lock().await = final_state;
 
     done.notify_waiters();
 }

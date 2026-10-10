@@ -1974,6 +1974,8 @@ fn translate_message(
         | ServerMessage::SessionDiff { .. }
         | ServerMessage::SessionDiffError { .. }
         | ServerMessage::SubagentHistory { .. }
+        | ServerMessage::JobOutput { .. }
+        | ServerMessage::JobOutputError { .. }
         | ServerMessage::TodoUpdated { .. }
         | ServerMessage::TodoUpdateError { .. }
         | ServerMessage::BrowserPageRegistration { .. }

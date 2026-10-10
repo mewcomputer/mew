@@ -399,6 +399,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::GitStatus { .. }
                 | ClientMessage::ReadSessionDiff { .. }
                 | ClientMessage::ReadSubagentHistory { .. }
+                | ClientMessage::ReadJobOutput { .. }
                 | ClientMessage::ReadPromptReceipt { .. }
                 | ClientMessage::UpdateTodo { .. }
                 | ClientMessage::WatchWorkspace { .. }
@@ -439,6 +440,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
             | ClientMessage::GitStatus { .. }
             | ClientMessage::ReadSessionDiff { .. }
             | ClientMessage::ReadSubagentHistory { .. }
+            | ClientMessage::ReadJobOutput { .. }
             | ClientMessage::ReadPromptReceipt { .. }
             | ClientMessage::WatchWorkspace { .. }
     );
@@ -985,17 +987,6 @@ where
                             previous_terminal.close();
                         }
                         let actions = session.pending_action_lock.lock().await;
-                        let (cid, was_first) =
-                            session.attach_client(client_tx.clone(), client_kind).await;
-                        client_id = Some(cid);
-                        attached_session = Some(session.clone());
-                        if client_kind == ClientKind::Desktop
-                            && !legacy_iroh
-                            && remote_scope.is_none()
-                            && remote_authorizer.is_none()
-                        {
-                            confirmed_desktop_sessions.insert(session.id.clone());
-                        }
                         let session_id = session.id.clone();
                         let (model, provider, permission_mode) = {
                             let agent = session.agent.lock().await;
@@ -1021,14 +1012,29 @@ where
                                     .await;
                             }
                         }
+                        let (cid, was_first) = session
+                            .attach_client_ready(
+                                client_tx.clone(),
+                                client_kind,
+                                ServerMessage::SessionReady {
+                                    session_id: session_id.clone(),
+                                    cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
+                                    model,
+                                    provider,
+                                    permission_mode,
+                                },
+                            )
+                            .await;
+                        client_id = Some(cid);
+                        attached_session = Some(session.clone());
+                        if client_kind == ClientKind::Desktop
+                            && !legacy_iroh
+                            && remote_scope.is_none()
+                            && remote_authorizer.is_none()
+                        {
+                            confirmed_desktop_sessions.insert(session.id.clone());
+                        }
                         let running = session.is_running.lock().await;
-                        reply(ServerMessage::SessionReady {
-                            session_id: session_id.clone(),
-                            cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
-                            model,
-                            provider,
-                            permission_mode,
-                        });
                         reply(ServerMessage::SessionActivityChanged {
                             session_id,
                             activity: if *running {
@@ -1088,18 +1094,6 @@ where
                             previous_terminal.close();
                         }
                         let actions = session.pending_action_lock.lock().await;
-                        let (cid, was_first) =
-                            session.attach_client(client_tx.clone(), client_kind).await;
-                        let existing_clients = session.client_presence_except(cid).await;
-                        client_id = Some(cid);
-                        attached_session = Some(session.clone());
-                        if client_kind == ClientKind::Desktop
-                            && !legacy_iroh
-                            && remote_scope.is_none()
-                            && remote_authorizer.is_none()
-                        {
-                            confirmed_desktop_sessions.insert(session.id.clone());
-                        }
 
                         let (model, provider, permission_mode) = {
                             let agent = session.agent.lock().await;
@@ -1117,14 +1111,30 @@ where
                             .session_cwd(&session_id)
                             .await
                             .map(|path| path.to_string_lossy().into_owned());
+                        let (cid, was_first) = session
+                            .attach_client_ready(
+                                client_tx.clone(),
+                                client_kind,
+                                ServerMessage::SessionReady {
+                                    session_id: session_id.clone(),
+                                    cwd,
+                                    model,
+                                    provider,
+                                    permission_mode,
+                                },
+                            )
+                            .await;
+                        let existing_clients = session.client_presence_except(cid).await;
+                        client_id = Some(cid);
+                        attached_session = Some(session.clone());
+                        if client_kind == ClientKind::Desktop
+                            && !legacy_iroh
+                            && remote_scope.is_none()
+                            && remote_authorizer.is_none()
+                        {
+                            confirmed_desktop_sessions.insert(session.id.clone());
+                        }
                         let running = session.is_running.lock().await;
-                        reply(ServerMessage::SessionReady {
-                            session_id: session_id.clone(),
-                            cwd,
-                            model,
-                            provider,
-                            permission_mode,
-                        });
                         reply(ServerMessage::SessionActivityChanged {
                             session_id: session_id.clone(),
                             activity: if *running {
@@ -1298,6 +1308,45 @@ where
                     messages,
                     next_cursor,
                     replace: false,
+                });
+            }
+            ClientMessage::ReadJobOutput {
+                session_id,
+                job_id,
+                request_id,
+                offset,
+            } => {
+                let result = match attached_session
+                    .as_ref()
+                    .filter(|session| session.id == session_id)
+                {
+                    Some(session) => {
+                        session
+                            .agent
+                            .lock()
+                            .await
+                            .shell_job_output(&job_id, offset)
+                            .await
+                    }
+                    None => Err("output requires the attached session".to_string()),
+                };
+                reply(match result {
+                    Ok(chunk) => ServerMessage::JobOutput {
+                        session_id,
+                        job_id,
+                        request_id,
+                        offset,
+                        next_offset: chunk.next_offset,
+                        output: chunk.output,
+                        done: chunk.done,
+                        incomplete: chunk.incomplete,
+                    },
+                    Err(message) => ServerMessage::JobOutputError {
+                        session_id,
+                        job_id,
+                        request_id,
+                        message,
+                    },
                 });
             }
             ClientMessage::ReadSubagentHistory {
@@ -3478,7 +3527,7 @@ fn wire_questions(questions: Vec<mew_agent::AskUserQuestion>) -> Vec<Question> {
 /// the `oneshot::Sender` is stashed in the `Session` for later response.
 async fn translate_event(
     event: AgentEvent,
-    session: &Session,
+    session: &Arc<Session>,
     session_mgr: &SessionManager,
 ) -> Vec<ServerMessage> {
     match event {
@@ -3717,11 +3766,8 @@ async fn translate_event(
             command,
             state,
         } => {
-            vec![ServerMessage::JobUpdate {
-                job_id,
-                command,
-                state,
-            }]
+            session.publish_job_update(job_id, command, state).await;
+            Vec::new()
         }
         AgentEvent::FileDelta {
             path,

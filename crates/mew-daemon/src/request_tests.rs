@@ -1443,3 +1443,334 @@ async fn activity_attach_snapshot_restores_current_work_and_removes_missed_compl
     assert!(subagents.is_empty());
     assert_eq!(jobs[0].state, "completed");
 }
+
+#[tokio::test]
+async fn job_output_reads_only_attached_session_and_preserves_offsets() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let parent = server.session_manager.create(None).await.unwrap();
+    let other = server.session_manager.create(None).await.unwrap();
+    let job_id = {
+        let agent = parent.agent.lock().await;
+        let id = agent
+            .start_shell_job("printf '日本語\\nfinal\\n'", directory.path())
+            .await;
+        assert!(agent.shell_job_block(&id, 3).await.unwrap().0.is_terminal());
+        id
+    };
+    let mut socket = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id: parent.id.clone(),
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    flush(&mut socket).await;
+    send(
+        &mut socket,
+        ClientMessage::ReadJobOutput {
+            session_id: parent.id.clone(),
+            job_id: job_id.clone(),
+            request_id: "first".into(),
+            offset: 0,
+        },
+    )
+    .await;
+    let messages = flush(&mut socket).await;
+    assert!(messages.iter().any(|message| matches!(message, ServerMessage::JobOutput { session_id, job_id: actual, request_id, offset: 0, next_offset: 16, output, done: true, incomplete: false } if session_id == &parent.id && actual == &job_id && request_id == "first" && output == "日本語\nfinal\n")), "{messages:?}");
+    for (session_id, id, offset) in [
+        (other.id.clone(), job_id.clone(), 0),
+        (parent.id.clone(), "missing".into(), 0),
+        (parent.id.clone(), job_id.clone(), 1),
+        (parent.id.clone(), job_id.clone(), 17),
+    ] {
+        send(
+            &mut socket,
+            ClientMessage::ReadJobOutput {
+                session_id: session_id.clone(),
+                job_id: id.clone(),
+                request_id: "error".into(),
+                offset,
+            },
+        )
+        .await;
+        let messages = flush(&mut socket).await;
+        assert!(messages.iter().any(|message| matches!(message, ServerMessage::JobOutputError { session_id: actual, job_id, request_id, message } if actual == &session_id && job_id == &id && request_id == "error" && !message.is_empty())), "{messages:?}");
+    }
+    send(
+        &mut socket,
+        ClientMessage::ReadJobOutput {
+            session_id: parent.id.clone(),
+            job_id,
+            request_id: "end".into(),
+            offset: 16,
+        },
+    )
+    .await;
+    assert!(flush(&mut socket).await.iter().any(|message| matches!(message, ServerMessage::JobOutput { request_id, offset: 16, next_offset: 16, output, done: true, .. } if request_id == "end" && output.is_empty())));
+}
+
+#[tokio::test]
+async fn job_output_reserves_partial_utf8_at_the_chunk_boundary() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let job_id = {
+        let agent = session.agent.lock().await;
+        let id = agent
+            .start_shell_job(
+                "awk 'BEGIN {for(i=0;i<65533;i++) printf \"x\"; printf \"🐱tail\\n\"}'",
+                directory.path(),
+            )
+            .await;
+        assert!(agent.shell_job_block(&id, 3).await.unwrap().0.is_terminal());
+        id
+    };
+    let mut socket = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id: session.id.clone(),
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    flush(&mut socket).await;
+    send(
+        &mut socket,
+        ClientMessage::ReadJobOutput {
+            session_id: session.id.clone(),
+            job_id: job_id.clone(),
+            request_id: "first".into(),
+            offset: 0,
+        },
+    )
+    .await;
+    let first = flush(&mut socket).await;
+    assert!(first.iter().any(|message|matches!(message,ServerMessage::JobOutput {offset:0,next_offset:65_533,output,done:false,incomplete:false,..} if output==&"x".repeat(65_533))));
+    send(
+        &mut socket,
+        ClientMessage::ReadJobOutput {
+            session_id: session.id.clone(),
+            job_id,
+            request_id: "tail".into(),
+            offset: 65_533,
+        },
+    )
+    .await;
+    let tail = flush(&mut socket).await;
+    assert!(tail.iter().any(|message|matches!(message,ServerMessage::JobOutput {offset:65_533,next_offset:65_542,output,done:true,incomplete:false,..} if output=="🐱tail\n")),"{tail:?}");
+}
+
+#[tokio::test]
+async fn idle_shell_jobs_publish_terminal_state_and_reconnect_without_losing_command() {
+    for mode in 0..3 {
+        let cancelled = mode == 1;
+        let directory = tempfile::tempdir().unwrap();
+        let command = if cancelled {
+            "printf 'ready\\n'; sleep 5 & wait"
+        } else if mode == 2 {
+            "sleep 0.3; printf 'build failed\\n'; exit 7"
+        } else {
+            "sleep 0.3; printf 'final tail\\n'"
+        };
+        let mut script = mew_provider_fake::FakeProvider::tool_call(
+            "shell_background",
+            "start-job",
+            serde_json::json!({"command": command}),
+        );
+        script.pop();
+        script.extend(mew_provider_fake::FakeProvider::tool_call(
+            "exit_tool",
+            "exit",
+            serde_json::json!({"final_answer": "started"}),
+        ));
+        let provider = Arc::new(mew_provider_fake::FakeProvider::new(script));
+        let server = DaemonServer::with_session_dir(
+            Arc::new(move |params| {
+                let mut agent = Agent::new(
+                    provider.clone(),
+                    Arc::new(mew_hooks::NopDispatcher),
+                    Some(params.writer),
+                    vec![Arc::new(mew_tools::tools::exit_tool::ExitTool)],
+                    None,
+                );
+                agent.set_permission_engine(Arc::new(
+                    mew_config::permissions::PermissionEngine::new(vec![])
+                        .with_mode(mew_hooks::PermissionMode::Dangerous),
+                ));
+                Ok((agent, None, None))
+            }),
+            directory.path().to_path_buf(),
+        );
+        let session = server.session_manager.create(None).await.unwrap();
+        let mut socket = connect(&server).await;
+        send(
+            &mut socket,
+            ClientMessage::AttachSession {
+                session_id: session.id.clone(),
+                client_kind: ClientKind::Tui,
+            },
+        )
+        .await;
+        flush(&mut socket).await;
+        send(
+            &mut socket,
+            ClientMessage::Prompt {
+                text: "start background work".into(),
+                attachments: vec![],
+            },
+        )
+        .await;
+        let job_id = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut job_id = None;
+            loop {
+                if let Message::Text(text) = socket.next().await.unwrap().unwrap() {
+                    let message: ServerMessage = mew_protocol::decode_json(&text).unwrap();
+                    match message {
+                        ServerMessage::JobUpdate {
+                            job_id: id,
+                            command: actual,
+                            state,
+                        } if state == "running" => {
+                            assert_eq!(actual, command);
+                            job_id = Some(id);
+                        }
+                        ServerMessage::SessionActivityChanged {
+                            activity: SessionState::Idle,
+                            ..
+                        } => {
+                            break job_id
+                                .expect("background tool must start before the parent finishes")
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .await
+        .expect("parent turn must finish while the job remains active");
+        if cancelled {
+            assert!(session.agent.lock().await.cancel_shell_job(&job_id).await);
+        }
+        let expected = match mode {
+            1 => "cancelled",
+            2 => "failed",
+            _ => "completed",
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Message::Text(text) = socket.next().await.unwrap().unwrap() {
+                    let message: ServerMessage = mew_protocol::decode_json(&text).unwrap();
+                    if let ServerMessage::JobUpdate {
+                        job_id: id,
+                        command: actual,
+                        state,
+                    } = message
+                    {
+                        if id == job_id && state == expected {
+                            assert_eq!(actual, command);
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("idle clients must receive job completion without another turn");
+        let output = session
+            .agent
+            .lock()
+            .await
+            .shell_job_output(&job_id, 0)
+            .await
+            .unwrap();
+        assert!(output.done);
+        if mode == 0 {
+            assert_eq!(output.output, "final tail\n");
+        }
+        if mode == 2 {
+            assert_eq!(output.output, "build failed\n");
+        }
+        let stale = publish(
+            &server,
+            &session,
+            AgentEvent::JobUpdate {
+                job_id: job_id.clone(),
+                command: String::new(),
+                state: "running".into(),
+            },
+        )
+        .await;
+        assert!(stale.iter().all(|message| !matches!(message, ServerMessage::JobUpdate {state, ..} if state == "running")), "late status must not regress terminal state: {stale:?}");
+        socket.close(None).await.unwrap();
+        let mut socket = connect(&server).await;
+        send(
+            &mut socket,
+            ClientMessage::AttachSession {
+                session_id: session.id.clone(),
+                client_kind: ClientKind::Tui,
+            },
+        )
+        .await;
+        let messages = flush(&mut socket).await;
+        let jobs = messages
+            .iter()
+            .find_map(|message| match message {
+                ServerMessage::SessionActivitySnapshot { jobs, .. } => Some(jobs),
+                _ => None,
+            })
+            .expect("reconnect must replay jobs");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id, job_id);
+        assert_eq!(jobs[0].state, expected);
+        assert_eq!(jobs[0].command, command);
+    }
+}
+
+#[tokio::test]
+async fn already_finished_job_publication_uses_terminal_source_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let job_id = {
+        let agent = session.agent.lock().await;
+        let id = agent
+            .start_shell_job("printf 'done\\n'", directory.path())
+            .await;
+        assert!(agent.shell_job_block(&id, 3).await.unwrap().0.is_terminal());
+        id
+    };
+    let messages = publish(
+        &server,
+        &session,
+        AgentEvent::JobUpdate {
+            job_id,
+            command: String::new(),
+            state: "running".into(),
+        },
+    )
+    .await;
+    assert!(messages.iter().any(|message| matches!(message, ServerMessage::JobUpdate {state, command, ..} if state == "completed" && command == "printf 'done\\n'")), "{messages:?}");
+    assert!(messages.iter().all(
+        |message| !matches!(message, ServerMessage::JobUpdate {state, ..} if state == "running")
+    ));
+}
+
+#[tokio::test]
+async fn nonzero_shell_exit_is_failed_with_original_exit_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let server = test_server(directory.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let agent = session.agent.lock().await;
+    let id = agent.start_shell_job("exit 7", directory.path()).await;
+    let (state, _) = agent.shell_job_block(&id, 3).await.unwrap();
+    assert_eq!(state.as_str(), "failed");
+    let jobs = agent.shell_jobs.lock().await;
+    assert_eq!(
+        format!("{:?}", *jobs[&id].state.lock().await),
+        "Completed { exit_code: 7 }"
+    );
+}

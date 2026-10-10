@@ -289,6 +289,10 @@ export class MewClient {
     loadSessionHistory(session_id, before, limit) {
         this.send({ type: "load_session_history", session_id, before, limit });
     }
+    /** Read the next bounded UTF-8 chunk from a session-owned job. */
+    readJobOutput(session_id, job_id, request_id, offset) {
+        this.send({ type: "read_job_output", session_id, job_id, request_id, offset });
+    }
     /** Request a recorded child transcript without changing the attached session. */
     readSubagentHistory(session_id, child_session_id, request_id) {
         this.send({ type: "read_subagent_history", session_id, child_session_id, request_id });
@@ -633,6 +637,12 @@ export class MewClient {
             case "session_history":
                 this.sessionHistoryMessages = msg.messages;
                 this.emit("session-history", { messages: msg.messages });
+                break;
+            case "job_output":
+                this.emit("job-output", { session_id: msg.session_id, job_id: msg.job_id, request_id: msg.request_id, offset: msg.offset, next_offset: msg.next_offset, output: msg.output, done: msg.done, incomplete: msg.incomplete });
+                break;
+            case "job_output_error":
+                this.emit("job-output-error", { session_id: msg.session_id, job_id: msg.job_id, request_id: msg.request_id, message: msg.message });
                 break;
             case "subagent_history":
                 this.emit("subagent-history", { session_id: msg.session_id, child_session_id: msg.child_session_id, request_id: msg.request_id, messages: msg.messages, error: msg.error });

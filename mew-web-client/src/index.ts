@@ -37,6 +37,7 @@ export type ClientMessage =
   | { type: "new_session"; cwd: string | null; client_kind: string }
   | { type: "attach_session"; session_id: string; client_kind: string }
   | { type: "load_session_history"; session_id: string; before: number; limit?: number }
+  | { type: "read_job_output"; session_id: string; job_id: string; request_id: string; offset: number }
   | { type: "read_subagent_history"; session_id: string; child_session_id: string; request_id: string }
   | { type: "list_sessions" }
   | { type: "delete_session"; session_id: string }
@@ -222,6 +223,24 @@ export interface JobActivity {
   job_id: string;
   command: string;
   state: string;
+}
+
+export interface JobOutput {
+  session_id: string;
+  job_id: string;
+  request_id: string;
+  offset: number;
+  next_offset: number;
+  output: string;
+  done: boolean;
+  incomplete: boolean;
+}
+
+export interface JobOutputError {
+  session_id: string;
+  job_id: string;
+  request_id: string;
+  message: string;
 }
 
 export interface SessionActivitySnapshot {
@@ -529,6 +548,8 @@ export type ServerMessage =
   | { type: "session_cleared" }
   | { type: "session_list"; sessions: SessionInfo[] }
   | { type: "session_history"; messages: Message[] }
+  | ({ type: "job_output" } & JobOutput)
+  | ({ type: "job_output_error" } & JobOutputError)
   | { type: "subagent_history"; session_id: string; child_session_id: string; request_id: string; messages: Message[]; error: string | null }
   | {
       type: "session_history_page";
@@ -712,6 +733,8 @@ export interface MewClientEvents {
   "session-cleared": () => void;
   "session-list": (data: { sessions: SessionInfo[] }) => void;
   "session-history": (data: { messages: Message[] }) => void;
+  "job-output": (data: JobOutput) => void;
+  "job-output-error": (data: JobOutputError) => void;
   "subagent-history": (data: { session_id: string; child_session_id: string; request_id: string; messages: Message[]; error: string | null }) => void;
   "model-list": (data: { models: ModelInfo[] }) => void;
   "model-switched": (data: { provider: string; model: string }) => void;
@@ -1072,6 +1095,11 @@ export class MewClient {
    *  previous history page. */
   loadSessionHistory(session_id: string, before: number, limit?: number): void {
     this.send({ type: "load_session_history", session_id, before, limit });
+  }
+
+  /** Read the next bounded UTF-8 chunk from a session-owned job. */
+  readJobOutput(session_id: string, job_id: string, request_id: string, offset: number): void {
+    this.send({ type: "read_job_output", session_id, job_id, request_id, offset });
   }
 
   /** Request a recorded child transcript without changing the attached session. */
@@ -1465,6 +1493,12 @@ export class MewClient {
       case "session_history":
         this.sessionHistoryMessages = msg.messages;
         this.emit("session-history", { messages: msg.messages });
+        break;
+      case "job_output":
+        this.emit("job-output", { session_id: msg.session_id, job_id: msg.job_id, request_id: msg.request_id, offset: msg.offset, next_offset: msg.next_offset, output: msg.output, done: msg.done, incomplete: msg.incomplete });
+        break;
+      case "job_output_error":
+        this.emit("job-output-error", { session_id: msg.session_id, job_id: msg.job_id, request_id: msg.request_id, message: msg.message });
         break;
       case "subagent_history":
         this.emit("subagent-history", { session_id: msg.session_id, child_session_id: msg.child_session_id, request_id: msg.request_id, messages: msg.messages, error: msg.error });

@@ -672,3 +672,23 @@ test("activity snapshots preserve their session and exact task identity", async 
   latest().peerSend({ type: "session_activity_snapshot", ...snapshot });
   assert.deepEqual(snapshots, [snapshot]);
 });
+
+test("job output chunks preserve request scope, offsets and incomplete status", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connected = client.connect();
+  latest().open();
+  await connected;
+  const replies: unknown[] = [];
+  const errors: unknown[] = [];
+  client.on("job-output", (reply) => replies.push(reply));
+  client.on("job-output-error", (error) => errors.push(error));
+  client.readJobOutput("session", "job", "read", 65_535);
+  assert.deepEqual(latest().sent.at(-1), { type: "read_job_output", session_id: "session", job_id: "job", request_id: "read", offset: 65_535 });
+  const chunk = { session_id: "session", job_id: "job", request_id: "read", offset: 65_535, next_offset: 65_538, output: "猫", done: true, incomplete: true };
+  latest().peerSend({ type: "job_output", ...chunk });
+  assert.deepEqual(replies, [chunk]);
+  const error = { session_id: "session", job_id: "job", request_id: "next", message: "invalid output offset" };
+  latest().peerSend({ type: "job_output_error", ...error });
+  assert.deepEqual(errors, [error]);
+});

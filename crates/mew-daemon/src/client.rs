@@ -1018,6 +1018,8 @@ async fn translate_server_message(
         | ServerMessage::SessionHistory { .. }
         | ServerMessage::SessionHistoryPage { .. }
         | ServerMessage::SubagentHistory { .. }
+        | ServerMessage::JobOutput { .. }
+        | ServerMessage::JobOutputError { .. }
         | ServerMessage::SessionTitleChanged { .. }
         | ServerMessage::SessionSummaryChanged { .. }
         | ServerMessage::SessionAlert { .. }

@@ -21,6 +21,12 @@ export type ClientMessage = {
     before: number;
     limit?: number;
 } | {
+    type: "read_job_output";
+    session_id: string;
+    job_id: string;
+    request_id: string;
+    offset: number;
+} | {
     type: "read_subagent_history";
     session_id: string;
     child_session_id: string;
@@ -304,6 +310,22 @@ export interface JobActivity {
     job_id: string;
     command: string;
     state: string;
+}
+export interface JobOutput {
+    session_id: string;
+    job_id: string;
+    request_id: string;
+    offset: number;
+    next_offset: number;
+    output: string;
+    done: boolean;
+    incomplete: boolean;
+}
+export interface JobOutputError {
+    session_id: string;
+    job_id: string;
+    request_id: string;
+    message: string;
 }
 export interface SessionActivitySnapshot {
     session_id: string;
@@ -634,7 +656,11 @@ export type ServerMessage = {
 } | {
     type: "session_history";
     messages: Message[];
-} | {
+} | ({
+    type: "job_output";
+} & JobOutput) | ({
+    type: "job_output_error";
+} & JobOutputError) | {
     type: "subagent_history";
     session_id: string;
     child_session_id: string;
@@ -890,6 +916,8 @@ export interface MewClientEvents {
     "session-history": (data: {
         messages: Message[];
     }) => void;
+    "job-output": (data: JobOutput) => void;
+    "job-output-error": (data: JobOutputError) => void;
     "subagent-history": (data: {
         session_id: string;
         child_session_id: string;
@@ -1109,6 +1137,8 @@ export declare class MewClient {
     /** Request older messages for the attached session using the cursor from a
      *  previous history page. */
     loadSessionHistory(session_id: string, before: number, limit?: number): void;
+    /** Read the next bounded UTF-8 chunk from a session-owned job. */
+    readJobOutput(session_id: string, job_id: string, request_id: string, offset: number): void;
     /** Request a recorded child transcript without changing the attached session. */
     readSubagentHistory(session_id: string, child_session_id: string, request_id: string): void;
     /** List all sessions known to the daemon (active + persisted idle).

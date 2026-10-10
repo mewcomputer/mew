@@ -68,6 +68,7 @@ pub struct Session {
     /// Ensures only one turn or model switch runs at a time.
     pub turn_lock: Mutex<()>,
     pub(crate) activity: Mutex<crate::activity::SessionActivity>,
+    pub(crate) job_observers: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     pub(crate) prompt_receipts:
         Mutex<HashMap<String, (mew_protocol::PromptStatus, Option<String>)>>,
     /// Broadcast targets: (client_id, sender, kind) per attached client.
@@ -275,6 +276,7 @@ impl Session {
             agent: Mutex::new(agent),
             turn_lock: Mutex::new(()),
             activity: Mutex::new(crate::activity::SessionActivity::default()),
+            job_observers: Mutex::new(HashMap::new()),
             prompt_receipts: Mutex::new(HashMap::new()),
             clients: Mutex::new(Vec::new()),
             pending_permissions: Mutex::new(HashMap::new()),
@@ -327,6 +329,21 @@ impl Session {
         (client_id, was_first)
     }
 
+    /// Confirm ownership before exposing the client to implicit session events.
+    pub(crate) async fn attach_client_ready(
+        &self,
+        sender: mpsc::UnboundedSender<ServerMessage>,
+        client_kind: mew_protocol::ClientKind,
+        ready: ServerMessage,
+    ) -> (u64, bool) {
+        let mut clients = self.clients.lock().await;
+        let was_first = clients.is_empty();
+        let client_id = self.next_id();
+        let _ = sender.send(ready);
+        clients.push((client_id, sender, client_kind));
+        (client_id, was_first)
+    }
+
     /// Detach a client by id. Returns true if this was the last client.
     pub async fn detach_client(&self, client_id: u64) -> bool {
         let mut clients = self.clients.lock().await;
@@ -354,7 +371,7 @@ impl Session {
     }
 
     /// Broadcast a message to all attached clients. Removes any sender that fails.
-    pub async fn broadcast(&self, msg: ServerMessage) {
+    pub async fn broadcast(&self, mut msg: ServerMessage) {
         let mut activity = if matches!(
             &msg,
             ServerMessage::SubagentStart { .. }
@@ -367,7 +384,9 @@ impl Session {
             None
         };
         if let Some(activity) = activity.as_mut() {
-            activity.apply(&msg);
+            if !activity.apply(&mut msg) {
+                return;
+            }
         }
         let mut clients = self.clients.lock().await;
         clients.retain(|(_, sender, _)| sender.send(msg.clone()).is_ok());
@@ -580,13 +599,28 @@ impl SessionManager {
         {
             return true;
         }
+        // Background jobs outlive their parent turn. Read their state before
+        // locking clients, since completion publication takes state then clients.
+        let has_running_jobs = {
+            let agent = session.agent.lock().await;
+            let jobs = agent.shell_jobs.lock().await;
+            let mut running = false;
+            for job in jobs.values() {
+                if !job.state.lock().await.is_terminal() {
+                    running = true;
+                    break;
+                }
+            }
+            running
+        };
         let clients = session.clients.lock().await;
         if !clients.is_empty() {
             return true;
         }
         // The manager and this reaper are the only expected owners of an idle
         // runtime. Other reapers hold weak references while sleeping.
-        if Arc::strong_count(session) > 2
+        if has_running_jobs
+            || Arc::strong_count(session) > 2
             || *session.is_running.lock().await
             || session.current_turn_cancel.lock().await.is_some()
         {
@@ -885,5 +919,115 @@ fn truncate_message(text: &str) -> String {
         format!("{cleaned}…")
     } else {
         cleaned
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        for observer in self.job_observers.get_mut().values() {
+            observer.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn detached_runtime_keeps_running_shell_jobs_until_they_finish() {
+        for cancelled in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let server = crate::DaemonServer::with_session_dir(
+                Arc::new(|params| {
+                    Ok((
+                        Agent::new(
+                            Arc::new(mew_provider_fake::FakeProvider::new(Vec::new())),
+                            Arc::new(mew_hooks::NopDispatcher),
+                            Some(params.writer),
+                            Vec::new(),
+                            None,
+                        ),
+                        None,
+                        None,
+                    ))
+                }),
+                directory.path().to_path_buf(),
+            );
+            let session = server.session_manager.create(None).await.unwrap();
+            let (job_id, cancel, job_state) = {
+                let agent = session.agent.lock().await;
+                let id = agent
+                    .start_shell_job(
+                        "while [ ! -e finish ]; do sleep 0.01; done; printf 'done\\n'",
+                        directory.path(),
+                    )
+                    .await;
+                let jobs = agent.shell_jobs.lock().await;
+                let job = &jobs[&id];
+                let cancel = job.cancel.clone();
+                let state = job.state.clone();
+                (id, cancel, state)
+            };
+            session
+                .publish_job_update(job_id.clone(), String::new(), "running".into())
+                .await;
+            assert_eq!(Arc::strong_count(&session), 2);
+            let current = job_state.lock().await;
+            let unload = server.session_manager.unload_detached(&session);
+            tokio::pin!(unload);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), &mut unload)
+                    .await
+                    .is_err()
+            );
+            let clients =
+                tokio::time::timeout(std::time::Duration::from_secs(1), session.clients.lock())
+                    .await
+                    .expect("job state must be checked before locking clients");
+            drop(clients);
+            drop(current);
+            let unloaded = unload.await;
+            if unloaded {
+                cancel.cancel();
+            }
+            assert!(
+                !unloaded,
+                "reaping must retain the idle parent's running job"
+            );
+            let (sender, _receiver) = mpsc::unbounded_channel();
+            let (client_id, _) = session
+                .attach_client(sender, mew_protocol::ClientKind::Tui)
+                .await;
+            let stopped = server.session_manager.unload_detached(&session).await;
+            if !stopped {
+                cancel.cancel();
+            }
+            assert!(stopped, "reattachment must stop the detached reaper");
+            session.detach_client(client_id).await;
+
+            if cancelled {
+                cancel.cancel();
+            } else {
+                tokio::fs::write(directory.path().join("finish"), "")
+                    .await
+                    .unwrap();
+            }
+            let (state, _) = session
+                .agent
+                .lock()
+                .await
+                .shell_job_block(&job_id, 3)
+                .await
+                .unwrap();
+            assert!(state.is_terminal());
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while !server.session_manager.unload_detached(&session).await {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("a completed or cancelled job must release the detached runtime");
+        }
     }
 }

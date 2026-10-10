@@ -4746,3 +4746,188 @@ async fn ask_user_question_preserves_option_descriptions_and_answer_types() {
         "{output}"
     );
 }
+
+#[tokio::test]
+async fn shell_job_does_not_finish_before_its_buffered_tail_is_collected() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job("printf 'last-line\\n'", cwd.path())
+        .await;
+    let (output, state) = {
+        let jobs = agent.shell_jobs.lock().await;
+        let job = &jobs[&id];
+        (job.output.clone(), job.state.clone())
+    };
+    let buffer_guard = output.lock().await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !state.lock().await.is_terminal(),
+        "terminal state was published before the pending output reader drained"
+    );
+    drop(buffer_guard);
+    let (state, output) = agent.shell_job_block(&id, 3).await.unwrap();
+    assert!(state.is_terminal());
+    assert_eq!(output, "last-line\n");
+}
+
+#[tokio::test]
+async fn shell_job_output_chunks_preserve_unicode_and_validate_offsets() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent.start_shell_job("i=0; while [ $i -lt 6000 ]; do printf '日本語🐱\\n'; i=$((i+1)); done; printf 'tail\\n'", cwd.path()).await;
+    let (state, full) = agent.shell_job_block(&id, 5).await.unwrap();
+    assert!(state.is_terminal());
+    assert!(full.ends_with("tail\n"));
+    assert!(full.len() > 65_536);
+    let mut offset = 0;
+    let mut collected = String::new();
+    loop {
+        let chunk = agent.shell_job_output(&id, offset).await.unwrap();
+        assert!(chunk.output.len() <= 65_536);
+        assert!(!chunk.incomplete);
+        assert_eq!(chunk.next_offset, offset + chunk.output.len() as u64);
+        collected.push_str(&chunk.output);
+        offset = chunk.next_offset;
+        if chunk.done {
+            break;
+        }
+        assert!(!chunk.output.is_empty());
+    }
+    assert_eq!(collected, full);
+    assert!(agent.shell_job_output(&id, 1).await.is_err());
+    assert!(agent.shell_job_output(&id, u64::MAX).await.is_err());
+    assert!(agent.shell_job_output("missing", 0).await.is_err());
+    let end = agent.shell_job_output(&id, offset).await.unwrap();
+    assert!(end.done);
+    assert!(end.output.is_empty());
+}
+
+#[tokio::test]
+async fn shell_job_bounds_inherited_pipe_drain_and_reports_incomplete_output() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job("sleep 5 & printf 'head\\n'", cwd.path())
+        .await;
+    let (state, output) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        agent.shell_job_block(&id, 3),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(state.is_terminal());
+    assert!(output.starts_with("head\n"));
+    assert!(output.contains("output incomplete"), "{output}");
+    let chunk = agent.shell_job_output(&id, 0).await.unwrap();
+    assert_eq!(chunk.output, "head\n");
+    assert!(chunk.done && chunk.incomplete);
+}
+
+#[tokio::test]
+async fn cancelled_shell_job_bounds_inherited_pipe_drain() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job("sleep 5 & printf 'ready\\n'; wait", cwd.path())
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if agent
+                .shell_job_status(&id)
+                .await
+                .unwrap()
+                .1
+                .contains("ready")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(agent.cancel_shell_job(&id).await);
+    let (state, output) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        agent.shell_job_block(&id, 3),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(state, crate::agent::ShellJobState::Cancelled));
+    assert!(output.contains("output incomplete"));
+    assert!(agent.shell_job_output(&id, 0).await.unwrap().incomplete);
+    assert!(!agent.cancel_shell_job(&id).await);
+}
+
+#[tokio::test]
+async fn shell_job_block_returns_immediately_for_an_already_finished_job() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent.start_shell_job("printf 'done\\n'", cwd.path()).await;
+    assert!(agent.shell_job_block(&id, 3).await.unwrap().0.is_terminal());
+    let (_, output) = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        agent.shell_job_block(&id, 3),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(output, "done\n");
+}
+
+#[tokio::test]
+async fn shell_job_preserves_unicode_split_across_pipe_writes() {
+    let agent = Agent::new(
+        Arc::new(FakeProvider::new(vec![])),
+        Arc::new(NopDispatcher),
+        None,
+        vec![],
+        None,
+    );
+    let cwd = tempfile::tempdir().unwrap();
+    let id = agent
+        .start_shell_job(
+            "printf '\\346'; sleep 0.02; printf '\\227'; sleep 0.02; printf '\\245\\n'",
+            cwd.path(),
+        )
+        .await;
+    let (state, output) = agent.shell_job_block(&id, 3).await.unwrap();
+    assert!(state.is_terminal());
+    assert_eq!(output, "日\n");
+    let chunk = agent.shell_job_output(&id, 0).await.unwrap();
+    assert_eq!(chunk.output, "日\n");
+    assert!(chunk.done && !chunk.incomplete);
+}

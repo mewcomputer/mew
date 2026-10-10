@@ -259,6 +259,13 @@ pub enum ClientMessage {
         session_id: String,
         request_id: String,
     },
+    /// Read a bounded chunk from a job owned by the attached session.
+    ReadJobOutput {
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        offset: u64,
+    },
     ReadSubagentHistory {
         session_id: String,
         child_session_id: String,
@@ -853,6 +860,22 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_cursor: Option<usize>,
         replace: bool,
+    },
+    JobOutput {
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        offset: u64,
+        next_offset: u64,
+        output: String,
+        done: bool,
+        incomplete: bool,
+    },
+    JobOutputError {
+        session_id: String,
+        job_id: String,
+        request_id: String,
+        message: String,
     },
     SubagentHistory {
         session_id: String,
@@ -1517,6 +1540,41 @@ pub fn subagent_outcome_to_wire(o: &mew_subagents::SubagentOutcome) -> SubagentO
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn job_output_preserves_chunk_offsets_and_request_identity() {
+        let request = ClientMessage::ReadJobOutput {
+            session_id: "session".into(),
+            job_id: "job".into(),
+            request_id: "read".into(),
+            offset: 65_535,
+        };
+        assert!(
+            matches!(round_trip(&request), ClientMessage::ReadJobOutput { session_id, job_id, request_id, offset } if session_id == "session" && job_id == "job" && request_id == "read" && offset == 65_535)
+        );
+        let reply = ServerMessage::JobOutput {
+            session_id: "session".into(),
+            job_id: "job".into(),
+            request_id: "read".into(),
+            offset: 65_535,
+            next_offset: 65_538,
+            output: "猫".into(),
+            done: true,
+            incomplete: true,
+        };
+        assert!(
+            matches!(round_trip(&reply), ServerMessage::JobOutput { offset: 65_535, next_offset: 65_538, output, done: true, incomplete: true, .. } if output == "猫")
+        );
+        let error = ServerMessage::JobOutputError {
+            session_id: "session".into(),
+            job_id: "job".into(),
+            request_id: "read".into(),
+            message: "unknown job".into(),
+        };
+        assert!(
+            matches!(round_trip(&error), ServerMessage::JobOutputError { session_id, job_id, request_id, message } if session_id == "session" && job_id == "job" && request_id == "read" && message == "unknown job")
+        );
+    }
+
     #[test]
     fn subagent_history_preserves_request_identity_and_errors() {
         let request = ClientMessage::ReadSubagentHistory {

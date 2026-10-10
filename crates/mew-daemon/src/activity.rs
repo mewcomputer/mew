@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use mew_protocol::{JobActivity, ServerMessage, SubagentActivity};
 use tokio::sync::mpsc;
@@ -10,7 +11,7 @@ pub(crate) struct SessionActivity {
 }
 
 impl SessionActivity {
-    pub(crate) fn apply(&mut self, message: &ServerMessage) {
+    pub(crate) fn apply(&mut self, message: &mut ServerMessage) -> bool {
         match message {
             ServerMessage::SubagentStart {
                 parent_call_id,
@@ -68,6 +69,14 @@ impl SessionActivity {
                 command,
                 state,
             } => {
+                if let Some(previous) = self.jobs.get(job_id) {
+                    if previous.state != "running" && state == "running" {
+                        return false;
+                    }
+                    if command.is_empty() {
+                        command.clone_from(&previous.command);
+                    }
+                }
                 self.jobs.insert(
                     job_id.clone(),
                     JobActivity {
@@ -79,10 +88,72 @@ impl SessionActivity {
             }
             _ => {}
         }
+        true
     }
 }
 
 impl crate::session::Session {
+    pub(crate) async fn publish_job_update(
+        self: &Arc<Self>,
+        job_id: String,
+        command: String,
+        state: String,
+    ) {
+        let job = {
+            let agent = self.agent.lock().await;
+            let jobs = agent.shell_jobs.lock().await;
+            jobs.get(&job_id)
+                .map(|job| (job.command.clone(), job.state.clone(), job.done.clone()))
+        };
+        let Some((command, state, done)) = job else {
+            self.broadcast(ServerMessage::JobUpdate {
+                job_id,
+                command,
+                state,
+            })
+            .await;
+            return;
+        };
+        let current = state.lock().await;
+        self.broadcast(ServerMessage::JobUpdate {
+            job_id: job_id.clone(),
+            command: command.clone(),
+            state: current.as_str().into(),
+        })
+        .await;
+        if current.is_terminal() {
+            return;
+        }
+        drop(current);
+        let mut observers = self.job_observers.lock().await;
+        if observers.contains_key(&job_id) {
+            return;
+        }
+        let session = Arc::downgrade(self);
+        let observed_id = job_id.clone();
+        let observer = tokio::spawn(async move {
+            // Register before checking state so an already completed job cannot lose its wakeup.
+            let notified = done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !state.lock().await.is_terminal() {
+                notified.await;
+            }
+            if let Some(session) = session.upgrade() {
+                let current = state.lock().await;
+                session
+                    .broadcast(ServerMessage::JobUpdate {
+                        job_id: observed_id.clone(),
+                        command,
+                        state: current.as_str().into(),
+                    })
+                    .await;
+                session.job_observers.lock().await.remove(&observed_id);
+            }
+        });
+        observers.insert(job_id, observer.abort_handle());
+    }
+
     pub(crate) async fn send_activity(&self, sender: &mpsc::UnboundedSender<ServerMessage>) {
         // Activity publications hold this lock until their event is queued.
         // The snapshot therefore precedes or includes every concurrent update.
@@ -201,5 +272,47 @@ mod tests {
         assert!(
             matches!(receiver.recv().await.unwrap(),ServerMessage::SessionActivitySnapshot {jobs,..} if jobs.len()==1 && jobs[0].job_id=="job")
         );
+    }
+
+    #[tokio::test]
+    async fn one_job_observer_does_not_retain_session_and_stops_on_drop() {
+        let directory = tempfile::tempdir().unwrap();
+        let session = session();
+        let id = session
+            .agent
+            .lock()
+            .await
+            .start_shell_job("sleep 5", directory.path())
+            .await;
+        for _ in 0..3 {
+            session
+                .publish_job_update(id.clone(), String::new(), "running".into())
+                .await;
+        }
+        let observers = session.job_observers.lock().await;
+        assert_eq!(
+            observers.len(),
+            1,
+            "status polling must not start duplicate observers"
+        );
+        let observer = observers[&id].clone();
+        drop(observers);
+        let cancel = session.agent.lock().await.shell_jobs.lock().await[&id]
+            .cancel
+            .clone();
+        let weak = Arc::downgrade(&session);
+        drop(session);
+        assert!(
+            weak.upgrade().is_none(),
+            "an idle observer must not retain its session"
+        );
+        let stopped = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            while !observer.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        cancel.cancel();
+        stopped.expect("dropping a session must abort its outstanding observer");
     }
 }

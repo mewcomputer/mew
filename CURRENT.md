@@ -1861,3 +1861,19 @@ and the socket test's permitted rerun. Rebuilt matching iOS device, simulator an
 host libraries; regenerated bindings matched the prepared changes byte for byte.
 All 32 AppStore tests passed on iPhone 17 with iOS 26.4, including child ownership
 and preserving the parent request when closing the child question.
+
+### 2026-10-10: bounded job output and idle completion
+
+Job output reads preserve UTF-8 byte offsets, session and request identity, and
+copy at most 64 KiB per response. Shell completion waits for final output with a
+one-second reader drain bound, reports incomplete output explicitly, and retains
+nonzero exit codes while presenting failed jobs as failed. Idle sessions publish
+job completion and preserve the full command through status updates and replay.
+Weak completion observers stop on session teardown. Detached runtimes retain live
+jobs, while reattached clients stop obsolete reapers. Ownership confirmation now
+precedes implicit activity for new and attached conversations.
+
+Verified six real shell regressions, the chunk wire roundtrip and all 30 client
+tests. The isolated backend candidate passed the full daemon suite, including
+real idle success/cancellation/exit-7, reconnect, reaper and attach-order tests,
+and compiled the CLI and mobile client without the pending frontend changes.
