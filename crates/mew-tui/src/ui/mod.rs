@@ -41,6 +41,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     );
 
     let show_sidebar = area.width >= SIDEBAR_MIN_WIDTH + SIDEBAR_WIDTH;
+    app.sidebar_rect = Rect::default();
+    app.sidebar_header_rows.clear();
 
     let main_chunks: Vec<Rect> = if show_sidebar {
         let chunks = Layout::default()

@@ -397,16 +397,38 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
     }
     match mouse.kind {
         MouseEventKind::ScrollUp => {
-            app.scroll_up(1);
+            if app.sidebar_rect.contains((mouse.column, mouse.row).into()) {
+                app.sidebar_scroll = app.sidebar_scroll.saturating_sub(1);
+            } else {
+                app.scroll_up(1);
+            }
             None
         }
         MouseEventKind::ScrollDown => {
-            app.scroll_down(1);
+            if app.sidebar_rect.contains((mouse.column, mouse.row).into()) {
+                app.sidebar_scroll = app
+                    .sidebar_scroll
+                    .saturating_add(1)
+                    .min(app.sidebar_max_scroll);
+            } else {
+                app.scroll_down(1);
+            }
             None
         }
         MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Down(MouseButton::Right) => {
             let row = mouse.row.saturating_sub(1);
             let col = mouse.column.saturating_sub(1);
+
+            // Sidebar click → toggle section.
+            if app.sidebar_rect.contains((mouse.column, mouse.row).into()) {
+                for (header_row, section) in &app.sidebar_header_rows.clone() {
+                    if mouse.row == *header_row {
+                        app.toggle_sidebar_section(section);
+                        return None;
+                    }
+                }
+                return None;
+            }
 
             // Scrollbar click → seek.
             let scrollbar_col = app.chat_area.right().saturating_sub(1);
@@ -456,16 +478,6 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
                         .min(app.input.len());
                 }
                 return None;
-            }
-
-            // Sidebar click → toggle section.
-            if app.sidebar_rect.contains((col, row).into()) {
-                for (header_row, section) in &app.sidebar_header_rows.clone() {
-                    if row == *header_row {
-                        app.toggle_sidebar_section(section);
-                        return None;
-                    }
-                }
             }
 
             // Chat area click → start selection.

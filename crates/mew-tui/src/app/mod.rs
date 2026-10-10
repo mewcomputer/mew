@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 pub(crate) use input::visual_rows;
 pub use mdstream;
 
-pub const SIDEBAR_MIN_WIDTH: u16 = 120;
+pub const SIDEBAR_MIN_WIDTH: u16 = 80;
 pub const SIDEBAR_WIDTH: u16 = 32;
 pub const PICKER_VISIBLE_ITEMS: usize = 8;
 const SPINNER_TICK_DIVISOR: u8 = 5;
@@ -139,6 +139,8 @@ pub struct App {
     pub sidebar_collapsed: std::collections::HashMap<String, bool>,
     pub sidebar_header_rows: Vec<(u16, String)>,
     pub sidebar_rect: Rect,
+    pub sidebar_scroll: u16,
+    pub sidebar_max_scroll: u16,
     pub models: Vec<(String, String)>,
     pub thinking_variants: HashMap<String, Vec<String>>,
     /// Numeric thinking-budget ranges keyed by bare model id, for models
@@ -233,12 +235,9 @@ pub struct App {
     pub git_branch_resolved: bool,
     pub short_cwd: String,
     pub subagents: Vec<SubagentState>,
-    /// When finished subagents and done todos stay visible in the sidebar
-    /// (seconds). 0 hides them immediately. Set from `tui.sidebar_finished_ttl_secs`.
+    /// How long failed activity remains visible in the sidebar (seconds).
+    /// Set from `tui.sidebar_finished_ttl_secs`; completed activity hides immediately.
     pub sidebar_finished_ttl: u64,
-    /// When each currently-done todo became Done, so the sidebar can hide
-    /// long-finished todos without touching the agent-owned list.
-    pub todo_done_at: std::collections::HashMap<usize, Instant>,
     pub background_jobs: Vec<BackgroundJobState>,
     pub undo_history: editor::UndoHistory,
     pub history_search_query: String,
@@ -335,6 +334,7 @@ pub struct BackgroundJobState {
     pub command: String,
     pub started_at: Instant,
     pub status: BackgroundJobStatus,
+    pub finished_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -847,6 +847,8 @@ impl App {
             sidebar_collapsed: std::collections::HashMap::new(),
             sidebar_header_rows: Vec::new(),
             sidebar_rect: Rect::default(),
+            sidebar_scroll: 0,
+            sidebar_max_scroll: 0,
             models: Vec::new(),
             thinking_variants: HashMap::new(),
             thinking_budget: HashMap::new(),
@@ -913,7 +915,6 @@ impl App {
             short_cwd: short_cwd(),
             subagents: Vec::new(),
             sidebar_finished_ttl: 180,
-            todo_done_at: std::collections::HashMap::new(),
             background_jobs: Vec::new(),
             undo_history: editor::UndoHistory::default(),
             history_search_query: String::new(),
@@ -1574,7 +1575,7 @@ impl App {
     /// start expanded; the environment section holds static info and starts
     /// collapsed.
     pub fn sidebar_default_collapsed(section: &str) -> bool {
-        section == "environment"
+        matches!(section, "environment" | "companion")
     }
 
     /// Toggle a sidebar section's collapsed state by name ("todos",
@@ -2096,41 +2097,33 @@ impl App {
         }
     }
 
-    /// How long a finished sidebar entry stays visible.
+    /// How long a failed sidebar entry stays visible.
     pub fn finished_ttl(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.sidebar_finished_ttl)
     }
 
-    /// Whether a todo should still show in the sidebar: not Done, or Done
-    /// recently enough (within `sidebar_finished_ttl`). View-only — the
-    /// agent's list keeps done todos until the model or user deletes them.
+    /// Completed todos remain in the task record, but leave the activity view.
     pub fn todo_visible(&self, t: &mew_agent::Todo) -> bool {
-        if t.status != mew_agent::TodoStatus::Done {
-            return true;
-        }
-        match self.todo_done_at.get(&t.id) {
-            Some(at) => at.elapsed() <= self.finished_ttl(),
-            // No done_at recorded (pre-feature state): treat as fresh.
-            None => true,
+        t.status != mew_agent::TodoStatus::Done
+    }
+
+    pub fn background_job_visible(&self, job: &BackgroundJobState) -> bool {
+        match job.status {
+            BackgroundJobStatus::Running => true,
+            BackgroundJobStatus::Failed => job
+                .finished_at
+                .is_some_and(|at| at.elapsed() <= self.finished_ttl()),
+            BackgroundJobStatus::Completed | BackgroundJobStatus::Cancelled => false,
         }
     }
 
-    /// Drop finished subagent entries older than the retention window so the
-    /// sidebar reads as a recent-activity feed instead of an ever-growing
-    /// log. Running entries are never pruned. Runs on every draw.
+    /// Keep current work and recent failures in the activity view.
     pub fn prune_sidebar_state(&mut self) {
         let ttl = self.finished_ttl();
-        self.subagents.retain(|s| match s.finished_at {
-            Some(at) => at.elapsed() <= ttl,
-            None => true, // still running
-        });
-        // Drop done-timestamps for todos that are no longer Done or gone;
-        // expiry itself is a view concern (todo_visible) so a re-render
-        // never resurrects an expired entry via a fresh timestamp.
-        self.todo_done_at.retain(|id, _at| {
-            self.todos
-                .iter()
-                .any(|t| t.id == *id && t.status == mew_agent::TodoStatus::Done)
+        self.subagents.retain(|s| match s.status {
+            SubagentStatus::Running => true,
+            SubagentStatus::Failed { .. } => s.finished_at.is_some_and(|at| at.elapsed() <= ttl),
+            SubagentStatus::Completed | SubagentStatus::Cancelled => false,
         });
     }
 
@@ -2325,19 +2318,6 @@ impl App {
                 });
             }
             AgentEvent::TodosUpdated { todos } => {
-                // Track when each todo became Done so the sidebar can hide
-                // long-finished todos (view-only; the agent's list is
-                // untouched). Ids that are no longer Done drop out, and a
-                // re-done todo restarts its clock.
-                let now = Instant::now();
-                let mut next = std::collections::HashMap::new();
-                for t in &todos {
-                    if t.status == mew_agent::TodoStatus::Done {
-                        let at = self.todo_done_at.get(&t.id).copied().unwrap_or(now);
-                        next.insert(t.id, at);
-                    }
-                }
-                self.todo_done_at = next;
                 self.todos = todos;
             }
             AgentEvent::ToolStart { call_id } => {
@@ -2437,15 +2417,24 @@ impl App {
                 display_name,
                 ..
             } => {
-                self.subagents.push(SubagentState {
-                    task_id: parent_call_id.clone(),
-                    name: name.clone(),
+                let state = SubagentState {
+                    task_id: parent_call_id,
+                    name,
                     started_at: Instant::now(),
                     status: SubagentStatus::Running,
                     last_progress: None,
-                    display_name: display_name.clone(),
+                    display_name,
                     finished_at: None,
-                });
+                };
+                if let Some(existing) = self
+                    .subagents
+                    .iter_mut()
+                    .find(|sa| sa.task_id == state.task_id)
+                {
+                    *existing = state;
+                } else {
+                    self.subagents.push(state);
+                }
             }
             AgentEvent::SubagentProgress { .. } => {}
             AgentEvent::SubagentStatus {
@@ -2518,8 +2507,17 @@ impl App {
                     _ => BackgroundJobStatus::Cancelled,
                 };
                 if let Some(job) = self.background_jobs.iter_mut().find(|j| j.job_id == job_id) {
-                    // Existing entry: transition its state. Preserve the
-                    // original started_at so the elapsed counter is stable.
+                    if matches!(status, BackgroundJobStatus::Running)
+                        && !matches!(job.status, BackgroundJobStatus::Running)
+                    {
+                        job.started_at = Instant::now();
+                    }
+                    job.finished_at = if matches!(status, BackgroundJobStatus::Running) {
+                        None
+                    } else {
+                        job.finished_at.or_else(|| Some(Instant::now()))
+                    };
+                    job.command = command;
                     job.status = status;
                 } else {
                     // First update we've seen for this job.
@@ -2527,6 +2525,8 @@ impl App {
                         job_id,
                         command,
                         started_at: Instant::now(),
+                        finished_at: (!matches!(status, BackgroundJobStatus::Running))
+                            .then(Instant::now),
                         status,
                     });
                 }

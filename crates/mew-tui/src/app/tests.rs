@@ -828,7 +828,7 @@ fn test_prune_sidebar_state_removes_expired_finished_subagents() {
 }
 
 #[test]
-fn test_done_todo_visibility_follows_ttl() {
+fn test_done_todo_visibility_preserves_list_and_hides_done() {
     let mut app = App::new();
     app.todos = vec![
         mew_agent::Todo {
@@ -844,27 +844,33 @@ fn test_done_todo_visibility_follows_ttl() {
             depends_on: Vec::new(),
         },
     ];
-    // Simulate TodosUpdated: fresh done timestamp.
+    // Restore the complete task record, including completed work.
     app.handle_agent_event(AgentEvent::TodosUpdated {
         todos: app.todos.clone(),
     });
 
-    // Freshly done within a large TTL: visible.
+    // Completed work leaves the activity view immediately.
     app.sidebar_finished_ttl = 3600;
-    assert!(app.todo_visible(&app.todos[1]));
+    assert!(!app.todo_visible(&app.todos[1]));
 
     // TTL 0: done todos hidden immediately, in-progress still visible.
     app.sidebar_finished_ttl = 0;
     assert!(!app.todo_visible(&app.todos[1]));
     assert!(app.todo_visible(&app.todos[0]));
 
-    // The pruned timestamp must not resurrect the hidden todo: re-running
-    // the event (as the agent would on any change) keeps it hidden.
+    // Replaying the task record must not resurrect completed activity.
     app.prune_sidebar_state();
     app.handle_agent_event(AgentEvent::TodosUpdated {
         todos: app.todos.clone(),
     });
     assert!(!app.todo_visible(&app.todos[1]));
+    assert_eq!(app.todos.len(), 2);
+    let mut restarted = app.todos.clone();
+    restarted[1].status = mew_agent::TodoStatus::InProgress;
+    app.handle_agent_event(AgentEvent::TodosUpdated { todos: restarted });
+    assert!(app.todo_visible(&app.todos[1]));
+    app.handle_agent_event(AgentEvent::TodosUpdated { todos: vec![] });
+    assert!(app.todos.is_empty());
 }
 
 #[test]
@@ -3654,4 +3660,66 @@ fn daemon_provider_error_keeps_turn_busy() {
     app.finish_turn();
     assert!(!app.streaming);
     assert!(app.pending_queued_send);
+}
+
+#[test]
+fn sidebar_job_failures_expire_and_restart_has_fresh_timing() {
+    let mut app = App::new();
+    app.handle_agent_event(AgentEvent::JobUpdate {
+        job_id: "job".into(),
+        command: "first command".into(),
+        state: "failed".into(),
+    });
+    assert!(app.background_job_visible(&app.background_jobs[0]));
+    app.background_jobs[0].finished_at = Some(Instant::now() - Duration::from_secs(181));
+    assert!(!app.background_job_visible(&app.background_jobs[0]));
+    app.background_jobs[0].started_at = Instant::now() - Duration::from_secs(500);
+    app.handle_agent_event(AgentEvent::JobUpdate {
+        job_id: "job".into(),
+        command: "retry command".into(),
+        state: "running".into(),
+    });
+    let job = &app.background_jobs[0];
+    assert!(job.started_at.elapsed() < Duration::from_secs(1));
+    assert!(job.finished_at.is_none());
+    assert_eq!(job.command, "retry command");
+    assert!(app.background_job_visible(job));
+    app.handle_agent_event(AgentEvent::JobUpdate {
+        job_id: "job".into(),
+        command: "retry command".into(),
+        state: "completed".into(),
+    });
+    assert!(!app.background_job_visible(&app.background_jobs[0]));
+}
+
+#[test]
+fn sidebar_subagent_restart_replaces_terminal_run() {
+    let mut app = App::new();
+    for child in ["first", "second"] {
+        app.handle_agent_event(AgentEvent::SubagentStart {
+            parent_call_id: "task".into(),
+            name: "researcher".into(),
+            child_session_id: child.into(),
+            display_name: None,
+        });
+        if child == "first" {
+            app.handle_agent_event(AgentEvent::SubagentStatus {
+                parent_call_id: "task".into(),
+                tool_name: "researcher".into(),
+                message: "old progress".into(),
+            });
+            app.handle_agent_event(AgentEvent::SubagentEnd {
+                parent_call_id: "task".into(),
+                child_session_id: child.into(),
+                outcome: mew_agent::SubagentOutcome::Failed {
+                    reason: "failed".into(),
+                },
+                manifests: vec![],
+            });
+        }
+    }
+    assert_eq!(app.subagents.len(), 1);
+    assert!(matches!(app.subagents[0].status, SubagentStatus::Running));
+    assert!(app.subagents[0].finished_at.is_none());
+    assert!(app.subagents[0].last_progress.is_none());
 }

@@ -2,31 +2,34 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Paragraph, Wrap},
+    widgets::Paragraph,
     Frame,
 };
 
 use crate::app::App;
 
 pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
-    // Drop finished subagents (and stale done-todo timestamps) so the
-    // sections below only ever show recent activity.
+    // Keep current work and recent failures ahead of secondary context.
     app.prune_sidebar_state();
     app.sidebar_rect = area;
+    app.sidebar_header_rows.clear();
     // Content renders into the padded inner rect below, so row tracking
     // starts one line down to stay aligned with what the user sees (the
     // click handler compares these rows against mouse coordinates). Every
-    // pushed line is truncated to the inner width so `Wrap` below never
-    // produces extra visual lines; if that invariant breaks, headers drift
-    // away from their recorded rows and clicks miss.
+    // pushed line occupies exactly one visual row; long labels are clipped
+    // without wrapping so header hit rows follow the viewport.
     let mut visual_row = area.y + 1;
     let mut text = Text::default();
 
-    // Session header: always on top.
+    // Current task state leads the activity list.
     draw_session_header(&mut text, &mut visual_row, app, area.width);
 
     // Persistent goal section renders only while a goal is set.
-    if app.active_goal.is_some() {
+    if app
+        .active_goal
+        .as_ref()
+        .is_some_and(|goal| goal.status != mew_agent::GoalStatus::Complete)
+    {
         push_divider(&mut text, &mut visual_row, app, area.width);
         draw_goal_section(&mut text, &mut visual_row, app, area.width);
     }
@@ -37,14 +40,16 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         draw_todos_section(&mut text, &mut visual_row, app, area.width);
     }
 
-    draw_companion_section(&mut text, &mut visual_row, app, area.width);
-
     if !app.subagents.is_empty() {
         push_divider(&mut text, &mut visual_row, app, area.width);
         draw_subagents_section(&mut text, &mut visual_row, app, area.width);
     }
 
-    if !app.background_jobs.is_empty() {
+    if app
+        .background_jobs
+        .iter()
+        .any(|job| app.background_job_visible(job))
+    {
         push_divider(&mut text, &mut visual_row, app, area.width);
         draw_jobs_section(&mut text, &mut visual_row, app, area.width);
     }
@@ -54,16 +59,42 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         draw_changes_section(&mut text, &mut visual_row, app, area.width);
     }
 
+    draw_companion_section(&mut text, &mut visual_row, app, area.width);
     draw_environment_section(&mut text, &mut visual_row, app, area.width);
 
-    let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
     let inner = Rect::new(
         area.x + 1,
         area.y + 1,
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
-    f.render_widget(paragraph, inner);
+    app.sidebar_max_scroll = text
+        .lines
+        .len()
+        .saturating_sub(inner.height as usize)
+        .min(u16::MAX as usize) as u16;
+    app.sidebar_scroll = app.sidebar_scroll.min(app.sidebar_max_scroll);
+    app.sidebar_header_rows.retain_mut(|(row, _)| {
+        let offset = row.saturating_sub(inner.y);
+        if offset < app.sidebar_scroll || offset >= app.sidebar_scroll.saturating_add(inner.height)
+        {
+            return false;
+        }
+        *row = inner.y + offset - app.sidebar_scroll;
+        true
+    });
+    f.render_widget(Paragraph::new(text).scroll((app.sidebar_scroll, 0)), inner);
+    if app.sidebar_max_scroll > 0 && area.height > 0 {
+        let footer = format!(
+            " scroll {}/{} ",
+            app.sidebar_scroll + 1,
+            app.sidebar_max_scroll + 1
+        );
+        f.render_widget(
+            Paragraph::new(footer).style(Style::default().fg(app.theme.resolve("text.muted"))),
+            Rect::new(inner.x, area.bottom().saturating_sub(1), inner.width, 1),
+        );
+    }
 }
 
 /// Truncate `s` to at most `max_cols` display columns, appending an ellipsis
@@ -99,8 +130,7 @@ fn push_divider(text: &mut Text, visual_row: &mut u16, app: &mut App, width: u16
     *visual_row += 1;
 }
 
-/// Session header at the top of the sidebar: the current session's title
-/// (when known), then id and message count.
+/// Current task identity, state, and the work or decision in progress.
 fn draw_session_header(text: &mut Text, visual_row: &mut u16, app: &mut App, width: u16) {
     let active_id = app.status.session_id.clone();
     let title = app
@@ -130,22 +160,80 @@ fn draw_session_header(text: &mut Text, visual_row: &mut u16, app: &mut App, wid
             Style::default().fg(app.theme.resolve("text.muted")),
         ),
         Span::styled(
-            active_id[..8.min(active_id.len())].to_string(),
+            active_id.chars().take(8).collect::<String>(),
             Style::default().fg(app.theme.resolve("text.placeholder")),
         ),
     ]));
     *visual_row += 1;
-    text.push_line(Line::from(vec![
-        Span::styled(
-            "  msg ",
+    let (label, detail, color) = if let Some(permission) = &app.permission {
+        (
+            "Waiting for approval",
+            Some(permission.tool_name.clone()),
+            "text.warning",
+        )
+    } else if app.user_question.is_some() {
+        ("Waiting for your answer", None, "text.warning")
+    } else if app.goal_proposal.is_some() {
+        ("Waiting for goal approval", None, "text.warning")
+    } else if app.cancelling {
+        ("Stopping", None, "text.warning")
+    } else if let Some(retry) = &app.retry_status {
+        ("Retrying", Some(retry.clone()), "text.warning")
+    } else if app.streaming {
+        let mut running_tools = app
+            .messages
+            .last()
+            .into_iter()
+            .flat_map(|message| message.parts.iter())
+            .filter_map(|part| match part {
+                mew_message::Part::ToolCall(call)
+                    if match app.tool_states.get(&call.base.id) {
+                        Some(crate::app::ToolDisplayState::Running) => true,
+                        Some(_) => false,
+                        None => matches!(call.state, mew_message::ToolState::Running(_)),
+                    } =>
+                {
+                    Some(call.tool_name.as_str())
+                }
+                _ => None,
+            });
+        let detail = if let Some(name) = running_tools.next() {
+            let more = running_tools.count();
+            Some(if more == 0 {
+                format!("Running {name}")
+            } else {
+                format!("Running {name} +{more} tools")
+            })
+        } else if app.reasoning_active_id.is_some() {
+            Some("Thinking".into())
+        } else {
+            Some("Responding".into())
+        };
+        ("Working", detail, "text.success")
+    } else {
+        ("Ready", None, "text.muted")
+    };
+    text.push_line(Line::from(Span::styled(
+        truncate_to_fit(label, max),
+        Style::default()
+            .fg(app.theme.resolve(color))
+            .add_modifier(Modifier::BOLD),
+    )));
+    *visual_row += 1;
+    if let Some(detail) = detail {
+        text.push_line(Line::from(Span::styled(
+            truncate_to_fit(&detail, max),
+            Style::default().fg(app.theme.resolve("text.placeholder")),
+        )));
+        *visual_row += 1;
+    }
+    if !app.queued_messages.is_empty() {
+        text.push_line(Line::from(Span::styled(
+            format!("Queued follow-ups: {}", app.queued_messages.len()),
             Style::default().fg(app.theme.resolve("text.muted")),
-        ),
-        Span::styled(
-            format!("{}", app.messages.len()),
-            Style::default().fg(app.theme.resolve("text.placeholder")),
-        ),
-    ]));
-    *visual_row += 1;
+        )));
+        *visual_row += 1;
+    }
 }
 
 /// Persistent goal section: the active objective plus its status. Renders
@@ -167,7 +255,9 @@ fn draw_goal_section(text: &mut Text, visual_row: &mut u16, app: &mut App, width
     *visual_row += 1;
 
     let inner = width.saturating_sub(2) as usize;
-    for chunk in crate::ui::chat::wrap_text_to_width(&goal.objective, inner as u16) {
+    for chunk in
+        crate::ui::chat::wrap_text_to_width(&goal.objective, inner.saturating_sub(2) as u16)
+    {
         text.push_line(Line::from(vec![Span::styled(
             format!("  {chunk}"),
             Style::default().fg(app.theme.resolve("text.body")),
@@ -191,17 +281,18 @@ fn draw_todos_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area
     let collapsed = app.sidebar_collapsed.get("todos").copied().unwrap_or(false);
     let arrow = if collapsed { "▶" } else { "▼" };
     app.sidebar_header_rows.push((*visual_row, "todos".into()));
-    // Only todos still visible: done todos older than the retention window
-    // are hidden (view-only; the agent's list still holds them).
-    let visible: Vec<&mew_agent::Todo> = app.todos.iter().filter(|t| app.todo_visible(t)).collect();
-    let todo_done = visible
+    // Visibility never changes the agent-owned todo list.
+    let remaining = app.todos.iter().filter(|t| app.todo_visible(t)).count();
+    let blocked = app
+        .todos
         .iter()
-        .filter(|t| t.status == mew_agent::TodoStatus::Done)
+        .filter(|t| t.status == mew_agent::TodoStatus::Blocked)
         .count();
+    let summary = format!(" Todos ({remaining} remaining)");
     text.push_line(Line::from(vec![
         Span::styled(arrow, Style::default().fg(app.theme.resolve("text.muted"))),
         Span::styled(
-            format!(" Todos ({}/{})", todo_done, visible.len()),
+            truncate_to_fit(&summary, area_width.saturating_sub(3) as usize),
             Style::default()
                 .fg(app.theme.resolve("text.body"))
                 .add_modifier(Modifier::BOLD),
@@ -212,10 +303,17 @@ fn draw_todos_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area
     if collapsed {
         return;
     }
+    if blocked > 0 {
+        text.push_line(Line::from(Span::styled(
+            format!("  {blocked} blocked"),
+            Style::default().fg(app.theme.resolve("text.error")),
+        )));
+        *visual_row += 1;
+    }
 
     // `  [x] ` (6) + `#` + id + ` ` precede the label.
     let inner = area_width.saturating_sub(2) as usize;
-    for t in visible {
+    for t in app.todos.iter().filter(|t| app.todo_visible(t)) {
         let (mark, color) = match t.status {
             mew_agent::TodoStatus::Done => ("x", app.theme.resolve("text.muted")),
             mew_agent::TodoStatus::InProgress => ("~", app.theme.resolve("text.warning")),
@@ -247,7 +345,7 @@ fn draw_companion_section(text: &mut Text, visual_row: &mut u16, app: &mut App, 
         .sidebar_collapsed
         .get("companion")
         .copied()
-        .unwrap_or(false);
+        .unwrap_or_else(|| App::sidebar_default_collapsed("companion"));
     let arrow = if collapsed { "▶" } else { "▼" };
     app.sidebar_header_rows
         .push((*visual_row, "companion".into()));
@@ -263,7 +361,7 @@ fn draw_companion_section(text: &mut Text, visual_row: &mut u16, app: &mut App, 
     *visual_row += 1;
 
     if !collapsed {
-        let budget = width.saturating_sub(2) as usize - 2; // two-space indent
+        let budget = width.saturating_sub(4) as usize; // two-space indent
         for line in info.lines().take(12) {
             text.push_line(Line::from(Span::styled(
                 format!("  {}", truncate_to_fit(line, budget)),
@@ -277,14 +375,18 @@ fn draw_companion_section(text: &mut Text, visual_row: &mut u16, app: &mut App, 
 fn draw_subagents_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area_width: u16) {
     let inner = area_width.saturating_sub(2) as usize;
     text.push_line(Line::from(vec![Span::styled(
-        "Subagents",
+        format!("Subagents ({})", app.subagents.len()),
         Style::default()
             .fg(app.theme.resolve("text.body"))
             .add_modifier(Modifier::BOLD),
     )]));
     *visual_row += 1;
     for sa in &app.subagents {
-        let elapsed = sa.started_at.elapsed().as_secs();
+        let elapsed = sa
+            .finished_at
+            .unwrap_or_else(std::time::Instant::now)
+            .saturating_duration_since(sa.started_at)
+            .as_secs();
         let (icon, color) = match &sa.status {
             crate::app::SubagentStatus::Running => ("▸", app.theme.resolve("text.warning")),
             crate::app::SubagentStatus::Completed => ("✓", app.theme.resolve("text.success")),
@@ -299,23 +401,13 @@ fn draw_subagents_section(text: &mut Text, visual_row: &mut u16, app: &mut App, 
         let status_label = match &sa.status {
             crate::app::SubagentStatus::Running => String::new(),
             crate::app::SubagentStatus::Completed => "  done".to_string(),
-            crate::app::SubagentStatus::Failed { reason } => {
-                let one_line = reason.lines().next().unwrap_or("").to_string();
-                format!("  failed: {}", one_line)
-            }
+            crate::app::SubagentStatus::Failed { .. } => "  failed".into(),
             crate::app::SubagentStatus::Cancelled => "  cancelled".to_string(),
-        };
-        let name_suffix = match &sa.display_name {
-            Some(_) => format!("  ({})", sa.name),
-            None => String::new(),
         };
         let time_suffix = format!("  {}", time_str);
         // `  ▸ ` prefix (4), then the name gets whatever remains after the
         // suffix, time, and status columns.
-        let fixed = 4
-            + super::display_width(&name_suffix)
-            + super::display_width(&time_suffix)
-            + super::display_width(&status_label);
+        let fixed = 4 + super::display_width(&time_suffix) + super::display_width(&status_label);
         let shown = sa.display_name.as_deref().unwrap_or(&sa.name);
         text.push_line(Line::from(vec![
             Span::styled(format!("  {} ", icon), Style::default().fg(color)),
@@ -324,23 +416,24 @@ fn draw_subagents_section(text: &mut Text, visual_row: &mut u16, app: &mut App, 
                 Style::default().fg(app.theme.resolve("text.placeholder")),
             ),
             Span::styled(
-                name_suffix,
-                Style::default().fg(app.theme.resolve("text.muted")),
-            ),
-            Span::styled(
                 time_suffix,
                 Style::default().fg(app.theme.resolve("text.muted")),
             ),
             Span::styled(status_label, Style::default().fg(color)),
         ]));
         *visual_row += 1;
-        if let Some(progress) = &sa.last_progress {
-            // The full message is still in self.messages if the user needs it.
-            // `    ↳ ` prefix is 6 columns.
+        let detail = match &sa.status {
+            crate::app::SubagentStatus::Failed { reason } => Some(reason.as_str()),
+            _ => sa.last_progress.as_deref(),
+        };
+        if let Some(detail) = detail {
             let budget = inner.saturating_sub(6);
             text.push_line(Line::from(Span::styled(
-                format!("    ↳ {}", truncate_to_fit(progress, budget)),
-                Style::default().fg(app.theme.resolve("text.muted")),
+                format!(
+                    "    ↳ {}",
+                    truncate_to_fit(detail.lines().next().unwrap_or(""), budget)
+                ),
+                Style::default().fg(color),
             )));
             *visual_row += 1;
         }
@@ -350,14 +443,28 @@ fn draw_subagents_section(text: &mut Text, visual_row: &mut u16, app: &mut App, 
 fn draw_jobs_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area_width: u16) {
     let inner = area_width.saturating_sub(2) as usize;
     text.push_line(Line::from(vec![Span::styled(
-        "Background Jobs",
+        format!(
+            "Background Jobs ({})",
+            app.background_jobs
+                .iter()
+                .filter(|job| app.background_job_visible(job))
+                .count()
+        ),
         Style::default()
             .fg(app.theme.resolve("text.body"))
             .add_modifier(Modifier::BOLD),
     )]));
     *visual_row += 1;
-    for job in &app.background_jobs {
-        let elapsed = job.started_at.elapsed().as_secs();
+    for job in app
+        .background_jobs
+        .iter()
+        .filter(|job| app.background_job_visible(job))
+    {
+        let elapsed = job
+            .finished_at
+            .unwrap_or_else(std::time::Instant::now)
+            .saturating_duration_since(job.started_at)
+            .as_secs();
         let (icon, color) = match &job.status {
             crate::app::BackgroundJobStatus::Running => ("▸", app.theme.resolve("text.warning")),
             crate::app::BackgroundJobStatus::Completed => ("✓", app.theme.resolve("text.success")),
@@ -464,7 +571,7 @@ fn draw_environment_section(text: &mut Text, visual_row: &mut u16, app: &mut App
     text.push_line(Line::from(vec![
         Span::styled(arrow, Style::default().fg(app.theme.resolve("text.muted"))),
         Span::styled(
-            " Environment",
+            format!(" Environment ({} files)", app.context_files.len()),
             Style::default()
                 .fg(app.theme.resolve("text.body"))
                 .add_modifier(Modifier::BOLD),
@@ -477,7 +584,7 @@ fn draw_environment_section(text: &mut Text, visual_row: &mut u16, app: &mut App
     }
 
     let inner = width.saturating_sub(2) as usize;
-    for path in &app.context_files.clone() {
+    for path in &app.context_files {
         text.push_line(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
@@ -490,7 +597,7 @@ fn draw_environment_section(text: &mut Text, visual_row: &mut u16, app: &mut App
 
     // `  ✓ ` prefix is 4 columns.
     let budget = inner.saturating_sub(4);
-    for (name, ok, count) in &app.mcp_status.clone() {
+    for (name, ok, count) in &app.mcp_status {
         let (icon, style) = if *ok {
             ("✓", Style::default().fg(app.theme.resolve("text.success")))
         } else {
@@ -551,6 +658,232 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_tracks_current_work_and_hides_successes() {
+        let mut app = App::new();
+        app.streaming = true;
+        app.todos = vec![
+            mew_agent::Todo {
+                id: 1,
+                content: "completed work".into(),
+                status: mew_agent::TodoStatus::Done,
+                depends_on: vec![],
+            },
+            mew_agent::Todo {
+                id: 2,
+                content: "blocked work".into(),
+                status: mew_agent::TodoStatus::Blocked,
+                depends_on: vec![],
+            },
+        ];
+        app.handle_agent_event(mew_agent::AgentEvent::JobUpdate {
+            job_id: "done".into(),
+            command: "finished command".into(),
+            state: "completed".into(),
+        });
+        app.handle_agent_event(mew_agent::AgentEvent::JobUpdate {
+            job_id: "active".into(),
+            command: "cargo test".into(),
+            state: "running".into(),
+        });
+        let out = render(&mut app, 32, 40);
+        assert!(out.contains("Working"), "{out}");
+        assert!(out.contains("1 remaining"), "{out}");
+        assert!(out.contains("1 blocked"), "{out}");
+        assert!(out.contains("cargo test"), "{out}");
+        assert!(!out.contains("completed work"), "{out}");
+        assert!(!out.contains("finished command"), "{out}");
+        assert_eq!(app.todos.len(), 2, "visibility must preserve the todo list");
+    }
+
+    #[test]
+    fn sidebar_describes_waiting_and_retrying() {
+        let mut app = App::new();
+        app.permission = Some(crate::app::PermissionState {
+            tool_name: "bash".into(),
+            call_id: "call".into(),
+            input: serde_json::json!({}),
+            tx: None,
+            selected: 0,
+            scroll: 0,
+            view: Default::default(),
+        });
+        let out = render(&mut app, 32, 20);
+        assert!(out.contains("Waiting for approval"), "{out}");
+        assert!(out.contains("bash"), "{out}");
+        app.permission = None;
+        app.retry_status = Some("retry in 2s".into());
+        let out = render(&mut app, 32, 20);
+        assert!(out.contains("Retrying"), "{out}");
+        assert!(out.contains("retry in 2s"), "{out}");
+    }
+
+    #[test]
+    fn sidebar_wheel_reaches_overflow_and_headers_follow_viewport() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+        let mut app = App::new();
+        app.todos = (0..20)
+            .map(|id| mew_agent::Todo {
+                id,
+                content: format!("work {id}"),
+                status: mew_agent::TodoStatus::Pending,
+                depends_on: vec![],
+            })
+            .collect();
+        app.context_files.push("AGENTS.md".into());
+        render(&mut app, 32, 10);
+        assert!(app.sidebar_max_scroll > 0);
+        app.scroll = 7;
+        for _ in 0..40 {
+            crate::events::handle_mouse_event(
+                &mut app,
+                MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: 10,
+                    row: 5,
+                    modifiers: KeyModifiers::NONE,
+                },
+            );
+        }
+        let lines = render_lines(&mut app, 32, 10);
+        assert_eq!(app.sidebar_scroll, app.sidebar_max_scroll);
+        assert_eq!(
+            app.scroll, 7,
+            "sidebar scrolling must not move the transcript"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Environment")),
+            "{lines:?}"
+        );
+        let (row, _) = app
+            .sidebar_header_rows
+            .iter()
+            .find(|(_, section)| section == "environment")
+            .unwrap()
+            .clone();
+        assert!(lines[row as usize].contains("Environment"));
+        crate::events::handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: 10,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.sidebar_collapsed.get("environment"), Some(&false));
+        app.todos.clear();
+        render(&mut app, 32, 10);
+        assert_eq!(
+            app.sidebar_scroll, 0,
+            "content removal must clamp the viewport"
+        );
+        assert_eq!(
+            app.sidebar_header_rows
+                .iter()
+                .filter(|(_, section)| section == "environment")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn sidebar_keeps_failed_work_visible_and_removes_finished_goals() {
+        let mut app = App::new();
+        app.active_goal = Some(crate::app::GoalView {
+            objective: "finished objective".into(),
+            status: mew_agent::GoalStatus::Complete,
+        });
+        for (id, outcome) in [
+            ("cancelled", mew_agent::SubagentOutcome::Cancelled),
+            ("completed", mew_agent::SubagentOutcome::Completed),
+            (
+                "failed",
+                mew_agent::SubagentOutcome::Failed {
+                    reason: "check credentials".into(),
+                },
+            ),
+        ] {
+            app.handle_agent_event(mew_agent::AgentEvent::SubagentStart {
+                parent_call_id: id.into(),
+                name: id.into(),
+                child_session_id: id.into(),
+                display_name: None,
+            });
+            app.handle_agent_event(mew_agent::AgentEvent::SubagentEnd {
+                parent_call_id: id.into(),
+                child_session_id: id.into(),
+                outcome,
+                manifests: vec![],
+            });
+        }
+        let out = render(&mut app, 32, 30);
+        assert!(out.contains("check credentials"), "{out}");
+        assert!(!out.contains("cancelled"), "{out}");
+        assert!(!out.contains("completed"), "{out}");
+        assert!(!out.contains("finished objective"), "{out}");
+        app.subagents[0].finished_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(181));
+        let out = render(&mut app, 32, 30);
+        assert!(!out.contains("Subagents"), "{out}");
+        assert!(
+            app.active_goal.is_some(),
+            "visibility must preserve the goal record"
+        );
+    }
+
+    #[test]
+    fn sidebar_current_tool_reasoning_and_queue_are_explicit() {
+        let mut app = App::new();
+        app.push_synthetic_message("working".into());
+        let message = app.messages.last_mut().unwrap();
+        message.parts = vec![mew_message::Part::ToolCall(mew_message::ToolCallPart {
+            base: mew_message::PartBase {
+                id: ulid::Ulid::new(),
+                message_id: message.id,
+                session_id: message.session_id,
+            },
+            tool_name: "bash".into(),
+            call_id: "call".into(),
+            raw_input: String::new(),
+            state: mew_message::ToolState::Running(mew_message::ToolStateRunning {
+                input: serde_json::json!({"command": "cargo test"}),
+                output: String::new(),
+                time: mew_message::ToolTime {
+                    start: 0,
+                    end: None,
+                },
+            }),
+        })];
+        app.streaming = true;
+        app.queued_messages = vec!["follow up".into()];
+        let out = render(&mut app, 32, 20);
+        assert!(out.contains("Running bash"), "{out}");
+        assert!(out.contains("Queued follow-ups: 1"), "{out}");
+        let call_id = app.messages.last().unwrap().parts[0].id();
+        app.tool_states.insert(
+            call_id,
+            crate::app::ToolDisplayState::Completed {
+                output: "done".into(),
+                diff: None,
+            },
+        );
+        let out = render(&mut app, 32, 20);
+        assert!(
+            !out.contains("Running bash"),
+            "completed display state wins over a buffered running part: {out}"
+        );
+        // A previous exchange must not be reported as the current tool.
+        app.push_synthetic_message("next exchange".into());
+        app.reasoning_active_id = Some(ulid::Ulid::new());
+        let out = render(&mut app, 32, 20);
+        assert!(out.contains("Thinking"), "{out}");
+        assert!(!out.contains("Running bash"), "{out}");
+        app.cancelling = true;
+        let out = render(&mut app, 32, 20);
+        assert!(out.contains("Stopping"), "{out}");
+    }
+
+    #[test]
     fn test_truncate_to_fit() {
         assert_eq!(truncate_to_fit("short", 10), "short");
         assert_eq!(truncate_to_fit("exactly-10", 10), "exactly-10");
@@ -587,14 +920,14 @@ mod tests {
     }
 
     #[test]
-    fn test_sidebar_session_header_shows_title_and_count() {
+    fn test_sidebar_session_header_shows_title_and_task_state() {
         let mut app = App::new();
         app.status.session_id = "abcdef1234567890".into();
         app.session_titles
             .insert("abcdef1234567890".into(), "refactor sidebar".into());
         let out = render(&mut app, 32, 40);
         assert!(out.contains("refactor sidebar"), "missing title:\n{out}");
-        assert!(out.contains("msg 0"), "missing message count:\n{out}");
+        assert!(out.contains("Ready"), "missing task state:\n{out}");
     }
 
     #[test]
@@ -638,7 +971,10 @@ mod tests {
             depends_on: Vec::new(),
         });
         let out = render(&mut app, 32, 40);
-        assert!(out.contains("Todos (0/1)"), "missing header:\n{out}");
+        assert!(
+            out.contains("Todos (1 remaining)"),
+            "missing header:\n{out}"
+        );
         assert!(out.contains("write tests"), "missing todo:\n{out}");
     }
 
@@ -701,7 +1037,7 @@ mod tests {
 
         let out = render(&mut app, 32, 40);
         assert!(
-            out.contains("Todos (0/1)"),
+            out.contains("Todos (1 remaining)"),
             "header must count visible only:\n{out}"
         );
         assert!(
