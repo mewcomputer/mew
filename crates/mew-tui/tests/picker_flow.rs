@@ -1,4 +1,6 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use mew_tui::{
     app::PickerItem,
     harness::{Backend, Harness},
@@ -16,6 +18,267 @@ fn display_row(buffer: &ratatui::buffer::Buffer, row: u16) -> String {
         column += unicode_width::UnicodeWidthStr::width(symbol).max(1) as u16;
     }
     text
+}
+
+fn project_conversation(id: &str, path: &std::path::Path) -> mew_protocol::SessionInfo {
+    serde_json::from_value(serde_json::json!({
+        "session_id": id, "state": "idle", "created_at": 10, "client_count": 0,
+        "summary": format!("work in {id}"), "cwd": path,
+        "last_message_at": 1_728_556_200_000_i64
+    }))
+    .unwrap()
+}
+
+#[test]
+fn conversation_rows_show_each_project_and_both_lines_choose_their_owner() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let mut harness = Harness::new(80, 40);
+    harness.app.daemon_sessions = vec![
+        project_conversation("alpha", &home.join("code/alpha")),
+        project_conversation("beta", &home.join("code/beta")),
+        project_conversation("outside", std::path::Path::new("/tmp/outside")),
+    ];
+    harness.app.input = "draft across projects".into();
+    harness.app.cursor = harness.app.input.len();
+    harness.app.open_session_picker();
+    let frame = harness.render();
+    assert_eq!(harness.app.picker_mouse.rows.len(), 6, "{frame}");
+    let list = harness.app.picker_mouse.list;
+    let lines: Vec<_> = frame.lines().collect();
+    for (index, path) in ["~/code/alpha", "~/code/beta", "/tmp/outside"]
+        .into_iter()
+        .enumerate()
+    {
+        let y = list.y + index as u16 * 2;
+        assert!(lines[y as usize + 1].contains(path), "{frame}");
+        assert!(lines[y as usize + 1].contains("10-10 10:30"), "{frame}");
+        assert!(harness.app.picker_mouse.rows.contains(&(y + 1, index)));
+    }
+    for (index, id) in ["alpha", "beta", "outside"].into_iter().enumerate() {
+        for (offset, column) in [(0, list.x + 2), (1, list.x + 2), (1, list.right() - 1)] {
+            harness.app.open_session_picker();
+            harness.render();
+            let list = harness.app.picker_mouse.list;
+            let action = mew_tui::events::handle_input_event(
+                &mut harness.app,
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row: list.y + index as u16 * 2 + offset,
+                    modifiers: KeyModifiers::NONE,
+                }),
+            );
+            assert!(action.is_none());
+            assert_eq!(harness.app.picker.as_ref().unwrap().selected, index);
+            let action = mew_tui::events::handle_input_event(
+                &mut harness.app,
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            );
+            assert!(
+                matches!(&action, Some(mew_tui::events::Action::AttachSession(owner)) if owner == id),
+                "{id} row {offset}, col {column}, action {action:?}"
+            );
+            assert_eq!(harness.app.input, "draft across projects");
+        }
+    }
+}
+
+#[test]
+fn conversation_rows_keep_metadata_right_aligned_and_selection_on_both_lines() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let mut app = mew_tui::App::new();
+    app.daemon_sessions = vec![project_conversation("alpha", &home.join("code/alpha"))];
+    app.open_session_picker();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let completed = terminal
+        .draw(|frame| mew_tui::ui::draw(frame, &mut app))
+        .unwrap();
+    let list = app.picker_mouse.list;
+    assert_eq!(completed.buffer[(list.x + 2, list.y + 1)].symbol(), "~");
+    assert_eq!(
+        completed.buffer[(list.right() - 1, list.y + 1)].symbol(),
+        "0"
+    );
+    let selection = app.theme.resolve("selection.background");
+    assert_eq!(completed.buffer[(list.x, list.y)].bg, selection);
+    assert_eq!(completed.buffer[(list.x, list.y + 1)].bg, selection);
+    assert!(completed.buffer[(list.x, list.y)]
+        .modifier
+        .contains(ratatui::style::Modifier::BOLD));
+    assert!(!completed.buffer[(list.x + 2, list.y + 1)]
+        .modifier
+        .contains(ratatui::style::Modifier::BOLD));
+}
+
+#[test]
+fn clipped_conversation_context_is_readable_in_selected_details() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let mut harness = Harness::new(40, 30);
+    harness.app.daemon_sessions = vec![project_conversation(
+        "alpha",
+        &home.join("code/identifying-parent/project"),
+    )];
+    harness.app.open_session_picker();
+    harness.app.picker.as_mut().unwrap().items[0].label = "○ task".into();
+    let frame = harness.render();
+    assert!(frame.contains("identifying-parent"), "{frame}");
+    harness.resize(80, 30);
+    harness.render();
+    assert!(harness.app.picker_mouse.details.is_empty());
+}
+
+#[test]
+fn sidebar_conversation_context_routes_both_lines_after_scrolling() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let mut harness = Harness::new(128, 24);
+    harness.app.daemon_mode = true;
+    harness.app.daemon_sessions = vec![
+        project_conversation("alpha", &home.join("code/alpha")),
+        project_conversation("beta", &home.join("code/beta")),
+    ];
+    harness.app.input = "keep draft".into();
+    harness.app.cursor = harness.app.input.len();
+    for scroll in [0, 2] {
+        harness.app.sidebar_scroll = scroll;
+        let frame = harness.render();
+        assert!(frame.contains("~/code/beta"), "{frame}");
+        for id in ["alpha", "beta"] {
+            let rows: Vec<_> = harness.app.sidebar_item_rows.iter()
+                .filter(|(_, item)| matches!(item, mew_tui::app::SidebarItem::Session(owner) if owner == id))
+                .map(|(y, _)| *y).collect();
+            assert_eq!(rows.len(), 2);
+            let column = harness.app.sidebar_rect.x + 2;
+            for y in rows {
+                let action = mew_tui::events::handle_input_event(
+                    &mut harness.app,
+                    Event::Mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column,
+                        row: y,
+                        modifiers: KeyModifiers::NONE,
+                    }),
+                );
+                assert!(
+                    matches!(action, Some(mew_tui::events::Action::AttachSession(owner)) if owner == id)
+                );
+                assert_eq!(harness.app.input, "keep draft");
+            }
+        }
+    }
+}
+
+#[test]
+fn short_conversation_picker_reserves_scrollable_context_and_failure_details() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let mut harness = Harness::new(40, 16);
+    harness.app.daemon_sessions = (0..6)
+        .map(|i| {
+            project_conversation(
+                &format!("project-{i}"),
+                &home.join("code/a-long-project-parent/workspace"),
+            )
+        })
+        .collect();
+    harness.app.session_turn_outcomes.insert(
+        "project-0".into(),
+        mew_client_core::TurnOutcome::Failed {
+            detail: Some("credentials unavailable".into()),
+        },
+    );
+    harness.app.open_session_picker();
+    for (width, height) in [(40, 16), (24, 12), (20, 12), (80, 18)] {
+        harness.resize(width, height);
+        let mut frames = harness.render();
+        assert!(
+            harness.app.picker.as_ref().unwrap().visible_details > 0,
+            "{frames}"
+        );
+        if width == 40 {
+            assert!(frames.contains("PgUp/PgDn details"), "{frames}");
+        }
+        for _ in 0..12 {
+            harness.key(KeyCode::PageDown.into());
+            frames.push_str(&harness.render());
+        }
+        assert!(frames.contains("credentials"), "{frames}");
+        assert_eq!(harness.app.picker.as_ref().unwrap().selected, 0);
+        harness.key(KeyCode::PageUp.into());
+    }
+}
+
+#[test]
+fn tiny_conversation_picker_keeps_a_title_and_escape_reachable() {
+    let mut harness = Harness::new(20, 4);
+    harness.app.daemon_sessions = vec![project_conversation(
+        "alpha",
+        std::path::Path::new("/tmp/alpha"),
+    )];
+    harness.app.open_session_picker();
+    let frame = harness.render();
+    assert!(frame.contains("○ work in"), "{frame}");
+    assert_eq!(harness.app.picker_mouse.rows.len(), 1);
+    assert_eq!(harness.app.picker.as_ref().unwrap().visible_items, 1);
+    harness.key(KeyCode::Esc.into());
+    assert!(harness.app.picker.is_none());
+}
+
+#[test]
+fn conversation_scrollbars_page_by_choices_and_keep_complete_pairs_after_resize() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let mut harness = Harness::new(80, 24);
+    harness.app.daemon_sessions = (0..40)
+        .map(|i| {
+            project_conversation(
+                &format!("project-{i:02}"),
+                &home.join(format!("code/project-{i:02}")),
+            )
+        })
+        .collect();
+    harness.app.open_session_picker();
+    harness.render();
+    let visible = harness.app.picker.as_ref().unwrap().visible_items;
+    let bar = harness.app.picker_mouse.scrollbar;
+    assert_eq!(bar.area.height as usize, visible * 2);
+    mew_tui::events::handle_input_event(
+        &mut harness.app,
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: bar.area.x,
+            row: bar.area.bottom() - 1,
+            modifiers: KeyModifiers::NONE,
+        }),
+    );
+    harness.render();
+    assert_eq!(harness.app.picker.as_ref().unwrap().scroll, visible);
+    for (width, height) in [(80, 40), (40, 16), (24, 12)] {
+        harness.resize(width, height);
+        harness.app.picker.as_mut().unwrap().selected = 39;
+        let frame = harness.render();
+        let picker = harness.app.picker.as_ref().unwrap();
+        let list = harness.app.picker_mouse.list;
+        assert_eq!(list.height as usize, picker.visible_items * 2, "{frame}");
+        assert!(harness.app.picker_mouse.rows.iter().any(|(_, i)| *i == 39));
+        assert!(harness
+            .app
+            .picker_mouse
+            .rows
+            .iter()
+            .all(|(y, _)| *y < list.bottom()));
+        assert!(
+            frame.contains(if width >= 40 { "project-39" } else { "t-39" }),
+            "{frame}"
+        );
+        assert_eq!(
+            harness
+                .app
+                .picker_mouse
+                .rows
+                .iter()
+                .filter(|(_, i)| *i == 39)
+                .count(),
+            2
+        );
+    }
 }
 
 #[test]

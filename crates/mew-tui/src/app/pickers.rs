@@ -25,6 +25,46 @@ fn conversation_marker(permissions: u32, questions: u32, unread: bool, running: 
     }
 }
 
+fn session_metadata(permissions: u32, questions: u32, last_message_at: Option<i64>) -> String {
+    use std::fmt::Write as _;
+
+    let mut metadata = String::new();
+    if permissions > 0 {
+        write!(
+            metadata,
+            "{permissions} {}",
+            if permissions == 1 {
+                "approval"
+            } else {
+                "approvals"
+            }
+        )
+        .unwrap();
+    }
+    if questions > 0 {
+        if !metadata.is_empty() {
+            metadata.push_str(" · ");
+        }
+        write!(
+            metadata,
+            "{questions} {}",
+            if questions == 1 {
+                "question"
+            } else {
+                "questions"
+            }
+        )
+        .unwrap();
+    }
+    if let Some(last) = last_message_at.and_then(chrono::DateTime::from_timestamp_millis) {
+        if !metadata.is_empty() {
+            metadata.push_str(" · ");
+        }
+        write!(metadata, "{}", last.format("%m-%d %H:%M")).unwrap();
+    }
+    metadata
+}
+
 impl App {
     pub fn open_model_picker(&mut self) {
         let mut items: Vec<PickerItem> = Vec::new();
@@ -154,60 +194,36 @@ impl App {
         }
     }
 
-    pub(crate) fn session_picker_item(&self, session: &mew_protocol::SessionInfo) -> PickerItem {
-        let id = &session.session_id;
+    pub(crate) fn session_context(&self, session: &mew_protocol::SessionInfo) -> PickerContext {
         let (permissions, questions) = self
             .session_attention
-            .get(id)
+            .get(&session.session_id)
             .copied()
             .unwrap_or((session.pending_permissions, session.pending_questions));
-        let mut status = Vec::new();
-        if permissions > 0 {
-            status.push(format!(
-                "{permissions} {}",
-                if permissions == 1 {
-                    "approval"
-                } else {
-                    "approvals"
-                }
-            ));
+        PickerContext {
+            path: session
+                .cwd
+                .as_deref()
+                .filter(|cwd| !cwd.is_empty())
+                .map(|cwd| format_cwd(Path::new(cwd)))
+                .unwrap_or_else(|| "Project unavailable".into()),
+            metadata: session_metadata(permissions, questions, session.last_message_at),
         }
-        if questions > 0 {
-            status.push(format!(
-                "{questions} {}",
-                if questions == 1 {
-                    "question"
-                } else {
-                    "questions"
-                }
-            ));
-        }
-        if session.archived {
-            status.push("Archived".into());
-        }
-        if session.pinned {
-            status.push("Pinned".into());
-        }
-        if id == &self.status.session_id {
-            status.push("current".into());
-        }
-        let mut description = status.join(" · ");
-        let last = session
-            .last_message_at
-            .and_then(chrono::DateTime::from_timestamp_millis)
-            .map(|dt| dt.format("%m-%d %H:%M").to_string());
-        if session.cwd.is_some() || last.is_some() {
-            if !description.is_empty() {
-                description.push('\n');
-            }
-            if let Some(cwd) = &session.cwd {
-                description.push_str(cwd);
-            }
-            if let Some(last) = last {
-                if session.cwd.is_some() {
+    }
+
+    pub(crate) fn session_picker_item(&self, session: &mew_protocol::SessionInfo) -> PickerItem {
+        let id = &session.session_id;
+        let mut description = String::new();
+        for (present, label) in [
+            (session.archived, "Archived"),
+            (session.pinned, "Pinned"),
+            (id == &self.status.session_id, "current"),
+        ] {
+            if present {
+                if !description.is_empty() {
                     description.push_str(" · ");
                 }
-                description.push_str(&last);
+                description.push_str(label);
             }
         }
         let failure = match self.session_turn_outcomes.get(id) {
@@ -230,6 +246,7 @@ impl App {
             id: id.clone(),
             label: self.session_label(session),
             description,
+            context: Some(self.session_context(session)),
             ..Default::default()
         }
     }
@@ -263,7 +280,10 @@ impl App {
                 PickerItem {
                     id: id.into(),
                     label: format!("{marker} {title}"),
-                    description: "Conversation details unavailable.".into(),
+                    context: Some(PickerContext {
+                        path: "Project unavailable".into(),
+                        metadata: session_metadata(permissions, questions, None),
+                    }),
                     ..Default::default()
                 }
             }));
@@ -348,7 +368,9 @@ impl App {
                     label: p.display_name.clone(),
                     description: format!(
                         "{}  ·  {} sessions  ·  last: {}",
-                        p.path, p.session_count, last
+                        format_cwd(Path::new(&p.path)),
+                        p.session_count,
+                        last
                     ),
                     ..Default::default()
                 }

@@ -1,6 +1,56 @@
 use super::*;
 
 #[test]
+fn format_cwd_preserves_home_component_boundaries_and_unicode() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    assert_eq!(format_cwd(&home), "~");
+    assert_eq!(
+        format_cwd(&home.join("projects/日本語")),
+        "~/projects/日本語"
+    );
+    let sibling = std::path::PathBuf::from(format!("{}-other/work", home.display()));
+    assert_eq!(format_cwd(&sibling), sibling.display().to_string());
+    assert_eq!(
+        format_cwd(std::path::Path::new("/tmp/project")),
+        "/tmp/project"
+    );
+}
+
+#[test]
+fn project_picker_abbreviates_the_home_path_without_changing_its_identity() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let path = home.join("projects/日本語").display().to_string();
+    let mut app = App::new();
+    app.projects = vec![mew_protocol::ProjectInfo {
+        path: path.clone(),
+        display_name: "日本語".into(),
+        session_count: 1,
+        last_used_at: None,
+        pinned: false,
+    }];
+    app.open_project_picker();
+    let item = &app.picker.as_ref().unwrap().items[0];
+    assert_eq!(item.id, path);
+    assert_eq!(
+        item.description,
+        "~/projects/日本語  ·  1 sessions  ·  last: —"
+    );
+}
+
+#[test]
+fn session_context_keeps_missing_project_and_invalid_time_explicit() {
+    let session: mew_protocol::SessionInfo = serde_json::from_value(serde_json::json!({
+        "session_id": "work", "state": "idle", "created_at": 0,
+        "client_count": 0, "cwd": "", "last_message_at": i64::MAX,
+        "pending_permissions": 1, "pending_questions": 2
+    }))
+    .unwrap();
+    let context = App::new().session_context(&session);
+    assert_eq!(context.path, "Project unavailable");
+    assert_eq!(context.metadata, "1 approval · 2 questions");
+}
+
+#[test]
 fn daemon_session_error_is_visible_without_an_active_prompt() {
     let mut app = App::new();
     let message = "failed to load session history";

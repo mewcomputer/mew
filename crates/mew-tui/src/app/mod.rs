@@ -388,12 +388,20 @@ pub enum Mode {
     Activity,
 }
 
+/// Project and activity metadata displayed beneath a conversation title.
+#[derive(Debug, Clone)]
+pub struct PickerContext {
+    pub path: String,
+    pub metadata: String,
+}
+
 /// A single item in the command palette.
 #[derive(Debug, Clone, Default)]
 pub struct PickerItem {
     pub id: String,
     pub label: String,
     pub description: String,
+    pub context: Option<PickerContext>,
     /// When true, this item renders as a non-selectable section header
     /// (e.g. "Recent" in the model picker). It is skipped by selection
     /// and filtered out when the user types a filter.
@@ -440,13 +448,13 @@ pub struct PickerState {
     pub cursor: usize,
     /// Undo history for the filter field.
     pub filter_undo: editor::UndoHistory,
-    /// Vertical list offset. Each choice or section header occupies one row.
+    /// Logical item offset, including section headers.
     pub scroll: usize,
     /// Wrapped description offset, controlled by Page Up and Page Down.
     pub details_scroll: usize,
     /// Visible description rows, used for page-sized navigation.
     pub visible_details: usize,
-    /// Number of display rows the list area can show. Set by the draw pass.
+    /// Visible logical items in the list area, set by the draw pass.
     pub visible_items: usize,
     pub hint: Option<String>,
     /// Numeric budget row state for the thinking-variant picker. `None` for
@@ -535,20 +543,44 @@ impl PickerState {
         if self.is_at_picker() {
             return self.items.iter().filter(|i| !i.header).collect();
         }
+        if self.filter.is_empty() {
+            return self.items.iter().collect();
+        }
         let f = self.filter.to_lowercase();
+        let home = std::env::var_os("HOME").map(|home| home.to_string_lossy().to_lowercase());
+        let normalized_path = home
+            .as_deref()
+            .and_then(|home| std::path::Path::new(&f).strip_prefix(home).ok())
+            .map(|rest| {
+                if rest.as_os_str().is_empty() {
+                    "~".into()
+                } else {
+                    format!("~/{}", rest.display())
+                }
+            });
+        let path_filter = normalized_path.as_deref().unwrap_or(&f);
         let mut seen_models = std::collections::HashSet::new();
         self.items
             .iter()
             .filter(|i| {
-                // Headers only appear when filter is empty.
+                // Section headers only appear while browsing.
                 if i.header {
-                    return f.is_empty();
+                    return false;
                 }
                 let matches = i.label.to_lowercase().contains(&f)
-                    || i.description.to_lowercase().contains(&f);
+                    || {
+                        let description = i.description.to_lowercase();
+                        description.contains(&f)
+                            || (path_filter != f && description.contains(path_filter))
+                    }
+                    || i.context.as_ref().is_some_and(|context| {
+                        let path = context.path.to_lowercase();
+                        path.contains(&f)
+                            || path.contains(path_filter)
+                            || context.metadata.to_lowercase().contains(&f)
+                    });
                 // Recent shortcuts duplicate full-list entries only while browsing.
-                matches
-                    && (self.kind != "model" || f.is_empty() || seen_models.insert(i.id.as_str()))
+                matches && (self.kind != "model" || seen_models.insert(i.id.as_str()))
             })
             .collect()
     }
@@ -3024,14 +3056,16 @@ fn short_cwd() -> String {
 }
 
 fn format_cwd(path: &std::path::Path) -> String {
-    let cwd = path.display().to_string();
     if let Some(home) = std::env::var_os("HOME") {
-        let home = home.to_string_lossy().into_owned();
-        if let Some(rest) = cwd.strip_prefix(&home) {
-            return format!("~{}", rest);
+        if let Ok(rest) = path.strip_prefix(std::path::Path::new(&home)) {
+            return if rest.as_os_str().is_empty() {
+                "~".into()
+            } else {
+                format!("~/{}", rest.display())
+            };
         }
     }
-    cwd
+    path.display().to_string()
 }
 
 /// Walk up from cwd to find a `.git/HEAD` and parse the branch name.

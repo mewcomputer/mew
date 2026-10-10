@@ -1955,3 +1955,24 @@ All 467 TUI tests across 18 targets passed, with generated themes up to date.
 Refreshed the eight task-flow captures and visually checked the conversation and
 attention views at 1280 by 800 pixels. Updated command documentation with the
 icon meanings; live interaction remains pending.
+
+### 2026-10-10: project context on every conversation
+
+Conversation pickers and the sidebar place project paths beneath each title,
+with pending action counts and time aligned on the right. Home paths use `~/`
+with component-safe boundaries; search accepts home aliases and absolute paths.
+Unknown projects remain explicit. Shortened paths preserve their project suffix,
+and selected details disclose clipped context without repeating ordinary rows.
+
+Both lines route to their conversation. Picker offsets and scrollbar paging count
+choices rather than physical rows, and resizing retains complete pairs where
+space permits. Short terminals reserve scrollable context and failure details;
+the scrolling hint follows the actual detail viewport. Selected context retains
+the shared highlight with lighter typography than its title.
+
+All 481 TUI tests across 18 targets passed, including path boundaries, Unicode,
+project search, row clicks, sidebar scrolling, track paging and narrow details.
+Generated themes are up to date. Refreshed eight desktop captures with several
+projects and added a 400 by 320 pixel short-terminal view to the screenshot
+gallery. Visually checked conversation, attention and narrow views using the
+actual renderer with sample state; paired live interaction remains pending.

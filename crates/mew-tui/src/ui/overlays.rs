@@ -12,8 +12,8 @@ use ratatui::{
 use super::display_width;
 use crate::app::{
     App, DecisionLayout, DecisionView, GoalComposeState, GoalProposalState, PermissionState,
-    PersonaSummary, PersonaSwitchConfirmState, PickerBudget, PickerItem, PickerState, SlashCommand,
-    UserQuestionState,
+    PersonaSummary, PersonaSwitchConfirmState, PickerBudget, PickerContext, PickerItem,
+    PickerState, SlashCommand, UserQuestionState,
 };
 
 /// A single selectable row in an inline autocomplete list (slash commands or
@@ -947,6 +947,57 @@ fn budget_track_line(
     ])
 }
 
+pub(super) fn picker_context_line(
+    context: &PickerContext,
+    width: u16,
+    style: Style,
+) -> Line<'static> {
+    let indent = width.min(2) as usize;
+    let available = width as usize - indent;
+    let metadata_width =
+        display_width(&context.metadata).min(available.saturating_sub(available.min(8) + 1));
+    let gap = usize::from(metadata_width > 0);
+    let path_width = available.saturating_sub(metadata_width + gap);
+    let path = if display_width(&context.path) <= path_width || path_width < 3 {
+        truncate(&context.path, path_width)
+    } else {
+        let prefix_budget = (path_width - 1) / 2;
+        let suffix_budget = path_width - 1 - prefix_budget;
+        let mut prefix_end = 0;
+        let mut prefix_width = 0;
+        for (index, grapheme) in context.path.grapheme_indices(true) {
+            let columns = display_width(grapheme);
+            if prefix_width + columns > prefix_budget {
+                break;
+            }
+            prefix_end = index + grapheme.len();
+            prefix_width += columns;
+        }
+        let mut suffix_start = context.path.len();
+        let mut suffix_width = 0;
+        for (index, grapheme) in context.path.grapheme_indices(true).rev() {
+            let columns = display_width(grapheme);
+            if suffix_width + columns > suffix_budget {
+                break;
+            }
+            suffix_start = index;
+            suffix_width += columns;
+        }
+        format!(
+            "{}…{}",
+            &context.path[..prefix_end],
+            &context.path[suffix_start..]
+        )
+    };
+    let spacing = available.saturating_sub(display_width(&path) + metadata_width);
+    Line::from(vec![
+        Span::styled(" ".repeat(indent), style),
+        Span::styled(path, style),
+        Span::styled(" ".repeat(spacing), style),
+        Span::styled(truncate(&context.metadata, metadata_width), style),
+    ])
+}
+
 pub(super) fn draw_picker(
     f: &mut Frame,
     picker: &mut PickerState,
@@ -973,6 +1024,10 @@ pub(super) fn draw_picker(
     };
     let inner_width = width.saturating_sub(padding * 2);
     let list_width = inner_width.saturating_sub(1).max(1);
+    let conversation = matches!(
+        picker.kind.as_str(),
+        "session" | "session_attention" | "session_archived"
+    );
     let (title, empty_message) = match picker.kind.as_str() {
         "command" => ("Commands", "No commands"),
         "model" => ("Models", "No models"),
@@ -1015,10 +1070,26 @@ pub(super) fn draw_picker(
             .collect()
     };
     if let Some(item) = filtered.get(picker.selected) {
+        let mut overflow = Vec::new();
         if display_width(&item.label) > list_width as usize {
-            let mut label = wrap_text(&item.label, inner_width as usize);
-            label.append(&mut details);
-            details = label;
+            overflow.extend(wrap_text(&item.label, inner_width as usize));
+        }
+        if let Some(context) = &item.context {
+            let available = list_width.saturating_sub(2) as usize;
+            let metadata_width = display_width(&context.metadata)
+                .min(available.saturating_sub(available.min(8) + 1));
+            let path_width =
+                available.saturating_sub(metadata_width + usize::from(metadata_width > 0));
+            if display_width(&context.path) > path_width {
+                overflow.extend(wrap_text(&context.path, inner_width as usize));
+            }
+            if display_width(&context.metadata) > metadata_width {
+                overflow.extend(wrap_text(&context.metadata, inner_width as usize));
+            }
+        }
+        if !overflow.is_empty() {
+            overflow.append(&mut details);
+            details = overflow;
         }
     }
     if filtered.is_empty() && !picker.filter.is_empty() {
@@ -1033,17 +1104,6 @@ pub(super) fn draw_picker(
     if let Some(hint) = &picker.hint {
         footer.extend(wrap_text(hint, inner_width as usize));
     }
-    if details.len() > 3 || (details.len() > 1 && inner_width < 32) {
-        footer.extend(wrap_text(
-            if inner_width < 20 {
-                "Pg↑/↓ details"
-            } else {
-                "PgUp/PgDn details"
-            },
-            inner_width as usize,
-        ));
-    }
-
     let max_height = area
         .height
         .saturating_sub(if area.height >= 18 { 4 } else { 0 });
@@ -1051,21 +1111,66 @@ pub(super) fn draw_picker(
     let available = max_height.saturating_sub(vertical_padding * 2);
     let header_height = if available >= 4 { 2 } else { 1 };
     let divider_height = u16::from(max_height >= 14);
-    let footer_height =
-        (footer.len() as u16).min(available.saturating_sub(header_height + divider_height + 1));
-    let chrome = vertical_padding * 2 + header_height + divider_height + footer_height;
-    let content_budget = max_height.saturating_sub(chrome);
-    // Reserve choices before details so a long description never crowds the list.
-    let min_choices = filtered.len().clamp(1, if max_height < 14 { 1 } else { 4 }) as u16;
-    let details_height = if details.is_empty() || content_budget < min_choices + 2 {
-        0
-    } else {
-        (details.len().min(3) as u16 + 1).min(content_budget - min_choices)
+    let mut details_hint = false;
+    let (chrome, row_height, details_height, visible_items, footer_height) = loop {
+        let content_space = available.saturating_sub(header_height + divider_height);
+        let reserve = if conversation && !details.is_empty() && content_space >= 4 {
+            4
+        } else {
+            1
+        };
+        let footer_height = (footer.len() as u16).min(content_space.saturating_sub(reserve));
+        let chrome = vertical_padding * 2 + header_height + divider_height + footer_height;
+        let content_budget = max_height.saturating_sub(chrome);
+        let row_height = if conversation && content_budget >= 2 {
+            2
+        } else {
+            1
+        };
+        // Reserve choices before details so long descriptions keep a usable list.
+        let min_choices = (filtered.len().clamp(1, if max_height < 14 { 1 } else { 4 }) as u16
+            * row_height)
+            .min(content_budget);
+        let min_choices = if conversation && !details.is_empty() {
+            min_choices.min(content_budget.saturating_sub(2).max(row_height))
+        } else {
+            min_choices
+        };
+        let details_height = if details.is_empty() || content_budget < min_choices + 2 {
+            0
+        } else {
+            (details.len().min(3) as u16 + 1).min(content_budget - min_choices)
+        };
+        if !details_hint
+            && details_height > 0
+            && details.len() > details_height.saturating_sub(1) as usize
+        {
+            let mut hint = wrap_text(
+                if inner_width < 20 {
+                    "Pg↑/↓ details"
+                } else {
+                    "PgUp/PgDn details"
+                },
+                inner_width as usize,
+            );
+            hint.append(&mut footer);
+            footer = hint;
+            details_hint = true;
+            continue;
+        }
+        let visible_items = filtered
+            .len()
+            .clamp(1, u16::MAX as usize)
+            .min((content_budget.saturating_sub(details_height) / row_height) as usize);
+        break (
+            chrome,
+            row_height,
+            details_height,
+            visible_items,
+            footer_height,
+        );
     };
-    let list_height = filtered
-        .len()
-        .clamp(1, u16::MAX as usize)
-        .min(content_budget.saturating_sub(details_height) as usize) as u16;
+    let list_height = visible_items as u16 * row_height;
     let height = chrome + list_height + details_height;
     let popup = Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
@@ -1081,10 +1186,7 @@ pub(super) fn draw_picker(
         inner_width,
         height.saturating_sub(vertical_padding * 2),
     );
-    let count = if matches!(
-        picker.kind.as_str(),
-        "session" | "session_attention" | "session_archived"
-    ) {
+    let count = if conversation {
         String::new()
     } else {
         format!(
@@ -1174,7 +1276,7 @@ pub(super) fn draw_picker(
         list_height,
     );
     mouse.list = list_area;
-    picker.visible_items = list_height as usize;
+    picker.visible_items = visible_items;
     picker.visible_details = details_height.saturating_sub(1) as usize;
     if picker.selected < picker.scroll {
         picker.scroll = picker.selected;
@@ -1186,14 +1288,22 @@ pub(super) fn draw_picker(
     picker.scroll = picker
         .scroll
         .min(filtered.len().saturating_sub(picker.visible_items));
+    let scroll = picker.scroll;
     mouse.rows.extend(
         filtered
             .iter()
             .enumerate()
             .skip(picker.scroll)
-            .take(list_height as usize)
+            .take(visible_items)
             .filter(|(_, item)| !item.header)
-            .map(|(index, _)| (list_area.y + (index - picker.scroll) as u16, index)),
+            .flat_map(|(index, _)| {
+                (0..row_height).map(move |offset| {
+                    (
+                        list_area.y + (index - scroll) as u16 * row_height + offset,
+                        index,
+                    )
+                })
+            }),
     );
     if filtered.is_empty() {
         f.render_widget(
@@ -1206,7 +1316,7 @@ pub(super) fn draw_picker(
             list_area,
         );
     } else {
-        render_picker_list(f, picker, &filtered, list_area, tokens);
+        render_picker_list(f, picker, &filtered, list_area, row_height, tokens);
         if filtered.len() > picker.visible_items && !list_area.is_empty() {
             mouse.scrollbar = super::mouse_scrollbar(
                 f,
@@ -1255,12 +1365,13 @@ pub(super) fn draw_picker(
     );
 }
 
-/// Choices occupy one row; only the selected choice has a separate description.
+/// Conversation choices retain project context beneath their title.
 fn render_picker_list(
     f: &mut Frame,
     picker: &mut PickerState,
     filtered: &[PickerItem],
     list_area: Rect,
+    row_height: u16,
     tokens: &crate::theme::Theme,
 ) {
     for (offset, (index, item)) in filtered
@@ -1288,7 +1399,12 @@ fn render_picker_list(
         } else {
             Modifier::empty()
         });
-        let row = Rect::new(list_area.x, list_area.y + offset as u16, list_area.width, 1);
+        let row = Rect::new(
+            list_area.x,
+            list_area.y + offset as u16 * row_height,
+            list_area.width,
+            row_height,
+        );
         f.render_widget(Block::default().style(style), row);
         let line = if item.id == "budget" {
             if let Some(budget) = picker.budget.as_mut() {
@@ -1316,6 +1432,22 @@ fn render_picker_list(
             ))
         };
         f.render_widget(Paragraph::new(line), row);
+        if row_height == 2 {
+            if let Some(context) = &item.context {
+                let context_style = Style::default()
+                    .bg(bg)
+                    .fg(if selected {
+                        fg
+                    } else {
+                        tokens.resolve("text.muted")
+                    })
+                    .remove_modifier(Modifier::BOLD);
+                f.render_widget(
+                    Paragraph::new(picker_context_line(context, row.width, context_style)),
+                    Rect::new(row.x, row.y + 1, row.width, 1),
+                );
+            }
+        }
     }
     if filtered.len() > picker.visible_items && !list_area.is_empty() {
         let mut state =
@@ -1860,7 +1992,33 @@ pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate;
+    use super::{picker_context_line, truncate};
+    use crate::app::PickerContext;
+    use ratatui::style::Style;
+
+    #[test]
+    fn project_context_preserves_project_end_and_whole_graphemes() {
+        for path in [
+            "~/a-long-parent/project",
+            "~/日本語/👩‍💻project",
+            "~/e\u{301}e\u{301}e\u{301}/project",
+        ] {
+            let context = PickerContext {
+                path: path.into(),
+                metadata: "10-10 10:30".into(),
+            };
+            for width in [0, 1, 8, 20, 30, 64] {
+                let line = picker_context_line(&context, width, Style::default()).to_string();
+                assert!(super::display_width(&line) <= width as usize, "{line:?}");
+                if width >= 30 {
+                    assert!(line.contains("project"), "{line:?}");
+                    assert!(line.ends_with("10-10 10:30"), "{line:?}");
+                }
+                assert!(!line.contains('�'));
+                assert!(!line.contains("👩…") && !line.contains("…‍"), "{line:?}");
+            }
+        }
+    }
 
     #[test]
     fn truncated_labels_keep_graphemes_whole_and_use_the_column_budget() {

@@ -65,5 +65,8 @@ follow-ups when you switch. Submitted input stays visible until the daemon
 acknowledges it; an uncertain submission is never replayed automatically.
 
 Conversation icons show state: `○` idle or complete, `●` unread update, `?`
-question, `!` approval, and `▶` working. Selected details keep the project,
-timestamp, pending action counts and any failure. Use `/cost` for cost details.
+question, `!` approval, and `▶` working. Each title has a second row with its
+project path on the left and pending action counts and time on the right.
+Paths inside your home directory use `~/`; search accepts either form. Selected
+details show failures and any clipped context, with `PgUp`/`PgDn` to scroll.
+Use `/cost` for cost details.

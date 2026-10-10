@@ -866,7 +866,11 @@ fn handle_scrollbar_mouse(app: &mut crate::app::App, mouse: MouseEvent) -> bool 
                 MouseScrollTarget::Slash => app.slash_scroll,
                 MouseScrollTarget::Picker => app.picker.as_ref().map_or(0, |picker| picker.scroll),
             };
-            let page = bar.area.height as usize;
+            let page = if target == MouseScrollTarget::Picker {
+                app.picker.as_ref().map_or(0, |picker| picker.visible_items)
+            } else {
+                bar.area.height as usize
+            };
             let offset = if mouse.row < bar.thumb.y {
                 current.saturating_sub(page)
             } else {

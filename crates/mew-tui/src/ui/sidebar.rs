@@ -187,6 +187,16 @@ fn draw_conversations(text: &mut Text, visual_row: &mut u16, app: &mut App, widt
             Style::default().fg(app.theme.resolve("text.body")),
         )));
         *visual_row += 1;
+        app.sidebar_item_rows.push((
+            *visual_row,
+            SidebarItem::Session(session.session_id.clone()),
+        ));
+        text.push_line(super::overlays::picker_context_line(
+            &app.session_context(session),
+            max as u16,
+            Style::default().fg(app.theme.resolve("text.muted")),
+        ));
+        *visual_row += 1;
     }
 }
 

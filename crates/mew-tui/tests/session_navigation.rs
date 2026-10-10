@@ -81,8 +81,18 @@ fn bell_counts_conversations_once_and_opens_archived_attention_without_losing_th
         vec!["approval", "done", "failed"]
     );
     assert!(
-        picker.items[0].description.contains("2 approvals")
-            && picker.items[0].description.contains("1 question")
+        picker.items[0]
+            .context
+            .as_ref()
+            .unwrap()
+            .metadata
+            .contains("2 approvals")
+            && picker.items[0]
+                .context
+                .as_ref()
+                .unwrap()
+                .metadata
+                .contains("1 question")
     );
     assert_eq!(picker.items[0].label, "! approval work");
     assert_eq!(picker.items[1].label, "● finished work");
@@ -237,10 +247,10 @@ fn attention_arriving_before_session_metadata_remains_reachable() {
     let picker = app.picker.as_ref().unwrap();
     assert_eq!(picker.items.len(), 1);
     assert_eq!(picker.items[0].id, "not-yet-listed");
-    assert_eq!(
-        picker.items[0].description,
-        "Conversation details unavailable."
-    );
+    assert!(picker.items[0].description.is_empty());
+    let context = picker.items[0].context.as_ref().unwrap();
+    assert_eq!(context.path, "Project unavailable");
+    assert_eq!(context.metadata, "1 approval");
 }
 #[test]
 fn canonical_completion_and_ready_ack_drive_the_bell() {
@@ -412,7 +422,10 @@ fn conversation_details_format_the_daemons_millisecond_timestamp() {
     app.daemon_sessions = vec![item];
     app.open_session_picker();
     assert!(app.picker.as_ref().unwrap().items[0]
-        .description
+        .context
+        .as_ref()
+        .unwrap()
+        .metadata
         .contains("10-10 10:30"));
 }
 
@@ -464,7 +477,10 @@ fn conversation_details_keep_context_without_repeating_quiet_state_or_cost() {
     app.daemon_sessions = vec![conversation];
     app.open_session_picker();
     let picker = app.picker.as_ref().unwrap();
-    assert_eq!(picker.items[0].description, "/tmp/project · 10-10 10:30");
+    assert!(picker.items[0].description.is_empty());
+    let context = picker.items[0].context.as_ref().unwrap();
+    assert_eq!(context.path, "/tmp/project");
+    assert_eq!(context.metadata, "10-10 10:30");
     let buffer = draw(&mut app, 80, 24);
     let text = (0..buffer.area.height)
         .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
@@ -539,4 +555,128 @@ fn project_details_format_the_daemons_millisecond_timestamp() {
     assert!(app.picker.as_ref().unwrap().items[0]
         .description
         .contains("last: 10-10 10:30"));
+}
+
+#[test]
+fn conversation_context_moves_project_time_and_pending_counts_out_of_selected_details() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let mut app = App::new();
+    app.status.session_id = "work".into();
+    let mut conversation = session("work", "chosen work", true);
+    conversation.pinned = true;
+    conversation.cwd = Some(home.join("projects/日本語").display().to_string());
+    conversation.last_message_at = Some(1_728_556_200_000);
+    app.daemon_sessions = vec![conversation];
+    app.session_attention.insert("work".into(), (2, 3));
+    app.session_turn_outcomes.insert(
+        "work".into(),
+        mew_client_core::TurnOutcome::Failed {
+            detail: Some("provider unavailable".into()),
+        },
+    );
+    app.open_session_picker();
+    app.toggle_session_picker_archive();
+    let item = &app.picker.as_ref().unwrap().items[0];
+    let context = item.context.as_ref().unwrap();
+    assert_eq!(context.path, "~/projects/日本語");
+    assert_eq!(context.metadata, "2 approvals · 3 questions · 10-10 10:30");
+    assert_eq!(
+        item.description,
+        "Archived · Pinned · current\nprovider unavailable"
+    );
+    assert!(!item.description.contains("projects") && !item.description.contains("10:30"));
+    assert!(!item.description.contains("approvals") && !item.description.contains("questions"));
+}
+
+#[test]
+fn conversation_context_paths_and_metadata_remain_searchable_in_all_catalog_views() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+    let absolute = home.join("projects/日本語").display().to_string();
+    let uppercase = absolute.to_uppercase();
+    for kind in ["recent", "archived", "attention"] {
+        let mut app = App::new();
+        let mut conversation = session("work", "chosen work", kind == "archived");
+        conversation.cwd = Some(absolute.clone());
+        conversation.last_message_at = Some(1_728_556_200_000);
+        app.daemon_sessions = vec![conversation, session("other", "other work", false)];
+        app.session_attention.insert("work".into(), (2, 1));
+        app.session_turn_outcomes.insert(
+            "work".into(),
+            mew_client_core::TurnOutcome::Failed {
+                detail: Some("provider unavailable".into()),
+            },
+        );
+        if kind == "attention" {
+            app.open_attention_picker();
+        } else {
+            app.open_session_picker();
+            if kind == "archived" {
+                app.toggle_session_picker_archive();
+            }
+        }
+        let picker = app.picker.as_mut().unwrap();
+        for query in [
+            absolute.as_str(),
+            uppercase.as_str(),
+            "~/projects/日本語",
+            "日本語",
+            "2 approvals",
+            "1 question",
+            "10-10 10:30",
+            "provider unavailable",
+            "chosen work",
+        ] {
+            picker.filter = query.into();
+            assert_eq!(
+                picker
+                    .filtered()
+                    .iter()
+                    .map(|item| item.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["work"],
+                "{kind}: {query}"
+            );
+        }
+        picker.filter = format!("{}-other/projects/日本語", home.display());
+        assert!(
+            picker.filtered().is_empty(),
+            "home sibling must retain its own identity"
+        );
+    }
+}
+
+#[test]
+fn unknown_and_external_project_contexts_remain_explicit_and_searchable() {
+    let mut app = App::new();
+    let mut external = session("external", "external work", false);
+    external.cwd = Some("/tmp/別-project".into());
+    app.daemon_sessions = vec![external, session("unknown", "unknown work", false)];
+    app.open_session_picker();
+    let picker = app.picker.as_mut().unwrap();
+    assert_eq!(
+        picker.items[0].context.as_ref().unwrap().path,
+        "/tmp/別-project"
+    );
+    assert_eq!(
+        picker.items[1].context.as_ref().unwrap().path,
+        "Project unavailable"
+    );
+    for (query, id) in [
+        ("/tmp/別-project", "external"),
+        ("Project unavailable", "unknown"),
+    ] {
+        picker.filter = query.into();
+        assert_eq!(picker.filtered()[0].id, id);
+        assert_eq!(picker.filtered().len(), 1);
+    }
+    app.session_attention.insert("unlisted".into(), (0, 2));
+    app.open_attention_picker();
+    let picker = app.picker.as_mut().unwrap();
+    assert!(picker.items[0].description.is_empty());
+    assert_eq!(
+        picker.items[0].context.as_ref().unwrap().metadata,
+        "2 questions"
+    );
+    picker.filter = "2 questions".into();
+    assert_eq!(picker.filtered()[0].id, "unlisted");
 }
