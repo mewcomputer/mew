@@ -117,9 +117,11 @@ frontend → transport → daemon → session → agent → provider
 
 The built-in TUI is daemon-only: local mode was sunset. The `mew` chat command
 spawns a `mew daemon` on a loopback TCP port (if none is running) and connects
-via `runtime::daemon::DaemonTarget` + `DaemonClient`. The daemon owns the
-`Agent`; the TUI receives the same logical `AgentEvent` stream after wire
-translation. Because the daemon serializes turns (`turn_lock` +
+via `runtime::daemon::DaemonTarget` and the persistent `runtime::client::TuiClient`
+actor. The actor drives the shared `mew-client-core::ClientEngine`, observes
+passive turns and reconciles uncertain submissions after reconnect. The daemon
+owns the `Agent`; required actions retain their session and request identities.
+Because the daemon serializes turns (`turn_lock` +
 `current_turn_cancel`), concurrent-turn races are impossible. The deprecated
 `runtime::local::LocalTarget` was removed.
 
@@ -149,10 +151,11 @@ exact target before browser tools become available. Native packaging bundles the
 standalone `agent-browser` executable, version 0.34 or newer, beside the daemon.
 Remote profiles do not register native browser pages.
 
-Native clients negotiate protocol revision 2 before session commands. Browser
-registration and session-diff commands are part of that revision; extension wire
-revision is independent. Review reads the requested daemon session's workspace,
-and replies carry both session and request IDs. Workspace watches detect worktree,
+Native clients negotiate protocol revision 3 before session commands. Scoped
+prompt receipts require revision 3; browser registration and session-diff commands
+were added in revision 2. Extension wire revision is independent. Review reads
+the requested daemon session's workspace, and replies carry both session and
+request IDs. Workspace watches detect worktree,
 HEAD and index changes without traversing `.git` objects.
 
 `SessionManager` owns active sessions and reloads idle top-level sessions from
@@ -184,11 +187,11 @@ incremental renderer, while completed or earlier parts use the cache.
 ### TUI event flow
 
 1. Crossterm input becomes a `mew_tui::events::Action`.
-2. `EventLoop::forward_agent_events` pumps agent events into the TUI channel.
-3. The main loop updates `App` state and draws.
-4. The drain coalesces ticks and queued actions, processes at most four agent
-   events per frame while streaming, then replays actions through the runtime
-   dispatcher.
+2. The persistent client actor forwards shared state updates and required actions
+   through its update channel.
+3. The main loop projects those updates into `App` and draws.
+4. The input drain coalesces ticks and queued actions, then replays actions
+   through the runtime dispatcher before the next draw.
 
 ### Runtime invariants
 
@@ -203,7 +206,7 @@ These are enforced by `just arch-check` and by the deny lint in
 3. Push display messages through `app.push_message`, `app.push_synthetic_message`,
    or `app.push_user`. Direct `app.messages.push(...)` skips dirty-state updates.
 4. A new command needs a `CommandTarget` method, a dispatch arm, and a test in
-   the same change. `LocalTarget` and `DaemonTarget` are both implemented today.
+   the same change. The built-in TUI uses `DaemonTarget`.
 5. `Unsupported` is the only sanctioned backend no-op. Returning it renders a
    visible alert; never swallow an unsupported command.
 

@@ -13,7 +13,7 @@ Type any of these in the input box (they autocomplete as you type).
 | `/compact` | Force context compaction on the next turn |
 | `/rewind <n>` | Rewind to keep only the first N messages |
 | `/rewind` | List recent messages with indices |
-| `/sessions` | List previous sessions (up to 20) (`/session` also works) |
+| `/sessions` | Open conversations ordered by latest activity (`/session` also works) |
 | `/resume <id>` | Resume a previous session by ID |
 
 See [Sessions](/docs/getting-started/sessions/) for details on persistence, resume, and rewind.
@@ -50,6 +50,16 @@ See [Permissions](/docs/using-mew/permissions/) for mode details, rules, and san
 |---------|-------------|
 | `/help` | Show available commands |
 | `/cost` | Show cost breakdown (tokens, $) |
-| `/todo` | Show the session todo list |
+| `/todo` | Browse and edit the session todo list |
+| `/agents` | Open a subagent's recorded conversation and tool trace |
+| `/jobs` | Open a background shell job and read its captured output |
+| `/tools` | Browse tool calls with full arguments, results and errors |
+| `/review` `/diff` | Review changes in this conversation's workspace; press `r` to refresh |
 | `/mouse` `/m` | Toggle mouse capture for text selection |
 | `/quit` `/q` | Exit mew |
+
+The sidebar bell and `Ctrl+N` open conversations with pending questions,
+permissions or unread outcomes. `Tab` switches between attention and all
+conversations. Each conversation keeps its draft, attachments and queued
+follow-ups when you switch. Submitted input stays visible until the daemon
+acknowledges it; an uncertain submission is never replayed automatically.

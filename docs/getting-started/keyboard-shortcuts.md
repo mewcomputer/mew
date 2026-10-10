@@ -10,6 +10,7 @@ Press `?` in the TUI to toggle the shortcuts overlay at any time.
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+P` | Open command palette (or cycle thinking variants in the variant picker) |
+| `Ctrl+N` | Open the attention bell's conversation list |
 | `?` | Toggle keyboard shortcuts overlay |
 | `Ctrl+L` | Scroll to bottom (re-attach auto-scroll) |
 | `Ctrl+C` | Cancel stream / clear input / quit (press twice) |
@@ -53,6 +54,8 @@ Press `?` in the TUI to toggle the shortcuts overlay at any time.
 
 | Action | Effect |
 |--------|--------|
-| Scroll wheel | Scroll chat up/down |
-| Click scrollbar | Seek to position |
+| Scroll wheel | Scroll the chat, picker list or details under the pointer |
+| Click scrollbar track | Page the corresponding view |
+| Drag scrollbar thumb | Scroll the corresponding view |
+| Click sidebar task, subagent or job | Open its details |
 | Click + drag | Select text (when mouse capture is on) |

@@ -1892,3 +1892,46 @@ Verified the exact isolated frontend candidate with eight viewer tests, 19 clien
 projection tests, 29 dispatch tests, two shared output-event tests, the actual
 frame/cache regression and command registry parity. The complete current TUI
 suite passed all 462 tests across 18 targets; renderer captures are 1280 by 800.
+
+### 2026-10-10: acknowledged prompts and scoped child questions
+
+This foundation checkpoint predates the later native and iOS verification.
+
+Wire revision 3 adds explicit session/request identities and acceptance receipts
+for prompt submissions. Duplicate IDs return the original result, reconnects can
+query the original conversation, and an unknown receipt requires manual history
+inspection. Busy sessions reject without echoing unsent text. Follow-ups wait for
+finished turn bookkeeping, and automatic title generation releases the turn lock.
+Receipts are runtime metadata and do not survive daemon restart or session reaping.
+
+Child questions now retain their original answer channel, option descriptions,
+and task/child identity through runner, daemon and every client. Closing a child
+question preserves parent actions; cancelling a waiting child persists its tool
+result and resolves matching pending cards. Shared client state retains jobs,
+retry waits, exact part updates, latest-active ordering and unread attention.
+
+Verified the real runner regressions, 194 agent tests, 13 daemon request tests,
+63 shared-core tests, protocol roundtrips, 28 TypeScript client tests and 124 web
+UI tests. Strict workspace clippy, architecture and theme checks passed. Native
+compilation used the installed CEF 150.0.11 SDK; regenerated Swift bindings, app
+module and changed tests typechecked at the project's simulator target. Native
+and mobile runtime interaction remain pending. UniFFI's emitted Swift/header
+whitespace is preserved rather than rewriting unrelated generated lines.
+
+### 2026-10-10: task-flow verification and screenshot gallery
+
+The terminal companion now preserves conversation drafts and follow-ups, uses
+confirmed project context, and exposes latest-active conversations through the
+sidebar and attention bell. Full output and workspace review replies are
+projected only into their matching session and request. The user-facing command
+and shortcut documentation describes the new navigation and viewers; runtime
+and protocol guidance follows the persistent client actor and scoped receipts.
+
+Verified 462 TUI tests across 18 targets, architecture rules and generated theme
+checks. Native desktop passed 154 tests across the regular run and an isolated
+socket regression rerun. The web UI passed 125 tests and its production build.
+The actual iOS simulator suite passed all 32 tests after rebuilding matching
+Rust libraries and regenerating UniFFI bindings. Thirty renderer captures are
+available in notes/capture/tui-20261010/index.html, including eight new task-flow,
+output, review and child-question views at 1280 by 800 pixels. Captures use sample
+state; paired live interaction remains pending.
