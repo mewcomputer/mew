@@ -143,14 +143,28 @@ pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Acti
 
 /// Handle keys while the help overlay is open.
 fn handle_help_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
-    use crossterm::event::{KeyCode, KeyModifiers};
     match key.code {
         KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Char(' ') => {
+            app.help_scroll = 0;
             app.mode = crate::app::Mode::Normal;
         }
+        KeyCode::Up => app.help_scroll = app.help_scroll.saturating_sub(1),
+        KeyCode::Down => {
+            app.help_scroll = app.help_scroll.saturating_add(1).min(app.help_max_scroll);
+        }
+        KeyCode::PageUp => {
+            app.help_scroll = app.help_scroll.saturating_sub(app.help_page_rows);
+        }
+        KeyCode::PageDown => {
+            app.help_scroll = app
+                .help_scroll
+                .saturating_add(app.help_page_rows)
+                .min(app.help_max_scroll);
+        }
+        KeyCode::Home => app.help_scroll = 0,
+        KeyCode::End => app.help_scroll = app.help_max_scroll,
         _ => {}
     }
-    let _ = KeyModifiers::empty();
     None
 }
 
@@ -311,6 +325,16 @@ fn insert_paste(app: &mut crate::app::App, content: &str) {
 }
 
 pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
+    if app.mode == crate::app::Mode::Help {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => app.help_scroll = app.help_scroll.saturating_sub(1),
+            MouseEventKind::ScrollDown => {
+                app.help_scroll = app.help_scroll.saturating_add(1).min(app.help_max_scroll);
+            }
+            _ => {}
+        }
+        return None;
+    }
     // The thinking picker's budget track is mouse-interactive; the wheel
     // scrolls every picker list. All other picker content stays inert.
     if app.mode == crate::app::Mode::CommandPalette {

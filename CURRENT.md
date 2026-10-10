@@ -1582,3 +1582,22 @@ item row visible; tiny layouts never place the picker caret outside the frame.
 Verified five surface tests and five picker behavior tests, the 309-test TUI
 gate, strict all-target clippy, CLI build, architecture and generated themes.
 Reviewed headless captures and resolved the tiny-caret regression before commit.
+
+### 2026-10-10: reachable TUI help and task-flow assessment
+
+Help now scrolls with arrows, page keys, Home/End and the mouse wheel. Its
+footer stays visible, resizing clamps the viewport, reopening starts at the
+top, and narrow layouts retain the close hint. Key labels no longer run into
+their descriptions. Help uses the same raised surface as the other overlays.
+
+Verified four help behavior tests at 24/40/80/160 columns, all 309 TUI tests,
+strict all-target clippy, CLI build, formatting, architecture and theme codegen.
+Breaker, simplifier and operator rechecks found no required issues after fixes.
+Normal commit hooks also passed workspace clippy; its existing dependency
+future-compatibility notices remain unrelated to this pass.
+
+Recorded the independent task-flow/rendering assessment and design context.
+Remaining priorities are conversation-owned follow-ups, persistent shared task
+observation and recovery, confirmed project context, attention navigation and
+review. The shared-client-core versus existing-adapter choice remains pending;
+no architecture migration or live native interaction was performed.

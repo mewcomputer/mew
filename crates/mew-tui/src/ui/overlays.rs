@@ -1426,7 +1426,8 @@ fn skills_style(
 
 /// Draw the keyboard shortcuts overlay. A centered modal showing all
 /// available shortcuts grouped by category.
-pub fn draw_help_overlay(f: &mut Frame, area: Rect, tokens: &crate::theme::Theme) {
+pub fn draw_help_overlay(f: &mut Frame, app: &mut App, area: Rect) {
+    let tokens = &app.theme;
     let width = 64.min(area.width.saturating_sub(4));
     let height = 30.min(area.height.saturating_sub(4));
     let x = area.x + (area.width - width) / 2;
@@ -1440,7 +1441,7 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect, tokens: &crate::theme::Theme
         .borders(ratatui::widgets::Borders::ALL)
         .style(
             Style::default()
-                .bg(tokens.resolve("background"))
+                .bg(tokens.resolve("panel.overlay"))
                 .fg(tokens.resolve("foreground")),
         );
     let inner = block.inner(modal_area);
@@ -1509,7 +1510,7 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect, tokens: &crate::theme::Theme
             Span::styled("undo", desc_style),
         ]),
         Line::from(vec![
-            Span::styled("  Ctrl+Shift+Z", key_style),
+            Span::styled("  Ctrl+Shift+Z  ", key_style),
             Span::styled("redo", desc_style),
         ]),
         Line::from(vec![
@@ -1543,7 +1544,7 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect, tokens: &crate::theme::Theme
             Span::styled("toggle sidebar environment section", desc_style),
         ]),
         Line::from(vec![
-            Span::styled("  Ctrl+Shift+C", key_style),
+            Span::styled("  Ctrl+Shift+C  ", key_style),
             Span::styled("copy selected text", desc_style),
         ]),
         Line::from(vec![
@@ -1584,15 +1585,89 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect, tokens: &crate::theme::Theme
             Span::styled("  /sessions  ", key_style),
             Span::styled("list resumable sessions", desc_style),
         ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press ? or Esc to close",
-            Style::default().fg(tokens.resolve("text.muted")),
-        )),
     ];
 
-    let para = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-    f.render_widget(para, inner);
+    let content_area = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width.saturating_sub(1),
+        inner.height.saturating_sub(1),
+    );
+    let mut content = Text::default();
+    for line in lines {
+        if line.spans.len() == 2 && content_area.width < 48 {
+            content.push_line(Line::from(line.spans[0].clone()));
+            let description = &line.spans[1];
+            for text in wrap_text(&description.content, content_area.width as usize) {
+                content.push_line(Line::from(Span::styled(text, description.style)));
+            }
+        } else if line.spans.len() == 2 && line.spans[0].width() < content_area.width as usize {
+            let label = &line.spans[0];
+            let description = &line.spans[1];
+            let description_width = content_area.width as usize - label.width();
+            for (row, text) in wrap_text(&description.content, description_width)
+                .into_iter()
+                .enumerate()
+            {
+                let prefix = if row == 0 {
+                    label.clone()
+                } else {
+                    Span::raw(" ".repeat(label.width()))
+                };
+                content.push_line(Line::from(vec![
+                    prefix,
+                    Span::styled(text, description.style),
+                ]));
+            }
+        } else if line.spans.is_empty() {
+            content.push_line(line);
+        } else {
+            for span in line.spans {
+                for text in wrap_text(&span.content, content_area.width as usize) {
+                    content.push_line(Line::from(Span::styled(text, span.style)));
+                }
+            }
+        }
+    }
+    app.help_page_rows = content_area.height;
+    app.help_max_scroll = (content.lines.len() as u16).saturating_sub(content_area.height);
+    app.help_scroll = app.help_scroll.min(app.help_max_scroll);
+    f.render_widget(
+        Paragraph::new(content).scroll((app.help_scroll, 0)),
+        content_area,
+    );
+
+    if app.help_max_scroll > 0 {
+        let mut state = ScrollbarState::new(app.help_max_scroll as usize + 1)
+            .position(app.help_scroll as usize);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+        f.render_stateful_widget(
+            scrollbar,
+            Rect {
+                height: content_area.height,
+                ..inner
+            },
+            &mut state,
+        );
+    }
+    if inner.height > 0 {
+        let footer = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+        let hint = if inner.width >= display_width("↑↓/PgUp/PgDn scroll · Esc close") as u16 {
+            "↑↓/PgUp/PgDn scroll · Esc close"
+        } else if inner.width >= display_width("↑↓ · Esc close") as u16 {
+            "↑↓ · Esc close"
+        } else {
+            "Esc close"
+        };
+        f.render_widget(
+            Paragraph::new(hint).style(Style::default().fg(tokens.resolve("text.muted"))),
+            footer,
+        );
+    }
 }
 
 /// Compute a centered rectangle of the given size inside `area`.

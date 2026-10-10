@@ -273,6 +273,6 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if app.mode == Mode::Help {
-        overlays::draw_help_overlay(f, area, &app.theme);
+        overlays::draw_help_overlay(f, app, area);
     }
 }

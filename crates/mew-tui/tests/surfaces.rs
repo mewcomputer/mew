@@ -49,6 +49,7 @@ fn modal_padding_uses_the_raised_surface() {
         Mode::PersonaSwitchConfirm,
         Mode::GoalProposal,
         Mode::GoalCompose,
+        Mode::Help,
     ] {
         let mut app = App::new();
         app.theme = surface_theme();
