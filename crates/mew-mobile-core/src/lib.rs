@@ -1952,6 +1952,8 @@ fn translate_message(
         | ServerMessage::GitStatusResult { .. }
         | ServerMessage::SessionDiff { .. }
         | ServerMessage::SessionDiffError { .. }
+        | ServerMessage::TodoUpdated { .. }
+        | ServerMessage::TodoUpdateError { .. }
         | ServerMessage::BrowserPageRegistration { .. }
         | ServerMessage::FsChanged { .. }
         | ServerMessage::SessionMetaChanged { .. }

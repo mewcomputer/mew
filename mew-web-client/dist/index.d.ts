@@ -116,7 +116,11 @@ export type ClientMessage = {
     session_id: string;
     path: string;
     max_bytes?: number;
-} | {
+} | ({
+    type: "update_todo";
+    session_id: string;
+    request_id: string;
+} & TodoEdit) | {
     type: "git_status";
     session_id: string;
 } | {
@@ -283,6 +287,13 @@ export interface QuestionOption {
 export interface Question {
     prompt: string;
     options: QuestionOption[];
+}
+export interface TodoEdit {
+    todo_id: number;
+    expected_content: string;
+    expected_status: string;
+    content: string;
+    status: string;
 }
 export interface Todo {
     id: number;
@@ -561,6 +572,16 @@ export type ServerMessage = {
     type: "todos_updated";
     todos: Todo[];
 } | {
+    type: "todo_updated";
+    session_id: string;
+    request_id: string;
+    todos: Todo[];
+} | {
+    type: "todo_update_error";
+    session_id: string;
+    request_id: string;
+    message: string;
+} | {
     type: "job_update";
     job_id: string;
     command: string;
@@ -795,6 +816,16 @@ export interface MewClientEvents {
         outcome: SubagentOutcome;
         manifests?: TurnManifest[];
     }) => void;
+    "todo-updated": (data: {
+        session_id: string;
+        request_id: string;
+        todos: Todo[];
+    }) => void;
+    "todo-update-error": (data: {
+        session_id: string;
+        request_id: string;
+        message: string;
+    }) => void;
     "todos-updated": (data: {
         todos: Todo[];
     }) => void;
@@ -1000,6 +1031,8 @@ export declare class MewClient {
     newSession(cwd?: string | null): Promise<string>;
     /** Send `prompt`. Streaming events are emitted via the registered handlers. */
     prompt(text: string, attachments?: Attachment[]): void;
+    /** Compare and save one todo; resolve only after the daemon confirms it. */
+    updateTodo(sessionId: string, edit: TodoEdit): Promise<Todo[]>;
     /** Send `cancel` to abort the current turn. */
     cancel(): void;
     /** Inject guidance into the running turn's next request (steer the LLM).

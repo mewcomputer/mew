@@ -36,6 +36,7 @@ use tungstenite::{protocol::WebSocketConfig, Message};
 
 /// Shared state for pending request/response pairs.
 struct ClientState {
+    pending_todo_edits: Mutex<HashMap<String, PendingTodoEdit>>,
     /// Buffered required actions, with consumed entries retained until the
     /// daemon resolves them so replay never creates a second response sender.
     required_actions: std::sync::Mutex<HashMap<String, Option<AgentEvent>>>,
@@ -72,7 +73,50 @@ pub struct DaemonClient {
     state: Arc<ClientState>,
 }
 
+struct PendingTodoEdit {
+    session_id: String,
+    reply: oneshot::Sender<Result<Vec<Todo>>>,
+}
+
 impl DaemonClient {
+    pub async fn update_todo(
+        &self,
+        session_id: &str,
+        edit: mew_protocol::TodoEdit,
+    ) -> Result<Vec<Todo>> {
+        let request_id = ulid::Ulid::new().to_string();
+        let (reply, receiver) = oneshot::channel();
+        self.state.pending_todo_edits.lock().await.insert(
+            request_id.clone(),
+            PendingTodoEdit {
+                session_id: session_id.into(),
+                reply,
+            },
+        );
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let json = mew_protocol::encode_json(&ClientMessage::UpdateTodo {
+                session_id: session_id.into(),
+                request_id: request_id.clone(),
+                edit,
+            })?;
+            self.state
+                .ws_out
+                .send(json)
+                .await
+                .context("daemon connection closed during todo save")?;
+            receiver
+                .await
+                .context("daemon disconnected before confirming todo save")?
+        })
+        .await
+        .context("todo save was not confirmed; update or reconnect the daemon before retrying");
+        self.state
+            .pending_todo_edits
+            .lock()
+            .await
+            .remove(&request_id);
+        result?
+    }
     /// Connect to a daemon at the given WebSocket URL.
     ///
     /// Returns the `DaemonClient` and a `Receiver<ServerMessage>` for
@@ -130,6 +174,7 @@ impl DaemonClient {
         let (notify_tx, notify_rx) = mpsc::channel::<ServerMessage>(128);
 
         let state = Arc::new(ClientState {
+            pending_todo_edits: Mutex::new(HashMap::new()),
             required_actions: std::sync::Mutex::new(HashMap::new()),
             pending_permissions: Mutex::new(HashMap::new()),
             pending_ask_user: Mutex::new(HashMap::new()),
@@ -162,6 +207,47 @@ impl DaemonClient {
                         continue;
                     }
                 };
+
+                let todo_reply = match &server_msg {
+                    ServerMessage::TodoUpdated {
+                        session_id,
+                        request_id,
+                        todos,
+                    } => Some((
+                        session_id,
+                        request_id,
+                        todos
+                            .iter()
+                            .map(|todo| {
+                                Ok(Todo {
+                                    id: todo.id,
+                                    content: todo.content.clone(),
+                                    status: TodoStatus::parse(&todo.status)
+                                        .context("invalid todo status in reply")?,
+                                    depends_on: todo.depends_on.clone(),
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>(),
+                    )),
+                    ServerMessage::TodoUpdateError {
+                        session_id,
+                        request_id,
+                        message,
+                    } => Some((session_id, request_id, Err(anyhow::anyhow!("{message}")))),
+                    _ => None,
+                };
+                if let Some((session_id, request_id, result)) = todo_reply {
+                    let mut pending = state_clone.pending_todo_edits.lock().await;
+                    if pending
+                        .get(request_id)
+                        .is_some_and(|request| &request.session_id == session_id)
+                    {
+                        if let Some(request) = pending.remove(request_id) {
+                            let _ = request.reply.send(result);
+                        }
+                    }
+                    continue;
+                }
 
                 // SessionReady is not an AgentEvent — the caller handles it
                 // via new_session(). Skip forwarding for those. But we do
@@ -221,13 +307,17 @@ impl DaemonClient {
                             break;
                         }
                     }
-                } else if matches!(server_msg, ServerMessage::Error { .. }) {
+                } else if matches!(
+                    server_msg,
+                    ServerMessage::Error { .. } | ServerMessage::TodosUpdated { .. }
+                ) {
                     let _ = state_clone.notify_tx.send(server_msg).await;
                 } else if !events.is_empty() {
                     warn!("daemon client: event without active prompt");
                 }
             }
             outgoing_task.abort();
+            state_clone.pending_todo_edits.lock().await.clear();
             let _ = outgoing_task.await;
             if let Some(tx) = state_clone.event_tx.lock().await.take() {
                 let _ = tx
@@ -513,6 +603,7 @@ async fn translate_server_message(
     state: &Arc<ClientState>,
 ) -> Vec<AgentEvent> {
     match msg {
+        ServerMessage::TodoUpdated { .. } | ServerMessage::TodoUpdateError { .. } => Vec::new(),
         ServerMessage::RemoteReady { .. } => Vec::new(),
         ServerMessage::SessionReady { .. } => Vec::new(),
 

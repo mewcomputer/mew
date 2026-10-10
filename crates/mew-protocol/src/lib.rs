@@ -241,6 +241,13 @@ pub enum ClientMessage {
         session_id: String,
         request_id: String,
     },
+    /// Compare and edit one todo without replacing its identity or dependencies.
+    UpdateTodo {
+        session_id: String,
+        request_id: String,
+        #[serde(flatten)]
+        edit: TodoEdit,
+    },
     WatchWorkspace {
         session_id: String,
         enabled: bool,
@@ -742,6 +749,16 @@ pub enum ServerMessage {
     TodosUpdated {
         todos: Vec<Todo>,
     },
+    TodoUpdated {
+        session_id: String,
+        request_id: String,
+        todos: Vec<Todo>,
+    },
+    TodoUpdateError {
+        session_id: String,
+        request_id: String,
+        message: String,
+    },
 
     /// A background shell job state changed.
     JobUpdate {
@@ -1118,6 +1135,15 @@ pub struct Todo {
     pub depends_on: Vec<usize>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TodoEdit {
+    pub todo_id: usize,
+    pub expected_content: String,
+    pub expected_status: String,
+    pub content: String,
+    pub status: String,
+}
+
 /// Metadata for a session group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupInfo {
@@ -1417,6 +1443,44 @@ pub fn subagent_outcome_to_wire(o: &mew_subagents::SubagentOutcome) -> SubagentO
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn todo_edit_and_scoped_replies_roundtrip() {
+        let request = ClientMessage::UpdateTodo {
+            session_id: "session".into(),
+            request_id: "edit".into(),
+            edit: TodoEdit {
+                todo_id: 3,
+                expected_content: "original".into(),
+                expected_status: "pending".into(),
+                content: "目標".into(),
+                status: "blocked".into(),
+            },
+        };
+        let json = encode_json(&request).unwrap();
+        assert!(json.contains("\"todo_id\":3"));
+        let decoded = decode_json::<ClientMessage>(&json).unwrap();
+        assert!(
+            matches!(decoded, ClientMessage::UpdateTodo { session_id, request_id, edit } if session_id == "session" && request_id == "edit" && edit.content == "目標")
+        );
+        for reply in [
+            ServerMessage::TodoUpdated {
+                session_id: "session".into(),
+                request_id: "edit".into(),
+                todos: vec![],
+            },
+            ServerMessage::TodoUpdateError {
+                session_id: "session".into(),
+                request_id: "edit".into(),
+                message: "changed while editing".into(),
+            },
+        ] {
+            assert_eq!(
+                encode_json(&decode_json::<ServerMessage>(&encode_json(&reply).unwrap()).unwrap())
+                    .unwrap(),
+                encode_json(&reply).unwrap()
+            );
+        }
+    }
     use super::*;
     use mew_message::{Part, PartBase, TextPart};
 

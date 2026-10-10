@@ -85,6 +85,7 @@ export type ClientMessage =
       path: string;
       max_bytes?: number;
     }
+  | ({ type: "update_todo"; session_id: string; request_id: string } & TodoEdit)
   | { type: "git_status"; session_id: string }
   | { type: "watch_workspace"; session_id: string; enabled: boolean }
   | { type: "open_path"; session_id: string; path: string }
@@ -208,6 +209,14 @@ export interface QuestionOption {
 export interface Question {
   prompt: string;
   options: QuestionOption[];
+}
+
+export interface TodoEdit {
+  todo_id: number;
+  expected_content: string;
+  expected_status: string;
+  content: string;
+  status: string;
 }
 
 export interface Todo {
@@ -481,6 +490,8 @@ export type ServerMessage =
       input: Record<string, unknown>;
     }
   | { type: "todos_updated"; todos: Todo[] }
+  | { type: "todo_updated"; session_id: string; request_id: string; todos: Todo[] }
+  | { type: "todo_update_error"; session_id: string; request_id: string; message: string }
   | { type: "job_update"; job_id: string; command: string; state: string }
   | { type: "slash_result"; text: string }
   | { type: "request_resolved"; request_id: string }
@@ -654,6 +665,8 @@ export interface MewClientEvents {
     outcome: SubagentOutcome;
     manifests?: TurnManifest[];
   }) => void;
+  "todo-updated": (data: { session_id: string; request_id: string; todos: Todo[] }) => void;
+  "todo-update-error": (data: { session_id: string; request_id: string; message: string }) => void;
   "todos-updated": (data: { todos: Todo[] }) => void;
   "job-update": (data: {
     job_id: string;
@@ -899,6 +912,46 @@ export class MewClient {
   /** Send `prompt`. Streaming events are emitted via the registered handlers. */
   prompt(text: string, attachments: Attachment[] = []): void {
     this.send({ type: "prompt", text, attachments });
+  }
+
+  /** Compare and save one todo; resolve only after the daemon confirms it. */
+  updateTodo(sessionId: string, edit: TodoEdit): Promise<Todo[]> {
+    const requestId = crypto.randomUUID();
+    return new Promise<Todo[]>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.off("todo-updated", onSaved);
+        this.off("todo-update-error", onError);
+        this.off("close", onClose);
+      };
+      const onSaved = (data: { session_id: string; request_id: string; todos: Todo[] }) => {
+        if (data.session_id !== sessionId || data.request_id !== requestId) return;
+        cleanup();
+        resolve(data.todos);
+      };
+      const onError = (data: { session_id: string; request_id: string; message: string }) => {
+        if (data.session_id !== sessionId || data.request_id !== requestId) return;
+        cleanup();
+        reject(new Error(data.message));
+      };
+      const onClose = () => {
+        cleanup();
+        reject(new Error("daemon disconnected before confirming todo save"));
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("todo save was not confirmed; update or reconnect the daemon before retrying"));
+      }, 3000);
+      this.on("todo-updated", onSaved);
+      this.on("todo-update-error", onError);
+      this.on("close", onClose);
+      try {
+        this.send({ type: "update_todo", session_id: sessionId, request_id: requestId, ...edit });
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    });
   }
 
   /** Send `cancel` to abort the current turn. */
@@ -1327,6 +1380,12 @@ export class MewClient {
           outcome: msg.outcome,
           manifests: msg.manifests ?? [],
         });
+        break;
+      case "todo_updated":
+        this.emit("todo-updated", msg);
+        break;
+      case "todo_update_error":
+        this.emit("todo-update-error", msg);
         break;
       case "todos_updated":
         this.emit("todos-updated", { todos: msg.todos });

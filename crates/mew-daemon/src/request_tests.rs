@@ -678,3 +678,41 @@ async fn buffered_requests_from_a_cancelled_turn_are_not_republished() {
     assert!(rx.await.is_err());
     assert_eq!(session.pending_questions_count().await, 0);
 }
+
+#[tokio::test]
+async fn delayed_todo_events_publish_canonical_state_instead_of_old_snapshots() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = test_server(dir.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    session
+        .attach_client(tx, mew_protocol::ClientKind::Unknown)
+        .await;
+    let mut old = mew_agent::TodoList::new();
+    old.create(vec![("old content".into(), vec![])]);
+    let todos = session.agent.lock().await.todos.clone();
+    let mut latest = old.clone();
+    latest
+        .update(
+            1,
+            Some("confirmed edit".into()),
+            Some(mew_agent::TodoStatus::Blocked),
+        )
+        .unwrap();
+    *todos.lock().await = latest;
+    let messages = translate_event(
+        AgentEvent::TodosUpdated { todos: old.items },
+        &session,
+        &server.session_manager,
+    )
+    .await;
+    assert!(
+        messages.is_empty(),
+        "todo publication must remain inside its canonical lock"
+    );
+    let ServerMessage::TodosUpdated { todos } = rx.recv().await.unwrap() else {
+        panic!("expected todo broadcast")
+    };
+    assert_eq!(todos[0].content, "confirmed edit");
+    assert_eq!(todos[0].status, "blocked");
+}

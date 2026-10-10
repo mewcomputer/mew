@@ -564,3 +564,56 @@ test("session-usage-changed carries the current context reading", async () => {
   assert.equal(got.length, 2);
   assert.equal(got[1]!.context_tokens, undefined);
 });
+
+test("todo edits wait for matching session and request acknowledgements", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connect = client.connect();
+  latest().open();
+  await connect;
+  const edit = { todo_id: 1, expected_content: "original", expected_status: "pending", content: "changed", status: "blocked" };
+  let finished = false;
+  const pending = client.updateTodo("session", edit).then((todos) => { finished = true; return todos; });
+  const request = latest().sent.at(-1)!;
+  assert.equal(request.type, "update_todo");
+  if (request.type !== "update_todo") throw new Error("unexpected request");
+  latest().peerSend({ type: "todo_updated", session_id: "other", request_id: request.request_id, todos: [] });
+  latest().peerSend({ type: "todo_updated", session_id: "session", request_id: "other", todos: [] });
+  await Promise.resolve();
+  assert.equal(finished, false);
+  const authoritative = [{ id: 1, content: "changed", status: "blocked", depends_on: [4] }];
+  latest().peerSend({ type: "todo_updated", session_id: "session", request_id: request.request_id, todos: authoritative });
+  assert.deepEqual(await pending, authoritative);
+  const failure = client.updateTodo("session", edit);
+  const second = latest().sent.at(-1)!;
+  if (second.type !== "update_todo") throw new Error("unexpected request");
+  latest().peerSend({ type: "todo_update_error", session_id: "session", request_id: second.request_id, message: "changed while editing" });
+  await assert.rejects(failure, /changed while editing/);
+});
+
+test("todo edits report disconnect and reject sends without a connection", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const edit = { todo_id: 1, expected_content: "original", expected_status: "pending", content: "changed", status: "blocked" };
+  await assert.rejects(client.updateTodo("session", edit), /not connected/);
+  const connect = client.connect();
+  latest().open();
+  await connect;
+  const pending = client.updateTodo("session", edit);
+  latest().peerClose();
+  await assert.rejects(pending, /disconnected before confirming/);
+});
+
+test("unsupported todo editing times out while unrelated errors remain visible", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connect = client.connect();
+  latest().open();
+  await connect;
+  const errors: string[] = [];
+  client.on("errorMessage", (data) => errors.push(data.message));
+  const pending = client.updateTodo("session", { todo_id: 1, expected_content: "original", expected_status: "pending", content: "changed", status: "blocked" });
+  latest().peerSend({ type: "error", message: "unknown variant update_todo" });
+  await assert.rejects(pending, /not confirmed; update or reconnect/);
+  assert.deepEqual(errors, ["unknown variant update_todo"]);
+});

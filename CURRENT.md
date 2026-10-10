@@ -1632,3 +1632,17 @@ theme checks. Headless captures covered 24/30/40/80/120 columns. Independent sou
 reviews caught full-row caret and equal-length undo cases; regressions pass.
 Buffer and raster pixel checks confirmed selection colors. Shared transport
 migration, passive cross-client observation and live native QA remain pending.
+
+### 2026-10-10: authoritative todo edits and attachment snapshots
+
+Todo edits now carry the session, request and expected original task. The daemon
+preserves IDs/dependencies, rejects stale edits and invalid completions, persists
+atomically, and acknowledges the saved list. Tool saves and publication share the
+canonical todo lock so older snapshots cannot overwrite or publish stale work.
+Attaching or creating a session sends its current todo snapshot after readiness.
+Idle todo updates also reach the daemon client's notification channel.
+
+Verified 29 agent todo tests, 63 daemon library tests, four real WebSocket
+regressions, protocol roundtrips, 26 TypeScript client tests and its build.
+Relevant strict clippy passed; mobile/shared clients compile. Protocol revision
+remains 2, with a bounded failure when an older daemon cannot confirm an edit.

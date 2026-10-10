@@ -396,6 +396,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::ReadFilePreview { .. }
                 | ClientMessage::GitStatus { .. }
                 | ClientMessage::ReadSessionDiff { .. }
+                | ClientMessage::UpdateTodo { .. }
                 | ClientMessage::WatchWorkspace { .. }
                 | ClientMessage::OpenPath { .. }
                 | ClientMessage::UnflagFile { .. }
@@ -1030,6 +1031,7 @@ where
                             },
                         });
                         drop(running);
+                        session.send_todos(&client_tx).await;
                         // Report the new session's active thinking variant so
                         // the frontend renders the pill immediately.
                         reply(ServerMessage::ThinkingVariantChanged {
@@ -1124,6 +1126,7 @@ where
                             },
                         });
                         drop(running);
+                        session.send_todos(&client_tx).await;
                         // Report the session's current thinking variant so the
                         // frontend renders the pill immediately on attach instead
                         // of showing "no thinking" until the user toggles it.
@@ -2179,6 +2182,31 @@ where
                         message: format!("git_status: {e}"),
                     }),
                 }
+            }
+            ClientMessage::UpdateTodo {
+                session_id,
+                request_id,
+                edit,
+            } => {
+                let result = match attached_session
+                    .as_ref()
+                    .filter(|session| session.id == session_id)
+                {
+                    Some(session) => session.update_todo(edit).await,
+                    None => Err(anyhow::anyhow!("todo edits require the attached session")),
+                };
+                reply(match result {
+                    Ok(todos) => ServerMessage::TodoUpdated {
+                        session_id,
+                        request_id,
+                        todos,
+                    },
+                    Err(error) => ServerMessage::TodoUpdateError {
+                        session_id,
+                        request_id,
+                        message: format!("{error:#}"),
+                    },
+                });
             }
             ClientMessage::ReadSessionDiff {
                 session_id,
@@ -3430,18 +3458,9 @@ async fn translate_event(
             // is rare and can be handled later.
             Vec::new()
         }
-        AgentEvent::TodosUpdated { todos } => {
-            vec![ServerMessage::TodosUpdated {
-                todos: todos
-                    .into_iter()
-                    .map(|t| mew_protocol::Todo {
-                        id: t.id,
-                        content: t.content,
-                        status: t.status.as_str().to_string(),
-                        depends_on: t.depends_on,
-                    })
-                    .collect(),
-            }]
+        AgentEvent::TodosUpdated { .. } => {
+            session.broadcast_todos().await;
+            Vec::new()
         }
         AgentEvent::JobUpdate {
             job_id,
@@ -3610,6 +3629,18 @@ mod tests {
 
         let result = check_socket_liveness(socket_path.to_str().unwrap());
         assert!(result.is_ok(), "missing socket should be fine: {result:?}");
+    }
+
+    #[test]
+    fn todo_edits_require_remote_control_scope() {
+        let message = ClientMessage::UpdateTodo {
+            session_id: "session".into(),
+            request_id: "edit".into(),
+            edit: mew_protocol::TodoEdit::default(),
+        };
+        assert!(!remote_message_allowed(RemoteScope::Observe, &message));
+        assert!(!remote_message_allowed(RemoteScope::Collaborate, &message));
+        assert!(remote_message_allowed(RemoteScope::Control, &message));
     }
 
     #[test]

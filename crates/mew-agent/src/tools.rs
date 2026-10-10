@@ -1959,7 +1959,7 @@ impl Agent {
             None => return,
         };
 
-        // Mutate under the lock, then render + snapshot for persistence.
+        // Mutation and persistence share the lock with client todo edits.
         // Annotate todos that have a subagent task executing them.
         let subagent_notes: std::collections::HashMap<usize, String> = {
             let tasks = self.subagent_tasks.lock().await;
@@ -1992,16 +1992,17 @@ impl Agent {
                 }
                 Err(e) => (e, false),
             };
+            if success {
+                if let Some(path) = &self.todos_path {
+                    if let Err(e) = snapshot.save(path).await {
+                        tracing::warn!(error = %e, "failed to persist todos");
+                    }
+                }
+            }
             (output, success, snapshot)
         };
 
-        // Persist on success only — failures don't change state.
         if success {
-            if let Some(path) = &self.todos_path {
-                if let Err(e) = snapshot.save(path).await {
-                    tracing::warn!(error = %e, "failed to persist todos");
-                }
-            }
             // Push the new snapshot to the TUI so the sidebar pane updates.
             let _ = ev_tx
                 .send(AgentEvent::TodosUpdated {

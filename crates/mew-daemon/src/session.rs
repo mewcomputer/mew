@@ -101,6 +101,63 @@ pub struct Session {
 }
 
 impl Session {
+    pub(crate) async fn update_todo(
+        &self,
+        edit: mew_protocol::TodoEdit,
+    ) -> Result<Vec<mew_protocol::Todo>> {
+        let status = mew_agent::TodoStatus::parse(&edit.status).context("invalid todo status")?;
+        let expected_status = mew_agent::TodoStatus::parse(&edit.expected_status)
+            .context("invalid original todo status")?;
+        anyhow::ensure!(
+            !edit.content.trim().is_empty(),
+            "todo content cannot be empty"
+        );
+        let (todos, path) = {
+            let agent = self.agent.lock().await;
+            (agent.todos.clone(), agent.todos_path.clone())
+        };
+        let path = path.context("session cannot persist todo edits")?;
+        let mut list = todos.lock().await;
+        let original = list.get(edit.todo_id).context("todo no longer exists")?;
+        anyhow::ensure!(
+            original.content == edit.expected_content && original.status == expected_status,
+            "todo changed while editing; reopen it before saving"
+        );
+        let mut updated = list.clone();
+        updated
+            .update(edit.todo_id, Some(edit.content), Some(status))
+            .map_err(anyhow::Error::msg)?;
+        updated
+            .save(&path)
+            .await
+            .map_err(anyhow::Error::msg)
+            .context("could not persist todo edit")?;
+        *list = updated;
+        let snapshot = wire_todos(&list.items);
+        self.broadcast(ServerMessage::TodosUpdated {
+            todos: snapshot.clone(),
+        })
+        .await;
+        Ok(snapshot)
+    }
+
+    /// Delayed agent events publish the latest list, never an older tool snapshot.
+    pub(crate) async fn broadcast_todos(&self) {
+        let todos = self.agent.lock().await.todos.clone();
+        let list = todos.lock().await;
+        self.broadcast(ServerMessage::TodosUpdated {
+            todos: wire_todos(&list.items),
+        })
+        .await;
+    }
+
+    pub(crate) async fn send_todos(&self, sender: &mpsc::UnboundedSender<ServerMessage>) {
+        let todos = self.agent.lock().await.todos.clone();
+        let list = todos.lock().await;
+        let _ = sender.send(ServerMessage::TodosUpdated {
+            todos: wire_todos(&list.items),
+        });
+    }
     /// Read the complete transcript, including history removed from model context
     /// and current message state that has not yet been persisted.
     pub(crate) async fn history(&self) -> Result<Vec<mew_message::Message>> {
@@ -280,6 +337,18 @@ impl Session {
         let goals = self.pending_goal_proposals.lock().await.len();
         (asks + goals) as u32
     }
+}
+
+fn wire_todos(todos: &[mew_agent::Todo]) -> Vec<mew_protocol::Todo> {
+    todos
+        .iter()
+        .map(|todo| mew_protocol::Todo {
+            id: todo.id,
+            content: todo.content.clone(),
+            status: todo.status.as_str().into(),
+            depends_on: todo.depends_on.clone(),
+        })
+        .collect()
 }
 
 /// Owns all active sessions.

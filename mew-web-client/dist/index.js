@@ -171,6 +171,48 @@ export class MewClient {
     prompt(text, attachments = []) {
         this.send({ type: "prompt", text, attachments });
     }
+    /** Compare and save one todo; resolve only after the daemon confirms it. */
+    updateTodo(sessionId, edit) {
+        const requestId = crypto.randomUUID();
+        return new Promise((resolve, reject) => {
+            const cleanup = () => {
+                clearTimeout(timer);
+                this.off("todo-updated", onSaved);
+                this.off("todo-update-error", onError);
+                this.off("close", onClose);
+            };
+            const onSaved = (data) => {
+                if (data.session_id !== sessionId || data.request_id !== requestId)
+                    return;
+                cleanup();
+                resolve(data.todos);
+            };
+            const onError = (data) => {
+                if (data.session_id !== sessionId || data.request_id !== requestId)
+                    return;
+                cleanup();
+                reject(new Error(data.message));
+            };
+            const onClose = () => {
+                cleanup();
+                reject(new Error("daemon disconnected before confirming todo save"));
+            };
+            const timer = setTimeout(() => {
+                cleanup();
+                reject(new Error("todo save was not confirmed; update or reconnect the daemon before retrying"));
+            }, 3000);
+            this.on("todo-updated", onSaved);
+            this.on("todo-update-error", onError);
+            this.on("close", onClose);
+            try {
+                this.send({ type: "update_todo", session_id: sessionId, request_id: requestId, ...edit });
+            }
+            catch (error) {
+                cleanup();
+                reject(error);
+            }
+        });
+    }
     /** Send `cancel` to abort the current turn. */
     cancel() {
         this.send({ type: "cancel" });
@@ -543,6 +585,12 @@ export class MewClient {
                     outcome: msg.outcome,
                     manifests: msg.manifests ?? [],
                 });
+                break;
+            case "todo_updated":
+                this.emit("todo-updated", msg);
+                break;
+            case "todo_update_error":
+                this.emit("todo-update-error", msg);
                 break;
             case "todos_updated":
                 this.emit("todos-updated", { todos: msg.todos });

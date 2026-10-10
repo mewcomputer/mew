@@ -99,6 +99,75 @@ async fn next_setting(
 }
 
 #[tokio::test]
+async fn confirmed_sessions_publish_persisted_todos_and_empty_new_snapshots() {
+    let root = tempfile::tempdir().unwrap();
+    let server = policy_server(root.path().to_path_buf());
+    let session = server.session_manager.create(None).await.unwrap();
+    let id = session.id.clone();
+    {
+        let agent = session.agent.lock().await;
+        let mut todos = agent.todos.lock().await;
+        todos.create(vec![
+            ("stored task".into(), vec![]),
+            ("dependent task".into(), vec![1]),
+        ]);
+        todos
+            .update(1, None, Some(mew_agent::TodoStatus::Blocked))
+            .unwrap();
+        todos
+            .save(agent.todos_path.as_ref().unwrap())
+            .await
+            .unwrap();
+    }
+    server.session_manager.remove(&id).await;
+    let mut socket = connect(&server).await;
+    send(
+        &mut socket,
+        ClientMessage::AttachSession {
+            session_id: id.clone(),
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    let messages = flush(&mut socket).await;
+    let ready = messages.iter().position(|message| matches!(message, ServerMessage::SessionReady { session_id, .. } if session_id == &id)).unwrap();
+    let snapshot = messages
+        .iter()
+        .position(|message| matches!(message, ServerMessage::TodosUpdated { .. }))
+        .expect("attach must publish canonical todos");
+    assert!(
+        snapshot > ready,
+        "session confirmation must precede its todo snapshot"
+    );
+    let ServerMessage::TodosUpdated { todos } = &messages[snapshot] else {
+        unreachable!()
+    };
+    assert_eq!(todos.len(), 2);
+    assert_eq!(todos[0].content, "stored task");
+    assert_eq!(todos[0].status, "blocked");
+    assert_eq!(todos[1].depends_on, vec![1]);
+
+    send(
+        &mut socket,
+        ClientMessage::NewSession {
+            cwd: None,
+            client_kind: ClientKind::Tui,
+        },
+    )
+    .await;
+    let messages = flush(&mut socket).await;
+    let ready = messages.iter().position(|message| matches!(message, ServerMessage::SessionReady { session_id, .. } if session_id != &id)).unwrap();
+    let snapshot = messages
+        .iter()
+        .position(|message| matches!(message, ServerMessage::TodosUpdated { .. }))
+        .expect("a new session must clear the previous todo snapshot");
+    assert!(snapshot > ready);
+    assert!(
+        matches!(&messages[snapshot], ServerMessage::TodosUpdated { todos } if todos.is_empty())
+    );
+}
+
+#[tokio::test]
 async fn effective_policy_and_todos_survive_runtime_reload() {
     let root = tempfile::tempdir().unwrap();
     let server = policy_server(root.path().to_path_buf());
