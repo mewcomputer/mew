@@ -1554,38 +1554,28 @@ impl App {
         visual_col: usize,
         content_width: u16,
     ) -> Option<usize> {
-        let w = content_width.max(1) as usize;
-        let mut current_row = 0;
-        for (line_idx, line) in self.input.split('\n').enumerate() {
-            let dw = unicode_width::UnicodeWidthStr::width(line);
-            let rows_in_line = if w == 0 { 1 } else { dw.div_ceil(w).max(1) };
-            if current_row + rows_in_line > visual_row {
-                // Target is within this logical line.
-                let row_in_line = visual_row - current_row;
-                let target_byte_col = (row_in_line * w) + visual_col;
-                // Find the byte offset at this display column.
-                let mut display_col = 0;
-                let mut byte_offset = 0;
-                for (byte_idx, ch) in line.char_indices() {
-                    if display_col >= target_byte_col {
-                        break;
-                    }
-                    let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                    display_col += ch_w;
-                    byte_offset = byte_idx + ch.len_utf8();
-                }
-                // Compute the start of this logical line in the full input.
-                let line_start = self
+        self.input_visual_rows(content_width)
+            .nth(visual_row)
+            .map(|(start, text, _)| {
+                let width = unicode_width::UnicodeWidthStr::width(text);
+                let end = start + text.len();
+                let continues = self
                     .input
-                    .split('\n')
-                    .take(line_idx)
-                    .map(|l| l.len() + 1) // +1 for the '\n'
-                    .sum::<usize>();
-                return Some(line_start + byte_offset);
-            }
-            current_row += rows_in_line;
-        }
-        None
+                    .as_bytes()
+                    .get(end)
+                    .is_some_and(|byte| *byte != b'\n');
+                let visual_col = if continues {
+                    visual_col.min(width.min(content_width.max(1) as usize).saturating_sub(1))
+                } else {
+                    visual_col
+                };
+                let offset = if width > content_width.max(1) as usize && visual_col > 0 {
+                    text.len()
+                } else {
+                    byte_at_display_offset(text, visual_col)
+                };
+                start + offset
+            })
     }
 
     /// Map a (visual_row, visual_col) in the wrapped input grid to a byte
@@ -1597,24 +1587,8 @@ impl App {
         visual_col: usize,
         content_width: u16,
     ) -> usize {
-        let w = content_width.max(1) as usize;
-        let mut current_visual_row = 0usize;
-        let mut byte_offset = 0usize;
-        for line in self.input.split('\n') {
-            let dw = unicode_width::UnicodeWidthStr::width(line);
-            let rows = if w == 0 { 1 } else { dw.div_ceil(w).max(1) };
-            if visual_row < current_visual_row + rows {
-                let row_in_line = visual_row - current_visual_row;
-                let start_col = row_in_line * w;
-                let col_clamped = visual_col.min(dw.saturating_sub(start_col));
-                let target_col = start_col + col_clamped;
-                let target_byte = byte_at_display_offset(line, target_col);
-                return byte_offset + target_byte;
-            }
-            current_visual_row += rows;
-            byte_offset += line.len() + 1; // +1 for the '\n'
-        }
-        self.input.len()
+        self.visual_to_byte_offset_opt(visual_row, visual_col, content_width)
+            .unwrap_or(self.input.len())
     }
 
     /// Scroll chat up (show older messages). Disables auto-scroll.
@@ -2838,8 +2812,8 @@ impl Default for App {
 
 pub(crate) fn byte_at_display_offset(s: &str, target_col: usize) -> usize {
     let mut col = 0usize;
-    for (i, ch) in s.char_indices() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+    for (i, grapheme) in unicode_segmentation::UnicodeSegmentation::grapheme_indices(s, true) {
+        let w = unicode_width::UnicodeWidthStr::width(grapheme);
         if col + w > target_col {
             return i;
         }

@@ -1554,3 +1554,17 @@ active process, so the recorded session's actual executable remains unconfirmed.
 Extended the existing real-file review regression to cover researcher as well
 as plan-reviewer and project code-reviewer. Verified all 12 session-workspace
 tests, including child permission forwarding for files outside the project.
+
+### 2026-10-10: TUI composer visibility and cursor geometry
+
+Queued follow-ups and history/paste prompts have reserved rows. Long drafts
+keep the edited row visible through movement, recall, clicks and resize. The
+editor and renderer share borrowed grapheme-aware rows, fixing odd-width CJK,
+joined emoji, combining marks and exact-wrap boundaries. A glyph wider than a
+one-cell text column has a visible replacement without modifying submitted
+input. Narrow Ctrl+R searches keep their query caret inside the terminal.
+
+Verified all 14 composer behavior tests with red/green regressions, all 309 TUI
+tests including the doc test, strict all-target TUI clippy and the CLI build.
+Source review caught the odd-width wrapping mismatch; the shared row geometry
+resolved it. Headless captures confirmed the long-draft viewport.

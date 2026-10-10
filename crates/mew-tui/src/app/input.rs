@@ -4,6 +4,7 @@
 //! history navigation, and visual cursor mapping.
 
 use super::*;
+use unicode_segmentation::UnicodeSegmentation;
 
 impl App {
     pub fn push_undo(&mut self) {
@@ -88,43 +89,76 @@ impl App {
         self.input.lines().count()
     }
 
-    pub fn input_visual_line_count(&self, content_width: u16) -> usize {
-        let w = content_width.max(1) as usize;
+    /// Borrowed wrapped rows: byte start, text, and whether the logical line begins here.
+    pub(crate) fn input_visual_rows(
+        &self,
+        content_width: u16,
+    ) -> impl Iterator<Item = (usize, &str, bool)> {
+        let width = content_width.max(1) as usize;
         self.input
             .split('\n')
-            .map(|line| {
-                let dw = unicode_width::UnicodeWidthStr::width(line);
-                dw.div_ceil(w).max(1)
+            .scan(0, |offset, line| {
+                let start = *offset;
+                *offset += line.len() + 1;
+                Some((start, line))
             })
-            .sum()
+            .flat_map(move |(line_start, line)| {
+                let mut remaining = line;
+                let mut consumed = 0;
+                let mut empty = line.is_empty();
+                std::iter::from_fn(move || {
+                    if empty {
+                        empty = false;
+                        return Some((line_start, line, true));
+                    }
+                    if remaining.is_empty() {
+                        return None;
+                    }
+                    let mut end = 0;
+                    let mut columns = 0;
+                    for grapheme in remaining.graphemes(true) {
+                        let grapheme_width = unicode_width::UnicodeWidthStr::width(grapheme);
+                        if end > 0 && grapheme_width > 0 && columns + grapheme_width > width {
+                            break;
+                        }
+                        columns += grapheme_width;
+                        end += grapheme.len();
+                    }
+                    let row = (line_start + consumed, &remaining[..end], consumed == 0);
+                    remaining = &remaining[end..];
+                    consumed += end;
+                    Some(row)
+                })
+            })
+    }
+
+    pub fn input_visual_line_count(&self, content_width: u16) -> usize {
+        self.input_visual_rows(content_width).count()
     }
 
     pub fn cursor_visual_row_col(&self, content_width: u16) -> (usize, usize) {
-        let w = content_width.max(1) as usize;
-        let (logical_line, col_in_line) = self.cursor_line_col();
-        let mut visual_row = 0;
-        for (li, line) in self.input.split('\n').enumerate() {
-            if li == logical_line {
-                let dw = unicode_width::UnicodeWidthStr::width(line);
-                let col_clamped = col_in_line.min(dw);
-                let row_in_line = col_clamped.checked_div(w).unwrap_or(0);
-                return (visual_row + row_in_line, col_clamped - row_in_line * w);
+        for (row, (start, text, _)) in self.input_visual_rows(content_width).enumerate() {
+            let end = start + text.len();
+            let logical_end = self
+                .input
+                .as_bytes()
+                .get(end)
+                .is_none_or(|byte| *byte == b'\n');
+            if self.cursor < end || (self.cursor == end && logical_end) {
+                let column = unicode_width::UnicodeWidthStr::width(
+                    &text[..self.cursor.saturating_sub(start)],
+                );
+                return (row, column.min(content_width.max(1) as usize));
             }
-            let dw = unicode_width::UnicodeWidthStr::width(line);
-            let rows = if w == 0 { 1 } else { dw.div_ceil(w).max(1) };
-            visual_row += rows;
         }
-        (visual_row, 0)
+        (0, 0)
     }
 
     pub fn cursor_line_col(&self) -> (usize, usize) {
         let before = &self.input[..self.cursor];
-        let line = before.lines().count().saturating_sub(1);
-        let col = if let Some(ln_pos) = before.rfind('\n') {
-            self.cursor - ln_pos - 1
-        } else {
-            self.cursor
-        };
+        let line = before.bytes().filter(|byte| *byte == b'\n').count();
+        let current_line = before.rsplit('\n').next().unwrap_or_default();
+        let col = unicode_width::UnicodeWidthStr::width(current_line);
         (line, col)
     }
 

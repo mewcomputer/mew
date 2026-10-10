@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use super::display_width;
-use crate::app::App;
+use crate::app::{App, Mode};
 
 /// The cat ASCII art shown on the landing screen, sitting to the left of the
 /// "mew" wordmark. Four lines; widths are a mix of half- and full-width glyphs,
@@ -112,7 +112,9 @@ pub(super) fn draw_landing(f: &mut Frame, app: &App, area: Rect) -> Rect {
         .clamp(30, 80)
         .min(area.width.saturating_sub(2));
     let content_w = input_w.saturating_sub(2).saturating_sub(2);
-    let input_h = (app.input_visual_line_count(content_w).clamp(1, 12) + 2) as u16;
+    let input_h = (app.input_visual_line_count(content_w).clamp(1, 12) + 2) as u16
+        + u16::from(!app.queued_messages.is_empty())
+        + u16::from(matches!(app.mode, Mode::HistorySearch | Mode::PasteConfirm));
 
     // Vertical layout: hero, a 1-row gap, then the input. The block is
     // centered using a nominal single-line input so the input box's top edge

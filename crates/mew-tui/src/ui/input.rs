@@ -23,8 +23,8 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 
     // If there are queued messages, render a dimmed preview strip above the
     // input area showing the oldest queued message with a (+N) badge.
-    if !app.queued_messages.is_empty() {
-        let queue_height = 1u16;
+    let queue_height = u16::from(!app.queued_messages.is_empty()).min(area.height);
+    if queue_height > 0 {
         let queue_area = Rect::new(area.x, area.y, area.width, queue_height);
         let queue_bg = app.theme.resolve("muted");
         let muted_style = Style::default()
@@ -46,9 +46,10 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         let prefix_str = "⏳ ";
         let available = area
             .width
-            .saturating_sub(prefix_str.len() as u16)
-            .saturating_sub(badge.len() as u16);
-        let preview: String = oldest.chars().take(available as usize).collect();
+            .saturating_sub(display_width(prefix_str) as u16)
+            .saturating_sub(display_width(&badge) as u16);
+        let first_line = oldest.lines().next().unwrap_or_default();
+        let preview = &first_line[..byte_at_display_offset(first_line, available as usize)];
         let line = Line::from(vec![
             Span::styled(prefix_str, badge_style),
             Span::styled(preview, muted_style),
@@ -64,7 +65,13 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let wrap_w = content_width.saturating_sub(prefix_width as u16).max(1) as usize;
     let visual_line_count = app.input_visual_line_count(wrap_w as u16).max(1);
     let input_height = (visual_line_count as u16).min(12) + 2;
-    let input_area = Rect::new(area.x, area.y, area.width, input_height.min(area.height));
+    let prompt_height = u16::from(matches!(app.mode, Mode::HistorySearch | Mode::PasteConfirm));
+    let input_area = Rect::new(
+        area.x,
+        area.y + queue_height,
+        area.width,
+        input_height.min(area.height.saturating_sub(queue_height + prompt_height)),
+    );
 
     let bg_block = Block::default().style(Style::default().bg(input_bg));
     f.render_widget(bg_block, input_area);
@@ -100,40 +107,36 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 
     let (cursor_visual_row, cursor_visual_col) = app.cursor_visual_row_col(wrap_w as u16);
 
-    let mut visual_row = 0usize;
-    for line in app.input.split('\n') {
-        let dw = display_width(line);
-        let rows = if wrap_w == 0 {
-            1
+    let first_visual_row =
+        cursor_visual_row.saturating_sub(content_area.height.saturating_sub(1) as usize);
+    for (visual_row, (_, text, first)) in app
+        .input_visual_rows(wrap_w as u16)
+        .enumerate()
+        .skip(first_visual_row)
+        .take(content_area.height as usize)
+    {
+        let y = content_area.y + (visual_row - first_visual_row) as u16;
+        let visible = if display_width(text) > wrap_w {
+            "�"
         } else {
-            dw.div_ceil(wrap_w).max(1)
+            text
         };
-        for r in 0..rows {
-            let y = content_area.y + visual_row as u16;
-            if y >= content_area.y + content_area.height {
-                break;
-            }
-            let start_col = r * wrap_w;
-            let end_col = ((r + 1) * wrap_w).min(dw);
-            let start_byte = byte_at_display_offset(line, start_col);
-            let end_byte = byte_at_display_offset(line, end_col);
-            let visible = &line[start_byte..end_byte];
-
-            let spans = if r == 0 {
-                vec![prefix.clone(), Span::styled(visible, style)]
-            } else {
-                vec![indent.clone(), Span::styled(visible, style)]
-            };
-            let text = Text::from(Line::from(spans));
-            let row = Rect::new(content_area.x, y, content_area.width, 1);
-            f.render_widget(Paragraph::new(text), row);
-            visual_row += 1;
-        }
+        let row_prefix = if first {
+            prefix.clone()
+        } else {
+            indent.clone()
+        };
+        let spans = vec![row_prefix, Span::styled(visible, style)];
+        let text = Text::from(Line::from(spans));
+        let row = Rect::new(content_area.x, y, content_area.width, 1);
+        f.render_widget(Paragraph::new(text), row);
     }
 
     let cursor_x = content_area.x + prefix_width as u16 + cursor_visual_col.min(wrap_w) as u16;
-    let cursor_y = content_area.y + cursor_visual_row.min(content_area.height as usize) as u16;
-    f.set_cursor_position((cursor_x, cursor_y));
+    let cursor_y = content_area.y + cursor_visual_row.saturating_sub(first_visual_row) as u16;
+    if content_area.height > 0 && cursor_x < input_area.right() {
+        f.set_cursor_position((cursor_x, cursor_y));
+    }
 
     // History search prompt (Ctrl+R).
     if app.mode == Mode::HistorySearch {
@@ -161,13 +164,18 @@ pub(super) fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                 .bg(input_bg)
         };
         let text = Text::from(Line::from(Span::styled(prompt, search_style)));
-        f.render_widget(Paragraph::new(text), search_area);
-        // Move cursor to the edited position in the search query.
-        let query_cursor_x = input_area.x
-            + 1
-            + "reverse-i-search: ".len() as u16
-            + display_width(&app.history_search_query[..app.history_search_cursor]) as u16;
-        f.set_cursor_position((query_cursor_x, search_y));
+        let query_column = display_width("reverse-i-search: ")
+            + display_width(&app.history_search_query[..app.history_search_cursor]);
+        let first_column =
+            query_column.saturating_sub(search_area.width.saturating_sub(1) as usize);
+        f.render_widget(
+            Paragraph::new(text).scroll((0, first_column.min(u16::MAX as usize) as u16)),
+            search_area,
+        );
+        if search_area.width > 0 && search_y < area.bottom() {
+            let query_cursor_x = search_area.x + (query_column - first_column) as u16;
+            f.set_cursor_position((query_cursor_x, search_y));
+        }
     }
 
     // Large paste confirmation prompt.

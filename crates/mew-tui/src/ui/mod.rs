@@ -29,9 +29,7 @@ pub(super) const DIFF_LINES_MAX: usize = 30;
 
 /// Compute display width of a string using Unicode standard widths.
 pub(super) fn display_width(s: &str) -> usize {
-    s.chars()
-        .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0))
-        .sum()
+    unicode_width::UnicodeWidthStr::width(s)
 }
 
 /// Render the full UI.
@@ -163,7 +161,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let input_height = (app
         .input_visual_line_count(input_content_width)
         .clamp(1, 12)
-        + 2) as u16;
+        + 2) as u16
+        + u16::from(!app.queued_messages.is_empty())
+        + u16::from(matches!(app.mode, Mode::HistorySearch | Mode::PasteConfirm));
 
     // When an ask_user question is active, the input slot is replaced by the
     // question overlay. Reserve enough vertical space for the prompt + a few

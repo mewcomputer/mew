@@ -357,16 +357,28 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
             }
 
             // Input click → position cursor and clear selection.
-            if app.input_area.contains((col, row).into()) {
+            if app.input_area.contains((mouse.column, mouse.row).into()) {
                 app.clear_selection();
-                let rel_x = col.saturating_sub(app.input_area.x) as usize;
-                let rel_y = row.saturating_sub(app.input_area.y) as usize;
+                let rel_x = mouse.column.saturating_sub(app.input_area.x) as usize;
+                let rel_y = mouse.row.saturating_sub(app.input_area.y) as usize;
+                let queue_height = usize::from(!app.queued_messages.is_empty());
+                let content_height = app
+                    .input_area
+                    .height
+                    .saturating_sub(queue_height as u16 + 2);
+                if rel_y <= queue_height || rel_y > queue_height + content_height as usize {
+                    return None;
+                }
                 // The input has a 1-cell border on each side and a 2-cell
                 // prefix (`> `) on the first visual row of each logical
                 // line. Convert the mouse cell to a (visual_row, visual_col)
                 // pair in the wrapped content grid.
-                let content_width = app.input_area.width.saturating_sub(2);
-                let visual_row = rel_y.saturating_sub(1);
+                let content_width = app.input_area.width.saturating_sub(4);
+                let first_visual_row = app
+                    .cursor_visual_row_col(content_width)
+                    .0
+                    .saturating_sub(content_height.saturating_sub(1) as usize);
+                let visual_row = rel_y - queue_height - 1 + first_visual_row;
                 let visual_col = rel_x.saturating_sub(1).saturating_sub(2);
                 let total = app.input_visual_line_count(content_width);
                 if visual_row < total {
@@ -1222,7 +1234,7 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             } else {
                 // If input is multi-line, move cursor between visual lines.
                 // Only navigate history when on the first visual line.
-                let content_width = app.input_area.width.saturating_sub(2);
+                let content_width = app.input_area.width.saturating_sub(4);
                 if app.input_visual_line_count(content_width) > 1
                     && !app.input.is_empty()
                     && app.cursor_visual_up(content_width)
@@ -1256,7 +1268,7 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             } else {
                 // If input is multi-line, move cursor between visual lines.
                 // Only navigate history when on the last visual line.
-                let content_width = app.input_area.width.saturating_sub(2);
+                let content_width = app.input_area.width.saturating_sub(4);
                 if app.input_visual_line_count(content_width) > 1
                     && !app.input.is_empty()
                     && app.cursor_visual_down(content_width)

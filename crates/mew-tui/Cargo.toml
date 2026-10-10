@@ -28,6 +28,7 @@ ratatui-mdstream = { workspace = true }
 mdstream = { workspace = true }
 ignore = { workspace = true }
 unicode-width = "0.2"
+unicode-segmentation = { workspace = true }
 rand.workspace = true
 strum = { version = "0.26", features = ["derive"] }
 mew-config = { workspace = true }
