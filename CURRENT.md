@@ -1701,3 +1701,17 @@ avoiding an extra provider request and a final-trace race. Orphan recovery uses
 the recorded exit result. Verified 192 agent tests, 19 session tests and strict
 all-target clippy. Real tools and temporary files exercised permission decisions
 and saved results. Parent/child mailboxes and worker resume remain absent.
+
+### 2026-10-10: scoped child transcript reads
+
+The daemon exposes read-only child history requests scoped to the attached
+parent, child and request ID. Parent and child metadata must agree on membership;
+child IDs are validated before path access. The reader supports the runtime's
+bare-ULID parent storage and checked external daemon-ID records, ignores only an
+incomplete trailing append, and rejects malformed complete records. Replies go
+only to the requesting connection, including during an active parent prompt.
+
+Verified protocol roundtrips, read scopes, two real WebSocket regressions, 64
+daemon library tests and 27 TypeScript client tests/build. Mobile/shared clients
+compile and scoped strict clippy passes. Reads do not wait for the turn lock or
+switch attachment. Older daemons fail through the viewer's bounded timeout.

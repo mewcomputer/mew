@@ -21,6 +21,11 @@ export type ClientMessage = {
     before: number;
     limit?: number;
 } | {
+    type: "read_subagent_history";
+    session_id: string;
+    child_session_id: string;
+    request_id: string;
+} | {
     type: "list_sessions";
 } | {
     type: "delete_session";
@@ -601,6 +606,13 @@ export type ServerMessage = {
     type: "session_history";
     messages: Message[];
 } | {
+    type: "subagent_history";
+    session_id: string;
+    child_session_id: string;
+    request_id: string;
+    messages: Message[];
+    error: string | null;
+} | {
     type: "session_history_page";
     session_id: string;
     messages: Message[];
@@ -847,6 +859,13 @@ export interface MewClientEvents {
     "session-history": (data: {
         messages: Message[];
     }) => void;
+    "subagent-history": (data: {
+        session_id: string;
+        child_session_id: string;
+        request_id: string;
+        messages: Message[];
+        error: string | null;
+    }) => void;
     "model-list": (data: {
         models: ModelInfo[];
     }) => void;
@@ -1057,6 +1076,8 @@ export declare class MewClient {
     /** Request older messages for the attached session using the cursor from a
      *  previous history page. */
     loadSessionHistory(session_id: string, before: number, limit?: number): void;
+    /** Request a recorded child transcript without changing the attached session. */
+    readSubagentHistory(session_id: string, child_session_id: string, request_id: string): void;
     /** List all sessions known to the daemon (active + persisted idle).
      *  The daemon responds with a `session-list` event. */
     listSessions(): Promise<SessionInfo[]>;

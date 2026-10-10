@@ -285,6 +285,10 @@ export class MewClient {
     loadSessionHistory(session_id, before, limit) {
         this.send({ type: "load_session_history", session_id, before, limit });
     }
+    /** Request a recorded child transcript without changing the attached session. */
+    readSubagentHistory(session_id, child_session_id, request_id) {
+        this.send({ type: "read_subagent_history", session_id, child_session_id, request_id });
+    }
     /** List all sessions known to the daemon (active + persisted idle).
      *  The daemon responds with a `session-list` event. */
     listSessions() {
@@ -617,6 +621,9 @@ export class MewClient {
             case "session_history":
                 this.sessionHistoryMessages = msg.messages;
                 this.emit("session-history", { messages: msg.messages });
+                break;
+            case "subagent_history":
+                this.emit("subagent-history", { session_id: msg.session_id, child_session_id: msg.child_session_id, request_id: msg.request_id, messages: msg.messages, error: msg.error });
                 break;
             case "session_history_page": {
                 const messages = msg.replace

@@ -101,6 +101,59 @@ pub struct Session {
 }
 
 impl Session {
+    pub(crate) async fn subagent_history(
+        &self,
+        child_session_id: &str,
+    ) -> Result<Vec<mew_message::Message>> {
+        ulid::Ulid::from_string(child_session_id).context("invalid child session ID")?;
+        let recorded_parent = self.agent.lock().await.session_id.to_string();
+        let mut parent = None;
+        // Both parent folder conventions require recorded child membership.
+        for id in [recorded_parent, self.id.clone()] {
+            let meta = mew_session::Meta::read(&self.session_dir, &id)
+                .await
+                .context("read parent session metadata")?;
+            if meta.as_ref().is_some_and(|meta| {
+                meta.id == id
+                    && meta
+                        .children_session_ids
+                        .iter()
+                        .any(|child| child == child_session_id)
+            }) {
+                parent = Some(id);
+                break;
+            }
+        }
+        let parent = parent.context("not a registered child of the attached parent")?;
+        let children = self.session_dir.join(&parent).join("subagents");
+        let meta = mew_session::Meta::read(&children, child_session_id)
+            .await
+            .context("read child session metadata")?
+            .context("missing child session metadata")?;
+        anyhow::ensure!(
+            meta.id == child_session_id && meta.parent_session_id.as_deref() == Some(&parent),
+            "child metadata does not match the attached parent"
+        );
+        let data = tokio::fs::read(children.join(child_session_id).join("session.jsonl"))
+            .await
+            .context("read child transcript")?;
+        // A live writer can expose an incomplete final append before its newline.
+        let last_record = data
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        let complete = if last_record < data.len()
+            && serde_json::from_slice::<serde::de::IgnoredAny>(&data[last_record..])
+                .is_err_and(|error| error.is_eof())
+        {
+            &data[..last_record]
+        } else {
+            &data
+        };
+        let complete = std::str::from_utf8(complete).context("invalid child transcript record")?;
+        mew_session::decode_messages(complete).context("invalid child transcript record")
+    }
+
     pub(crate) async fn update_todo(
         &self,
         edit: mew_protocol::TodoEdit,

@@ -1165,6 +1165,7 @@ fn server_message_type(msg: &mew_protocol::ServerMessage) -> &'static str {
         }
         mew_protocol::ServerMessage::AskUserRequest { .. } => "AskUserRequest",
         mew_protocol::ServerMessage::GoalProposed { .. } => "GoalProposed",
+        mew_protocol::ServerMessage::SubagentHistory { .. } => "SubagentHistory",
         mew_protocol::ServerMessage::SubagentStart { .. } => "SubagentStart",
         mew_protocol::ServerMessage::SubagentStatus { .. } => "SubagentStatus",
         mew_protocol::ServerMessage::SubagentEnd { .. } => "SubagentEnd",

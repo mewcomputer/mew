@@ -79,6 +79,24 @@ struct PendingTodoEdit {
 }
 
 impl DaemonClient {
+    pub async fn read_subagent_history(
+        &self,
+        session_id: &str,
+        child_session_id: &str,
+        request_id: &str,
+    ) -> Result<()> {
+        let json = mew_protocol::encode_json(&ClientMessage::ReadSubagentHistory {
+            session_id: session_id.into(),
+            child_session_id: child_session_id.into(),
+            request_id: request_id.into(),
+        })?;
+        self.state
+            .ws_out
+            .send(json)
+            .await
+            .context("daemon connection closed during child history request")
+    }
+
     pub async fn update_todo(
         &self,
         session_id: &str,
@@ -982,6 +1000,7 @@ async fn translate_server_message(
         ServerMessage::SessionList { .. }
         | ServerMessage::SessionHistory { .. }
         | ServerMessage::SessionHistoryPage { .. }
+        | ServerMessage::SubagentHistory { .. }
         | ServerMessage::SessionTitleChanged { .. }
         | ServerMessage::SessionSummaryChanged { .. }
         | ServerMessage::SessionAlert { .. }

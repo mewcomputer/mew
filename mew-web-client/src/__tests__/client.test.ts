@@ -617,3 +617,21 @@ test("unsupported todo editing times out while unrelated errors remain visible",
   await assert.rejects(pending, /not confirmed; update or reconnect/);
   assert.deepEqual(errors, ["unknown variant update_todo"]);
 });
+
+test("subagent history preserves viewer identity and never replaces session history", async () => {
+  const { factory, latest } = makeFactory();
+  const client = new MewClient("ws://test/", { socketFactory: factory });
+  const connect = client.connect();
+  latest().open();
+  await connect;
+  const replies: unknown[] = [];
+  let sessionHistory = false;
+  client.on("subagent-history", (reply) => replies.push(reply));
+  client.on("session-history", () => { sessionHistory = true; });
+  client.readSubagentHistory("parent", "child", "request");
+  assert.deepEqual(latest().sent.at(-1), { type: "read_subagent_history", session_id: "parent", child_session_id: "child", request_id: "request" });
+  const reply = { type: "subagent_history" as const, session_id: "parent", child_session_id: "child", request_id: "request", messages: [], error: "missing transcript" };
+  latest().peerSend(reply);
+  assert.deepEqual(replies, [{ session_id: "parent", child_session_id: "child", request_id: "request", messages: [], error: "missing transcript" }]);
+  assert.equal(sessionHistory, false);
+});

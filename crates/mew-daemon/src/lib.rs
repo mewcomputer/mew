@@ -396,6 +396,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
                 | ClientMessage::ReadFilePreview { .. }
                 | ClientMessage::GitStatus { .. }
                 | ClientMessage::ReadSessionDiff { .. }
+                | ClientMessage::ReadSubagentHistory { .. }
                 | ClientMessage::UpdateTodo { .. }
                 | ClientMessage::WatchWorkspace { .. }
                 | ClientMessage::OpenPath { .. }
@@ -434,6 +435,7 @@ fn remote_message_allowed(scope: RemoteScope, message: &ClientMessage) -> bool {
             | ClientMessage::ReadFilePreview { .. }
             | ClientMessage::GitStatus { .. }
             | ClientMessage::ReadSessionDiff { .. }
+            | ClientMessage::ReadSubagentHistory { .. }
             | ClientMessage::WatchWorkspace { .. }
     );
     if observe {
@@ -1289,6 +1291,32 @@ where
                     messages,
                     next_cursor,
                     replace: false,
+                });
+            }
+            ClientMessage::ReadSubagentHistory {
+                session_id,
+                child_session_id,
+                request_id,
+            } => {
+                let result = match attached_session
+                    .as_ref()
+                    .filter(|parent| parent.id == session_id)
+                {
+                    Some(parent) => parent.subagent_history(&child_session_id).await,
+                    None => Err(anyhow::anyhow!(
+                        "history requires the attached parent session"
+                    )),
+                };
+                let (messages, error) = match result {
+                    Ok(messages) => (messages, None),
+                    Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+                };
+                reply(ServerMessage::SubagentHistory {
+                    session_id,
+                    child_session_id,
+                    request_id,
+                    messages,
+                    error,
                 });
             }
             ClientMessage::ListSessions => {
@@ -3641,6 +3669,22 @@ mod tests {
         assert!(!remote_message_allowed(RemoteScope::Observe, &message));
         assert!(!remote_message_allowed(RemoteScope::Collaborate, &message));
         assert!(remote_message_allowed(RemoteScope::Control, &message));
+    }
+
+    #[test]
+    fn child_history_is_available_to_each_remote_read_scope() {
+        let message = ClientMessage::ReadSubagentHistory {
+            session_id: "parent".into(),
+            child_session_id: "child".into(),
+            request_id: "history".into(),
+        };
+        for scope in [
+            RemoteScope::Observe,
+            RemoteScope::Collaborate,
+            RemoteScope::Control,
+        ] {
+            assert!(remote_message_allowed(scope, &message));
+        }
     }
 
     #[test]

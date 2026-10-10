@@ -241,6 +241,11 @@ pub enum ClientMessage {
         session_id: String,
         request_id: String,
     },
+    ReadSubagentHistory {
+        session_id: String,
+        child_session_id: String,
+        request_id: String,
+    },
     /// Compare and edit one todo without replacing its identity or dependencies.
     UpdateTodo {
         session_id: String,
@@ -804,6 +809,13 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_cursor: Option<usize>,
         replace: bool,
+    },
+    SubagentHistory {
+        session_id: String,
+        child_session_id: String,
+        request_id: String,
+        messages: Vec<mew_message::Message>,
+        error: Option<String>,
     },
 
     // -- Model management --
@@ -1443,6 +1455,29 @@ pub fn subagent_outcome_to_wire(o: &mew_subagents::SubagentOutcome) -> SubagentO
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subagent_history_preserves_request_identity_and_errors() {
+        let request = ClientMessage::ReadSubagentHistory {
+            session_id: "parent".into(),
+            child_session_id: "child".into(),
+            request_id: "request".into(),
+        };
+        assert!(
+            matches!(round_trip(&request), ClientMessage::ReadSubagentHistory { session_id, child_session_id, request_id } if session_id == "parent" && child_session_id == "child" && request_id == "request")
+        );
+        for error in [None, Some("missing child transcript".into())] {
+            let reply = ServerMessage::SubagentHistory {
+                session_id: "parent".into(),
+                child_session_id: "child".into(),
+                request_id: "request".into(),
+                messages: vec![],
+                error: error.clone(),
+            };
+            assert!(
+                matches!(round_trip(&reply), ServerMessage::SubagentHistory { session_id, child_session_id, request_id, messages, error: actual } if session_id == "parent" && child_session_id == "child" && request_id == "request" && messages.is_empty() && actual == error)
+            );
+        }
+    }
     #[test]
     fn todo_edit_and_scoped_replies_roundtrip() {
         let request = ClientMessage::UpdateTodo {

@@ -37,6 +37,7 @@ export type ClientMessage =
   | { type: "new_session"; cwd: string | null; client_kind: string }
   | { type: "attach_session"; session_id: string; client_kind: string }
   | { type: "load_session_history"; session_id: string; before: number; limit?: number }
+  | { type: "read_subagent_history"; session_id: string; child_session_id: string; request_id: string }
   | { type: "list_sessions" }
   | { type: "delete_session"; session_id: string }
   | { type: "rename_session"; session_id: string; title: string }
@@ -498,6 +499,7 @@ export type ServerMessage =
   | { type: "session_cleared" }
   | { type: "session_list"; sessions: SessionInfo[] }
   | { type: "session_history"; messages: Message[] }
+  | { type: "subagent_history"; session_id: string; child_session_id: string; request_id: string; messages: Message[]; error: string | null }
   | {
       type: "session_history_page";
       session_id: string;
@@ -678,6 +680,7 @@ export interface MewClientEvents {
   "session-cleared": () => void;
   "session-list": (data: { sessions: SessionInfo[] }) => void;
   "session-history": (data: { messages: Message[] }) => void;
+  "subagent-history": (data: { session_id: string; child_session_id: string; request_id: string; messages: Message[]; error: string | null }) => void;
   "model-list": (data: { models: ModelInfo[] }) => void;
   "model-switched": (data: { provider: string; model: string }) => void;
   "persona-list": (data: { personas: PersonaInfo[] }) => void;
@@ -1032,6 +1035,11 @@ export class MewClient {
    *  previous history page. */
   loadSessionHistory(session_id: string, before: number, limit?: number): void {
     this.send({ type: "load_session_history", session_id, before, limit });
+  }
+
+  /** Request a recorded child transcript without changing the attached session. */
+  readSubagentHistory(session_id: string, child_session_id: string, request_id: string): void {
+    this.send({ type: "read_subagent_history", session_id, child_session_id, request_id });
   }
 
   /** List all sessions known to the daemon (active + persisted idle).
@@ -1412,6 +1420,9 @@ export class MewClient {
       case "session_history":
         this.sessionHistoryMessages = msg.messages;
         this.emit("session-history", { messages: msg.messages });
+        break;
+      case "subagent_history":
+        this.emit("subagent-history", { session_id: msg.session_id, child_session_id: msg.child_session_id, request_id: msg.request_id, messages: msg.messages, error: msg.error });
         break;
       case "session_history_page": {
         const messages = msg.replace
