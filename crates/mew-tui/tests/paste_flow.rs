@@ -190,6 +190,8 @@ fn non_editor_modals_hide_the_underlying_chat_caret() {
         Mode::PermissionPrompt,
         Mode::PersonaSwitchConfirm,
         Mode::GoalProposal,
+        Mode::TodoEditor,
+        Mode::Activity,
     ] {
         app.mode = mode;
         terminal.draw(|frame| ui::draw(frame, &mut app)).unwrap();

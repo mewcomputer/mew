@@ -112,10 +112,12 @@ pub fn handle_input_event(app: &mut crate::app::App, event: CrosstermEvent) -> O
 /// Process a crossterm key event and return an action.
 pub fn handle_key_event(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
     match app.mode {
+        crate::app::Mode::Activity => handle_activity_key(app, key),
         crate::app::Mode::PermissionPrompt => handle_permission_key(app, key),
         crate::app::Mode::UserQuestion => handle_user_question_key(app, key),
         crate::app::Mode::GoalProposal => handle_goal_proposal_key(app, key),
         crate::app::Mode::GoalCompose => handle_goal_compose_key(app, key),
+        crate::app::Mode::TodoEditor => app.handle_todo_key(key),
         crate::app::Mode::CommandPalette => handle_picker_key(app, key),
         crate::app::Mode::PersonaSwitchConfirm => handle_persona_confirm_key(app, key),
         crate::app::Mode::Help => handle_help_key(app, key),
@@ -317,6 +319,10 @@ fn handle_paste_event(app: &mut crate::app::App, text: String) -> Option<Action>
     if text.is_empty() {
         return None;
     }
+    if app.mode == crate::app::Mode::TodoEditor {
+        app.paste_todo(&text);
+        return None;
+    }
     if app.mode == crate::app::Mode::GoalCompose {
         if let Some(goal) = app.goal_compose.as_mut() {
             goal.undo.snapshot(&goal.title, goal.cursor);
@@ -442,6 +448,43 @@ fn insert_paste(app: &mut crate::app::App, content: &str) {
 }
 
 pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
+    if app.mode == crate::app::Mode::TodoEditor {
+        if let Some(state) = app.todo_editor.as_mut() {
+            if state.body.contains((mouse.column, mouse.row).into()) && state.draft.is_none() {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => state.scroll = state.scroll.saturating_sub(2),
+                    MouseEventKind::ScrollDown => {
+                        state.scroll = state.scroll.saturating_add(2).min(state.max_scroll)
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some((_, id)) =
+                            state.row_hits.iter().find(|(row, _)| *row == mouse.row)
+                        {
+                            state.selected = Some(*id);
+                            state.reveal_selection = true;
+                            return app.handle_todo_key(KeyEvent::new(
+                                KeyCode::Enter,
+                                KeyModifiers::NONE,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        return None;
+    }
+    if app.mode == crate::app::Mode::Activity {
+        let code = match mouse.kind {
+            MouseEventKind::ScrollUp => KeyCode::Up,
+            MouseEventKind::ScrollDown => KeyCode::Down,
+            _ => return None,
+        };
+        if let Some(view) = app.activity_view.as_mut() {
+            scroll_decision(&mut view.scroll, &view.view, code);
+        }
+        return None;
+    }
     if app.mode == crate::app::Mode::Help {
         match mouse.kind {
             MouseEventKind::ScrollUp => app.help_scroll = app.help_scroll.saturating_sub(1),
@@ -511,6 +554,18 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
 
             // Sidebar click → toggle section.
             if app.sidebar_rect.contains((mouse.column, mouse.row).into()) {
+                if let Some((_, item)) = app
+                    .sidebar_item_rows
+                    .iter()
+                    .find(|(row, _)| *row == mouse.row)
+                {
+                    match item.clone() {
+                        crate::app::SidebarItem::Todo(id) => app.open_todos(Some(id)),
+                        crate::app::SidebarItem::Subagent(id) => app.open_subagent(id),
+                        crate::app::SidebarItem::Job(id) => app.open_job(id),
+                    }
+                    return None;
+                }
                 for (header_row, section) in &app.sidebar_header_rows.clone() {
                     if mouse.row == *header_row {
                         app.toggle_sidebar_section(section);
@@ -758,6 +813,15 @@ fn scroll_decision(scroll: &mut u16, view: &crate::app::DecisionView, code: KeyC
         KeyCode::End => view.max_scroll,
         _ => *scroll,
     };
+}
+
+fn handle_activity_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+        app.close_activity();
+    } else if let Some(view) = app.activity_view.as_mut() {
+        scroll_decision(&mut view.scroll, &view.view, key.code);
+    }
+    None
 }
 
 fn handle_permission_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
@@ -1697,6 +1761,12 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                             _ => None,
                         }
                     }
+                } else if kind == "subagent" {
+                    app.open_subagent(id);
+                    None
+                } else if kind == "job" {
+                    app.open_job(id);
+                    None
                 } else if kind == "model" {
                     Some(Action::SwitchModel(id))
                 } else if kind == "thinking_variant" {
@@ -1838,6 +1908,10 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
 /// High-level actions produced by input handling.
 #[derive(Debug, Clone, strum::EnumIter)]
 pub enum Action {
+    UpdateTodo {
+        session_id: String,
+        edit: mew_protocol::TodoEdit,
+    },
     /// Submit a user message.
     Submit(String),
     /// Execute a slash command.

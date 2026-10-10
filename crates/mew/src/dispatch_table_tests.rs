@@ -64,12 +64,21 @@ impl runtime::target::CommandTarget for RecordingTarget {
         self.record("compact");
         self.check()
     }
-    async fn todos(&mut self) -> Result<String, runtime::target::Unsupported> {
-        self.record("todos");
+    async fn update_todo(
+        &mut self,
+        _session_id: &str,
+        edit: mew_protocol::TodoEdit,
+    ) -> anyhow::Result<Vec<mew_agent::Todo>> {
+        self.record("update_todo");
         if self.failing {
-            Err(runtime::target::Unsupported("test"))
+            anyhow::bail!("save rejected")
         } else {
-            Ok("test".into())
+            Ok(vec![mew_agent::Todo {
+                id: edit.todo_id,
+                content: edit.content,
+                status: mew_agent::TodoStatus::parse(&edit.status).unwrap(),
+                depends_on: vec![],
+            }])
         }
     }
     async fn switch_model(
@@ -249,9 +258,22 @@ async fn test_action_variant_table() {
             Action::AttachSession(_) => Action::AttachSession("sess_123".into()),
             Action::SendQueuedNow(_) => Action::SendQueuedNow("queued text".into()),
             Action::GuideQueued(_) => Action::GuideQueued("guided text".into()),
+            Action::UpdateTodo { .. } => Action::UpdateTodo {
+                session_id: String::new(),
+                edit: mew_protocol::TodoEdit {
+                    todo_id: 7,
+                    expected_content: "old".into(),
+                    expected_status: "pending".into(),
+                    content: "edited".into(),
+                    status: "pending".into(),
+                },
+            },
             other => other,
         };
         let mut app = mew_tui::App::new();
+        if matches!(action, Action::UpdateTodo { .. }) {
+            app.open_todos(None);
+        }
         let mut target = RecordingTarget::new();
         let mut should_break = false;
         let plugin_info = std::sync::Arc::new(std::sync::Mutex::new(PluginInfo {

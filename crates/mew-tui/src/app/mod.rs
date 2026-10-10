@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+pub use activity::{ActivityTarget, ActivityView, SidebarItem};
 pub(crate) use input::visual_rows;
 pub use mdstream;
 
@@ -36,6 +37,8 @@ pub enum SlashResult {
     ToggleMouseCapture,
     Compact,
     Todo,
+    OpenSubagents,
+    OpenJobs,
     Rewind(usize),
     PluginCommand {
         name: String,
@@ -112,6 +115,7 @@ pub struct App {
     pub active_goal: Option<GoalView>,
     /// A pending `/goal <text>` being edited before confirmation.
     pub goal_compose: Option<GoalComposeState>,
+    pub todo_editor: Option<todos::TodoEditor>,
     pub persona_switch_confirm: Option<PersonaSwitchConfirmState>,
     pub todos: Vec<mew_agent::Todo>,
     pub tool_states: HashMap<PartId, ToolDisplayState>,
@@ -138,6 +142,8 @@ pub struct App {
     pub subagent_catalog: Vec<mew_subagents::SubagentDef>,
     pub sidebar_collapsed: std::collections::HashMap<String, bool>,
     pub sidebar_header_rows: Vec<(u16, String)>,
+    pub sidebar_item_rows: Vec<(u16, SidebarItem)>,
+    pub activity_view: Option<ActivityView>,
     pub sidebar_rect: Rect,
     pub sidebar_scroll: u16,
     pub sidebar_max_scroll: u16,
@@ -359,6 +365,8 @@ pub enum Mode {
     PasteConfirm,
     GoalProposal,
     GoalCompose,
+    TodoEditor,
+    Activity,
 }
 
 /// A single item in the command palette.
@@ -825,6 +833,7 @@ impl App {
             daemon_required_actions: VecDeque::new(),
             active_goal: None,
             goal_compose: None,
+            todo_editor: None,
             persona_switch_confirm: None,
             todos: Vec::new(),
             tool_states: HashMap::new(),
@@ -846,6 +855,8 @@ impl App {
             subagent_catalog: Vec::new(),
             sidebar_collapsed: std::collections::HashMap::new(),
             sidebar_header_rows: Vec::new(),
+            sidebar_item_rows: Vec::new(),
+            activity_view: None,
             sidebar_rect: Rect::default(),
             sidebar_scroll: 0,
             sidebar_max_scroll: 0,
@@ -946,6 +957,19 @@ impl App {
     pub fn apply_daemon_notification(&mut self, msg: &mew_protocol::ServerMessage) {
         use mew_protocol::ServerMessage;
         match msg {
+            ServerMessage::TodosUpdated { todos } => {
+                self.todos = todos
+                    .iter()
+                    .filter_map(|todo| {
+                        Some(mew_agent::Todo {
+                            id: todo.id,
+                            content: todo.content.clone(),
+                            status: mew_agent::TodoStatus::parse(&todo.status)?,
+                            depends_on: todo.depends_on.clone(),
+                        })
+                    })
+                    .collect();
+            }
             ServerMessage::Error { message } => self.set_alert(message.clone()),
             ServerMessage::SessionList { sessions } => {
                 // Sync the active session's cumulative change stats (gives
@@ -1160,6 +1184,11 @@ impl App {
                 ..
             } => {
                 self.clear_daemon_required_actions();
+                if self.status.session_id != *session_id {
+                    self.todos.clear();
+                    self.subagents.clear();
+                    self.background_jobs.clear();
+                }
                 self.status.session_id = session_id.clone();
                 // On attach, update the active model/provider from the
                 // daemon's session state. Fields may be empty if the
@@ -1251,6 +1280,10 @@ impl App {
             if let Some((request_id, event)) = self.daemon_required_actions.pop_front() {
                 self.daemon_request_id = Some(request_id);
                 self.handle_agent_event(event);
+            } else if self.todo_editor.as_ref().is_some_and(|state| {
+                state.session_id == self.status.session_id && state.draft.is_some()
+            }) {
+                self.mode = Mode::TodoEditor;
             }
         }
     }
@@ -2119,11 +2152,27 @@ impl App {
 
     /// Keep current work and recent failures in the activity view.
     pub fn prune_sidebar_state(&mut self) {
+        if self.mode != Mode::Activity {
+            self.activity_view = None;
+        }
+        let viewing = self
+            .activity_view
+            .as_ref()
+            .filter(|view| view.session_id == self.status.session_id)
+            .and_then(|view| match &view.target {
+                ActivityTarget::Subagent(id) => Some(id.as_str()),
+                ActivityTarget::Job(_) => None,
+            });
         let ttl = self.finished_ttl();
-        self.subagents.retain(|s| match s.status {
-            SubagentStatus::Running => true,
-            SubagentStatus::Failed { .. } => s.finished_at.is_some_and(|at| at.elapsed() <= ttl),
-            SubagentStatus::Completed | SubagentStatus::Cancelled => false,
+        self.subagents.retain(|s| {
+            viewing == Some(s.task_id.as_str())
+                || match s.status {
+                    SubagentStatus::Running => true,
+                    SubagentStatus::Failed { .. } => {
+                        s.finished_at.is_some_and(|at| at.elapsed() <= ttl)
+                    }
+                    SubagentStatus::Completed | SubagentStatus::Cancelled => false,
+                }
         });
     }
 
@@ -2761,6 +2810,7 @@ impl App {
         self.user_question = None;
         self.mode = Mode::Normal;
         self.clear_daemon_required_actions();
+        self.show_next_daemon_required_action();
     }
 
     /// Toggle between accept (0) and reject (1) in the goal proposal modal.
@@ -2985,7 +3035,9 @@ pub fn parse_namespace_refs(text: &str) -> Vec<NamespaceRef> {
 #[cfg(test)]
 mod tests;
 
+pub mod activity;
 pub mod editor;
 pub mod input;
 pub mod pickers;
 pub mod slash;
+pub mod todos;

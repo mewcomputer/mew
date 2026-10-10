@@ -7,6 +7,7 @@ use ratatui::{
 
 use crate::app::{App, Mode, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH};
 
+mod activity;
 pub(crate) mod chat;
 mod companion;
 pub(crate) mod input;
@@ -14,6 +15,7 @@ pub(crate) mod overlays;
 mod sidebar;
 mod spinner;
 mod status;
+mod todos;
 mod welcome;
 
 /// Max lines of bash output shown when collapsed.
@@ -43,6 +45,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let show_sidebar = area.width >= SIDEBAR_MIN_WIDTH + SIDEBAR_WIDTH;
     app.sidebar_rect = Rect::default();
     app.sidebar_header_rows.clear();
+    app.sidebar_item_rows.clear();
 
     let main_chunks: Vec<Rect> = if show_sidebar {
         let chunks = Layout::default()
@@ -153,19 +156,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // options + the hint. Cap at half the terminal so a short terminal still
     // gets to see the chat above.
     let question_height = if app.mode == Mode::UserQuestion {
-        let rows = app
-            .user_question
-            .as_ref()
-            .and_then(|uq| uq.questions.get(uq.page))
-            .map(|q| {
-                // Each option takes 2 rows (label + always-rendered description
-                // row, even if empty) plus the freeform row. Plus prompt, blank,
-                // hint, and padding.
-                let n = q.options.len() as u16;
-                n * 2 + 1 + 1 + 1 + 1 + 2
-            })
-            .unwrap_or(6);
-        rows.min(main_area.height / 2).max(6)
+        input_height.min(main_area.height / 2).max(6)
     } else {
         input_height
     };
@@ -215,6 +206,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 /// directly by the layout that hosts it (it occupies the input slot, not a
 /// centered popup), so it's not dispatched here.
 fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
+    if app.mode == Mode::Activity {
+        activity::draw_activity(f, app, area);
+    }
+
     if app.mode == Mode::Settings {
         if let Some(ref settings) = app.settings {
             crate::settings::draw_settings(f, settings, area, &app.theme);
@@ -247,6 +242,10 @@ fn draw_overlays(f: &mut Frame, app: &mut App, area: Rect) {
         if let Some(ref state) = app.goal_compose {
             overlays::draw_goal_compose(f, state, area, &app.theme);
         }
+    }
+
+    if app.mode == Mode::TodoEditor {
+        todos::draw(f, app, area);
     }
 
     if app.mode == Mode::CommandPalette {

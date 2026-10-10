@@ -1663,3 +1663,25 @@ Verified 14 paste regressions, existing question and surface tests, and the full
 382-test TUI suite. Workspace strict clippy, CLI build and architecture checks
 passed. Deterministic captures were retaken at 128 columns by 40 rows, producing
 1280 by 800 images with normal terminal text.
+
+### 2026-10-10: inspectable activity and editable todos
+
+Sidebar task, subagent and job rows open session-owned detail views. `/todo`,
+`/agents` and `/jobs` provide keyboard access at every width. Completed activity
+leaves the sidebar while its open viewer retains the outcome. Details use actual
+received progress, command, timing and failure data; unavailable/session-changed
+states are explicit. Mouse hits follow visible wrapped rows and scrolling.
+
+The todo browser includes finished records and edits description/status against
+the expected original task. Save acknowledgment replaces canonical state;
+errors retain the draft. Unicode/multiline editing, undo, caret scrolling,
+status/save hints and visible-row selection work on narrow terminals. Permission
+and question interruptions preserve edits. Idle todo notifications refresh the
+list, and confirmed attachment clears the old session's sidebar work.
+
+Verified 17 todo regressions, eight activity regressions and 22 runtime dispatch
+tests. The full 382-test TUI suite, strict workspace/all-target TUI clippy, CLI
+build, architecture and generated-theme checks pass. Independent reviews covered
+backend publication and editor interruption/session ownership. The 16-view local
+screenshot gallery is notes/capture/tui-20261010/index.html at 1280 by 800 pixels.
+Shared transport migration and live native cross-client QA remain pending.

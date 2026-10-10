@@ -62,8 +62,12 @@ pub trait CommandTarget: Send {
     /// Force context compaction.
     async fn compact(&mut self) -> Result<(), Unsupported>;
 
-    /// Get the current todo list as a rendered string.
-    async fn todos(&mut self) -> Result<String, Unsupported>;
+    /// Edit one authoritative todo, preserving its identity and dependencies.
+    async fn update_todo(
+        &mut self,
+        session_id: &str,
+        edit: mew_protocol::TodoEdit,
+    ) -> anyhow::Result<Vec<mew_agent::Todo>>;
 
     /// Switch to a different model. Returns the new provider/model IDs.
     async fn switch_model(&mut self, spec: &str) -> Result<SwitchedModel, Unsupported>;

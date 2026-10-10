@@ -48,6 +48,24 @@ work are useful foundations.
   and cancelled activity leaves immediately; recent failures retain their
   reason for `tui.sidebar_finished_ttl_secs`. Todo and goal records are preserved.
   Restarting a job or subagent clears stale timing and progress.
+- Sidebar task, subagent and job rows open their corresponding details. `/todo`,
+  `/agents` and `/jobs` also work below the sidebar width. Finished work leaves
+  the sidebar while an already-open detail view retains its final status.
+  Activity views retain their session owner and explain when data is unavailable.
+- The todo browser includes completed records and supports description/status
+  editing. Saves wait for a correlated daemon acknowledgment; conflicts,
+  dependency constraints and persistence failures keep the draft for recovery.
+  Permission/question interruptions preserve an unsaved editor. Idle updates and
+  attachment snapshots refresh canonical todos without replacing that draft.
+  A confirmed session switch clears the old sidebar's activity and todo records.
+- Paste inserts in one undo step, normalizes line endings, and targets the
+  visible editor. Large-paste confirmation counts characters and preserves slash
+  command mode. Short landing screens prioritize the composer and its prompt.
+  Rendering and mouse input share composer geometry.
+- Question inputs follow the Unicode caret and retain exact multiline answers.
+  Long prompts/choices leave room for the answer and cancel hint; review pins
+  submit/cancel beneath clipped previews. Read-only popovers hide the chat caret.
+  The allow-tool panel uses its raised color without an extra outline.
 
 ## Remaining priorities
 
@@ -59,8 +77,9 @@ work are useful foundations.
 | P1 | Attention lacks a reliable destination. Session lists do not seed attention state; the flat picker omits required-action counts and useful conversation summaries. | Project-grouped task navigation with running/attention filters, archived recovery, and retained outcomes. |
 | P2 | Changes are a noninteractive path list; session-diff replies have no TUI consumer. Some advertised commands are unsupported in the daemon path. | Direct review entry point using session/request correlation; implement commands against authoritative state or explain their availability. |
 
-Layouts below 112 columns still need a keyboard-accessible activity view.
-Tool-output truncation also needs a clear way to inspect the omitted content.
+Tool-output truncation still needs a clear way to inspect the omitted content.
+Activity detail views use the status, progress, command and failure information
+already received; child transcripts and job output need transport support.
 These follow the ownership and connection repairs. The sidebar reflects events
 received by the current adapter; passive progress from another client remains
 limited by its transport. Changes remains the cumulative session delta summary.
@@ -85,7 +104,7 @@ with the interactive TUI.
 ## Design assessment
 
 These provisional scores describe the remaining source-level risks after the
-first visual/input slice. They are judgment, not measured usability results.
+visual/input and activity slices. They are judgment, not measured usability results.
 
 | Heuristic | Score / 4 | Evidence |
 |---|---:|---|
@@ -96,7 +115,7 @@ first visual/input slice. They are judgment, not measured usability results.
 | Error prevention | 1 | A queued instruction can cross task ownership. |
 | Recognition | 2 | Picker labels improved; finding waiting work still requires recall. |
 | Efficiency | 3 | Keyboard editing and progressive disclosure work well. |
-| Minimalism | 3 | Strong identity; command ordering and narrow activity access need work. |
+| Minimalism | 3 | Strong identity; command ordering still needs work. |
 | Error recovery | 1 | Idle disconnects and rejected submission recovery remain weak. |
 | Help | 3 | All sections are reachable; advertised unsupported commands still confuse. |
 | Total | 22 / 40 | Task reliability limits the experience. |
@@ -107,3 +126,12 @@ choices. A multitasking developer can miss waiting work or misroute a follow-up.
 A terminal power user sharing a task with GPUI can miss progress and reference
 the wrong project. Completion should leave a persistent outcome and a clear
 review/follow-up action; a transient toast is insufficient.
+
+## Screenshot gallery
+
+The local gallery is `notes/capture/tui-20261010/index.html`. It contains 16
+actual-renderer captures at 128 columns by 40 rows, rasterized to 1280 by 800
+pixels with approximately 16 px text. It covers the sidebar, subagent/job
+details, todo browsing/editing/errors, long paste, question input/review and
+existing popovers. Narrow-terminal behavior remains covered by buffer tests and
+separate captures. The capture directory is ignored by Git.

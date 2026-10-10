@@ -85,10 +85,12 @@ impl CommandTarget for DaemonTarget {
             .map_err(|_| Unsupported("daemon connection failed during compact"))
     }
 
-    async fn todos(&mut self) -> Result<String, Unsupported> {
-        // Todos come via TodosUpdated events from the daemon, not as a
-        // direct response. Return a placeholder — the app has the snapshot.
-        Err(Unsupported("todos are pushed by the daemon as events"))
+    async fn update_todo(
+        &mut self,
+        session_id: &str,
+        edit: mew_protocol::TodoEdit,
+    ) -> anyhow::Result<Vec<mew_agent::Todo>> {
+        self.client.update_todo(session_id, edit).await
     }
 
     async fn switch_model(&mut self, spec: &str) -> Result<SwitchedModel, Unsupported> {

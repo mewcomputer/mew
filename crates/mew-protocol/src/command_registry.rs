@@ -40,8 +40,18 @@ pub static BUILTIN_COMMANDS: &[CommandDef] = &[
     },
     CommandDef {
         name: "/todo",
-        description: "show the session todo list",
+        description: "view and edit session todos",
         locus: CommandLocus::Either,
+    },
+    CommandDef {
+        name: "/agents",
+        description: "view session subagents",
+        locus: CommandLocus::Client,
+    },
+    CommandDef {
+        name: "/jobs",
+        description: "view background jobs",
+        locus: CommandLocus::Client,
     },
     CommandDef {
         name: "/cost",

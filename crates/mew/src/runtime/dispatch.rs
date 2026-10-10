@@ -49,6 +49,18 @@ pub struct Ctx<'a, T: CommandTarget> {
 /// always maintained.
 pub async fn handle_action<T: CommandTarget>(cx: &mut Ctx<'_, T>, action: Action) -> Flow {
     match action {
+        Action::UpdateTodo { session_id, edit } => {
+            let result = if session_id != cx.app.status.session_id {
+                Err("session changed; reopen todos".into())
+            } else {
+                cx.target
+                    .update_todo(&session_id, edit)
+                    .await
+                    .map_err(|error| error.to_string())
+            };
+            cx.app.finish_todo_save(result);
+            Flow::Continue
+        }
         Action::Submit(text) => {
             handle_submit(cx, text).await;
             Flow::Continue
@@ -365,10 +377,15 @@ async fn handle_slash_command<T: CommandTarget>(cx: &mut Ctx<'_, T>, text: Strin
             Flow::Continue
         }
         SlashResult::Todo => {
-            match cx.target.todos().await {
-                Ok(list) => cx.app.push_synthetic_message(list),
-                Err(Unsupported(reason)) => cx.app.set_alert(reason),
-            }
+            cx.app.open_todos(None);
+            Flow::Continue
+        }
+        SlashResult::OpenSubagents => {
+            cx.app.open_subagent_picker();
+            Flow::Continue
+        }
+        SlashResult::OpenJobs => {
+            cx.app.open_job_picker();
             Flow::Continue
         }
         SlashResult::SwitchModel(spec) => {

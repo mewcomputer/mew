@@ -6,13 +6,14 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::App;
+use crate::app::{App, SidebarItem};
 
 pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     // Keep current work and recent failures ahead of secondary context.
     app.prune_sidebar_state();
     app.sidebar_rect = area;
     app.sidebar_header_rows.clear();
+    app.sidebar_item_rows.clear();
     // Content renders into the padded inner rect below, so row tracking
     // starts one line down to stay aligned with what the user sees (the
     // click handler compares these rows against mouse coordinates). Every
@@ -40,7 +41,11 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         draw_todos_section(&mut text, &mut visual_row, app, area.width);
     }
 
-    if !app.subagents.is_empty() {
+    if app
+        .subagents
+        .iter()
+        .any(|state| app.subagent_visible(state))
+    {
         push_divider(&mut text, &mut visual_row, app, area.width);
         draw_subagents_section(&mut text, &mut visual_row, app, area.width);
     }
@@ -74,15 +79,17 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         .saturating_sub(inner.height as usize)
         .min(u16::MAX as usize) as u16;
     app.sidebar_scroll = app.sidebar_scroll.min(app.sidebar_max_scroll);
-    app.sidebar_header_rows.retain_mut(|(row, _)| {
+    let scroll = app.sidebar_scroll;
+    let map_row = |row: &mut u16| {
         let offset = row.saturating_sub(inner.y);
-        if offset < app.sidebar_scroll || offset >= app.sidebar_scroll.saturating_add(inner.height)
-        {
+        if offset < scroll || offset >= scroll.saturating_add(inner.height) {
             return false;
         }
-        *row = inner.y + offset - app.sidebar_scroll;
+        *row = inner.y + offset - scroll;
         true
-    });
+    };
+    app.sidebar_header_rows.retain_mut(|(row, _)| map_row(row));
+    app.sidebar_item_rows.retain_mut(|(row, _)| map_row(row));
     f.render_widget(Paragraph::new(text).scroll((app.sidebar_scroll, 0)), inner);
     if app.sidebar_max_scroll > 0 && area.height > 0 {
         let footer = format!(
@@ -313,7 +320,9 @@ fn draw_todos_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area
 
     // `  [x] ` (6) + `#` + id + ` ` precede the label.
     let inner = area_width.saturating_sub(2) as usize;
+    let mut item_rows = Vec::new();
     for t in app.todos.iter().filter(|t| app.todo_visible(t)) {
+        item_rows.push((*visual_row, SidebarItem::Todo(t.id)));
         let (mark, color) = match t.status {
             mew_agent::TodoStatus::Done => ("x", app.theme.resolve("text.muted")),
             mew_agent::TodoStatus::InProgress => ("~", app.theme.resolve("text.warning")),
@@ -332,6 +341,7 @@ fn draw_todos_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area
         ]));
         *visual_row += 1;
     }
+    app.sidebar_item_rows.extend(item_rows);
 }
 
 fn draw_companion_section(text: &mut Text, visual_row: &mut u16, app: &mut App, width: u16) {
@@ -375,13 +385,25 @@ fn draw_companion_section(text: &mut Text, visual_row: &mut u16, app: &mut App, 
 fn draw_subagents_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area_width: u16) {
     let inner = area_width.saturating_sub(2) as usize;
     text.push_line(Line::from(vec![Span::styled(
-        format!("Subagents ({})", app.subagents.len()),
+        format!(
+            "Subagents ({})",
+            app.subagents
+                .iter()
+                .filter(|state| app.subagent_visible(state))
+                .count()
+        ),
         Style::default()
             .fg(app.theme.resolve("text.body"))
             .add_modifier(Modifier::BOLD),
     )]));
     *visual_row += 1;
-    for sa in &app.subagents {
+    let mut item_rows = Vec::new();
+    for sa in app
+        .subagents
+        .iter()
+        .filter(|state| app.subagent_visible(state))
+    {
+        item_rows.push((*visual_row, SidebarItem::Subagent(sa.task_id.clone())));
         let elapsed = sa
             .finished_at
             .unwrap_or_else(std::time::Instant::now)
@@ -427,6 +449,7 @@ fn draw_subagents_section(text: &mut Text, visual_row: &mut u16, app: &mut App, 
             _ => sa.last_progress.as_deref(),
         };
         if let Some(detail) = detail {
+            item_rows.push((*visual_row, SidebarItem::Subagent(sa.task_id.clone())));
             let budget = inner.saturating_sub(6);
             text.push_line(Line::from(Span::styled(
                 format!(
@@ -438,6 +461,7 @@ fn draw_subagents_section(text: &mut Text, visual_row: &mut u16, app: &mut App, 
             *visual_row += 1;
         }
     }
+    app.sidebar_item_rows.extend(item_rows);
 }
 
 fn draw_jobs_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area_width: u16) {
@@ -455,11 +479,13 @@ fn draw_jobs_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area_
             .add_modifier(Modifier::BOLD),
     )]));
     *visual_row += 1;
+    let mut item_rows = Vec::new();
     for job in app
         .background_jobs
         .iter()
         .filter(|job| app.background_job_visible(job))
     {
+        item_rows.push((*visual_row, SidebarItem::Job(job.job_id.clone())));
         let elapsed = job
             .finished_at
             .unwrap_or_else(std::time::Instant::now)
@@ -499,6 +525,7 @@ fn draw_jobs_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area_
         ]));
         *visual_row += 1;
     }
+    app.sidebar_item_rows.extend(item_rows);
 }
 
 fn draw_changes_section(text: &mut Text, visual_row: &mut u16, app: &mut App, area_width: u16) {
