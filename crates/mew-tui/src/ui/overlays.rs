@@ -24,81 +24,147 @@ struct AutocompleteEntry<'a> {
     description: &'a str,
 }
 
-/// Render an inline, borderless autocomplete list. This is the shared
-/// component behind both the slash-command list and the `@`-mention list:
-/// a raised surface panel with single-line entries and a slim scrollbar.
+/// Keep compact inline lists usable when the landing screen clips their height.
+fn autocomplete_rows(area: Rect) -> Rect {
+    let inset = u16::from(area.width > 2);
+    let chrome = area.height >= 5;
+    Rect::new(
+        area.x + inset,
+        area.y + if chrome { 2 } else { 0 },
+        area.width.saturating_sub(inset * 2),
+        area.height.saturating_sub(if chrome { 4 } else { 0 }),
+    )
+}
+
+fn keep_autocomplete_selection_visible(
+    selected: usize,
+    scroll: &mut usize,
+    len: usize,
+    visible: usize,
+) {
+    let visible = visible.max(1);
+    *scroll = (*scroll).min(len.saturating_sub(visible));
+    if selected < *scroll {
+        *scroll = selected;
+    } else if selected >= scroll.saturating_add(visible) {
+        *scroll = selected.saturating_sub(visible - 1);
+    }
+}
+
+/// Render a raised list with its heading and completion keys pinned in place.
 fn draw_autocomplete(
     f: &mut Frame,
     tokens: &crate::theme::Theme,
     entries: &[AutocompleteEntry<'_>],
     selected: usize,
     scroll: usize,
+    labels: (&str, &str),
     area: Rect,
 ) {
     let surface = tokens.resolve("panel.overlay");
-    // Clear any content behind the list (e.g. the landing logo) before
-    // painting the surface. A `Block` only sets the background color; the
-    // foreground glyphs underneath would otherwise stay visible.
+    let (title, hint) = labels;
     f.render_widget(Clear, area);
-    let bg = Block::default().style(Style::default().bg(surface));
-    f.render_widget(bg, area);
-
-    let inner = Rect::new(
-        area.x + 1,
-        area.y + 1,
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
-    let visible = inner.height as usize;
-
-    let mut text = Text::default();
-    for (i, entry) in entries.iter().enumerate().skip(scroll).take(visible) {
-        let is_selected = i == selected;
-        let name_style = if is_selected {
+    f.render_widget(Block::default().style(Style::default().bg(surface)), area);
+    let rows = autocomplete_rows(area);
+    let visible = rows.height as usize;
+    if area.height >= 5 {
+        let heading = format!("{title}  {}/{}", selected + 1, entries.len());
+        f.render_widget(
+            Paragraph::new(truncate(&heading, rows.width as usize)).style(
+                Style::default()
+                    .fg(tokens.resolve("text.body"))
+                    .bg(surface)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(rows.x, area.y + 1, rows.width, 1),
+        );
+        f.render_widget(
+            Paragraph::new(if display_width(hint) <= rows.width as usize {
+                hint
+            } else if title == "Commands" && rows.width >= 25 {
+                "Tab complete · Enter · Esc"
+            } else if title == "References" && rows.width >= 22 {
+                "↑↓ · Enter insert · Esc"
+            } else {
+                "Enter · Esc"
+            })
+            .style(
+                Style::default()
+                    .fg(tokens.resolve("text.muted"))
+                    .bg(surface),
+            ),
+            Rect::new(rows.x, area.bottom() - 2, rows.width, 1),
+        );
+    }
+    for (row, (i, entry)) in entries
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(visible)
+        .enumerate()
+    {
+        let selected = i == selected;
+        let style = if selected {
             Style::default()
                 .fg(tokens.resolve("selection.foreground"))
                 .bg(tokens.resolve("selection.background"))
-                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(tokens.resolve("text.body")).bg(surface)
         };
-        let desc_style = if is_selected {
-            Style::default()
-                .fg(tokens.resolve("selection.foreground"))
-                .bg(tokens.resolve("selection.background"))
-        } else {
-            Style::default()
-                .fg(tokens.resolve("text.muted"))
-                .bg(surface)
-        };
-        text.push_line(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(entry.name, name_style),
-            Span::raw("  "),
-            Span::styled(entry.description, desc_style),
-        ]));
+        let name = truncate(entry.name, rows.width as usize);
+        let remaining = (rows.width as usize).saturating_sub(display_width(&name) + 2);
+        let mut spans = vec![Span::styled(name, style.add_modifier(Modifier::BOLD))];
+        if remaining > 0 && !entry.description.is_empty() {
+            let description_style = if selected {
+                style
+            } else {
+                style.fg(tokens.resolve("text.muted"))
+            };
+            spans.push(Span::styled("  ", style));
+            spans.push(Span::styled(
+                truncate(entry.description, remaining),
+                description_style,
+            ));
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(spans)).style(style),
+            Rect::new(rows.x, rows.y + row as u16, rows.width, 1),
+        );
     }
-
-    f.render_widget(Paragraph::new(text), inner);
-
-    if entries.len() > visible {
-        let scrollbar_area = Rect::new(area.x + area.width - 1, area.y, 1, area.height);
-        // content_length is the scroll range (max_scroll + 1), not the item
-        // count: ratatui only reaches the track end when position ==
-        // content_length - 1, and our scroll tops out at len - visible.
-        let mut scrollbar_state = ScrollbarState::new(entries.len().saturating_sub(visible) + 1)
+    if entries.len() > visible && visible > 0 && area.width > 2 {
+        let scrollbar_area = Rect::new(area.right() - 1, rows.y, 1, rows.height);
+        let mut state = ScrollbarState::new(entries.len().saturating_sub(visible) + 1)
             .viewport_content_length(visible)
             .position(scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
             .track_symbol(Some("│"))
-            .thumb_symbol("█");
-        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+            .thumb_symbol("█")
+            .track_style(
+                Style::default()
+                    .fg(tokens.resolve("text.muted"))
+                    .bg(surface),
+            )
+            .thumb_style(Style::default().fg(tokens.resolve("text.body")).bg(surface));
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
     }
 }
 
-pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCommand], area: Rect) {
+pub(super) fn draw_slash_autocomplete(
+    f: &mut Frame,
+    app: &mut App,
+    cmds: &[SlashCommand],
+    area: Rect,
+) {
+    app.slash_visible = autocomplete_rows(area).height as usize;
+    app.slash_selected = app.slash_selected.min(cmds.len().saturating_sub(1));
+    keep_autocomplete_selection_visible(
+        app.slash_selected,
+        &mut app.slash_scroll,
+        cmds.len(),
+        app.slash_visible,
+    );
     let entries: Vec<AutocompleteEntry<'_>> = cmds
         .iter()
         .map(|cmd| AutocompleteEntry {
@@ -112,35 +178,31 @@ pub(super) fn draw_slash_autocomplete(f: &mut Frame, app: &App, cmds: &[SlashCom
         &entries,
         app.slash_selected,
         app.slash_scroll,
+        (
+            "Commands",
+            "↑↓ choose · Tab complete · Enter run · Esc close",
+        ),
         area,
     );
 }
 
-/// Render the inline `@`-mention autocomplete list above the chat input.
-/// Reuses the slash-command component with the unified file/model/skill/
-/// subagent catalog, and keeps the selected entry in view while scrolling.
+/// Render references using the actual allocated viewport above the composer.
 pub(super) fn draw_reference_autocomplete(f: &mut Frame, app: &mut App, area: Rect) {
-    let Some(picker) = app.picker.as_mut() else {
+    let Some(picker) = app.picker.as_mut().filter(|p| p.is_at_picker()) else {
         return;
     };
-    if !picker.is_at_picker() {
-        return;
-    }
-
     let filtered_len = picker.filtered().len();
     if filtered_len == 0 {
         return;
     }
-
-    let visible = (area.height.saturating_sub(2) as usize).max(1);
+    picker.visible_items = autocomplete_rows(area).height as usize;
     picker.selected = picker.selected.min(filtered_len - 1);
-    if picker.selected < picker.scroll {
-        picker.scroll = picker.selected;
-    } else if picker.selected >= picker.scroll + visible {
-        picker.scroll = picker.selected.saturating_sub(visible - 1);
-    }
-    picker.scroll = picker.scroll.min(filtered_len.saturating_sub(visible));
-
+    keep_autocomplete_selection_visible(
+        picker.selected,
+        &mut picker.scroll,
+        filtered_len,
+        picker.visible_items,
+    );
     let entries: Vec<AutocompleteEntry<'_>> = picker
         .filtered()
         .into_iter()
@@ -149,13 +211,13 @@ pub(super) fn draw_reference_autocomplete(f: &mut Frame, app: &mut App, area: Re
             description: &item.description,
         })
         .collect();
-
     draw_autocomplete(
         f,
         &app.theme,
         &entries,
         picker.selected,
         picker.scroll,
+        ("References", "↑↓ choose · Enter insert · Esc close"),
         area,
     );
 }

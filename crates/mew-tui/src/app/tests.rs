@@ -3329,6 +3329,7 @@ fn test_slash_scrollbar_reaches_bottom() {
     h.type_str("/");
     assert_eq!(h.app.mode, crate::app::Mode::SlashCommand);
     // Force the popup to the bottom; the draw pass clamps slash_scroll.
+    h.app.slash_selected = h.app.filtered_slash_commands().len() - 1;
     h.app.slash_scroll = usize::MAX;
     let (thumb, _top, bottom) = scrollbar_span(&h.render()).expect("slash scrollbar must render");
     assert_eq!(

@@ -1601,3 +1601,34 @@ Remaining priorities are conversation-owned follow-ups, persistent shared task
 observation and recovery, confirmed project context, attention navigation and
 review. The shared-client-core versus existing-adapter choice remains pending;
 no architecture migration or live native interaction was performed.
+
+### 2026-10-10: TUI popover and activity rework
+
+Centered pickers now show one row per choice and separate selected details in a
+page-scrollable viewport. Search follows the Unicode caret, selection fills its
+row, narrow layouts retain actions, and the thinking budget track uses actual
+zero-based mouse coordinates. Search undo/redo resets details even when query
+length does not change.
+
+Permission, persona and goal dialogs use content-based sizing and pinned
+decisions. Long and multiline bodies remain reachable through keys and the
+wheel, resizing preserves/clamps offsets, and close hints fit narrow terminals.
+The goal editor shares the composer's visual rows, reserves its insertion caret,
+and owns pasted text and undo without touching the conversation draft.
+
+Inline autocomplete measures the space actually drawn, including the clipped
+landing screen. Its heading, completion keys and full selected row stay useful
+through scrolling and resizing. Truncation keeps grapheme clusters whole.
+
+The sidebar appears from 112 columns and leads with current work, waiting,
+retrying or stopping state. Successful/cancelled work leaves the activity view
+immediately; recent failures retain their reason for the configured TTL. Todos
+and goals keep their authoritative records. Remaining/blocked counts, independent
+scrolling, accurate header hit rows and clean restarts replace stale clutter.
+Secondary environment and companion sections respect saved expansion choices.
+
+Verified 343 TUI tests, strict all-target TUI clippy, CLI build, architecture and
+theme checks. Headless captures covered 24/30/40/80/120 columns. Independent source
+reviews caught full-row caret and equal-length undo cases; regressions pass.
+Buffer and raster pixel checks confirmed selection colors. Shared transport
+migration, passive cross-client observation and live native QA remain pending.

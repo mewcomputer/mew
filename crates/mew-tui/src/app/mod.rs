@@ -181,7 +181,7 @@ pub struct App {
     pub slash_selected: usize,
     pub slash_scroll: usize,
     /// Last visible item count used to lay out the slash-autocomplete popup.
-    /// Updated by `ui/mod.rs` each frame so `adjust_slash_scroll` can keep the
+    /// Updated by the autocomplete renderer so `adjust_slash_scroll` can keep the
     /// selection in view.
     pub slash_visible: usize,
     pub bash_expanded: bool,

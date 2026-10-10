@@ -77,22 +77,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let show_ref = app.mode == Mode::CommandPalette
         && app.picker.as_ref().is_some_and(|p| p.is_at_picker())
         && ref_count > 0;
-    // Cap the visible list at min(12, half the terminal height) so a long
-    // command set doesn't eat the whole screen, and tall terminals get more
-    // items. If fewer commands exist than the cap, show them all.
-    let max_visible_items: u16 = (area.height / 2).min(12);
+    // Reserve the list's heading and pinned completion hint within its cap.
+    // The renderer measures the final clipped viewport on the landing screen.
+    let max_autocomplete_height = (main_area.height / 2).min(16);
     let autocomplete_height = if show_slash {
-        (slash_cmds.len() as u16).min(max_visible_items) + 2
+        (slash_cmds.len().min(12) as u16 + 4).min(max_autocomplete_height)
     } else if show_ref {
-        (ref_count as u16).min(max_visible_items) + 2
+        (ref_count.min(12) as u16 + 4).min(max_autocomplete_height)
     } else {
         0
     };
-    app.slash_visible = if show_slash {
-        (slash_cmds.len()).min(max_visible_items as usize)
-    } else {
-        0
-    };
+    app.slash_visible = 0;
 
     // Landing / start screen: when there's no conversation yet, show the cat +
     // "mew" hero with a centered input directly beneath it instead of the

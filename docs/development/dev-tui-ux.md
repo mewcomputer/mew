@@ -35,6 +35,19 @@ work are useful foundations.
 - Help scrolls with keys and the wheel, clamps after resize, and keeps a close
   hint visible. Pickers have contextual titles, navigation hints, and explicit
   empty results that retain the query.
+- Centered pickers use one row per choice, a full selected-row highlight, and a
+  separate description viewport with page-key navigation. Search follows the
+  Unicode caret; selection and search edits reset the details viewport.
+- Permission, persona and goal dialogs size to their content, scroll long or
+  multiline bodies, and pin actions and close hints. The goal editor owns its
+  paste and undo history without modifying the conversation draft.
+- Inline autocomplete measures the clipped landing viewport, keeps the choice
+  visible through scrolling and resizing, and retains completion/close hints.
+- The sidebar appears at 112 columns. It leads with current work or the waiting
+  decision, shows remaining/blocked tasks, and scrolls independently. Successful
+  and cancelled activity leaves immediately; recent failures retain their
+  reason for `tui.sidebar_finished_ttl_secs`. Todo and goal records are preserved.
+  Restarting a job or subagent clears stale timing and progress.
 
 ## Remaining priorities
 
@@ -46,10 +59,11 @@ work are useful foundations.
 | P1 | Attention lacks a reliable destination. Session lists do not seed attention state; the flat picker omits required-action counts and useful conversation summaries. | Project-grouped task navigation with running/attention filters, archived recovery, and retained outcomes. |
 | P2 | Changes are a noninteractive path list; session-diff replies have no TUI consumer. Some advertised commands are unsupported in the daemon path. | Direct review entry point using session/request correlation; implement commands against authoritative state or explain their availability. |
 
-The sidebar only appears at 152 columns and has no overflow navigation. Narrow
-layouts need a keyboard-accessible activity view. Tool-output truncation also
-needs a clear way to inspect the omitted content. These follow the ownership and
-connection repairs.
+Layouts below 112 columns still need a keyboard-accessible activity view.
+Tool-output truncation also needs a clear way to inspect the omitted content.
+These follow the ownership and connection repairs. The sidebar reflects events
+received by the current adapter; passive progress from another client remains
+limited by its transport. Changes remains the cumulative session delta summary.
 
 ## Architecture choice
 
