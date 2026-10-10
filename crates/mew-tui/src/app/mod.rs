@@ -388,10 +388,12 @@ pub struct PickerState {
     pub cursor: usize,
     /// Undo history for the filter field.
     pub filter_undo: editor::UndoHistory,
-    /// Vertical scroll offset in rendered display rows (each wrapped line
-    /// counts as one row). Set by the draw pass, which also keeps the
-    /// selected item's row span in view.
+    /// Vertical list offset. Each choice or section header occupies one row.
     pub scroll: usize,
+    /// Wrapped description offset, controlled by Page Up and Page Down.
+    pub details_scroll: usize,
+    /// Visible description rows, used for page-sized navigation.
+    pub visible_details: usize,
     /// Number of display rows the list area can show. Set by the draw pass.
     pub visible_items: usize,
     pub hint: Option<String>,
@@ -543,6 +545,7 @@ impl PickerState {
             attempts += 1;
         }
         self.selected = new as usize;
+        self.details_scroll = 0;
     }
 }
 
@@ -1314,6 +1317,8 @@ impl App {
             cursor: 0,
             filter_undo: editor::UndoHistory::default(),
             scroll: 0,
+            details_scroll: 0,
+            visible_details: 0,
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: None,
             budget: None,

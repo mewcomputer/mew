@@ -565,8 +565,8 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
 /// scrolls it by moving the selection; the draw pass keeps the selected
 /// item's wrapped rows in view.
 fn handle_picker_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -> Option<Action> {
-    let row = mouse.row.saturating_sub(1);
-    let col = mouse.column.saturating_sub(1);
+    let row = mouse.row;
+    let col = mouse.column;
     // Snapshot the budget track state (read-only borrow). Only the thinking
     // picker's budget row is a hit target; everything else is list space.
     let (in_track, dragging) = {
@@ -1635,6 +1635,20 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             app.picker_down();
             None
         }
+        KeyCode::PageUp | KeyCode::PageDown => {
+            if let Some(picker) = app.picker.as_mut() {
+                if key.code == KeyCode::PageUp {
+                    picker.details_scroll = picker
+                        .details_scroll
+                        .saturating_sub(picker.visible_details.max(1));
+                } else {
+                    picker.details_scroll = picker
+                        .details_scroll
+                        .saturating_add(picker.visible_details.max(1));
+                }
+            }
+            None
+        }
         _ => {
             // Budget row (thinking-variant budget): digits and editing keys
             // operate on the draft, not the filter.
@@ -1698,13 +1712,20 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
             // the previous insert/backspace arms did.
             if let Some(p) = app.picker.as_mut() {
                 let before = p.filter.len();
+                let restores_filter = key.modifiers.contains(KeyModifiers::CONTROL)
+                    && match key.code {
+                        KeyCode::Char('z') => !p.filter_undo.undo_is_empty(),
+                        KeyCode::Char('y') => !p.filter_undo.redo_is_empty(),
+                        _ => false,
+                    };
                 if crate::app::editor::handle_key_with_undo(
                     &mut p.filter,
                     &mut p.cursor,
                     key,
                     &mut p.filter_undo,
                 ) {
-                    if p.filter.len() != before {
+                    if p.filter.len() != before || restores_filter {
+                        p.details_scroll = 0;
                         if p.filter.len() > before {
                             p.selected = 0;
                         } else {

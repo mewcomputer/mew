@@ -2,10 +2,10 @@ use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
 use ratatui::{
-    layout::{Constraint, Layout, Margin, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame,
 };
 
@@ -756,14 +756,25 @@ fn budget_track_line(
     budget: &PickerBudget,
     selected: bool,
     tokens: &crate::theme::Theme,
+    track_width: u16,
 ) -> Line<'static> {
     let value = budget.snapped();
     let total = (budget.info.max - budget.info.min).max(1) as f64;
-    let filled = ((value - budget.info.min) as f64 / total * BUDGET_TRACK_WIDTH as f64)
+    let filled = ((value - budget.info.min) as f64 / total * track_width as f64)
         .round()
-        .clamp(0.0, BUDGET_TRACK_WIDTH as f64) as usize;
-    let bg = tokens.resolve("panel.overlay");
-    let muted = Style::default().fg(tokens.resolve("text.muted")).bg(bg);
+        .clamp(0.0, track_width as f64) as usize;
+    let bg = tokens.resolve(if selected {
+        "selection.background"
+    } else {
+        "panel.overlay"
+    });
+    let muted = Style::default()
+        .fg(if selected {
+            tokens.resolve("selection.foreground")
+        } else {
+            tokens.resolve("text.muted")
+        })
+        .bg(bg);
     let value_style = if selected {
         Style::default()
             .fg(tokens.resolve("selection.foreground"))
@@ -779,7 +790,7 @@ fn budget_track_line(
             "█".repeat(filled),
             Style::default().fg(tokens.resolve("text.accent")).bg(bg),
         ),
-        Span::styled("░".repeat(BUDGET_TRACK_WIDTH as usize - filled), muted),
+        Span::styled("░".repeat(track_width as usize - filled), muted),
         Span::styled("]", muted),
         Span::styled(format!(" {} tok{}", budget.draft, cursor), value_style),
     ])
@@ -791,10 +802,25 @@ pub(super) fn draw_picker(
     area: Rect,
     tokens: &crate::theme::Theme,
 ) {
-    // Centered pickers (command palette, model, theme, etc.) keep a narrow
-    // centered popup; the inline `@`-mention list is rendered by
-    // `draw_reference_autocomplete` above the input instead.
-    let width = 60u16.min(area.width.saturating_sub(4));
+    if let Some(budget) = picker.budget.as_mut() {
+        budget.track_rect = None;
+    }
+    if area.is_empty() {
+        return;
+    }
+    let width = 64u16.min(
+        area.width
+            .saturating_sub(if area.width >= 20 { 4 } else { 0 }),
+    );
+    let padding = if width >= 20 {
+        2
+    } else if width >= 6 {
+        1
+    } else {
+        0
+    };
+    let inner_width = width.saturating_sub(padding * 2);
+    let list_width = inner_width.saturating_sub(1).max(1);
     let (title, empty_message) = match picker.kind.as_str() {
         "command" => ("Commands", "No commands"),
         "model" => ("Models", "No models"),
@@ -807,276 +833,326 @@ pub(super) fn draw_picker(
         "rewind" => ("Rewind conversation", "No earlier messages"),
         _ => ("Select", "No options"),
     };
-    let inner_width = width.saturating_sub(4);
-    let footer_style = Style::default()
-        .fg(tokens.resolve("text.muted"))
-        .bg(tokens.resolve("panel.overlay"));
-    let mut footer: Vec<Line<'static>> =
-        wrap_text("↑↓ move  Enter choose  Esc close", inner_width as usize)
-            .into_iter()
-            .map(|line| Line::from(Span::styled(line, footer_style)))
-            .collect();
-    if let Some(hint) = &picker.hint {
-        if area.height.saturating_sub(4) > 6 + footer.len() as u16 {
-            footer.push(Line::from(Span::styled(
-                truncate(hint, inner_width as usize),
-                footer_style,
-            )));
-        }
-    }
-
-    // `filtered` is cloned to owned items so the budget-track bookkeeping
-    // below can mutate the picker while iterating the rows.
+    // Own the rows so rendering the slider can update its hit target.
     let filtered: Vec<PickerItem> = picker.filtered().into_iter().cloned().collect();
-
-    // The budget track is only hit-testable while its row is visible.
-    if let Some(budget) = picker.budget.as_mut() {
-        if !filtered.iter().any(|i| i.id == "budget") {
-            budget.track_rect = None;
-        }
+    if picker.selected >= filtered.len() {
+        picker.selected = filtered.iter().position(|item| !item.header).unwrap_or(0);
+        picker.details_scroll = 0;
     }
-
-    // Model the list as flat display rows. Each item contributes its wrapped
-    // label/description rows; headers and the budget row contribute one. The
-    // rows are display-width exact, so popup height, the visible window, the
-    // scroll offset, and the scrollbar all agree with what the render emits.
-    let list_width = width.saturating_sub(4).saturating_sub(1) as usize;
-    let mut flat_rows: Vec<Line<'static>> = Vec::new();
-    let mut flat_items: Vec<usize> = Vec::new();
-    // Row start of each filtered item, with a trailing sentinel == total_rows.
-    let mut starts: Vec<usize> = Vec::with_capacity(filtered.len() + 1);
-    let mut acc = 0;
-    for (i, item) in filtered.iter().enumerate() {
-        starts.push(acc);
-        let rows: Vec<Line<'static>> = if item.header {
-            // Section headers render as a non-selectable muted label.
-            let style = Style::default()
-                .fg(tokens.resolve("text.muted"))
-                .bg(tokens.resolve("panel.overlay"))
-                .add_modifier(Modifier::DIM);
-            wrap_text(&item.label, list_width)
-                .into_iter()
-                .map(|l| Line::from(Span::styled(l, style)))
-                .collect()
-        } else if item.id == "budget" {
-            // The thinking picker's budget row renders as a slider track.
-            let line = if let Some(budget) = picker.budget.as_mut() {
-                budget_track_line(budget, i == picker.selected, tokens)
+    let choices = filtered.iter().filter(|item| !item.header).count();
+    let description = filtered
+        .get(picker.selected)
+        .map(|item| {
+            if item.id == "budget" {
+                "Token budget: ←→ adjust, type digits, Enter apply"
             } else {
-                Line::from(vec![Span::styled("budget", Style::default())])
-            };
-            vec![line]
-        } else {
-            let is_selected = i == picker.selected;
-            let label_style = if is_selected {
-                Style::default()
-                    .fg(tokens.resolve("selection.foreground"))
-                    .bg(tokens.resolve("selection.background"))
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-                    .fg(tokens.resolve("text.body"))
-                    .bg(tokens.resolve("panel.overlay"))
-            };
-            let desc_style = if is_selected {
-                Style::default()
-                    .fg(tokens.resolve("selection.foreground"))
-                    .bg(tokens.resolve("selection.background"))
-            } else {
-                Style::default()
-                    .fg(tokens.resolve("text.muted"))
-                    .bg(tokens.resolve("panel.overlay"))
-            };
-            let mut rows: Vec<Line<'static>> = wrap_text(&item.label, list_width)
-                .into_iter()
-                .map(|l| Line::from(Span::styled(l, label_style)))
-                .collect();
-            if !item.description.is_empty() {
-                rows.extend(
-                    wrap_text(&item.description, list_width)
-                        .into_iter()
-                        .map(|l| Line::from(Span::styled(l, desc_style))),
-                );
+                item.description.as_str()
             }
-            rows
-        };
-        acc += rows.len();
-        for line in rows {
-            flat_items.push(i);
-            flat_rows.push(line);
+        })
+        .unwrap_or("");
+    let mut details = if description.is_empty() {
+        Vec::new()
+    } else {
+        description
+            .split('\n')
+            .flat_map(|line| wrap_text(line, inner_width as usize))
+            .collect()
+    };
+    if let Some(item) = filtered.get(picker.selected) {
+        if display_width(&item.label) > list_width as usize {
+            let mut label = wrap_text(&item.label, inner_width as usize);
+            label.append(&mut details);
+            details = label;
         }
     }
-    starts.push(acc);
-    let total_rows: usize = flat_rows.len();
+    if filtered.is_empty() && !picker.filter.is_empty() {
+        details = vec!["Try a different search.".into()];
+    }
+    let surface = tokens.resolve("panel.overlay");
+    let body_style = Style::default().fg(tokens.resolve("text.body")).bg(surface);
+    let muted_style = Style::default()
+        .fg(tokens.resolve("text.muted"))
+        .bg(surface);
+    let mut footer = wrap_text(
+        if inner_width >= 14 {
+            "↑↓ move Enter choose Esc close"
+        } else {
+            "↑↓ Enter Esc"
+        },
+        inner_width as usize,
+    );
+    if let Some(hint) = &picker.hint {
+        footer.extend(wrap_text(hint, inner_width as usize));
+    }
+    if details.len() > 3 || (details.len() > 1 && inner_width < 32) {
+        footer.extend(wrap_text(
+            if inner_width < 20 {
+                "Pg↑/↓ details"
+            } else {
+                "PgUp/PgDn details"
+            },
+            inner_width as usize,
+        ));
+    }
 
-    // Cap the popup at a bounded row budget so long lists don't fill the
-    // screen; longer content is reached by scrolling.
-    let content_height = total_rows.clamp(1, PICKER_VISIBLE_ITEMS * 2) as u16;
-    // Title, filter, divider, footer, and top/bottom padding surround the list.
-    let footer_height = footer.len() as u16;
-    let chrome = 5 + footer_height;
     let max_height = area
         .height
-        .saturating_sub(4)
-        .max((chrome + 1).min(area.height));
-    let height = (chrome + content_height).min(max_height);
-    let list_area_height = height.saturating_sub(chrome);
-    let visible_rows = list_area_height.max(1) as usize;
-    picker.visible_items = visible_rows;
-
-    // Keep the selected item fully in view. Runs every draw so arrow keys and
-    // wheel-driven selection moves scroll the list along with them.
-    if !filtered.is_empty() {
-        let sel = picker.selected.min(starts.len() - 2);
-        let sel_start = starts[sel];
-        let sel_end = starts[sel + 1];
-        // Pin to the item's first row when the item is taller than the
-        // window or already scrolled past; otherwise bring its end into view.
-        if sel_end - sel_start >= visible_rows || sel_start < picker.scroll {
-            picker.scroll = sel_start;
-        } else if sel_end > picker.scroll + visible_rows {
-            picker.scroll = sel_end.saturating_sub(visible_rows);
-        }
-    }
-    picker.scroll = picker.scroll.min(total_rows.saturating_sub(visible_rows));
-
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-    let popup = Rect::new(area.x + x, area.y + y, width, height);
-
-    f.render_widget(Clear, popup);
-
-    let bg = Block::default().style(Style::default().bg(tokens.resolve("panel.overlay")));
-    f.render_widget(bg, popup);
-
-    let inner = Rect::new(
-        popup.x + 2,
-        popup.y + 1,
-        popup.width.saturating_sub(4),
-        popup.height.saturating_sub(2),
+        .saturating_sub(if area.height >= 18 { 4 } else { 0 });
+    let vertical_padding = u16::from(max_height >= 6);
+    let available = max_height.saturating_sub(vertical_padding * 2);
+    let header_height = if available >= 4 { 2 } else { 1 };
+    let divider_height = u16::from(max_height >= 14);
+    let footer_height =
+        (footer.len() as u16).min(available.saturating_sub(header_height + divider_height + 1));
+    let chrome = vertical_padding * 2 + header_height + divider_height + footer_height;
+    let content_budget = max_height.saturating_sub(chrome);
+    // Reserve choices before details so a long description never crowds the list.
+    let min_choices = filtered.len().clamp(1, if max_height < 14 { 1 } else { 4 }) as u16;
+    let details_height = if details.is_empty() || content_budget < min_choices + 2 {
+        0
+    } else {
+        (details.len().min(3) as u16 + 1).min(content_budget - min_choices)
+    };
+    let list_height = (filtered.len().clamp(1, PICKER_VISIBLE_ITEMS) as u16)
+        .min(content_budget.saturating_sub(details_height));
+    let height = chrome + list_height + details_height;
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
     );
-
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
+    f.render_widget(Clear, popup);
+    f.render_widget(Block::default().style(body_style), popup);
+    let inner = Rect::new(
+        popup.x + padding,
+        popup.y + vertical_padding,
+        inner_width,
+        height.saturating_sub(vertical_padding * 2),
+    );
+    let count = format!(
+        "{choices} {}",
+        if choices == 1 { "choice" } else { "choices" }
+    );
+    let title_width = display_width(title);
+    let title_line = if title_width + display_width(&count) + 2 <= inner.width as usize {
+        Line::from(vec![
+            Span::styled(title, body_style.add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " ".repeat(inner.width as usize - title_width - display_width(&count)),
+                muted_style,
+            ),
+            Span::styled(count, muted_style),
+        ])
+    } else {
+        Line::from(Span::styled(
             truncate(title, inner.width as usize),
-            Style::default()
-                .fg(tokens.resolve("text.body"))
-                .bg(tokens.resolve("panel.overlay"))
-                .add_modifier(Modifier::BOLD),
-        ))),
+            body_style.add_modifier(Modifier::BOLD),
+        ))
+    };
+    f.render_widget(
+        Paragraph::new(title_line),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
 
-    let filter_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
-    let prefix = Span::styled(
-        "> ",
-        Style::default()
-            .fg(tokens.resolve("text.accent"))
-            .bg(tokens.resolve("panel.overlay")),
-    );
-    let filter_text = Span::styled(
-        &picker.filter,
-        Style::default()
-            .fg(tokens.resolve("text.body"))
-            .bg(tokens.resolve("panel.overlay")),
-    );
-    let filter_para = Paragraph::new(Line::from(vec![prefix, filter_text]));
-    f.render_widget(filter_para, filter_area);
-
-    let cursor_x = filter_area.x
-        + 2
-        + (display_width(&picker.filter[..picker.cursor])
-            .min(filter_area.width.saturating_sub(2) as usize) as u16);
-    if filter_area.width > 2 && filter_area.y < f.area().bottom() {
-        f.set_cursor_position((cursor_x.min(filter_area.right() - 1), filter_area.y));
+    if header_height == 2 {
+        let prefix_width = if inner.width > 2 { 2 } else { 0 };
+        let query_width = inner.width.saturating_sub(prefix_width) as usize;
+        let before = &picker.filter[..picker.cursor];
+        let mut start = 0;
+        let mut caret_width = display_width(before);
+        for (index, grapheme) in before.grapheme_indices(true) {
+            if caret_width < query_width {
+                break;
+            }
+            caret_width = caret_width.saturating_sub(display_width(grapheme));
+            start = index + grapheme.len();
+        }
+        let mut query = String::new();
+        let mut columns = 0;
+        for grapheme in picker.filter[start..].graphemes(true) {
+            let width = display_width(grapheme);
+            if columns + width > query_width {
+                break;
+            }
+            query.push_str(grapheme);
+            columns += width;
+        }
+        let filter_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(
+                    if prefix_width > 0 { "> " } else { "" },
+                    body_style.fg(tokens.resolve("text.accent")),
+                ),
+                Span::styled(query, body_style),
+            ])),
+            filter_area,
+        );
+        if !filter_area.is_empty() {
+            f.set_cursor_position((
+                (filter_area.x + prefix_width + caret_width as u16).min(filter_area.right() - 1),
+                filter_area.y,
+            ));
+        }
     }
-
-    let div_area = Rect::new(inner.x, inner.y + 2, inner.width, 1);
-    let div_line = Line::from(Span::styled(
-        "─".repeat(inner.width as usize),
-        Style::default()
-            .fg(tokens.resolve("divider"))
-            .bg(tokens.resolve("panel.overlay")),
-    ));
-    f.render_widget(Paragraph::new(div_line), div_area);
-
+    let divider = || {
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(inner.width as usize),
+            muted_style.fg(tokens.resolve("divider")),
+        )))
+    };
+    if divider_height > 0 {
+        f.render_widget(
+            divider(),
+            Rect::new(inner.x, inner.y + header_height, inner.width, 1),
+        );
+    }
     let list_area = Rect::new(
         inner.x,
-        inner.y + 3,
-        inner.width.saturating_sub(1),
-        list_area_height,
+        inner.y + header_height + divider_height,
+        list_width,
+        list_height,
     );
-
+    picker.visible_items = list_height as usize;
+    picker.visible_details = details_height.saturating_sub(1) as usize;
+    if picker.selected < picker.scroll {
+        picker.scroll = picker.selected;
+    } else if picker.selected >= picker.scroll.saturating_add(picker.visible_items) {
+        picker.scroll = picker
+            .selected
+            .saturating_sub(picker.visible_items.saturating_sub(1));
+    }
+    picker.scroll = picker
+        .scroll
+        .min(filtered.len().saturating_sub(picker.visible_items));
     if filtered.is_empty() {
-        let message = if picker.filter.is_empty() {
-            empty_message
-        } else {
-            "No matches"
-        };
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(message, footer_style))),
+            Paragraph::new(if picker.filter.is_empty() {
+                empty_message
+            } else {
+                "No matches"
+            })
+            .style(muted_style),
             list_area,
         );
     } else {
-        render_picker_list(f, picker, &filtered, &flat_items, flat_rows, list_area);
+        render_picker_list(f, picker, &filtered, list_area, tokens);
+    }
+    if details_height > 0 {
+        f.render_widget(
+            divider(),
+            Rect::new(inner.x, list_area.bottom(), inner.width, 1),
+        );
+        let rows = details_height.saturating_sub(1) as usize;
+        picker.details_scroll = picker
+            .details_scroll
+            .min(details.len().saturating_sub(rows));
+        f.render_widget(
+            Paragraph::new(Text::from(
+                details
+                    .into_iter()
+                    .skip(picker.details_scroll)
+                    .take(rows)
+                    .map(|line| Line::from(Span::styled(line, muted_style)))
+                    .collect::<Vec<_>>(),
+            )),
+            Rect::new(inner.x, list_area.bottom() + 1, inner.width, rows as u16),
+        );
     }
     f.render_widget(
-        Paragraph::new(footer),
-        Rect::new(inner.x, list_area.bottom(), inner.width, footer_height),
+        Paragraph::new(Text::from(
+            footer
+                .into_iter()
+                .take(footer_height as usize)
+                .map(|line| Line::from(Span::styled(line, muted_style)))
+                .collect::<Vec<_>>(),
+        )),
+        Rect::new(
+            inner.x,
+            list_area.bottom() + details_height,
+            inner.width,
+            footer_height,
+        ),
     );
 }
 
-/// Render the picker's item list (and scrollbar) into `list_area`.
+/// Choices occupy one row; only the selected choice has a separate description.
 fn render_picker_list(
     f: &mut Frame,
     picker: &mut PickerState,
     filtered: &[PickerItem],
-    flat_items: &[usize],
-    flat_rows: Vec<Line<'static>>,
     list_area: Rect,
+    tokens: &crate::theme::Theme,
 ) {
-    let total_rows: usize = flat_rows.len();
-    let mut list_text = Text::default();
-    let window_start = picker.scroll;
-    for (row_y, (item_idx, line)) in (list_area.y..).zip(
-        flat_items
-            .iter()
-            .zip(flat_rows)
-            .skip(window_start)
-            .take(picker.visible_items),
-    ) {
-        // The budget row records its track rect for mouse hit-testing.
-        if filtered.get(*item_idx).map(|it| it.id == "budget") == Some(true) {
-            if let Some(budget) = picker.budget.as_mut() {
-                budget.track_rect = Some(Rect::new(list_area.x, row_y, BUDGET_TRACK_WIDTH, 1));
-            }
-        }
-        list_text.push_line(line);
-    }
-
-    // Lines are pre-wrapped to the list width, so no ratatui `Wrap`: every
-    // emitted row matches the row math above exactly.
-    let list_para = Paragraph::new(list_text);
-    f.render_widget(list_para, list_area);
-
-    if total_rows > picker.visible_items {
-        let scrollbar_area = list_area.inner(Margin {
-            horizontal: 0,
-            vertical: 0,
+    for (offset, (index, item)) in filtered
+        .iter()
+        .enumerate()
+        .skip(picker.scroll)
+        .take(picker.visible_items)
+        .enumerate()
+    {
+        let selected = index == picker.selected && !item.header;
+        let bg = tokens.resolve(if selected {
+            "selection.background"
+        } else {
+            "panel.overlay"
         });
-        // content_length is the scroll range (max_scroll + 1) so the thumb
-        // travels the full track; the app's scroll tops out at
-        // total_rows - visible_rows.
-        let mut scrollbar_state =
-            ScrollbarState::new(total_rows.saturating_sub(picker.visible_items) + 1)
+        let fg = tokens.resolve(if selected {
+            "selection.foreground"
+        } else if item.header {
+            "text.muted"
+        } else {
+            "text.body"
+        });
+        let style = Style::default().fg(fg).bg(bg).add_modifier(if selected {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
+        let row = Rect::new(list_area.x, list_area.y + offset as u16, list_area.width, 1);
+        f.render_widget(Block::default().style(style), row);
+        let line = if item.id == "budget" {
+            if let Some(budget) = picker.budget.as_mut() {
+                let value_width = display_width(&format!(
+                    " {} tok{}",
+                    budget.draft,
+                    if selected { "_" } else { "" }
+                ));
+                let track_width =
+                    BUDGET_TRACK_WIDTH.min(list_area.width.saturating_sub(value_width as u16 + 2));
+                if track_width >= 2 {
+                    budget.track_rect = Some(Rect::new(row.x + 1, row.y, track_width, 1));
+                }
+                budget_track_line(budget, selected, tokens, track_width)
+            } else {
+                Line::from(Span::styled(
+                    truncate(&item.label, list_area.width as usize),
+                    style,
+                ))
+            }
+        } else {
+            Line::from(Span::styled(
+                truncate(&item.label, list_area.width as usize),
+                style,
+            ))
+        };
+        f.render_widget(Paragraph::new(line), row);
+    }
+    if filtered.len() > picker.visible_items && !list_area.is_empty() {
+        let mut state =
+            ScrollbarState::new(filtered.len().saturating_sub(picker.visible_items) + 1)
                 .viewport_content_length(picker.visible_items)
                 .position(picker.scroll);
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(None)
-            .end_symbol(None)
-            .track_symbol(Some("│"))
-            .thumb_symbol("█");
-        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("│"))
+                .thumb_symbol("█"),
+            Rect::new(list_area.right(), list_area.y, 1, list_area.height),
+            &mut state,
+        );
     }
 }
 

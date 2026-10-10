@@ -271,6 +271,8 @@ fn open_test_picker(app: &mut App, kind: &str, items: Vec<PickerItem>) {
         cursor: 0,
         filter_undo: editor::UndoHistory::default(),
         scroll: 0,
+        details_scroll: 0,
+        visible_details: 0,
         visible_items: PICKER_VISIBLE_ITEMS,
         hint: None,
         budget: None,
@@ -3059,11 +3061,11 @@ fn test_budget_mouse_click_drag_commit() {
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
 
-    // Click on the track sets the draft (row/col are 1-based; the handler
-    // subtracts 1). Column 15 → frac (14-10)/19 ≈ 0.21 → snap → 55296.
+    // Crossterm uses zero-based coordinates. Column 14 maps to
+    // (14-10)/19 of the track, snapped to 55296 tokens.
     assert!(crate::events::handle_mouse_event(
         &mut app,
-        mouse(MouseEventKind::Down(MouseButton::Left), 15, 6)
+        mouse(MouseEventKind::Down(MouseButton::Left), 14, 5)
     )
     .is_none());
     assert_eq!(budget_draft(&app), "55296");
@@ -3076,14 +3078,14 @@ fn test_budget_mouse_click_drag_commit() {
     // Drag to the right end.
     crate::events::handle_mouse_event(
         &mut app,
-        mouse(MouseEventKind::Drag(MouseButton::Left), 30, 6),
+        mouse(MouseEventKind::Drag(MouseButton::Left), 29, 5),
     );
     assert_eq!(budget_draft(&app), "262144");
 
     // Release commits `budget:<n>` and keeps the picker open.
     let action = crate::events::handle_mouse_event(
         &mut app,
-        mouse(MouseEventKind::Up(MouseButton::Left), 30, 6),
+        mouse(MouseEventKind::Up(MouseButton::Left), 29, 5),
     );
     assert_eq!(thinking_action(action), Some("budget:262144".into()));
     assert!(app.picker.is_some());
@@ -3106,8 +3108,8 @@ fn test_budget_mouse_wheel_nudges_and_commits() {
 
     let mouse = |kind: MouseEventKind| MouseEvent {
         kind,
-        column: 15,
-        row: 6,
+        column: 14,
+        row: 5,
         modifiers: crossterm::event::KeyModifiers::NONE,
     };
 
