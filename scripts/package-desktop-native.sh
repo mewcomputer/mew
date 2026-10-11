@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+source "$repo_root/scripts/cef-runtime.sh"
 profile="${MEW_DESKTOP_PROFILE:-release}"
 
 if [[ -n "${MEW_VERSION:-}" ]]; then
@@ -81,37 +82,18 @@ case "$(uname -s)" in
         cp "$target_dir/mew-desktop" "$contents/MacOS/mew-desktop"
         cp "$target_dir/mew" "$contents/MacOS/mew"
         cp "$browser_cli" "$contents/MacOS/agent-browser"
-        cef_framework="${MEW_CEF_FRAMEWORK_SOURCE:-}"
-        if [[ -n "$cef_framework" && -d "$cef_framework/Chromium Embedded Framework.framework" ]]; then
-            cef_framework="$cef_framework/Chromium Embedded Framework.framework"
-        fi
-        if [[ -z "$cef_framework" ]]; then
-            cef_path="${CEF_PATH:-$HOME/.local/share/cef}"
-            if [[ -d "$cef_path/Chromium Embedded Framework.framework" ]]; then
-                cef_framework="$cef_path/Chromium Embedded Framework.framework"
-            elif [[ -d "$cef_path" && "$(basename "$cef_path")" == "Chromium Embedded Framework.framework" ]]; then
-                cef_framework="$cef_path"
-            else
-                case "$(uname -m)" in
-                    arm64) cef_arch="aarch64" ;;
-                    x86_64) cef_arch="x86_64" ;;
-                    *) echo "unsupported macOS architecture for the native browser runtime" >&2; exit 1 ;;
-                esac
-                for candidate in "$cef_path"/*/cef_macos_"$cef_arch"/Chromium\ Embedded\ Framework.framework; do
-                    if [[ -d "$candidate" ]]; then
-                        cef_framework="$candidate"
-                        break
-                    fi
-                done
-            fi
-        fi
-        if [[ -z "$cef_framework" ]]; then
-            for candidate in "$target_dir"/build/cef-dll-sys-*/out/cef_macos_"$cef_arch"/Chromium\ Embedded\ Framework.framework; do
-                if [[ -d "$candidate" ]]; then
-                    cef_framework="$candidate"
-                    break
-                fi
-            done
+        case "$(uname -m)" in
+            arm64) cef_arch="aarch64" ;;
+            x86_64) cef_arch="x86_64" ;;
+            *) echo "unsupported macOS architecture for the native browser runtime" >&2; exit 1 ;;
+        esac
+        cef_version="$(cef_runtime_version "$repo_root")"
+        cef_framework="$(find_cef_framework "$cef_version" "$cef_arch" "$target_dir" \
+            "${CEF_PATH:-$HOME/.local/share/cef}" "${MEW_CEF_FRAMEWORK_SOURCE:-}")"
+        cef_credits="$(dirname "$cef_framework")/CREDITS.html"
+        if [[ ! -f "$cef_credits" ]]; then
+            echo "CEF runtime $cef_version is missing CREDITS.html: $cef_credits" >&2
+            exit 1
         fi
         cef_helper="${MEW_CEF_HELPER_PATH:-$target_dir/mew-cef-host-helper}"
         if [[ ! -d "$cef_framework" || ! -x "$cef_helper" ]]; then
@@ -120,6 +102,7 @@ case "$(uname -s)" in
         fi
         rm -rf "$frameworks/Chromium Embedded Framework.framework"
         ditto "$cef_framework" "$frameworks/Chromium Embedded Framework.framework"
+        cp "$cef_credits" "$frameworks/CREDITS.html"
         cp "$cef_helper" "$contents/MacOS/mew-cef-host-helper"
         # Windowed CEF on macOS selects process-specific helper bundles for
         # renderer and GPU processes. A single adjacent helper executable is

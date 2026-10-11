@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-15]
 
     steps:
       - uses: actions/checkout@v4
@@ -29,11 +29,20 @@ jobs:
       - name: Cache cargo registry + build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Install Zig for Ghostty terminal emulation
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
       - name: Install Linux system deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y \
+            libssl-dev pkg-config libc++-dev cmake ninja-build clang \
+            libfontconfig1-dev libglib2.0-dev libwayland-dev \
+            libx11-xcb-dev libxkbcommon-x11-dev libzstd-dev \
+            libgtk-3-dev libnss3-dev libxss-dev libasound2-dev libgbm-dev
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -43,7 +52,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       - name: Install JS dependencies
@@ -63,7 +72,7 @@ jobs:
 
   web-ci:
     name: Web UI + Client typecheck
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
@@ -76,7 +85,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       - name: Install dependencies

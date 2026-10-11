@@ -17,16 +17,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            cross_linker: aarch64-linux-gnu-gcc
-            cross_pkg: gcc-aarch64-linux-gnu
 
     steps:
       - uses: actions/checkout@v4
@@ -45,16 +43,14 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y libssl-dev pkg-config libc++-dev
 
-      - name: Install cross-compilation toolchain
-        if: matrix.cross_pkg
-        run: |
-          sudo apt-get install -y ${{ matrix.cross_pkg }}
+      - name: Install Zig for Ghostty terminal emulation
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
 
       - name: Build release binary
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross_linker }}
         run: cargo build --release --target ${{ matrix.target }} -p mew
 
       - name: Package binary

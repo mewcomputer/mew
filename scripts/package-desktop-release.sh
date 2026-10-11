@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+source "$repo_root/scripts/cef-runtime.sh"
 profile="${MEW_DESKTOP_PROFILE:-release}"
 if [[ "$profile" != "release" ]]; then
     echo "desktop release packaging requires MEW_DESKTOP_PROFILE=release" >&2
@@ -55,6 +56,18 @@ for path in \
     fi
 done
 
+cef_framework="$app/Contents/Frameworks/Chromium Embedded Framework.framework"
+cef_version="$(cef_runtime_version "$repo_root")"
+if ! cef_framework_matches "$cef_framework" "$cef_version"; then
+    echo "release app requires CEF runtime $cef_version; rebuild the app bundle first" >&2
+    exit 1
+fi
+cef_credits="$(dirname "$cef_framework")/CREDITS.html"
+if [[ ! -f "$cef_credits" ]]; then
+    echo "bundled CEF CREDITS.html was not found; rebuild the app bundle first" >&2
+    exit 1
+fi
+
 output_dir="${MEW_DESKTOP_OUTPUT_DIR:-$repo_root/target/$profile/dist}"
 artifact_base="mew-desktop-v${version}-${arch}-apple-darwin"
 stage="$output_dir/$artifact_base"
@@ -72,40 +85,7 @@ if [[ -f "$repo_root/LICENSE" ]]; then
     cp "$repo_root/LICENSE" "$stage/LICENSE"
 fi
 
-cef_parent="$(dirname "$app/Contents/Frameworks/Chromium Embedded Framework.framework")"
-if [[ -f "$cef_parent/CREDITS.html" ]]; then
-    cp "$cef_parent/CREDITS.html" "$stage/CEF-CREDITS.html"
-else
-    cef_source="${MEW_CEF_FRAMEWORK_SOURCE:-}"
-    if [[ -n "$cef_source" && -d "$cef_source/Chromium Embedded Framework.framework" ]]; then
-        cef_source="$(dirname "$cef_source")"
-    elif [[ -n "$cef_source" && "$(basename "$cef_source")" == "Chromium Embedded Framework.framework" ]]; then
-        cef_source="$(dirname "$cef_source")"
-    fi
-    if [[ -z "$cef_source" ]]; then
-        cef_path="${CEF_PATH:-$HOME/.local/share/cef}"
-        for candidate in "$cef_path"/*/cef_macos_*; do
-            if [[ -f "$candidate/CREDITS.html" ]]; then
-                cef_source="$candidate"
-                break
-            fi
-        done
-    fi
-    if [[ -z "$cef_source" ]]; then
-        for candidate in "$repo_root/target/$profile"/build/cef-dll-sys-*/out/cef_macos_*; do
-            if [[ -f "$candidate/CREDITS.html" ]]; then
-                cef_source="$candidate"
-                break
-            fi
-        done
-    fi
-    if [[ -n "$cef_source" && -f "$cef_source/CREDITS.html" ]]; then
-        cp "$cef_source/CREDITS.html" "$stage/CEF-CREDITS.html"
-    else
-        echo "CEF CREDITS.html was not found; refusing to ship an incomplete release" >&2
-        exit 1
-    fi
-fi
+cp "$cef_credits" "$stage/CEF-CREDITS.html"
 
 cat > "$stage/RELEASE-METADATA.txt" <<EOF
 mew desktop ${version}

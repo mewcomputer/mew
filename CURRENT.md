@@ -2100,3 +2100,37 @@ its persisted response. Strict Clippy, architecture, generated-theme and format
 checks passed, and the CLI built. Inspected wide and narrow renderer captures
 under /private/tmp/mew-window-ux-captures. Live terminal focus reporting and OSC
 title display remain pending interactive verification.
+
+### 2026-10-11: restore build prerequisites and native release packaging
+
+CI, nightly and release builds install the pinned Zig 0.15.2 toolchain used by
+Ghostty. Web checks run on Node 24, matching the TypeScript test runner and the
+workspace engine requirement. Linux ARM CLI artifacts now build on a native
+Ubuntu ARM runner, avoiding cross-target OpenSSL discovery. Intel macOS builds
+use the supported macos-15-intel runner. Workspace Linux checks install the
+terminal and native desktop link dependencies. Desktop releases install CMake,
+Ninja and checksum-verified standalone agent-browser 0.34.0 assets for each
+architecture before assembling the app.
+
+Native packaging selects the CEF version pinned by cef-dll-sys, skips older
+cached frameworks and rejects incompatible explicit overrides. The selected
+SDK's credits stay inside the app; release archives use those bundled credits
+and reject stale frameworks or missing notices. Five filesystem packaging
+regressions and five workflow prerequisite checks cover these failure modes.
+The companion-plugin example's unused placeholder and lint warnings were removed;
+two behavior tests retain its seeded identities and one-time intro behavior.
+Native build and archive prerequisites are documented in the CEF host README.
+
+The release CLI, GPUI client and CEF helper built on ARM macOS. The assembled
+app includes CEF 150.0.14, standalone agent-browser and five executable helper
+bundles. ZIP and DMG exports are under target/release/dist. SHA256 hashes, ZIP
+CRCs and notices, DMG checksum and read-only mounted app contents all passed.
+The assets remain unsigned and unnotarized; nothing was installed or published.
+
+The complete just ci gate passed: 2,463 Rust test cases across 133 targets,
+30 web-client tests, format, strict Clippy, architecture, generated themes,
+web production builds and the real daemon/bridge subprocess round trip. Four
+existing Rust tests remain ignored. Targeted packaging and companion-example
+Clippy checks also passed. GitHub Linux and Intel runner execution remains
+pending a fresh remote workflow run; terminal focus and title live checks are
+still separate from build verification.

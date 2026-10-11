@@ -164,7 +164,7 @@ fn generate_bones(user_id: &str) -> CompanionBones {
     let species = rng.pick(SPECIES).to_string();
     let eyes = rng.pick(EYES).to_string();
     let hat = rng.pick(HATS).to_string();
-    let shiny = rng.next() % 100 == 0;
+    let shiny = rng.next().is_multiple_of(100);
 
     // Stats: one peak, one dump, rest scattered.
     let floor = rarity.stat_floor();
@@ -179,13 +179,13 @@ fn generate_bones(user_id: &str) -> CompanionBones {
     };
 
     let mut stats = [0u32; 5];
-    for i in 0..5 {
+    for (i, stat) in stats.iter_mut().enumerate() {
         if i == peak_stat as usize {
-            stats[i] = floor + 30 + (rng.next() % 30);
+            *stat = floor + 30 + (rng.next() % 30);
         } else if i == dump_stat as usize {
-            stats[i] = 1 + (rng.next() % 20);
+            *stat = 1 + (rng.next() % 20);
         } else {
-            stats[i] = floor + (rng.next() % (55 - floor));
+            *stat = floor + (rng.next() % (55 - floor));
         }
     }
 
@@ -440,13 +440,12 @@ fn handle_hook(
 
         "on-system-prompt" => {
             let prompt = params["value"].as_str().unwrap_or("");
-            if state.muted || state.soul.is_none() {
-                serde_json::json!(prompt)
-            } else if state.intro_shown {
-                serde_json::json!(prompt)
-            } else {
+            if let Some(soul) = state
+                .soul
+                .as_ref()
+                .filter(|_| !state.muted && !state.intro_shown)
+            {
                 state.intro_shown = true;
-                let soul = state.soul.as_ref().unwrap();
                 let intro = format!(
                     "you're working alongside {}, a {} companion watching this conversation.\n\
                      you're not {} — it's a separate watcher.\n\
@@ -456,6 +455,8 @@ fn handle_hook(
                     soul.name, state.bones.species, soul.name, soul.name, prompt,
                 );
                 serde_json::json!(intro)
+            } else {
+                serde_json::json!(prompt)
             }
         }
 
@@ -578,19 +579,6 @@ fn send_host_request(method: &str, params: &serde_json::Value) {
     stdout.flush().unwrap();
 }
 
-fn request_host_storage(_state: &mut BuddyState) {
-    // Request soul from host storage.
-    // The host will respond asynchronously; for simplicity, we use
-    // the storage as a persistent JSON blob and load it initially.
-    // In practice, the response from host-storage-read comes back
-    // as a JSON-RPC response that the reader loop handles (but our
-    // current single-threaded reader doesn't handle incoming responses
-    // to plugin-initiated requests mid-stream).
-
-    // For now, just save soul state to host storage when changed.
-    // The actual read is done through a side channel in the init hook.
-}
-
 fn hatch_companion(state: &mut BuddyState) {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -607,7 +595,7 @@ fn hatch_companion(state: &mut BuddyState) {
         "grumpy but caring",
     ];
 
-    let seed = fnv1a(&state.bones.species.as_bytes());
+    let seed = fnv1a(state.bones.species.as_bytes());
     let mut rng = Mulberry32::new(seed);
     let name = rng.pick(names).to_string();
     let personality = rng.pick(personalities).to_string();
@@ -638,7 +626,6 @@ fn push_initial_bubble(state: &BuddyState) {
     let msg = if let Some(ref soul) = state.soul {
         format!("{} is here!", soul.name)
     } else {
-        let stars = state.bones.rarity.stars();
         let shiny = if state.bones.shiny { " shiny" } else { "" };
         format!("a{shiny} {} appeared! /buddy", state.bones.species)
     };
@@ -659,4 +646,61 @@ fn pull_reaction(_state: &mut BuddyState, text: &str) {
             "value": text,
         }),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seeded_companions_keep_their_identity_and_stats() {
+        for (user, shiny, rarity, stats) in [
+            ("local", false, "common", [5, 37, 18, 7, 54]),
+            ("65", true, "uncommon", [26, 67, 16, 45, 41]),
+        ] {
+            let bones = generate_bones(user);
+            assert_eq!(
+                serde_json::to_value(bones).unwrap(),
+                serde_json::json!({
+                    "species": "blob", "eyes": "×", "hat": "beanie",
+                    "shiny": shiny, "rarity": rarity,
+                    "stats": {
+                        "debugging": stats[0], "patience": stats[1],
+                        "chaos": stats[2], "wisdom": stats[3], "snark": stats[4]
+                    }
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn companion_intro_waits_for_a_soul_and_unmute_then_appears_once() {
+        let mut state = BuddyState::new("test");
+        let params = serde_json::json!({"value": "existing instructions"});
+        assert_eq!(
+            handle_hook(&mut state, "on-system-prompt", &params),
+            params["value"]
+        );
+        assert!(!state.intro_shown);
+
+        hatch_companion(&mut state);
+        state.muted = true;
+        assert_eq!(
+            handle_hook(&mut state, "on-system-prompt", &params),
+            params["value"]
+        );
+        assert!(!state.intro_shown);
+
+        state.muted = false;
+        let intro = handle_hook(&mut state, "on-system-prompt", &params);
+        let intro = intro.as_str().unwrap();
+        assert!(intro.contains(&state.soul.as_ref().unwrap().name));
+        assert!(intro.contains(&state.bones.species));
+        assert!(intro.ends_with("existing instructions"));
+        assert!(state.intro_shown);
+        assert_eq!(
+            handle_hook(&mut state, "on-system-prompt", &params),
+            params["value"]
+        );
+    }
 }

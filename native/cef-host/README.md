@@ -61,6 +61,17 @@ then packages the framework and helper app bundles. Set
 `MEW_CEF_FRAMEWORK_SOURCE` or `CEF_PATH` when the CEF distribution is outside
 `~/.local/share/cef`; set `MEW_CEF_HELPER_PATH` to override the helper binary.
 
+The native build requires Zig 0.15.2 for terminal emulation, CMake, Ninja,
+and a standalone macOS `agent-browser` executable at version 0.34.0 or newer
+on PATH. The release workflow installs these prerequisites. Packaging selects
+the CEF runtime pinned by `cef-dll-sys`, skipping older cached frameworks.
+An explicit framework override must match that version and have the
+distribution's `CREDITS.html` beside it.
+
+`just desktop-package` also produces a ZIP, DMG and `SHA256SUMS` under
+`target/release/dist`. CEF credits are copied into the app from its selected
+distribution and included alongside the app in both release archives.
+
 Chromium anchors its Mach-port rendezvous names to the main bundle identifier,
 and every helper process resolves the same name to find the browser's
 rendezvous server. The packaged native app provides the real bundle identity;
