@@ -2229,3 +2229,26 @@ All 154 desktop tests and all-targets Clippy with warnings denied passed locally
 format and diff checks passed. The real lifecycle listener test required loopback
 socket permission. Cloudflare deployment and web CI passed on the preceding
 9ded149 commit; the scoped import fix will be verified in the next Rust CI run.
+
+### 2026-10-11: stabilize boolean template output across MiniJinja versions
+
+macOS CI reached tests and exposed a fresh dependency behavior change: MiniJinja
+2.24 renders scalar booleans as True/False, while the local 2.21 resolution and
+existing prompt templates use lowercase true/false. The shared renderer now
+writes lowercase boolean literals directly and delegates other values to the
+normal formatter. Context values remain typed booleans, preserving conditionals.
+No dependency version was pinned and existing assertions were not relaxed.
+
+The model-switch regression reproduced the exact initial persona prompt on 2.24
+before the fix. Tests cover both boolean values, both predicate branches, valid
+JSON-shaped authored templates, strings, numbers and explicit escaping. All 476
+related prompt, agent and CLI tests and strict Clippy passed with 2.24. All 64
+prompt tests and the original model-switch regression passed with 2.21; both
+versions support the final direct-write API. Assertion diagnostics retain the
+actual initial and switched prompts if this regresses.
+
+The complete just ci gate passed with the fresh 2.24 local resolution and the
+external Zig cache environment. Its ignored lockfile was backed up and now uses
+2.24 for reproducible local checks against this CI failure. Source changes do not
+alter the repository's dependency-locking policy. The preceding remote run passed
+Clippy on both Rust platforms; the updated formatter will be checked after push.

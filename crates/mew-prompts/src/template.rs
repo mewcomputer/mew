@@ -237,6 +237,15 @@ pub fn render(body: &str, ctx: &TemplateContext) -> String {
     };
 
     let mut env = minijinja::Environment::new();
+    // Keep prompt boolean spelling stable without changing predicate values.
+    env.set_formatter(|out, state, value| {
+        if value.kind() == minijinja::value::ValueKind::Bool {
+            let literal = if value.is_true() { "true" } else { "false" };
+            out.write_str(literal).map_err(Into::into)
+        } else {
+            minijinja::escape_formatter(out, state, value)
+        }
+    });
 
     // transclude: inline a built-in VFS resource, rendering any nested Jinja
     // directives in the included content against the same context.
@@ -359,6 +368,49 @@ mod tests {
         assert!(result.contains("Session: 01JXK4M3PQ."));
         assert!(result.contains("CWD: /home/user/project."));
         assert!(result.contains("Date: 2026-06-29."));
+    }
+
+    #[test]
+    fn boolean_output_stays_lowercase_without_changing_predicates() {
+        let body = "vision={{ supports_vision }}; {% if supports_vision %}images{% else %}text{% endif %}; model={{ model_id }}; tools={{ tools|length }}";
+        for (supports_vision, expected) in [(false, "false; text"), (true, "true; images")] {
+            let context = TemplateContext {
+                supports_vision,
+                ..ctx()
+            };
+            assert_eq!(
+                render(body, &context),
+                format!("vision={expected}; model=deepseek-v4-flash; tools=3")
+            );
+        }
+    }
+
+    #[test]
+    fn authored_json_booleans_remain_valid_json() {
+        for supports_vision in [false, true] {
+            let context = TemplateContext {
+                supports_vision,
+                ..ctx()
+            };
+            let rendered = render("{\"vision\": {{ supports_vision }}}", &context);
+            let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+            assert_eq!(parsed["vision"], supports_vision);
+        }
+    }
+
+    #[test]
+    fn boolean_formatter_preserves_strings_numbers_and_explicit_escaping() {
+        let context = TemplateContext {
+            model_id: "model<beta>&".into(),
+            ..ctx()
+        };
+        assert_eq!(
+            render(
+                "{{ model_id }}; {{ model_id|escape }}; {{ tools|length }}",
+                &context
+            ),
+            "model<beta>&; model&lt;beta&gt;&amp;; 3"
+        );
     }
 
     #[test]

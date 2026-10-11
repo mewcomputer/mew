@@ -438,12 +438,16 @@ async fn model_switch_refreshes_project_templates_and_the_child_provider() {
         &[],
     )
     .unwrap();
-    assert!(agent
-        .persona_prompt
-        .as_ref()
-        .unwrap()
-        .contains("vision: false"));
-    assert!(agent.system.contains("context-model: first; vision: false"));
+    let persona_prompt = agent.persona_prompt.as_deref().unwrap();
+    assert!(
+        persona_prompt.contains("vision: false"),
+        "initial persona prompt: {persona_prompt:?}"
+    );
+    assert!(
+        agent.system.contains("context-model: first; vision: false"),
+        "initial system prompt: {:?}",
+        agent.system
+    );
     run(&agent).await;
 
     switch_session_model(
@@ -460,12 +464,20 @@ async fn model_switch_refreshes_project_templates_and_the_child_provider() {
     assert_eq!(old.requests.lock().unwrap().len(), 1);
     let requests = next.requests.lock().unwrap();
     assert_eq!(requests.len(), 4);
-    assert!(requests[0]
-        .system
-        .contains("context-model: second; vision: true"));
-    assert!(requests[0]
-        .system
-        .contains("persona-model: second; vision: true"));
+    assert!(
+        requests[0]
+            .system
+            .contains("context-model: second; vision: true"),
+        "switched system prompt: {:?}",
+        requests[0].system
+    );
+    assert!(
+        requests[0]
+            .system
+            .contains("persona-model: second; vision: true"),
+        "switched persona prompt: {:?}",
+        requests[0].system
+    );
     assert!(requests[1].messages.iter().flat_map(|message| &message.parts).any(|part| {
         matches!(part, Part::ToolCall(call) if call.call_id == "model-skill" && call.state.output().is_some_and(|output| output.contains("skill-model: second")))
     }));
