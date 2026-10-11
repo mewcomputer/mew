@@ -2134,3 +2134,25 @@ existing Rust tests remain ignored. Targeted packaging and companion-example
 Clippy checks also passed. GitHub Linux and Intel runner execution remains
 pending a fresh remote workflow run; terminal focus and title live checks are
 still separate from build verification.
+
+### 2026-10-11: rerunnable TUI UX gallery and window snapshots
+
+The ux_capture example renders 51 current UI states through the actual TUI
+renderer and bundled rasterizer fonts. Fixture modules cover terminal-local
+conversation navigation, scoped notifications, global history, activity and
+trace viewers, todo and goal editors, approval and question dialogs, paste,
+readline input, review and both dark and light user-message surfaces. Desktop
+captures are 1280 by 800 pixels; narrow captures use actual smaller viewports.
+The dated gallery and companion text frames are under the ignored directory
+notes/capture/tui-20261011, preserving prior captures. The example and build
+command are tracked and documented so a fresh checkout can regenerate them.
+
+Four new checked-in goldens pin the quiet single-view layout, multiple local
+views, scoped notification picker and global history. The related golden and
+surface suites passed, and all TUI tests passed in the full CI gate. Targeted
+example and golden Clippy checks passed. All PNG signatures, CRCs, decoded
+streams and dimensions were verified; two gallery builds had identical image
+hashes. Representative wide and narrow images were inspected, including the
+permission surface and detailed subagent viewer. These captures use deterministic
+sample state; live focus, title, input and real browser interaction checks remain
+pending.

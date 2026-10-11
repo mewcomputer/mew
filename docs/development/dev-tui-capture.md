@@ -71,6 +71,40 @@ snapshot after-response
 screenshot output.png
 ```
 
+### UX gallery with structured sample state
+
+The capture example renders conversation navigation, notification scope, activity
+viewers, dialogs and input states that require more structured data than the script
+verbs provide:
+
+```bash
+cargo run -p mew-tui --example ux_capture -- notes/capture/tui-current
+```
+
+Open `notes/capture/tui-current/index.html` to browse the PNGs and companion text
+frames. Desktop captures are 128 columns × 40 rows at 1280 × 800 pixels; narrow
+fixtures use their actual smaller viewport. The example uses the current `ui::draw`
+renderer and bundled rasterizer fonts, with sample daemon messages applied through
+the shared client reducer. It requires no daemon, credentials or image utilities.
+Elapsed-time labels and repository context are fixed for repeatable captures.
+
+Fixture sources live in `crates/mew-tui/examples/ux_capture/`. These images verify
+layout and projected state. Terminal focus reporting, OSC titles, platform input
+and actual daemon connectivity require separate live checks.
+
+Window navigation also has checked-in text goldens covering the quiet single view,
+multiple open conversations, scoped notifications and global history:
+
+```bash
+cargo test -p mew-tui --test window_golden
+# After inspecting intentional visual changes:
+MEW_UPDATE_GOLDEN=1 cargo test -p mew-tui --test window_golden
+```
+
+Generated galleries stay under the ignored `notes/capture/` directory. Capture
+sources and regression frames are tracked, so the gallery can be rebuilt after a
+fresh checkout.
+
 ## Method 2: `mew tui-capture --connect` (real daemon turn)
 
 Connects to a running `mew-daemon` so the recording exercises the real

@@ -1,0 +1,32 @@
+  check the browser lifecycle
+                                                                                         Open here · ^Alt+O
+  Each terminal chooses which conversations to keep open. Closing a view preserves its   🔔  1 needs you · 1 result
+  draft and running work.                                                                ○ Native browser lifecycle
+                                                                                           /tmp/mew
+                                                                                         ● Project homepage
+                                                                                           /tmp/site
+                                                                                         ? TUI interaction pass
+              Conversations                                                                /tmp/mew          1 question
+              >                                                                          ──────────────────────────────
+              ────────────────────────────────────────────────────────────               Native browser lifecycle
+              ○ Native browser lifecycle                                                   id  browser
+                /tmp/mew                                                                 Ready
+              ! Another terminal's work
+                /tmp/other                                    2 approvals
+              ● Project homepage
+                /tmp/site
+              ? TUI interaction pass
+                /tmp/mew                                       1 question
+              ────────────────────────────────────────────────────────────
+              current
+              Tab archived · Ctrl+Alt+O open here · Ctrl+Alt+A archive ·
+              Ctrl+Alt+P pin
+
+
+
+
+
+
+ include reconnects too
+
+ 🔔  2 · ^Alt+N  /tmp/mew                                                0 tok  ·  $0.00
