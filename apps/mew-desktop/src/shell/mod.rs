@@ -27,7 +27,6 @@ use mew_ui_model::{
     TranscriptRole, UsageSummary,
 };
 use ratatui::style::Color;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     borrow::Cow,
     cell::RefCell,

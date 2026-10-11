@@ -2217,3 +2217,15 @@ access if the new preview still fails.
 Separate follow-up: the workspace ignores Cargo.lock, and CI resolved some newer
 dependency versions than the local build. No dependency-locking policy was changed
 in this fix.
+
+### 2026-10-11: keep native window-handle imports platform-scoped
+
+The next Ubuntu Rust job built Ghostty and CEF successfully, then exposed unused
+window-handle imports in the desktop shell. Those types are consumed only by the
+macOS parent-view helper. Moved the imports inside its existing macOS-gated
+function, keeping the Linux shell free of unused platform names.
+
+All 154 desktop tests and all-targets Clippy with warnings denied passed locally;
+format and diff checks passed. The real lifecycle listener test required loopback
+socket permission. Cloudflare deployment and web CI passed on the preceding
+9ded149 commit; the scoped import fix will be verified in the next Rust CI run.

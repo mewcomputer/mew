@@ -1767,6 +1767,8 @@ pub(super) fn attachment_mime(path: &Path) -> Option<&'static str> {
 
 #[cfg(target_os = "macos")]
 pub(super) fn parent_view_handle(window: &Window) -> Option<usize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
     let handle = HasWindowHandle::window_handle(window).ok()?;
     match handle.as_raw() {
         RawWindowHandle::AppKit(handle) => Some(handle.ns_view.as_ptr() as usize),
