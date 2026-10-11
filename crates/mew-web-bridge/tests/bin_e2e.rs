@@ -16,7 +16,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use mew_protocol::{ClientMessage, ServerMessage};
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::{client::ClientRequestBuilder, Message};
 use tokio_tungstenite::{client_async, WebSocketStream};
@@ -55,12 +55,34 @@ async fn free_port() -> Result<u16> {
 }
 
 /// Spawn a child process. Returns a guard that kills the child on drop.
-struct ChildGuard(Child);
+struct ChildGuard {
+    child: Child,
+    stderr: NamedTempFile,
+}
+
+impl ChildGuard {
+    fn spawn(command: &mut Command) -> Result<Self> {
+        let stderr = NamedTempFile::new()?;
+        let child = command
+            .stdout(Stdio::null())
+            .stderr(stderr.reopen()?)
+            .spawn()?;
+        Ok(Self { child, stderr })
+    }
+
+    fn ensure_running(&mut self, name: &str) -> Result<()> {
+        if let Some(status) = self.child.try_wait()? {
+            let stderr = std::fs::read_to_string(self.stderr.path())?;
+            anyhow::bail!("{name} exited before becoming ready ({status}): {stderr}");
+        }
+        Ok(())
+    }
+}
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -71,22 +93,19 @@ fn spawn_fake_daemon(
     socket_path: &std::path::Path,
     home_dir: &std::path::Path,
 ) -> Result<ChildGuard> {
-    let child = Command::new(mew_bin)
-        .arg("daemon")
-        .arg("--fake-provider")
-        .arg("--socket")
-        .arg(socket_path)
-        // Use an isolated home directory so the daemon doesn't read the
-        // user's real state.toml (on macOS, directories uses
-        // ~/Library/Application Support/computer.mew.mew).
-        .env("HOME", home_dir)
-        .env_remove("MEW_CONFIG")
-        .env_remove("MEW_DEFAULT_MODEL")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawn mew daemon")?;
-    Ok(ChildGuard(child))
+    ChildGuard::spawn(
+        Command::new(mew_bin)
+            .arg("daemon")
+            .arg("--fake-provider")
+            .arg("--socket")
+            .arg(socket_path)
+            // Keep daemon state and catalog caches inside the isolated home.
+            .env("HOME", home_dir)
+            .env("MEW_CACHE_DIR", home_dir.join("catalog-cache"))
+            .env_remove("MEW_CONFIG")
+            .env_remove("MEW_DEFAULT_MODEL"),
+    )
+    .context("spawn mew daemon")
 }
 
 /// Spawn `mew-web` pointed at the fake daemon. `--spawn false` makes the
@@ -96,43 +115,53 @@ fn spawn_bridge(
     daemon_socket: &std::path::Path,
     tcp_port: u16,
 ) -> Result<ChildGuard> {
-    let child = Command::new(mew_web_bin)
-        .arg("--port")
-        .arg(format!("127.0.0.1:{tcp_port}"))
-        .arg("--daemon-socket")
-        .arg(daemon_socket)
-        .arg("--spawn")
-        .arg("false")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawn mew-web")?;
-    Ok(ChildGuard(child))
+    ChildGuard::spawn(
+        Command::new(mew_web_bin)
+            .arg("--port")
+            .arg(format!("127.0.0.1:{tcp_port}"))
+            .arg("--daemon-socket")
+            .arg(daemon_socket)
+            .arg("--spawn")
+            .arg("false"),
+    )
+    .context("spawn mew-web")
 }
 
 /// Wait for the daemon socket to appear, up to `timeout` total.
-async fn wait_for_unix_socket(path: &std::path::Path, timeout: Duration) -> Result<()> {
+async fn wait_for_unix_socket(
+    path: &std::path::Path,
+    child: &mut ChildGuard,
+    timeout: Duration,
+) -> Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
         if path.exists() {
             return Ok(());
         }
+        child.ensure_running("daemon")?;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    anyhow::bail!("timed out waiting for daemon socket at {:?}", path);
+    let stderr = std::fs::read_to_string(child.stderr.path())?;
+    anyhow::bail!("timed out waiting for daemon socket at {path:?}; stderr: {stderr}");
 }
 
 /// Wait for the TCP port to accept connections, up to `timeout` total.
-async fn wait_for_tcp_port(addr: SocketAddr, timeout: Duration) -> Result<()> {
+async fn wait_for_tcp_port(
+    addr: SocketAddr,
+    child: &mut ChildGuard,
+    timeout: Duration,
+) -> Result<()> {
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
         if let Ok(s) = TcpStream::connect(addr).await {
             drop(s);
             return Ok(());
         }
+        child.ensure_running("bridge")?;
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    anyhow::bail!("timed out waiting for tcp port {addr}");
+    let stderr = std::fs::read_to_string(child.stderr.path())?;
+    anyhow::bail!("timed out waiting for tcp port {addr}; stderr: {stderr}");
 }
 
 async fn send(ws: &mut Ws, msg: ClientMessage) -> Result<()> {
@@ -174,6 +203,63 @@ where
 }
 
 #[tokio::test]
+async fn daemon_startup_failure_reports_child_stderr() -> Result<()> {
+    let tmp = TempDir::new()?;
+    let mut child = ChildGuard::spawn(
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg("printf 'startup failure fixture\\n' >&2; exit 7"),
+    )?;
+    let error = wait_for_unix_socket(
+        &tmp.path().join("missing.sock"),
+        &mut child,
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("startup failure fixture"),
+        "{error:#}"
+    );
+    assert!(error.to_string().contains("exit status: 7"), "{error:#}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn bridge_startup_timeout_reports_stderr_while_child_is_alive() -> Result<()> {
+    let mut child = ChildGuard::spawn(
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg("printf 'startup stalled fixture\\n' >&2; read held")
+            .stdin(Stdio::piped()),
+    )?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if std::fs::read_to_string(child.stderr.path())?.contains("startup stalled fixture") {
+                return Ok::<_, anyhow::Error>(());
+            }
+            child.ensure_running("fixture")?;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    let addr = SocketAddr::from(([127, 0, 0, 1], free_port().await?));
+    let error = wait_for_tcp_port(addr, &mut child, Duration::from_millis(50))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("timed out waiting for tcp port"),
+        "{error:#}"
+    );
+    assert!(
+        error.to_string().contains("startup stalled fixture"),
+        "{error:#}"
+    );
+    assert!(child.child.try_wait()?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn bin_e2e_daemon_plus_bridge_full_round_trip() -> Result<()> {
     let Some((mew_bin, mew_web_bin)) = binary_paths() else {
         eprintln!("skipping: binaries not built. Run `cargo build` (or `just build`) and re-run.");
@@ -192,13 +278,17 @@ async fn bin_e2e_daemon_plus_bridge_full_round_trip() -> Result<()> {
 
     // Spawn the daemon first. It must bind the socket before the
     // bridge can connect.
-    let _daemon = spawn_fake_daemon(&mew_bin, &socket_path, &home_dir)?;
-    wait_for_unix_socket(&socket_path, Duration::from_secs(5)).await?;
+    let mut daemon = spawn_fake_daemon(&mew_bin, &socket_path, &home_dir)?;
+    wait_for_unix_socket(&socket_path, &mut daemon, Duration::from_secs(5)).await?;
+    assert!(
+        !home_dir.join("catalog-cache").exists(),
+        "fake daemon must start without accessing real model catalogs"
+    );
 
     // Spawn the bridge. `--spawn false` skips the bridge's own
     // daemon-spawn (we already have one running).
-    let _bridge = spawn_bridge(&mew_web_bin, &socket_path, bridge_port)?;
-    wait_for_tcp_port(bridge_addr, Duration::from_secs(5)).await?;
+    let mut bridge = spawn_bridge(&mew_web_bin, &socket_path, bridge_port)?;
+    wait_for_tcp_port(bridge_addr, &mut bridge, Duration::from_secs(5)).await?;
 
     // Connect a raw WS client to the bridge.
     let stream = TcpStream::connect(bridge_addr).await?;

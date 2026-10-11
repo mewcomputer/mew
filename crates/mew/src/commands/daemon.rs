@@ -35,7 +35,11 @@ pub(crate) async fn build_daemon_server(
     mode: mew_hooks::PermissionMode,
 ) -> Result<mew_daemon::DaemonServer> {
     let cfg = mew_config::load().context("load config")?;
-    let cat = crate::setup::providers::load_catalog(&cfg).await;
+    let cat = if fake_provider {
+        None
+    } else {
+        crate::setup::providers::load_catalog(&cfg).await
+    };
 
     build_daemon_server_with_config(
         cfg,

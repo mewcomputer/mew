@@ -2190,3 +2190,30 @@ global dependency cache. Changed source and test files passed strict Clippy and
 format checks. The workspace Rust and JavaScript suites passed under the CI cache
 configuration; a separate subprocess startup timeout is being diagnosed before
 claiming a clean full gate.
+
+### 2026-10-11: deterministic fake-daemon startup and subprocess diagnostics
+
+The fake-provider daemon no longer loads real model catalogs before binding its
+listener. Its provider and model list do not consume catalog data, so this removes
+unnecessary network and cache work from the deterministic subprocess harness.
+A cold-cache real-daemon regression failed first because catalog storage was
+created, then passed without creating it after the fix.
+
+Subprocess readiness now reports early child exit status and stderr. Logs use
+owned temporary files so a timeout can report a still-running child's output
+without waiting for inherited pipes to close. Real shell-child regressions cover
+early exit and a live stalled process, alongside the actual daemon/bridge/WebSocket
+round trip. No startup timeout was increased. The original local timeout's exact
+cause was not captured by the old harness, so it is not attributed to a specific
+permission or catalog failure.
+
+All three subprocess tests, 12 daemon-policy/status tests and targeted strict
+Clippy passed. The complete just ci gate then passed with both Zig cache variables
+configured as in GitHub, including the new site build. The separate fresh-source
+Ghostty regression also passed through Cargo. Remote checks will run after this
+push; Cloudflare deployment diagnostics remain unavailable without dashboard
+access if the new preview still fails.
+
+Separate follow-up: the workspace ignores Cargo.lock, and CI resolved some newer
+dependency versions than the local build. No dependency-locking policy was changed
+in this fix.
