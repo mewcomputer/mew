@@ -272,6 +272,11 @@ pub enum ClientEvent {
         session_id: String,
     },
     SessionListChanged,
+    /// Authoritative turn outcome, independent of session attachment.
+    SessionOutcome {
+        session_id: String,
+        outcome: TurnOutcome,
+    },
     SessionActivityChanged {
         session_id: String,
         running: bool,
@@ -673,8 +678,15 @@ impl ClientState {
                     }
                     AlertKind::PermissionNeeded | AlertKind::InputNeeded => return Vec::new(),
                 };
-                self.session_turn_outcomes.insert(session_id, outcome);
-                vec![ClientEvent::SessionListChanged]
+                self.session_turn_outcomes
+                    .insert(session_id.clone(), outcome.clone());
+                vec![
+                    ClientEvent::SessionOutcome {
+                        session_id,
+                        outcome,
+                    },
+                    ClientEvent::SessionListChanged,
+                ]
             }
             ServerMessage::SessionSummaryChanged {
                 session_id,
@@ -2409,6 +2421,132 @@ mod tests {
 
         assert!(state.presence.is_empty());
         assert_eq!(state.control_yielded_by, None);
+    }
+
+    #[test]
+    fn session_completion_reports_outcome_even_for_attached_session() {
+        for attached in [false, true] {
+            let mut state = ClientState {
+                attached_session: attached.then(|| "session-1".into()),
+                ..ClientState::default()
+            };
+            state.unread_completions.insert("session-1".into());
+            state.session_turn_outcomes.insert(
+                "session-1".into(),
+                TurnOutcome::Failed {
+                    detail: Some("earlier failure".into()),
+                },
+            );
+            let events = state.apply_server_message(ServerMessage::SessionAlert {
+                session_id: "session-1".into(),
+                title: "Finished work".into(),
+                kind: AlertKind::TurnComplete,
+                detail: None,
+            });
+
+            assert!(matches!(
+                events.as_slice(),
+                [ClientEvent::SessionOutcome {
+                    session_id,
+                    outcome: TurnOutcome::Completed,
+                }, ClientEvent::SessionListChanged] if session_id == "session-1"
+            ));
+            assert_eq!(
+                state.session_turn_outcomes["session-1"],
+                TurnOutcome::Completed
+            );
+            assert_eq!(state.unread_completions.contains("session-1"), !attached);
+        }
+    }
+
+    #[test]
+    fn session_failure_reports_outcome_and_preserves_authoritative_detail() {
+        for attached in [false, true] {
+            let mut state = ClientState {
+                attached_session: attached.then(|| "session-1".into()),
+                ..ClientState::default()
+            };
+            state.session_turn_outcomes.insert(
+                "session-1".into(),
+                TurnOutcome::Failed {
+                    detail: Some("earlier provider error".into()),
+                },
+            );
+            let events = state.apply_server_message(ServerMessage::SessionAlert {
+                session_id: "session-1".into(),
+                title: "Failed work".into(),
+                kind: AlertKind::TurnFailed,
+                detail: Some("terminal failure".into()),
+            });
+
+            assert!(matches!(
+                events.as_slice(),
+                [ClientEvent::SessionOutcome {
+                    session_id,
+                    outcome: TurnOutcome::Failed { detail: Some(detail) },
+                }, ClientEvent::SessionListChanged]
+                    if session_id == "session-1" && detail == "terminal failure"
+            ));
+            assert_eq!(
+                state.session_turn_outcomes["session-1"],
+                TurnOutcome::Failed {
+                    detail: Some("terminal failure".into())
+                }
+            );
+            assert_eq!(state.unread_completions.contains("session-1"), !attached);
+        }
+    }
+
+    #[test]
+    fn session_failure_without_detail_reports_saved_provider_error() {
+        for prior_error in [None, Some("provider disconnected")] {
+            let mut state = ClientState {
+                attached_session: Some("session-1".into()),
+                ..ClientState::default()
+            };
+            if let Some(message) = prior_error {
+                state.apply_server_message(ServerMessage::ErrorEvent {
+                    message: message.into(),
+                });
+            }
+            let events = state.apply_server_message(ServerMessage::SessionAlert {
+                session_id: "session-1".into(),
+                title: "Failed work".into(),
+                kind: AlertKind::TurnFailed,
+                detail: None,
+            });
+
+            assert!(matches!(
+                events.as_slice(),
+                [ClientEvent::SessionOutcome {
+                    session_id,
+                    outcome: TurnOutcome::Failed { detail },
+                }, ClientEvent::SessionListChanged]
+                    if session_id == "session-1" && detail.as_deref() == prior_error
+            ));
+            assert_eq!(
+                state.session_turn_outcomes["session-1"],
+                TurnOutcome::Failed {
+                    detail: prior_error.map(str::to_owned)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn permission_and_input_alerts_do_not_report_turn_outcomes() {
+        let mut state = ClientState::default();
+        for kind in [AlertKind::PermissionNeeded, AlertKind::InputNeeded] {
+            let events = state.apply_server_message(ServerMessage::SessionAlert {
+                session_id: "session-1".into(),
+                title: "Needs attention".into(),
+                kind,
+                detail: Some("required action".into()),
+            });
+            assert!(events.is_empty());
+            assert!(state.session_turn_outcomes.is_empty());
+            assert!(state.unread_completions.is_empty());
+        }
     }
 
     #[test]

@@ -2056,3 +2056,15 @@ across idle and streaming states, the recovered wrap space, Unicode boundaries,
 one-column input, queued drafts and resizing. Existing visual goldens passed.
 Refreshed renderer captures and inspected desktop and short composer views.
 Live interaction remains pending.
+
+### 2026-10-11: expose authoritative turn outcomes to presentation clients
+
+The shared client reducer emits session-scoped completion and failure events,
+including for the attached conversation. Presentation clients can distinguish
+attachment from actually viewing a result without changing the existing unread
+behavior used by other frontends. Authoritative failure details retain precedence;
+permission and question alerts do not become turn outcomes.
+
+All 72 client-core tests passed, including outcome delivery, failure-detail
+reconciliation and existing activity parity. Client-core Clippy passed with
+warnings denied.
