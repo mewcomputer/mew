@@ -1,3 +1,8 @@
+---
+title: Tasks and orchestration
+description: Assessment of task tracking and orchestration primitives, gaps, and improvement paths.
+---
+
 # Tasks and orchestration: current state and improvement paths
 
 Status: assessment + proposal, no implementation yet.

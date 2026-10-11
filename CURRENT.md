@@ -2156,3 +2156,17 @@ hashes. Representative wide and narrow images were inspected, including the
 permission surface and detailed subagent viewer. These captures use deterministic
 sample state; live focus, title, input and real browser interaction checks remain
 pending.
+
+### 2026-10-11: validate the documentation site in CI
+
+The orchestration assessment lacked Starlight's required title metadata, causing
+an actual site build to fail while the Rust and web-client gates passed. Added
+title and description frontmatter without changing the assessment text. GitHub
+web CI and just ci now build the documentation site as well as the application
+clients, covering schema validation for the repository docs symlink.
+
+The site build reproduced the missing-title error before the fix, then passed
+and produced 38 pages, search and sitemap. The new workflow regression failed
+before the site-build step was added; all six workflow tests and targeted strict
+Clippy now pass. Cloudflare's check exposes only a generic failure and its
+dashboard requires login, so the exact remote failure is not yet confirmed.

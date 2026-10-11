@@ -84,6 +84,18 @@ fn web_ci_uses_a_runtime_that_executes_the_typescript_tests() {
 }
 
 #[test]
+fn web_ci_builds_the_site_that_loads_repository_documentation() {
+    let workflow = workflow("ci.yml");
+    assert!(workflow["jobs"]["web-ci"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .any(|step| step["run"]
+            .as_str()
+            .is_some_and(|run| run.contains("pnpm --filter site build"))));
+}
+
+#[test]
 fn desktop_release_installs_and_checks_the_browser_before_packaging() {
     let workflow = workflow("release.yml");
     let job = &workflow["jobs"]["desktop-build"];
