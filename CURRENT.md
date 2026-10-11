@@ -2170,3 +2170,23 @@ and produced 38 pages, search and sitemap. The new workflow regression failed
 before the site-build step was added; all six workflow tests and targeted strict
 Clippy now pass. Cloudflare's check exposes only a generic failure and its
 dashboard requires login, so the exact remote failure is not yet confirmed.
+
+### 2026-10-11: respect externally configured Zig caches
+
+Both PR Rust jobs installed Zig successfully but then failed to find libsimdutf.a.
+setup-zig sets both cache environment variables to the workspace cache, while
+the vendored Ghostty build searched only the source checkout's default cache.
+The build now passes an explicit Cargo-owned local cache directory to Zig and
+searches that same directory for dependency archives. The global cache remains
+shared for downloaded dependencies; target build artifacts stay scoped to
+OUT_DIR. Cargo tracks the relevant Zig environment and the correct build.rs path.
+
+A real fresh-source regression reproduced the exact missing-archive panic before
+the fix, then installed all four static libraries and vt.h after it. Direct and
+normal Cargo runs passed with externally configured local and global caches;
+the external local cache was untouched. The opt-in native regression includes
+run instructions and requires Zig, the pinned source checkout and a populated
+global dependency cache. Changed source and test files passed strict Clippy and
+format checks. The workspace Rust and JavaScript suites passed under the CI cache
+configuration; a separate subprocess startup timeout is being diagnosed before
+claiming a clean full gate.

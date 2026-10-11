@@ -16,9 +16,12 @@ fn main() {
 
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_NO_VENDOR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_SOURCE_DIR");
+    println!("cargo:rerun-if-env-changed=ZIG_GLOBAL_CACHE_DIR");
+    println!("cargo:rerun-if-env-changed=ZIG_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=ZIG_LIBC");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
-    println!("cargo:rerun-if-changed=crates/libghostty-vt-sys/build.rs");
+    println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR must be set"));
     let target = env::var("TARGET").expect("TARGET must be set");
@@ -40,11 +43,16 @@ fn main() {
 
     // Build libghostty-vt via zig.
     let install_prefix = out_dir.join("ghostty-install");
+    // Scope build artifacts to this Cargo target even when CI configures a
+    // shared Zig cache. The global cache still shares downloaded dependencies.
+    let zig_cache = out_dir.join("zig-cache");
 
     let mut build = Command::new("zig");
     build
         .arg("build")
         .arg("-Demit-lib-vt")
+        .arg("--cache-dir")
+        .arg(&zig_cache)
         .arg("--prefix")
         .arg(&install_prefix)
         .current_dir(&ghostty_dir);
@@ -75,14 +83,13 @@ fn main() {
     // simdutf, highway, and utfcpp are built as separate static libs in the zig
     // cache under content-addressed paths. Find and copy them into the install
     // lib dir so there's a single, stable search path.
-    let zig_cache = ghostty_dir.join(".zig-cache").join("o");
+    let zig_objects = zig_cache.join("o");
     for dep in &["libsimdutf.a", "libhighway.a", "libutfcpp.a"] {
         let dest = lib_dir.join(dep);
         if !dest.exists() {
-            let found = find_in_dir(&zig_cache, dep)
+            let found = find_in_dir(&zig_objects, dep)
                 .unwrap_or_else(|| panic!("could not find {dep} in zig cache"));
-            std::fs::copy(&found, &dest)
-                .unwrap_or_else(|e| panic!("failed to copy {dep}: {e}"));
+            std::fs::copy(&found, &dest).unwrap_or_else(|e| panic!("failed to copy {dep}: {e}"));
         }
     }
 
@@ -104,9 +111,10 @@ fn fetch_ghostty(out_dir: &Path) -> PathBuf {
     // Skip fetch if we already have the right commit.
     if stamp.exists()
         && let Ok(existing) = std::fs::read_to_string(&stamp)
-            && existing.trim() == GHOSTTY_COMMIT {
-                return src_dir;
-            }
+        && existing.trim() == GHOSTTY_COMMIT
+    {
+        return src_dir;
+    }
 
     // Clean and clone fresh.
     if src_dir.exists() {
