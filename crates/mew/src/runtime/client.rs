@@ -1270,6 +1270,211 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn real_daemon_outcomes_follow_each_terminal_window_and_closing_keeps_work_running() {
+        async fn project_until(
+            app: &mut mew_tui::App,
+            updates: &mut mpsc::UnboundedReceiver<ClientUpdate>,
+            matches: impl Fn(&ClientUpdate) -> bool,
+        ) -> ClientUpdate {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let update = updates.recv().await.unwrap();
+                    let matched = matches(&update);
+                    app.apply_client_update(
+                        &update.events,
+                        &update.state,
+                        update.changed_message.as_ref(),
+                    );
+                    if matched {
+                        break update;
+                    }
+                }
+            })
+            .await
+            .expect("real daemon did not deliver the expected window update")
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let server = mew_daemon::DaemonServer::with_session_dir(
+            Arc::new(|params| {
+                Ok((
+                    mew_agent::Agent::new(
+                        Arc::new(mew_provider_fake::FakeProvider::new(
+                            mew_provider_fake::FakeProvider::text_response("completed response"),
+                        )),
+                        Arc::new(mew_hooks::NopDispatcher),
+                        Some(params.writer),
+                        Vec::new(),
+                        None,
+                    ),
+                    None,
+                    None,
+                ))
+            }),
+            directory.path().to_path_buf(),
+        );
+        let a = server.session_manager.create(None).await.unwrap();
+        let b = server.session_manager.create(None).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let daemon = tokio::spawn(server.run_tcp(address));
+        let url = format!("ws://{address}");
+        let (client_a, mut updates_a) = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(client) = TuiClient::connect(&url).await {
+                    break client;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let (client_b, mut updates_b) = TuiClient::connect(&url).await.unwrap();
+        let mut app_a = mew_tui::App::new();
+        let mut app_b = mew_tui::App::new();
+        app_a.daemon_mode = true;
+        app_b.daemon_mode = true;
+        app_a.terminal_focused = Some(false);
+        app_b.terminal_focused = Some(true);
+        for (client, session) in [(&client_a, &a), (&client_b, &b)] {
+            client
+                .send(ClientMessage::SetAutoTitle { enabled: false })
+                .await
+                .unwrap();
+            client
+                .send(ClientMessage::SetAutoSummary { enabled: false })
+                .await
+                .unwrap();
+            client
+                .send(ClientMessage::AttachSession {
+                    session_id: session.id.clone(),
+                    client_kind: ClientKind::Tui,
+                })
+                .await
+                .unwrap();
+        }
+        project_until(&mut app_a, &mut updates_a, |update| {
+            update.events.iter().any(|event| {
+                matches!(event,
+                ClientEvent::SessionReady { session_id } if session_id == &a.id)
+            })
+        })
+        .await;
+        project_until(&mut app_b, &mut updates_b, |update| {
+            update.events.iter().any(|event| {
+                matches!(event,
+                ClientEvent::SessionReady { session_id } if session_id == &b.id)
+            })
+        })
+        .await;
+        assert_eq!(app_a.open_sessions.as_slice(), std::slice::from_ref(&a.id));
+        assert_eq!(app_b.open_sessions.as_slice(), std::slice::from_ref(&b.id));
+
+        client_a
+            .submit(
+                &a.id,
+                "first",
+                "complete in the background".into(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let outcome_a = project_until(&mut app_a, &mut updates_a, |update| {
+            update.events.iter().any(|event| matches!(event,
+                ClientEvent::SessionOutcome { session_id, outcome: mew_client_core::TurnOutcome::Completed }
+                    if session_id == &a.id))
+        }).await;
+        let outcome_b = project_until(&mut app_b, &mut updates_b, |update| {
+            update.events.iter().any(|event| matches!(event,
+                ClientEvent::SessionOutcome { session_id, outcome: mew_client_core::TurnOutcome::Completed }
+                    if session_id == &a.id))
+        }).await;
+        assert!(
+            !outcome_a.state.unread_completions.contains(&a.id),
+            "shared legacy attachment policy stays unchanged"
+        );
+        assert!(outcome_b.state.unread_completions.contains(&a.id));
+        assert!(
+            app_a.unread_completions.contains(&a.id),
+            "an unfocused attached terminal has not read its result"
+        );
+        assert_eq!(app_a.notification_counts(), (0, 1));
+        assert_eq!(app_b.notification_counts(), (0, 0));
+        assert!(!app_b.conversation_is_open(&a.id));
+
+        // Hold the real transcript lock so closing happens during an actual
+        // accepted turn, independently of provider speed or machine load.
+        let messages = a.agent.lock().await.messages.clone();
+        let transcript = messages.lock().await;
+        client_a
+            .submit(
+                &a.id,
+                "second",
+                "continue after closing the view".into(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        project_until(&mut app_a, &mut updates_a, |update| {
+            update.events.iter().any(|event| {
+                matches!(event,
+                ClientEvent::SessionActivityChanged { session_id, running: true }
+                    if session_id == &a.id)
+            })
+        })
+        .await;
+        client_a
+            .send(ClientMessage::AttachSession {
+                session_id: b.id.clone(),
+                client_kind: ClientKind::Tui,
+            })
+            .await
+            .unwrap();
+        project_until(&mut app_a, &mut updates_a, |update| {
+            update.events.iter().any(|event| {
+                matches!(event,
+                ClientEvent::SessionReady { session_id } if session_id == &b.id)
+            })
+        })
+        .await;
+        assert_eq!(app_a.open_sessions, [a.id.clone(), b.id.clone()]);
+        assert!(app_a.close_window_conversation(&a.id).is_none());
+        assert_eq!(app_a.open_sessions.as_slice(), std::slice::from_ref(&b.id));
+        assert!(*a.is_running.lock().await);
+        assert!(!a
+            .current_turn_cancel
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .is_cancelled());
+        drop(transcript);
+
+        for (app, updates) in [(&mut app_a, &mut updates_a), (&mut app_b, &mut updates_b)] {
+            project_until(app, updates, |update| {
+                update.events.iter().any(|event| matches!(event,
+                    ClientEvent::SessionOutcome { session_id, outcome: mew_client_core::TurnOutcome::Completed }
+                        if session_id == &a.id))
+            }).await;
+            assert_eq!(app.status.session_id, b.id);
+            assert_eq!(app.notification_counts(), (0, 0));
+        }
+        assert!(!*a.is_running.lock().await);
+        assert_eq!(
+            mew_session::Reader::load_from(directory.path(), &a.id)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|message| message.role == mew_message::Role::Assistant)
+                .count(),
+            2,
+            "both daemon turns must finish and persist despite closing the view"
+        );
+        daemon.abort();
+    }
+
+    #[tokio::test]
     async fn real_daemon_offscreen_turns_refresh_latest_sessions_with_persisted_timestamps() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().to_path_buf();

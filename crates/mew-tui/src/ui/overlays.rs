@@ -1026,12 +1026,13 @@ pub(super) fn draw_picker(
     let list_width = inner_width.saturating_sub(1).max(1);
     let conversation = matches!(
         picker.kind.as_str(),
-        "session" | "session_attention" | "session_archived"
+        "session" | "session_open" | "session_attention" | "session_archived"
     );
     let (title, empty_message) = match picker.kind.as_str() {
         "command" => ("Commands", "No commands"),
         "model" => ("Models", "No models"),
         "session" => ("Conversations", "No conversations"),
+        "session_open" => ("Open in this window", "No open conversations"),
         "session_attention" => ("Notifications", "No unread updates"),
         "session_archived" => ("Archived conversations", "No archived conversations"),
         "subagent" => ("Subagents", "No active subagents"),
@@ -1759,6 +1760,22 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut App, area: Rect) {
         Line::from(vec![
             Span::styled("  Ctrl+Alt+N ", key_style),
             Span::styled("conversation notifications", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+Alt+O ", key_style),
+            Span::styled("conversations open in this window", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+Alt+←/→ ", key_style),
+            Span::styled("switch open conversations", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+Alt+Enter ", key_style),
+            Span::styled("new conversation in this project", desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("  Ctrl+Alt+W ", key_style),
+            Span::styled("close here; last conversation exits mew", desc_style),
         ]),
         Line::from(vec![
             Span::styled("  ?          ", key_style),

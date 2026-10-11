@@ -134,11 +134,8 @@ impl App {
     }
 
     pub fn session_attention_count(&self) -> usize {
-        self.daemon_sessions
-            .iter()
-            .filter(|session| self.session_needs_attention(session))
-            .count()
-            + self.unlisted_attention_ids().len()
+        let (needed, results) = self.notification_counts();
+        needed + results
     }
 
     fn unlisted_attention_ids(&self) -> std::collections::BTreeSet<&str> {
@@ -147,8 +144,14 @@ impl App {
             .filter(|(_, (permissions, questions))| *permissions > 0 || *questions > 0)
             .map(|(id, _)| id.as_str())
             .chain(self.unread_completions.iter().map(String::as_str))
+            .chain(
+                self.session_turn_outcomes
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|id| self.conversation_failed(id)),
+            )
             .filter(|id| {
-                *id != self.status.session_id
+                self.conversation_is_open(id)
                     && !self
                         .daemon_sessions
                         .iter()
@@ -158,15 +161,11 @@ impl App {
     }
 
     fn session_needs_attention(&self, session: &mew_protocol::SessionInfo) -> bool {
-        if session.session_id == self.status.session_id {
+        if !self.conversation_is_open(&session.session_id) {
             return false;
         }
-        let (permissions, questions) = self
-            .session_attention
-            .get(&session.session_id)
-            .copied()
-            .unwrap_or((session.pending_permissions, session.pending_questions));
-        permissions > 0 || questions > 0 || self.unread_completions.contains(&session.session_id)
+        self.conversation_needs_input(&session.session_id)
+            || self.unread_completions.contains(&session.session_id)
     }
 
     pub(crate) fn session_label(&self, session: &mew_protocol::SessionInfo) -> String {
@@ -182,12 +181,20 @@ impl App {
             .get(id)
             .copied()
             .unwrap_or((session.pending_permissions, session.pending_questions));
-        let marker = conversation_marker(
-            permissions,
-            questions,
-            self.unread_completions.contains(id),
-            session.state == mew_protocol::SessionState::Running,
-        );
+        let marker = if self.conversation_is_open(id)
+            && self.conversation_failed(id)
+            && permissions == 0
+            && questions == 0
+        {
+            '×'
+        } else {
+            conversation_marker(
+                permissions,
+                questions,
+                self.unread_completions.contains(id),
+                session.state == mew_protocol::SessionState::Running,
+            )
+        };
         match title {
             Some(title) => format!("{marker} {title}"),
             None => format!("{marker} {id:.8}"),
@@ -256,14 +263,29 @@ impl App {
             .daemon_sessions
             .iter()
             .filter(|session| match kind {
+                "session_open" => self.conversation_is_open(&session.session_id),
                 "session_attention" => self.session_needs_attention(session),
                 "session_archived" => session.archived,
                 _ => !session.archived,
             })
             .map(|session| self.session_picker_item(session))
             .collect();
-        if kind == "session_attention" {
-            items.extend(self.unlisted_attention_ids().into_iter().map(|id| {
+        if matches!(kind, "session_attention" | "session_open") {
+            let unlisted = if kind == "session_attention" {
+                self.unlisted_attention_ids()
+            } else {
+                self.open_sessions
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|id| {
+                        !self
+                            .daemon_sessions
+                            .iter()
+                            .any(|session| session.session_id == *id)
+                    })
+                    .collect()
+            };
+            items.extend(unlisted.into_iter().map(|id| {
                 let title = self
                     .session_titles
                     .get(id)
@@ -271,12 +293,16 @@ impl App {
                     .unwrap_or_else(|| id.chars().take(12).collect());
                 let (permissions, questions) =
                     self.session_attention.get(id).copied().unwrap_or_default();
-                let marker = conversation_marker(
-                    permissions,
-                    questions,
-                    self.unread_completions.contains(id),
-                    false,
-                );
+                let marker = if self.conversation_failed(id) && permissions == 0 && questions == 0 {
+                    '×'
+                } else {
+                    conversation_marker(
+                        permissions,
+                        questions,
+                        self.unread_completions.contains(id),
+                        false,
+                    )
+                };
                 PickerItem {
                     id: id.into(),
                     label: format!("{marker} {title}"),
@@ -293,6 +319,10 @@ impl App {
 
     pub fn open_session_picker(&mut self) {
         self.open_session_picker_kind("session");
+    }
+
+    pub fn open_window_picker(&mut self) {
+        self.open_session_picker_kind("session_open");
     }
 
     pub fn open_attention_picker(&mut self) {
@@ -314,11 +344,14 @@ impl App {
             visible_items: PICKER_VISIBLE_ITEMS,
             hint: Some(
                 match kind {
+                    "session_open" => "Tab all conversations · Ctrl+Alt+W close here",
                     "session_attention" => {
-                        "Tab all conversations · Ctrl+Alt+A archive/restore · Ctrl+Alt+P pin"
+                        "Tab all conversations · Ctrl+Alt+W close here · Ctrl+Alt+A archive/restore"
                     }
                     "session_archived" => "Tab recent · Ctrl+Alt+A restore · Ctrl+Alt+P pin",
-                    _ => "Tab archived · Ctrl+Alt+A archive · Ctrl+Alt+P pin",
+                    _ => {
+                        "Tab archived · Ctrl+Alt+O open here · Ctrl+Alt+A archive · Ctrl+Alt+P pin"
+                    }
                 }
                 .into(),
             ),
@@ -342,7 +375,7 @@ impl App {
         let Some(picker) = self.picker.as_ref().filter(|picker| {
             matches!(
                 picker.kind.as_str(),
-                "session" | "session_attention" | "session_archived"
+                "session" | "session_open" | "session_attention" | "session_archived"
             )
         }) else {
             return;

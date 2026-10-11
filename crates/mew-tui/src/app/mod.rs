@@ -280,6 +280,13 @@ pub struct App {
     // is the single gate — UI surfaces check it before rendering.
     pub daemon_mode: bool,
     pub daemon_sessions: Vec<mew_protocol::SessionInfo>,
+    /// Confirmed conversations kept open in this terminal window.
+    pub open_sessions: Vec<String>,
+    closing_conversation: Option<String>,
+    /// An attach confirmation can arrive before the conversation's transcript.
+    awaiting_transcript: bool,
+    /// Unknown until the terminal reports focus; interaction acknowledges visible results.
+    pub terminal_focused: Option<bool>,
     pub session_turn_outcomes: std::collections::BTreeMap<String, mew_client_core::TurnOutcome>,
     pub unread_completions: std::collections::BTreeSet<String>,
     pub session_titles: std::collections::HashMap<String, String>,
@@ -1034,6 +1041,10 @@ impl App {
             pending_paste: None,
             daemon_mode: false,
             daemon_sessions: Vec::new(),
+            open_sessions: Vec::new(),
+            closing_conversation: None,
+            awaiting_transcript: false,
+            terminal_focused: None,
             session_turn_outcomes: std::collections::BTreeMap::new(),
             unread_completions: std::collections::BTreeSet::new(),
             session_titles: std::collections::HashMap::new(),
@@ -1146,9 +1157,8 @@ impl App {
                 kind,
                 detail,
                 session_id,
-            } => {
-                // Show a toast for the alert. If it's for a non-active
-                // session, prefix with the session title.
+            } if self.conversation_is_open(session_id) => {
+                // Background views in this window identify their alert owner.
                 let prefix = if session_id != &self.status.session_id {
                     let name = self
                         .session_titles
@@ -1184,6 +1194,7 @@ impl App {
                     self.messages.push(msg.clone());
                 }
                 self.auto_scroll = true;
+                self.awaiting_transcript = false;
                 self.pending_md_rerender = self.messages.last().map(|m| m.id);
                 self.mark_chat_dirty();
             }
@@ -1213,6 +1224,7 @@ impl App {
                 });
                 if *replace {
                     self.messages.clear();
+                    self.awaiting_transcript = false;
                 }
                 if *replace {
                     self.messages.extend(messages.iter().cloned());
@@ -1304,6 +1316,8 @@ impl App {
                     self.background_jobs.clear();
                 }
                 self.status.session_id = session_id.clone();
+                self.awaiting_transcript = true;
+                self.confirm_window_conversation(session_id);
                 self.attaching_session = false;
                 // On attach, update the active model/provider from the
                 // daemon's session state. Fields may be empty if the
@@ -3201,3 +3215,4 @@ pub mod input;
 pub mod pickers;
 pub mod slash;
 pub mod todos;
+mod window;

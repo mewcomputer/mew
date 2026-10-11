@@ -345,7 +345,11 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Min(0), Constraint::Length(right_width)])
         .split(inner);
     let mut left_area = chunks[0];
-    if app.daemon_mode && left_area.width >= 2 && area.height > 0 {
+    if app.daemon_mode
+        && app.session_attention_count() > 0
+        && left_area.width >= 2
+        && area.height > 0
+    {
         let count = app.session_attention_count();
         let label = format!("🔔 {count} · ^Alt+N");
         let width = (display_width(&label) as u16).min(left_area.width);
@@ -358,10 +362,10 @@ pub(super) fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
         f.render_widget(
             Paragraph::new(text).style(
                 Style::default()
-                    .fg(app.theme.resolve(if count > 0 {
+                    .fg(app.theme.resolve(if app.notification_counts().0 > 0 {
                         "text.warning"
                     } else {
-                        "text.muted"
+                        "text.accent"
                     }))
                     .bg(status_bg),
             ),

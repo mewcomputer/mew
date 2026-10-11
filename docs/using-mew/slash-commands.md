@@ -58,14 +58,16 @@ See [Permissions](/docs/using-mew/permissions/) for mode details, rules, and san
 | `/mouse` `/m` | Toggle mouse capture for text selection |
 | `/quit` `/q` | Exit mew |
 
-The sidebar bell and `Ctrl+Alt+N` open conversations with pending questions,
-permissions or unread outcomes. `Tab` switches between attention and all
-conversations. Each conversation keeps its draft, attachments and queued
+The bell and `Ctrl+Alt+N` open this terminal window's conversations with pending
+questions, permissions, failures or unread results. `Ctrl+Alt+O` lists all views
+open here, and `Tab` opens global history from either list. Each conversation
+keeps its draft, attachments and queued
 follow-ups when you switch. Submitted input stays visible until the daemon
 acknowledges it; an uncertain submission is never replayed automatically.
 
 Conversation icons show state: `○` idle or complete, `●` unread update, `?`
-question, `!` approval, and `▶` working. Each title has a second row with its
+question, `!` approval, `×` a failed turn in an open conversation, and `▶` working.
+Each title has a second row with its
 project path on the left and pending action counts and time on the right.
 Paths inside your home directory use `~/`; search accepts either form. Selected
 details show failures and any clipped context, with `PgUp`/`PgDn` to scroll.

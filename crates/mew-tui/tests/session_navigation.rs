@@ -35,6 +35,9 @@ fn bell_counts_conversations_once_and_opens_archived_attention_without_losing_th
     let mut app = App::new();
     app.daemon_mode = true;
     app.status.session_id = "active".into();
+    app.open_sessions = ["active", "approval", "done", "failed"]
+        .map(str::to_owned)
+        .into();
     app.input = "saved draft".into();
     app.cursor = app.input.len();
     app.daemon_sessions = vec![
@@ -56,9 +59,9 @@ fn bell_counts_conversations_once_and_opens_archived_attention_without_losing_th
             detail: Some("provider unavailable".into()),
         },
     );
-    assert_eq!(app.session_attention_count(), 3);
+    assert_eq!(app.session_attention_count(), 4);
     let buffer = draw(&mut app, 120, 30);
-    let y = row(&buffer, "3 updates");
+    let y = row(&buffer, "3 needs you");
     let x = app.sidebar_rect.x + 2;
     handle_input_event(
         &mut app,
@@ -78,29 +81,29 @@ fn bell_counts_conversations_once_and_opens_archived_attention_without_losing_th
             .iter()
             .map(|item| item.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["approval", "done", "failed"]
+        vec!["active", "approval", "done", "failed"]
     );
     assert!(
-        picker.items[0]
+        picker.items[1]
             .context
             .as_ref()
             .unwrap()
             .metadata
             .contains("2 approvals")
-            && picker.items[0]
+            && picker.items[1]
                 .context
                 .as_ref()
                 .unwrap()
                 .metadata
                 .contains("1 question")
     );
-    assert_eq!(picker.items[0].label, "! approval work");
-    assert_eq!(picker.items[1].label, "● finished work");
+    assert_eq!(picker.items[1].label, "! approval work");
+    assert_eq!(picker.items[2].label, "● finished work");
     assert!(
-        picker.items[2].description.contains("provider unavailable")
-            && picker.items[2].description.contains("Archived")
+        picker.items[3].description.contains("provider unavailable")
+            && picker.items[3].description.contains("Archived")
     );
-    app.picker.as_mut().unwrap().selected = 2;
+    app.picker.as_mut().unwrap().selected = 3;
     assert!(
         matches!(key(&mut app,KeyCode::Enter,KeyModifiers::NONE),Some(Action::AttachSession(id)) if id=="failed")
     );
@@ -218,6 +221,7 @@ fn connection_state_stays_visible_after_the_toast_and_precedes_turn_status() {
 #[test]
 fn attention_refresh_preserves_selected_identity_and_removes_acknowledged_rows() {
     let mut app = App::new();
+    app.open_sessions = ["a", "b"].map(str::to_owned).into();
     app.daemon_sessions = vec![session("a", "first", false), session("b", "second", false)];
     app.unread_completions.extend(["a".into(), "b".into()]);
     app.open_attention_picker();
@@ -244,6 +248,7 @@ fn attention_refresh_preserves_selected_identity_and_removes_acknowledged_rows()
 #[test]
 fn attention_arriving_before_session_metadata_remains_reachable() {
     let mut app = App::new();
+    app.open_sessions.push("not-yet-listed".into());
     app.session_attention
         .insert("not-yet-listed".into(), (1, 0));
     assert_eq!(app.session_attention_count(), 1);
@@ -257,8 +262,10 @@ fn attention_arriving_before_session_metadata_remains_reachable() {
     assert_eq!(context.metadata, "1 approval");
 }
 #[test]
-fn canonical_completion_and_ready_ack_drive_the_bell() {
+fn canonical_completion_waits_for_the_attached_transcript_before_acknowledgement() {
     let mut app = App::new();
+    app.open_sessions.push("done".into());
+    app.terminal_focused = Some(true);
     app.status.session_id = "active".into();
     let mut state = mew_client_core::ClientState::default();
     let events = state.apply_server_message(mew_protocol::ServerMessage::SessionList {
@@ -287,13 +294,21 @@ fn canonical_completion_and_ready_ack_drive_the_bell() {
         permission_mode: None,
     });
     app.apply_client_update(&events, &state, None);
+    app.acknowledge_visible_result();
+    assert_eq!(app.session_attention_count(), 1);
+    let events = state
+        .apply_server_message(mew_protocol::ServerMessage::SessionHistory { messages: vec![] });
+    app.apply_client_update(&events, &state, None);
+    app.acknowledge_visible_result();
     assert_eq!(app.session_attention_count(), 0);
     assert!(app.picker.is_none());
 }
 
 #[test]
-fn canonical_failed_alert_is_unread_until_ready_and_keeps_its_failure_detail() {
+fn canonical_failed_alert_keeps_its_failure_detail_and_remains_actionable_after_ready() {
     let mut app = App::new();
+    app.open_sessions.push("failed".into());
+    app.terminal_focused = Some(true);
     app.status.session_id = "active".into();
     let mut state = mew_client_core::ClientState::default();
     for _ in 0..2 {
@@ -312,7 +327,7 @@ fn canonical_failed_alert_is_unread_until_ready_and_keeps_its_failure_detail() {
     app.apply_client_update(&events, &state, None);
     app.open_attention_picker();
     let item = &app.picker.as_ref().unwrap().items[0];
-    assert_eq!(item.label, "● failed work");
+    assert_eq!(item.label, "× failed work");
     assert!(item.description.contains("Archived"));
     assert!(item.description.contains("provider unavailable"));
     let events = state.apply_server_message(mew_protocol::ServerMessage::SessionReady {
@@ -323,11 +338,11 @@ fn canonical_failed_alert_is_unread_until_ready_and_keeps_its_failure_detail() {
         permission_mode: None,
     });
     app.apply_client_update(&events, &state, None);
-    assert_eq!(app.session_attention_count(), 0);
+    assert_eq!(app.session_attention_count(), 1);
     app.open_session_picker();
     key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
     let item = &app.picker.as_ref().unwrap().items[0];
-    assert_eq!(item.label, "○ failed work");
+    assert_eq!(item.label, "× failed work");
     assert!(item.description.contains("provider unavailable"));
 }
 
@@ -335,6 +350,7 @@ fn canonical_failed_alert_is_unread_until_ready_and_keeps_its_failure_detail() {
 fn narrow_status_keeps_a_clickable_bell_visible_and_clears_its_hit_bounds_on_resize() {
     let mut app = App::new();
     app.daemon_mode = true;
+    app.open_sessions.push("done".into());
     app.input = "saved draft".into();
     app.cursor = app.input.len();
     app.daemon_sessions = vec![session("done", "finished work", false)];
@@ -373,6 +389,8 @@ fn narrow_status_keeps_a_clickable_bell_visible_and_clears_its_hit_bounds_on_res
 fn unread_failure_marker_survives_a_long_sidebar_title_and_routes_by_id() {
     let mut app = App::new();
     app.daemon_mode = true;
+    app.status.session_id = "active".into();
+    app.open_sessions = ["failed", "active"].map(str::to_owned).into();
     app.daemon_sessions = vec![session(
         "failed",
         &"long conversation title ".repeat(5),
@@ -384,7 +402,7 @@ fn unread_failure_marker_survives_a_long_sidebar_title_and_routes_by_id() {
         mew_client_core::TurnOutcome::Failed { detail: None },
     );
     let buffer = draw(&mut app, 120, 30);
-    let y = row(&buffer, "● long conversation");
+    let y = row(&buffer, "× long conversation");
     let x = app.sidebar_rect.x + 2;
     let action = handle_input_event(
         &mut app,
@@ -402,6 +420,7 @@ fn core_recency_order_reaches_both_the_sidebar_and_picker_without_grouping() {
     let mut state = mew_client_core::ClientState::default();
     let mut app = App::new();
     app.daemon_mode = true;
+    app.open_sessions = ["older", "newer"].map(str::to_owned).into();
     let mut older = session("older", "older work", false);
     older.created_at = 10;
     older.state = mew_protocol::SessionState::Running;
@@ -502,6 +521,7 @@ fn conversation_details_keep_context_without_repeating_quiet_state_or_cost() {
 #[test]
 fn unlisted_conversations_use_the_same_decision_icons() {
     let mut app = App::new();
+    app.open_sessions = ["approval", "question", "update"].map(str::to_owned).into();
     app.session_attention.insert("approval".into(), (1, 0));
     app.session_attention.insert("question".into(), (0, 1));
     app.unread_completions.insert("update".into());
@@ -613,6 +633,7 @@ fn conversation_context_paths_and_metadata_remain_searchable_in_all_catalog_view
             },
         );
         if kind == "attention" {
+            app.open_sessions.push("work".into());
             app.open_attention_picker();
         } else {
             app.open_session_picker();
@@ -676,6 +697,7 @@ fn unknown_and_external_project_contexts_remain_explicit_and_searchable() {
         assert_eq!(picker.filtered().len(), 1);
     }
     app.session_attention.insert("unlisted".into(), (0, 2));
+    app.open_sessions.push("unlisted".into());
     app.open_attention_picker();
     let picker = app.picker.as_mut().unwrap();
     assert!(picker.items[0].description.is_empty());

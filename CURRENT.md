@@ -2068,3 +2068,35 @@ permission and question alerts do not become turn outcomes.
 All 72 client-core tests passed, including outcome delivery, failure-detail
 reconciliation and existing activity parity. Client-core Clippy passed with
 warnings denied.
+
+### 2026-10-11: terminal-local conversations, attention and titles
+
+Each TUI process keeps a confirmed list of conversations open in its window.
+A single view stays quiet; multiple views expose an Open here sidebar and picker.
+Global history remains available through Tab. Ctrl+Alt+O opens the local list,
+Ctrl+Alt+Left/Right switch views, Ctrl+Alt+Enter starts a conversation in the
+current project, and Ctrl+Alt+W closes a view. Closing a background view leaves
+daemon work running and retains its draft, attachments and queued follow-ups
+within the TUI process. Closing the current view waits for its replacement to
+attach successfully; closing the last view exits the frontend.
+
+The bell counts only this window's conversations and separates work needing
+input from successful unread results. Failures remain actionable until another
+turn starts. Focus events acknowledge visible results at the latest transcript
+position; overlays, scrollback and pending attached history prevent premature
+acknowledgement. Terminals without focus reporting wait for actual interaction.
+Raw notifications from other windows no longer create local toasts.
+
+Terminal titles identify the current conversation, home-relative project and
+work, question, approval, failure, unread or connection state. Background counts
+include only views open here. Titles change only when their text changes;
+control sequences and bidi controls are removed and Unicode titles remain
+bounded without splitting graphemes. Help and shortcut documentation match.
+
+All 564 TUI tests across 21 targets and 199 CLI tests across three targets passed.
+A real daemon/WebSocket regression covers two independent windows, unfocused
+completion and closing an accepted running turn without cancelling or losing
+its persisted response. Strict Clippy, architecture, generated-theme and format
+checks passed, and the CLI built. Inspected wide and narrow renderer captures
+under /private/tmp/mew-window-ux-captures. Live terminal focus reporting and OSC
+title display remain pending interactive verification.

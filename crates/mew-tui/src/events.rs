@@ -45,14 +45,7 @@ impl EventLoop {
             loop {
                 match reader.next().await {
                     Some(Ok(event)) => {
-                        if matches!(
-                            event,
-                            CrosstermEvent::Key(_)
-                                | CrosstermEvent::Mouse(_)
-                                | CrosstermEvent::Paste(_)
-                                | CrosstermEvent::Resize(_, _)
-                        ) && tx.send(Event::Input(event)).await.is_err()
-                        {
+                        if tx.send(Event::Input(event)).await.is_err() {
                             break;
                         }
                     }
@@ -93,7 +86,22 @@ impl EventLoop {
 
 /// Process any crossterm input event and return an action.
 pub fn handle_input_event(app: &mut crate::app::App, event: CrosstermEvent) -> Option<Action> {
+    if matches!(
+        event,
+        CrosstermEvent::Key(_) | CrosstermEvent::Mouse(_) | CrosstermEvent::Paste(_)
+    ) {
+        app.acknowledge_result_on_interaction();
+    }
     match event {
+        CrosstermEvent::FocusGained => {
+            app.terminal_focused = Some(true);
+            app.acknowledge_visible_result();
+            None
+        }
+        CrosstermEvent::FocusLost => {
+            app.terminal_focused = Some(false);
+            None
+        }
         CrosstermEvent::Key(key) => handle_key_event(app, key),
         CrosstermEvent::Mouse(mouse) => handle_mouse_event(app, mouse),
         CrosstermEvent::Paste(text) => handle_paste_event(app, text),
@@ -105,7 +113,6 @@ pub fn handle_input_event(app: &mut crate::app::App, event: CrosstermEvent) -> O
             app.mark_chat_dirty();
             None
         }
-        _ => None,
     }
 }
 
@@ -666,7 +673,7 @@ pub(crate) fn handle_mouse_event(app: &mut crate::app::App, mouse: MouseEvent) -
                     .find(|(row, _)| *row == mouse.row)
                 {
                     match item.clone() {
-                        crate::app::SidebarItem::Sessions => app.open_session_picker(),
+                        crate::app::SidebarItem::Sessions => app.open_window_picker(),
                         crate::app::SidebarItem::Attention => app.open_attention_picker(),
                         crate::app::SidebarItem::Session(id) => {
                             return Some(Action::AttachSession(id))
@@ -1402,6 +1409,24 @@ fn handle_normal_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
 
     // Global shortcuts.
     match key.code {
+        KeyCode::Char('o') if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            app.open_window_picker();
+            return None;
+        }
+        KeyCode::Char('w') if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            return app.close_window_conversation(&app.status.session_id.clone());
+        }
+        KeyCode::Left if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            return app.adjacent_window_conversation(-1);
+        }
+        KeyCode::Right if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            return app.adjacent_window_conversation(1);
+        }
+        KeyCode::Enter if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            return Some(Action::NewSessionInProject(
+                app.project_cwd().display().to_string(),
+            ));
+        }
         KeyCode::Char('n') if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) => {
             app.open_attention_picker();
             return None;
@@ -1738,6 +1763,27 @@ fn at_mention_action(label: &str) -> Option<Action> {
 }
 
 fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action> {
+    if key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        if key.code == KeyCode::Char('o') {
+            app.open_window_picker();
+            return None;
+        }
+        if key.code == KeyCode::Char('w')
+            && app.picker.as_ref().is_some_and(|picker| {
+                matches!(
+                    picker.kind.as_str(),
+                    "session" | "session_open" | "session_attention" | "session_archived"
+                )
+            })
+        {
+            let id = app
+                .picker
+                .as_ref()
+                .and_then(|picker| picker.selected_item())
+                .map(|item| item.id.clone());
+            return id.and_then(|id| app.close_window_conversation(&id));
+        }
+    }
     // Inline `@` picker: editing keys mutate the chat input (not a separate
     // picker filter field), then re-derive the picker filter from the token
     // after the last `@`. Navigation/selection/close fall through to the
@@ -1772,7 +1818,7 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         && app.picker.as_ref().is_some_and(|picker| {
             matches!(
                 picker.kind.as_str(),
-                "session" | "session_attention" | "session_archived"
+                "session" | "session_open" | "session_attention" | "session_archived"
             )
         })
     {
@@ -1794,7 +1840,7 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                 }
             } else if matches!(
                 picker.kind.as_str(),
-                "session" | "session_attention" | "session_archived"
+                "session" | "session_open" | "session_attention" | "session_archived"
             ) {
                 // Ctrl+Alt+P toggles pinned on the highlighted session row.
                 let id = picker.selected_item().map(|i| i.id.clone());
@@ -1812,7 +1858,7 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
         if let Some(ref picker) = app.picker {
             if matches!(
                 picker.kind.as_str(),
-                "session" | "session_attention" | "session_archived"
+                "session" | "session_open" | "session_attention" | "session_archived"
             ) {
                 let id = picker.selected_item().map(|i| i.id.clone());
                 if let Some(id) = id {
@@ -1878,7 +1924,7 @@ fn handle_picker_key(app: &mut crate::app::App, key: KeyEvent) -> Option<Action>
                     at_mention_action(&label)
                 } else if matches!(
                     kind.as_str(),
-                    "session" | "session_attention" | "session_archived"
+                    "session" | "session_open" | "session_attention" | "session_archived"
                 ) {
                     Some(Action::AttachSession(id))
                 } else if kind == "project" {

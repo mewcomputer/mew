@@ -73,6 +73,7 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
         crossterm::terminal::EnterAlternateScreen,
         crossterm::event::EnableMouseCapture,
         crossterm::event::EnableBracketedPaste,
+        crossterm::event::EnableFocusChange,
     )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
@@ -81,6 +82,7 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
     event_loop.spawn();
 
     let mut last_event_was_tick = false;
+    let mut last_title = String::new();
 
     // Construct PluginInfo — the daemon updates active_persona only.
     let plugin_info = Arc::new(std::sync::Mutex::new(crate::PluginInfo {
@@ -89,10 +91,17 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
 
     let result = loop {
         if !last_event_was_tick || app.needs_redraw() {
+            app.acknowledge_visible_result();
             if let Err(e) = terminal.draw(|f| mew_tui::ui::draw(f, &mut app)) {
                 break Err(anyhow::anyhow!("draw error: {}", e));
             }
-            mew_tui::title::set_terminal_title(mew_tui::title::title_for_streaming(app.streaming));
+            if !last_event_was_tick {
+                let title = mew_tui::title::title_for_app(&app);
+                if title != last_title {
+                    mew_tui::title::set_terminal_title(&title);
+                    last_title = title;
+                }
+            }
         }
 
         let event = tokio::select! {
@@ -217,6 +226,7 @@ pub(crate) async fn chat_with_daemon(connect_url: &str, attach: Option<&str>) ->
         crossterm::terminal::LeaveAlternateScreen,
         crossterm::event::DisableMouseCapture,
         crossterm::event::DisableBracketedPaste,
+        crossterm::event::DisableFocusChange,
     )?;
     mew_tui::title::set_terminal_title("mew");
     result

@@ -40,6 +40,18 @@ description: Power-user features and workflows for mew.
 
 ## Session management
 
+- **Open here**: `Ctrl+Alt+O` lists conversations open in this terminal window.
+  `Tab` opens global history. Attach another conversation to keep both open;
+  `Ctrl+Alt+Left` / `Ctrl+Alt+Right` switch between them. `Ctrl+Alt+Enter`
+  starts one in the current project.
+- **Close a view**: `Ctrl+Alt+W` closes the current view, or the highlighted
+  view in a conversation picker. Its draft and queued follow-ups remain available
+  during this TUI process, and daemon work keeps running. Closing the last view
+  exits the TUI.
+- **Notifications**: the bell only includes conversations open here. Questions,
+  approvals and failures need attention; completed results stay unread until
+  visible in a focused terminal. Without terminal focus reporting, interacting
+  with the visible conversation acknowledges its result.
 - **History**: `/sessions` lists previous sessions with timestamps.
   `/resume <id>` resumes one. See [Sessions](/docs/getting-started/sessions/).
 - **Rewind**: `/rewind <n>` truncates to the first N messages. Use
@@ -71,10 +83,11 @@ session, that approval survives `/clear`.
 
 ## Terminal title
 
-When streaming, the terminal tab title shows `mew - thinking...`. When
-idle, it shows `mew`. This helps you tell when a response is done from
-another tab. Logs are redirected to `/tmp/mew-<pid>.log` so they don't
-corrupt the TUI display.
+The terminal title names the current conversation and project, for example
+`mew · running · Native browser lifecycle · ~/code/mew`. It shows approval,
+question, failure, unread-result and connection states, with counts for background
+conversations open in this window. Logs are redirected to `/tmp/mew-<pid>.log`
+so they don't corrupt the TUI display.
 
 ## Prompting patterns
 

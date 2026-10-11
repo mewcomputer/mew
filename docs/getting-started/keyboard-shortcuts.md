@@ -11,6 +11,10 @@ Press `?` with an empty composer to open the shortcuts overlay.
 |----------|--------|
 | `Ctrl+Space` | Open command palette |
 | `Ctrl+Alt+N` | Open the attention bell's conversation list |
+| `Ctrl+Alt+O` | Show conversations open in this terminal window |
+| `Ctrl+Alt+Left` / `Ctrl+Alt+Right` | Switch between open conversations |
+| `Ctrl+Alt+Enter` | Start a conversation in the current project |
+| `Ctrl+Alt+W` | Close the current view, or the selected conversation view in a picker |
 | `?` | Toggle keyboard shortcuts overlay |
 | `Ctrl+L` | Scroll to bottom (re-attach auto-scroll) |
 | `Ctrl+C` | Cancel stream / clear input / quit (press twice) |
@@ -53,7 +57,11 @@ sequence and stops `Alt+Y` from replacing unrelated text. Characters with
 combining marks and joined emoji move, delete and transpose together.
 
 In conversation pickers, `Ctrl+Alt+A` archives/restores the selected conversation
-and `Ctrl+Alt+P` pins it. In the thinking picker, `Ctrl+Alt+P` cycles variants.
+and `Ctrl+Alt+P` pins it. Closing a view keeps its draft and queued follow-ups
+for this TUI process and leaves daemon work running. Closing the last view exits
+the TUI. `Tab` opens global history from the open-view or notification picker;
+in history, it switches between current and archived conversations.
+In the thinking picker, `Ctrl+Alt+P` cycles variants.
 Plain `Ctrl+A` and `Ctrl+P/N` retain their editing/navigation meanings.
 
 ## Chat

@@ -22,7 +22,7 @@ pub(super) fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let mut visual_row = area.y + 1;
     let mut text = Text::default();
 
-    if app.daemon_mode {
+    if app.daemon_mode && app.open_sessions.len() > 1 {
         draw_conversations(&mut text, &mut visual_row, app, area.width);
         push_divider(&mut text, &mut visual_row, app, area.width);
     }
@@ -147,36 +147,31 @@ fn draw_conversations(text: &mut Text, visual_row: &mut u16, app: &mut App, widt
     app.sidebar_item_rows
         .push((*visual_row, SidebarItem::Sessions));
     text.push_line(Line::from(Span::styled(
-        "Conversations",
+        "Open here · ^Alt+O",
         Style::default()
             .fg(app.theme.resolve("text.body"))
             .add_modifier(Modifier::BOLD),
     )));
     *visual_row += 1;
     let count = app.session_attention_count();
-    app.sidebar_item_rows
-        .push((*visual_row, SidebarItem::Attention));
-    text.push_line(Line::from(Span::styled(
-        truncate_to_fit(
-            &format!(
-                "🔔 {count} {} · ^Alt+N",
-                if count == 1 { "update" } else { "updates" }
-            ),
-            max,
-        ),
-        Style::default().fg(app.theme.resolve(if count > 0 {
-            "text.warning"
-        } else {
-            "text.muted"
-        })),
-    )));
-    *visual_row += 1;
-    for session in app
-        .daemon_sessions
-        .iter()
-        .filter(|session| !session.archived)
-        .take(3)
-    {
+    if count > 0 {
+        app.sidebar_item_rows
+            .push((*visual_row, SidebarItem::Attention));
+        text.push_line(Line::from(Span::styled(
+            truncate_to_fit(&format!("🔔 {}", app.notification_summary()), max),
+            Style::default().fg(app.theme.resolve(if app.notification_counts().0 > 0 {
+                "text.warning"
+            } else {
+                "text.accent"
+            })),
+        )));
+        *visual_row += 1;
+    }
+    let open_sessions = &app.open_sessions;
+    let current_id = &app.status.session_id;
+    for session in app.daemon_sessions.iter().filter(|session| {
+        open_sessions.contains(&session.session_id) || &session.session_id == current_id
+    }) {
         let label = app.session_label(session);
         app.sidebar_item_rows.push((
             *visual_row,

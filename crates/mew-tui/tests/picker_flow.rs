@@ -136,6 +136,7 @@ fn sidebar_conversation_context_routes_both_lines_after_scrolling() {
         project_conversation("alpha", &home.join("code/alpha")),
         project_conversation("beta", &home.join("code/beta")),
     ];
+    harness.app.open_sessions = vec!["alpha".into(), "beta".into()];
     harness.app.input = "keep draft".into();
     harness.app.cursor = harness.app.input.len();
     for scroll in [0, 2] {

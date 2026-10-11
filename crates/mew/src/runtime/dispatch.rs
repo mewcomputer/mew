@@ -1005,6 +1005,7 @@ async fn handle_attach_session<T: CommandTarget>(cx: &mut Ctx<'_, T>, id: &str) 
         Ok(()) => {}
         Err(Unsupported(reason)) => {
             cx.app.attaching_session = false;
+            cx.app.cancel_window_close();
             cx.app.set_alert(reason);
         }
     }

@@ -55,7 +55,7 @@ impl App {
                     self.confirm_project(session.cwd.as_deref());
                     self.streaming = session.running;
                     self.hydrate_activity(session);
-                    self.unread_completions = state.unread_completions.clone();
+                    self.acknowledge_visible_result();
                     self.refresh_session_picker();
                 }
                 ClientEvent::SessionListChanged | ClientEvent::SessionMetaChanged { .. } => {
@@ -78,8 +78,13 @@ impl App {
                             .or_insert((session.pending_permissions, session.pending_questions));
                     }
                     self.session_turn_outcomes = state.session_turn_outcomes.clone();
-                    self.unread_completions = state.unread_completions.clone();
                     self.refresh_session_picker();
+                }
+                ClientEvent::SessionOutcome {
+                    session_id,
+                    outcome,
+                } => {
+                    self.record_window_outcome(session_id, outcome);
                 }
                 ClientEvent::ActivitySnapshot { session_id }
                     if session_id == &self.status.session_id =>
@@ -104,6 +109,8 @@ impl App {
                         };
                     }
                     if *running {
+                        self.unread_completions.remove(session_id);
+                        self.session_turn_outcomes.remove(session_id);
                         if session_id == &self.status.session_id {
                             self.streaming = true;
                         }
@@ -116,6 +123,7 @@ impl App {
                 {
                     if let Some(message) = changed {
                         self.project_message(message);
+                        self.awaiting_transcript = false;
                     }
                 }
                 ClientEvent::UserMessage {
@@ -413,6 +421,7 @@ impl App {
                 }
                 ClientEvent::Error(message) => {
                     self.attaching_session = false;
+                    self.cancel_window_close();
                     self.set_alert(message);
                 }
                 _ => {}
